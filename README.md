@@ -2,6 +2,8 @@
 
 Bar inventory management API for iOS app. Helps bartenders scan bottles and track inventory with offline-first sync.
 
+**Live API:** https://eight6d-api.onrender.com
+
 ## Tech Stack
 
 - **Framework:** FastAPI (Python 3.11+)
@@ -30,54 +32,75 @@ uvicorn main:app --reload
 
 ## API Endpoints
 
+All endpoints are prefixed with `/v1/`
+
 ### Health & Info
 - `GET /` - API info
 - `GET /health` - Health check
 
 ### Auth
-- `POST /auth/register` - Create account
-- `POST /auth/login` - Login
-- `POST /auth/refresh` - Refresh token
+- `POST /v1/auth/register` - Create account
+- `POST /v1/auth/login` - Login
+- `POST /v1/auth/refresh` - Refresh token
+- `POST /v1/auth/forgot-password` - Request password reset
+- `POST /v1/auth/reset-password` - Reset password with token
+- `PUT /v1/auth/change-password` - Change password (auth required)
+
+### Users
+- `GET /v1/users/me` - Get user profile
+- `DELETE /v1/users/me` - Delete account
+- `POST /v1/users/me/accept-terms` - Accept terms & privacy
 
 ### Products
-- `GET /products` - List products
-- `GET /products/search?q={query}` - Search
-- `GET /products/barcode/{upc}` - Lookup by UPC
-- `POST /products` - Add product (auth)
-- `POST /products/{id}/increment-scan` - Increment scan count
+- `GET /v1/products` - List products
+- `GET /v1/products/search?q={query}` - Search
+- `GET /v1/products/barcode/{upc}` - Lookup by UPC
+- `POST /v1/products` - Add product (auth)
+- `POST /v1/products/{id}/increment-scan` - Increment scan count
 
 ### Locations
-- `GET /locations` - List locations
-- `POST /locations` - Create location
-- `GET /locations/{id}/par-levels` - Get par levels
-- `POST /locations/{id}/par-levels` - Set par level
-- `POST /locations/{id}/par-levels/bulk` - Bulk update
+- `GET /v1/locations` - List locations
+- `POST /v1/locations` - Create location
+- `GET /v1/locations/{id}/par-levels` - Get par levels
+- `POST /v1/locations/{id}/par-levels` - Set par level
+- `POST /v1/locations/{id}/par-levels/bulk` - Bulk update
+
+### Distributors
+- `GET /v1/distributors` - List distributors
+- `POST /v1/distributors` - Create distributor
+- `PUT /v1/distributors/{id}` - Update distributor
+- `DELETE /v1/distributors/{id}` - Delete distributor
+- `GET /v1/locations/{id}/product-distributors` - List product-distributor assignments
+- `POST /v1/locations/{id}/product-distributors` - Assign product to distributor
 
 ### Inventory
-- `POST /inventory/start` - Start session
-- `GET /inventory/{id}` - Get session
-- `POST /inventory/{id}/scan` - Add scan
-- `POST /inventory/{id}/scan/bulk` - Bulk scans
-- `POST /inventory/{id}/voice` - Add voice note
-- `POST /inventory/{id}/complete` - Complete & generate order
-- `POST /inventory/{id}/cancel` - Cancel session
+- `POST /v1/inventory/start` - Start session
+- `GET /v1/inventory/{id}` - Get session
+- `POST /v1/inventory/{id}/scan` - Add scan
+- `POST /v1/inventory/{id}/scan/bulk` - Bulk scans
+- `POST /v1/inventory/{id}/voice` - Add voice note
+- `POST /v1/inventory/{id}/complete` - Complete & generate order
+- `POST /v1/inventory/{id}/cancel` - Cancel session
 
 ### Orders
-- `GET /orders` - List orders
-- `GET /orders/{id}` - Get order
-- `POST /orders/{id}/export` - Export order
+- `GET /v1/orders` - List orders
+- `GET /v1/orders/{id}` - Get order
+- `POST /v1/orders/{id}/export` - Export order
+- `POST /v1/orders/{id}/prepare-emails` - Prepare distributor emails
 
 ### Sync
-- `POST /sync` - Bulk sync (offline support)
-- `GET /sync/{location_id}` - Get location data
+- `POST /v1/sync` - Bulk sync (offline support)
+- `GET /v1/sync/{location_id}` - Get location data
 
 ## Database Schema
 
 See `database.py` for full schema. Key tables:
 
-- `users` - User accounts
+- `users` - User accounts (with subscription fields)
 - `locations` - Bars/venues
 - `products` - Master product database (25 seeded)
+- `distributors` - Distributor contacts
+- `location_product_distributors` - Product-distributor mappings
 - `par_levels` - Target stock levels
 - `inventory_sessions` - Count sessions
 - `scans` - Individual bottle scans
@@ -93,6 +116,8 @@ See `database.py` for full schema. Key tables:
 3. Set build command: `pip install -r requirements.txt`
 4. Set start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 5. Deploy
+
+**URL:** https://eight6d-api.onrender.com
 
 ## License
 

@@ -23,6 +23,35 @@ def get_db():
     finally:
         conn.close()
 
+def _column_exists(conn, table, column):
+    """Check if a column exists in a table"""
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table})")
+    columns = [row[1] for row in cursor.fetchall()]
+    return column in columns
+
+
+def _migrate_users_table(conn):
+    """Add missing columns to users table for v1.1 schema"""
+    cursor = conn.cursor()
+    
+    new_columns = [
+        ('terms_accepted_at', 'TEXT'),
+        ('privacy_accepted_at', 'TEXT'),
+        ('trial_started_at', 'TEXT'),
+        ('trial_ends_at', 'TEXT'),
+        ('subscription_status', "TEXT DEFAULT 'trial'"),
+        ('subscription_tier', "TEXT DEFAULT 'starter'"),
+        ('password_reset_token', 'TEXT'),
+        ('password_reset_expires_at', 'TEXT'),
+    ]
+    
+    for col_name, col_type in new_columns:
+        if not _column_exists(conn, 'users', col_name):
+            cursor.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}")
+            print(f"Added column: users.{col_name}")
+
+
 def init_db():
     """Initialize database with tables and seed data"""
     with get_db() as conn:
@@ -47,6 +76,14 @@ def init_db():
                 updated_at TEXT NOT NULL,
                 deleted_at TEXT
             )
+        """)
+        
+        # Migrate existing users table to add missing columns
+        _migrate_users_table(conn)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_users_email 
+            ON users(email) WHERE deleted_at IS NULL
         """)
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_users_email 
