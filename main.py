@@ -147,74 +147,88 @@ def health_check():
 @v1_router.post("/auth/register", response_model=TokenResponse, status_code=201)
 def register(user_data: UserCreate):
     """Create new user account"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        # Check if terms were accepted
-        if not getattr(user_data, 'terms_accepted', False):
-            raise HTTPException(status_code=400, detail={
-                "error": "terms_not_accepted",
-                "message": "You must accept the terms of service to register"
-            })
-        
-        # Check if email exists
-        cursor.execute(
-            "SELECT id FROM users WHERE email = ? AND deleted_at IS NULL",
-            (user_data.email.lower().strip(),)
-        )
-        if cursor.fetchone():
-            raise HTTPException(status_code=400, detail={
-                "error": "email_exists",
-                "message": "An account with this email already exists"
-            })
-        
-        # Create user with trial
-        user_id = generate_id()
-        now = now_iso()
-        password_hash = get_password_hash(user_data.password)
-        trial_ends = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
-        
-        cursor.execute("""
-            INSERT INTO users (id, email, password_hash, name, terms_accepted_at, privacy_accepted_at,
-                               trial_started_at, trial_ends_at, subscription_status, subscription_tier,
-                               created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            user_id,
-            user_data.email.lower().strip(),
-            password_hash,
-            user_data.name,
-            now,  # terms_accepted_at
-            now,  # privacy_accepted_at
-            now,  # trial_started_at
-            trial_ends,
-            'trial',
-            'starter',
-            now,
-            now
-        ))
-        conn.commit()
-        
-        # Generate tokens
-        access_token = create_access_token(user_id)
-        refresh_token = create_refresh_token(user_id)
-        
-        return {
-            "user": {
-                "id": user_id,
-                "email": user_data.email.lower().strip(),
-                "name": user_data.name,
-                "subscription_status": "trial",
-                "subscription_tier": "starter",
-                "trial_ends_at": trial_ends,
-                "terms_accepted_at": now,
-                "privacy_accepted_at": now,
-                "created_at": now
-            },
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "expires_in": 3600
-        }
+    import sys
+    import traceback
+    
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            
+            # Check if terms were accepted
+            if not getattr(user_data, 'terms_accepted', False):
+                raise HTTPException(status_code=400, detail={
+                    "error": "terms_not_accepted",
+                    "message": "You must accept the terms of service to register"
+                })
+            
+            # Check if email exists
+            cursor.execute(
+                "SELECT id FROM users WHERE email = ? AND deleted_at IS NULL",
+                (user_data.email.lower().strip(),)
+            )
+            if cursor.fetchone():
+                raise HTTPException(status_code=400, detail={
+                    "error": "email_exists",
+                    "message": "An account with this email already exists"
+                })
+            
+            # Create user with trial
+            user_id = generate_id()
+            now = now_iso()
+            password_hash = get_password_hash(user_data.password)
+            trial_ends = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
+            
+            cursor.execute("""
+                INSERT INTO users (id, email, password_hash, name, terms_accepted_at, privacy_accepted_at,
+                                   trial_started_at, trial_ends_at, subscription_status, subscription_tier,
+                                   created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id,
+                user_data.email.lower().strip(),
+                password_hash,
+                user_data.name,
+                now,  # terms_accepted_at
+                now,  # privacy_accepted_at
+                now,  # trial_started_at
+                trial_ends,
+                'trial',
+                'starter',
+                now,
+                now
+            ))
+            conn.commit()
+            
+            # Generate tokens
+            access_token = create_access_token(user_id)
+            refresh_token = create_refresh_token(user_id)
+            
+            return {
+                "user": {
+                    "id": user_id,
+                    "email": user_data.email.lower().strip(),
+                    "name": user_data.name,
+                    "subscription_status": "trial",
+                    "subscription_tier": "starter",
+                    "trial_ends_at": trial_ends,
+                    "terms_accepted_at": now,
+                    "privacy_accepted_at": now,
+                    "created_at": now
+                },
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "expires_in": 3600
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"REGISTER ERROR: {e}", file=sys.stderr)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail={
+            "error": "server_error",
+            "message": "An unexpected error occurred",
+            "debug": str(e)
+        })
 
 @v1_router.post("/auth/login", response_model=TokenResponse)
 def login(credentials: UserLogin):
