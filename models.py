@@ -10,13 +10,38 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8)
+    terms_accepted: bool = Field(default=False)
 
 class UserResponse(UserBase):
     id: str
+    subscription_status: str = "trial"
+    subscription_tier: str = "starter"
+    trial_ends_at: Optional[datetime] = None
+    terms_accepted_at: Optional[datetime] = None
+    privacy_accepted_at: Optional[datetime] = None
     created_at: datetime
     
     class Config:
         from_attributes = True
+
+class UserProfileResponse(UserResponse):
+    """Full user profile including subscription details"""
+    pass
+
+class AcceptTermsRequest(BaseModel):
+    terms_version: str
+    privacy_version: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(..., min_length=8)
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(..., min_length=8)
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -45,6 +70,7 @@ class ProductBase(BaseModel):
     category: str = Field(..., pattern="^(spirits|beer|wine|other)$")
     size: Optional[str] = None
     upc: Optional[str] = None
+    price: Optional[float] = None
 
 class ProductCreate(ProductBase):
     pass
@@ -131,7 +157,7 @@ class ParLevelBulkResponse(BaseModel):
 
 class ScanBase(BaseModel):
     product_id: str
-    level: str = Field(..., pattern="^(full|3/4|half|1/4|empty)$")
+    level: str = Field(..., pattern="^(full|almost_full|3/4|half|1/4|empty)$")
     quantity: int = Field(default=1, ge=1)
     detection_method: str = Field(..., pattern="^(auto|pen|barcode|manual)$")
     confidence: Optional[float] = Field(None, ge=0, le=1)
@@ -337,3 +363,72 @@ class APIInfoResponse(BaseModel):
     status: str
     docs: str
     endpoints: dict
+
+# ============== DISTRIBUTOR MODELS ==============
+
+class DistributorBase(BaseModel):
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    rep_name: Optional[str] = None
+
+class DistributorCreate(DistributorBase):
+    pass
+
+class DistributorUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    rep_name: Optional[str] = None
+
+class DistributorResponse(DistributorBase):
+    id: str
+    user_id: str
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class DistributorListResponse(BaseModel):
+    distributors: List[DistributorResponse]
+
+class LocationProductDistributorCreate(BaseModel):
+    product_id: str
+    distributor_id: str
+
+class LocationProductDistributorResponse(BaseModel):
+    id: str
+    location_id: str
+    product_id: str
+    distributor_id: str
+    distributor: Optional[DistributorResponse] = None
+    product: Optional[ProductResponse] = None
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class LocationProductDistributorListResponse(BaseModel):
+    assignments: List[LocationProductDistributorResponse]
+
+# ============== EMAIL PREPARATION MODELS ==============
+
+class EmailItem(BaseModel):
+    product_id: str
+    product_name: str
+    quantity: int
+    size: Optional[str] = None
+
+class DistributorEmail(BaseModel):
+    distributor_id: str
+    distributor_name: str
+    to: str
+    subject: str
+    body_text: str
+    items: List[EmailItem]
+    total_items: int
+
+class OrderPrepareEmailsResponse(BaseModel):
+    emails: List[DistributorEmail]
+    summary: dict

@@ -14,6 +14,7 @@ def level_to_decimal(level: str) -> float:
     """Convert level string to decimal value"""
     mapping = {
         "full": 1.0,
+        "almost_full": 1.0,  # Backwards compatibility
         "3/4": 0.75,
         "half": 0.5,
         "1/4": 0.25,
@@ -24,7 +25,7 @@ def level_to_decimal(level: str) -> float:
 def decimal_to_level(decimal: float) -> str:
     """Convert decimal to level string"""
     if decimal >= 0.875:
-        return "full"
+        return "almost_full"
     elif decimal >= 0.625:
         return "3/4"
     elif decimal >= 0.375:

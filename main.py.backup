@@ -1,18 +1,16 @@
-from fastapi import FastAPI, Depends, HTTPException, Header, Request, Query, APIRouter
+from fastapi import FastAPI, Depends, HTTPException, Header, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import time
 import uuid
-import json
 
 from database import init_db, get_db
 from auth import (
     get_password_hash, verify_password, create_access_token, 
-    create_refresh_token, verify_token, create_password_reset_token,
-    verify_password_reset_token
+    create_refresh_token, verify_token
 )
 from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
@@ -68,10 +66,6 @@ async def add_request_id(request: Request, call_next):
     
     return response
 
-# ============== V1 ROUTER ==============
-
-v1_router = APIRouter(prefix="/v1")
-
 # ============== DEPENDENCIES ==============
 
 def get_current_user(authorization: str = Header(None)) -> str:
@@ -109,14 +103,12 @@ def root():
         "status": "healthy",
         "docs": "/docs",
         "endpoints": {
-            "auth": ["/v1/auth/register", "/v1/auth/login", "/v1/auth/refresh", "/v1/auth/forgot-password", "/v1/auth/reset-password"],
-            "products": ["/v1/products", "/v1/products/search", "/v1/products/barcode/{upc}"],
-            "locations": ["/v1/locations", "/v1/locations/{id}/par-levels"],
-            "inventory": ["/v1/inventory/start", "/v1/inventory/{id}", "/v1/inventory/{id}/scan"],
-            "orders": ["/v1/orders", "/v1/orders/{id}", "/v1/orders/{id}/prepare-emails", "/v1/orders/{id}/export"],
-            "sync": ["/v1/sync"],
-            "distributors": ["/v1/distributors"],
-            "users": ["/v1/users/me"]
+            "auth": ["/auth/register", "/auth/login", "/auth/refresh"],
+            "products": ["/products", "/products/search", "/products/barcode/{upc}"],
+            "locations": ["/locations", "/locations/{id}/par-levels"],
+            "inventory": ["/inventory/start", "/inventory/{id}", "/inventory/{id}/scan"],
+            "orders": ["/orders", "/orders/{id}"],
+            "sync": ["/sync"]
         }
     }
 
@@ -144,18 +136,11 @@ def health_check():
 
 # ============== AUTHENTICATION ==============
 
-@v1_router.post("/auth/register", response_model=TokenResponse, status_code=201)
+@app.post("/auth/register", response_model=TokenResponse, status_code=201)
 def register(user_data: UserCreate):
     """Create new user account"""
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        # Check if terms were accepted
-        if not getattr(user_data, 'terms_accepted', False):
-            raise HTTPException(status_code=400, detail={
-                "error": "terms_not_accepted",
-                "message": "You must accept the terms of service to register"
-            })
         
         # Check if email exists
         cursor.execute(
@@ -168,28 +153,19 @@ def register(user_data: UserCreate):
                 "message": "An account with this email already exists"
             })
         
-        # Create user with trial
+        # Create user
         user_id = generate_id()
         now = now_iso()
         password_hash = get_password_hash(user_data.password)
-        trial_ends = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
         
         cursor.execute("""
-            INSERT INTO users (id, email, password_hash, name, terms_accepted_at, privacy_accepted_at,
-                               trial_started_at, trial_ends_at, subscription_status, subscription_tier,
-                               created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO users (id, email, password_hash, name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (
             user_id,
             user_data.email.lower().strip(),
             password_hash,
             user_data.name,
-            now,  # terms_accepted_at
-            now,  # privacy_accepted_at
-            now,  # trial_started_at
-            trial_ends,
-            'trial',
-            'starter',
             now,
             now
         ))
@@ -204,11 +180,6 @@ def register(user_data: UserCreate):
                 "id": user_id,
                 "email": user_data.email.lower().strip(),
                 "name": user_data.name,
-                "subscription_status": "trial",
-                "subscription_tier": "starter",
-                "trial_ends_at": trial_ends,
-                "terms_accepted_at": now,
-                "privacy_accepted_at": now,
                 "created_at": now
             },
             "access_token": access_token,
@@ -216,7 +187,7 @@ def register(user_data: UserCreate):
             "expires_in": 3600
         }
 
-@v1_router.post("/auth/login", response_model=TokenResponse)
+@app.post("/auth/login", response_model=TokenResponse)
 def login(credentials: UserLogin):
     """Authenticate and get tokens"""
     with get_db() as conn:
@@ -224,9 +195,7 @@ def login(credentials: UserLogin):
         
         # Find user
         cursor.execute(
-            """SELECT id, email, password_hash, name, subscription_status, subscription_tier,
-                      trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at 
-               FROM users WHERE email = ? AND deleted_at IS NULL""",
+            "SELECT id, email, password_hash, name, created_at FROM users WHERE email = ? AND deleted_at IS NULL",
             (credentials.email.lower().strip(),)
         )
         row = cursor.fetchone()
@@ -246,11 +215,6 @@ def login(credentials: UserLogin):
                 "id": row["id"],
                 "email": row["email"],
                 "name": row["name"],
-                "subscription_status": row["subscription_status"],
-                "subscription_tier": row["subscription_tier"],
-                "trial_ends_at": row["trial_ends_at"],
-                "terms_accepted_at": row["terms_accepted_at"],
-                "privacy_accepted_at": row["privacy_accepted_at"],
                 "created_at": row["created_at"]
             },
             "access_token": access_token,
@@ -258,7 +222,7 @@ def login(credentials: UserLogin):
             "expires_in": 3600
         }
 
-@v1_router.post("/auth/refresh", response_model=RefreshResponse)
+@app.post("/auth/refresh", response_model=RefreshResponse)
 def refresh_token(refresh_data: RefreshRequest):
     """Get new access token using refresh token"""
     user_id = verify_token(refresh_data.refresh_token, "refresh")
@@ -276,7 +240,7 @@ def refresh_token(refresh_data: RefreshRequest):
 
 # ============== PRODUCTS ==============
 
-@v1_router.get("/products", response_model=ProductListResponse)
+@app.get("/products", response_model=ProductListResponse)
 def list_products(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
@@ -324,7 +288,7 @@ def list_products(
             "has_more": (offset + limit) < total
         }
 
-@v1_router.get("/products/search", response_model=ProductSearchResponse)
+@app.get("/products/search", response_model=ProductSearchResponse)
 def search_products(
     q: str = Query(..., min_length=2),
     limit: int = Query(20, ge=1, le=50)
@@ -353,7 +317,7 @@ def search_products(
             "total": len(products)
         }
 
-@v1_router.get("/products/barcode/{upc}", response_model=dict)
+@app.get("/products/barcode/{upc}", response_model=dict)
 def get_product_by_barcode(upc: str):
     """Lookup product by UPC barcode"""
     with get_db() as conn:
@@ -373,7 +337,7 @@ def get_product_by_barcode(upc: str):
         product["verified"] = bool(product["verified"])
         return {"product": product}
 
-@v1_router.post("/products", response_model=dict, status_code=201)
+@app.post("/products", response_model=dict, status_code=201)
 def create_product(product_data: ProductCreate, user_id: str = Depends(get_current_user)):
     """Add new product"""
     with get_db() as conn:
@@ -427,7 +391,7 @@ def create_product(product_data: ProductCreate, user_id: str = Depends(get_curre
             }
         }
 
-@v1_router.post("/products/{product_id}/increment-scan", response_model=ScanCountResponse)
+@app.post("/products/{product_id}/increment-scan", response_model=ScanCountResponse)
 def increment_scan_count(product_id: str):
     """Increment scan count (call when product is scanned)"""
     with get_db() as conn:
@@ -453,7 +417,7 @@ def increment_scan_count(product_id: str):
 
 # ============== LOCATIONS ==============
 
-@v1_router.get("/locations", response_model=LocationListResponse)
+@app.get("/locations", response_model=LocationListResponse)
 def list_locations(user_id: str = Depends(get_current_user)):
     """List user's locations"""
     with get_db() as conn:
@@ -468,7 +432,7 @@ def list_locations(user_id: str = Depends(get_current_user)):
         locations = [dict(row) for row in cursor.fetchall()]
         return {"locations": locations}
 
-@v1_router.post("/locations", response_model=dict, status_code=201)
+@app.post("/locations", response_model=dict, status_code=201)
 def create_location(location_data: LocationCreate, user_id: str = Depends(get_current_user)):
     """Create new location"""
     with get_db() as conn:
@@ -503,7 +467,7 @@ def create_location(location_data: LocationCreate, user_id: str = Depends(get_cu
             }
         }
 
-@v1_router.get("/locations/{location_id}/par-levels", response_model=ParLevelListResponse)
+@app.get("/locations/{location_id}/par-levels", response_model=ParLevelListResponse)
 def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
     """Get all par levels for a location"""
     with get_db() as conn:
@@ -556,7 +520,7 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
         
         return {"par_levels": par_levels}
 
-@v1_router.post("/locations/{location_id}/par-levels", response_model=dict)
+@app.post("/locations/{location_id}/par-levels", response_model=dict)
 def set_par_level(location_id: str, par_data: ParLevelCreate, user_id: str = Depends(get_current_user)):
     """Set or update par level for a product"""
     with get_db() as conn:
@@ -610,7 +574,7 @@ def set_par_level(location_id: str, par_data: ParLevelCreate, user_id: str = Dep
             }
         }
 
-@v1_router.post("/locations/{location_id}/par-levels/bulk", response_model=ParLevelBulkResponse)
+@app.post("/locations/{location_id}/par-levels/bulk", response_model=ParLevelBulkResponse)
 def set_par_levels_bulk(location_id: str, bulk_data: ParLevelBulkRequest, user_id: str = Depends(get_current_user)):
     """Set multiple par levels at once"""
     with get_db() as conn:
@@ -665,7 +629,7 @@ def set_par_levels_bulk(location_id: str, bulk_data: ParLevelBulkRequest, user_i
 
 # ============== INVENTORY SESSIONS ==============
 
-@v1_router.post("/inventory/start", response_model=dict, status_code=201)
+@app.post("/inventory/start", response_model=dict, status_code=201)
 def start_inventory(session_data: InventorySessionCreate, user_id: str = Depends(get_current_user)):
     """Start new inventory session"""
     with get_db() as conn:
@@ -721,7 +685,7 @@ def start_inventory(session_data: InventorySessionCreate, user_id: str = Depends
             }
         }
 
-@v1_router.get("/inventory/{session_id}", response_model=InventorySessionDetailResponse)
+@app.get("/inventory/{session_id}", response_model=InventorySessionDetailResponse)
 def get_inventory_session(session_id: str, user_id: str = Depends(get_current_user)):
     """Get session with all scans and voice notes"""
     with get_db() as conn:
@@ -802,7 +766,7 @@ def get_inventory_session(session_id: str, user_id: str = Depends(get_current_us
             "voice_notes": voice_notes
         }
 
-@v1_router.post("/inventory/{session_id}/scan", response_model=dict, status_code=201)
+@app.post("/inventory/{session_id}/scan", response_model=dict, status_code=201)
 def add_scan(session_id: str, scan_data: ScanCreate, user_id: str = Depends(get_current_user)):
     """Add bottle scan to session"""
     with get_db() as conn:
@@ -885,7 +849,7 @@ def add_scan(session_id: str, scan_data: ScanCreate, user_id: str = Depends(get_
             "session_total": total
         }
 
-@v1_router.post("/inventory/{session_id}/scan/bulk", response_model=ScanBulkResponse, status_code=201)
+@app.post("/inventory/{session_id}/scan/bulk", response_model=ScanBulkResponse, status_code=201)
 def add_scans_bulk(session_id: str, bulk_data: ScanBulkRequest, user_id: str = Depends(get_current_user)):
     """Add multiple scans at once"""
     with get_db() as conn:
@@ -968,7 +932,7 @@ def add_scans_bulk(session_id: str, bulk_data: ScanBulkRequest, user_id: str = D
             "scans": scans
         }
 
-@v1_router.post("/inventory/{session_id}/voice", response_model=dict, status_code=201)
+@app.post("/inventory/{session_id}/voice", response_model=dict, status_code=201)
 def add_voice_note(session_id: str, voice_data: VoiceNoteCreate, user_id: str = Depends(get_current_user)):
     """Add voice note to session"""
     with get_db() as conn:
@@ -1008,7 +972,7 @@ def add_voice_note(session_id: str, voice_data: VoiceNoteCreate, user_id: str = 
             }
         }
 
-@v1_router.post("/inventory/{session_id}/complete", response_model=InventoryCompleteResponse)
+@app.post("/inventory/{session_id}/complete", response_model=InventoryCompleteResponse)
 def complete_inventory(session_id: str, user_id: str = Depends(get_current_user)):
     """Mark session as complete and generate order"""
     with get_db() as conn:
@@ -1138,7 +1102,7 @@ def complete_inventory(session_id: str, user_id: str = Depends(get_current_user)
             }
         }
 
-@v1_router.post("/inventory/{session_id}/cancel", response_model=dict)
+@app.post("/inventory/{session_id}/cancel", response_model=dict)
 def cancel_inventory(session_id: str, user_id: str = Depends(get_current_user)):
     """Cancel an in-progress session"""
     with get_db() as conn:
@@ -1173,7 +1137,7 @@ def cancel_inventory(session_id: str, user_id: str = Depends(get_current_user)):
 
 # ============== ORDERS ==============
 
-@v1_router.get("/orders", response_model=OrderListResponse)
+@app.get("/orders", response_model=OrderListResponse)
 def list_orders(
     location_id: Optional[str] = None,
     limit: int = Query(20, ge=1, le=100),
@@ -1239,7 +1203,7 @@ def list_orders(
             "total": total
         }
 
-@v1_router.get("/orders/{order_id}", response_model=dict)
+@app.get("/orders/{order_id}", response_model=dict)
 def get_order(order_id: str, user_id: str = Depends(get_current_user)):
     """Get full order details"""
     with get_db() as conn:
@@ -1291,7 +1255,7 @@ def get_order(order_id: str, user_id: str = Depends(get_current_user)):
             }
         }
 
-@v1_router.post("/orders/{order_id}/export", response_model=OrderExportResponse)
+@app.post("/orders/{order_id}/export", response_model=OrderExportResponse)
 def export_order(order_id: str, export_data: OrderExportRequest, user_id: str = Depends(get_current_user)):
     """Generate export and mark as exported"""
     with get_db() as conn:
@@ -1371,7 +1335,7 @@ def export_order(order_id: str, export_data: OrderExportRequest, user_id: str = 
 
 # ============== SYNC ==============
 
-@v1_router.post("/sync", response_model=SyncResponse)
+@app.post("/sync", response_model=SyncResponse)
 def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
     """Bulk sync endpoint for offline data"""
     with get_db() as conn:
@@ -1517,7 +1481,7 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
             "server_updates": server_updates
         }
 
-@v1_router.get("/sync/{location_id}", response_model=SyncLocationResponse)
+@app.get("/sync/{location_id}", response_model=SyncLocationResponse)
 def get_location_sync_data(location_id: str, since: Optional[str] = None, user_id: str = Depends(get_current_user)):
     """Get latest data for a location (delta sync)"""
     with get_db() as conn:
@@ -1599,352 +1563,6 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
             "products": products,
             "synced_at": now
         }
-
-
-# ============== V1 DISTRIBUTORS ==============
-
-@v1_router.get("/distributors", response_model=DistributorListResponse)
-def list_distributors(user_id: str = Depends(get_current_user)):
-    """List user's distributors"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM distributors 
-            WHERE user_id = ? AND deleted_at IS NULL
-            ORDER BY name ASC
-        """, (user_id,))
-        distributors = [dict(row) for row in cursor.fetchall()]
-        return {"distributors": distributors}
-
-@v1_router.post("/distributors", response_model=dict, status_code=201)
-def create_distributor(distributor_data: DistributorCreate, user_id: str = Depends(get_current_user)):
-    """Create new distributor"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        distributor_id = generate_id()
-        now = now_iso()
-        cursor.execute("""
-            INSERT INTO distributors (id, user_id, name, email, phone, rep_name, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (distributor_id, user_id, distributor_data.name, distributor_data.email,
-              distributor_data.phone, distributor_data.rep_name, now, now))
-        conn.commit()
-        return {"distributor": {"id": distributor_id, "user_id": user_id, "name": distributor_data.name,
-                                "email": distributor_data.email, "phone": distributor_data.phone,
-                                "rep_name": distributor_data.rep_name, "created_at": now, "updated_at": now}}
-
-@v1_router.put("/distributors/{distributor_id}", response_model=dict)
-def update_distributor(distributor_id: str, distributor_data: DistributorUpdate, user_id: str = Depends(get_current_user)):
-    """Update distributor"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM distributors WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
-                       (distributor_id, user_id))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Distributor not found"})
-        now = now_iso()
-        updates = []
-        params = []
-        if distributor_data.name is not None:
-            updates.append("name = ?")
-            params.append(distributor_data.name)
-        if distributor_data.email is not None:
-            updates.append("email = ?")
-            params.append(distributor_data.email)
-        if distributor_data.phone is not None:
-            updates.append("phone = ?")
-            params.append(distributor_data.phone)
-        if distributor_data.rep_name is not None:
-            updates.append("rep_name = ?")
-            params.append(distributor_data.rep_name)
-        updates.append("updated_at = ?")
-        params.append(now)
-        params.append(distributor_id)
-        cursor.execute(f"UPDATE distributors SET {', '.join(updates)} WHERE id = ?", params)
-        conn.commit()
-        return {"success": True, "message": "Distributor updated"}
-
-@v1_router.delete("/distributors/{distributor_id}")
-def delete_distributor(distributor_id: str, user_id: str = Depends(get_current_user)):
-    """Soft delete distributor"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM distributors WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
-                       (distributor_id, user_id))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Distributor not found"})
-        cursor.execute("UPDATE distributors SET deleted_at = ?, updated_at = ? WHERE id = ?",
-                       (now_iso(), now_iso(), distributor_id))
-        conn.commit()
-        return {"success": True, "message": "Distributor deleted"}
-
-@v1_router.post("/locations/{location_id}/product-distributors", response_model=dict)
-def assign_product_distributor(location_id: str, assignment: LocationProductDistributorCreate,
-                                user_id: str = Depends(get_current_user)):
-    """Assign a product to a distributor for a location"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
-                       (location_id, user_id))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied"})
-        assignment_id = generate_id()
-        now = now_iso()
-        cursor.execute("""
-            INSERT INTO location_product_distributors (id, location_id, product_id, distributor_id, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(location_id, product_id) DO UPDATE SET
-                distributor_id = excluded.distributor_id
-        """, (assignment_id, location_id, assignment.product_id, assignment.distributor_id, now))
-        conn.commit()
-        return {"success": True, "assignment_id": assignment_id}
-
-@v1_router.get("/locations/{location_id}/product-distributors", response_model=LocationProductDistributorListResponse)
-def list_product_distributors(location_id: str, user_id: str = Depends(get_current_user)):
-    """List product-distributor assignments for a location"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
-                       (location_id, user_id))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied"})
-        cursor.execute("""
-            SELECT lpd.*, d.name as distributor_name, d.email as distributor_email,
-                   p.name as product_name, p.brand as product_brand, p.size as product_size
-            FROM location_product_distributors lpd
-            JOIN distributors d ON lpd.distributor_id = d.id
-            JOIN products p ON lpd.product_id = p.id
-            WHERE lpd.location_id = ? AND d.deleted_at IS NULL
-        """, (location_id,))
-        assignments = []
-        for row in cursor.fetchall():
-            assignments.append({
-                "id": row["id"],
-                "location_id": row["location_id"],
-                "product_id": row["product_id"],
-                "distributor_id": row["distributor_id"],
-                "distributor": {"id": row["distributor_id"], "name": row["distributor_name"], "email": row["distributor_email"]},
-                "product": {"id": row["product_id"], "name": row["product_name"], "brand": row["product_brand"], "size": row["product_size"]},
-                "created_at": row["created_at"]
-            })
-        return {"assignments": assignments}
-
-# ============== V1 EMAIL PREPARATION ==============
-
-@v1_router.post("/orders/{order_id}/prepare-emails", response_model=OrderPrepareEmailsResponse)
-def prepare_order_emails(order_id: str, user_id: str = Depends(get_current_user)):
-    """Prepare emails grouped by distributor for an order"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT o.*, l.name as location_name
-            FROM orders o
-            JOIN locations l ON o.location_id = l.id
-            WHERE o.id = ? AND l.user_id = ?
-        """, (order_id, user_id))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Order not found"})
-        
-        order_data = json.loads(row.get("order_data", "{}"))
-        items = order_data.get("items", [])
-        location_id = row["location_id"]
-        location_name = row["location_name"]
-        
-        # Group items by distributor
-        distributor_items = {}
-        for item in items:
-            product_id = item.get("product_id")
-            cursor.execute("""
-                SELECT d.id, d.name, d.email
-                FROM location_product_distributors lpd
-                JOIN distributors d ON lpd.distributor_id = d.id
-                WHERE lpd.location_id = ? AND lpd.product_id = ? AND d.deleted_at IS NULL
-            """, (location_id, product_id))
-            dist_row = cursor.fetchone()
-            if dist_row:
-                dist_id = dist_row["id"]
-                if dist_id not in distributor_items:
-                    distributor_items[dist_id] = {
-                        "distributor_id": dist_id,
-                        "distributor_name": dist_row["name"],
-                        "email": dist_row["email"] or "orders@example.com",
-                        "items": []
-                    }
-                distributor_items[dist_id]["items"].append(item)
-        
-        # If no distributors assigned, put all items in a default group
-        if not distributor_items:
-            distributor_items["default"] = {
-                "distributor_id": "default",
-                "distributor_name": "Default Distributor",
-                "email": "orders@example.com",
-                "items": items
-            }
-        
-        # Generate emails
-        today = datetime.now(timezone.utc).strftime("%B %d, %Y")
-        emails = []
-        total_items = 0
-        
-        for dist_data in distributor_items.values():
-            dist_items = dist_data["items"]
-            items_text = []
-            email_items = []
-            
-            for item in dist_items:
-                qty = int(item.get("order_quantity", 0))
-                name = item.get("product_name", "Unknown")
-                size = item.get("size", "")
-                items_text.append(f"- {name} {size} x {qty}")
-                email_items.append({
-                    "product_id": item.get("product_id"),
-                    "product_name": name,
-                    "quantity": qty,
-                    "size": size
-                })
-                total_items += qty
-            
-            body_text = f"""Hi,
-
-Please deliver:
-
-{chr(10).join(items_text)}
-
-Total: {sum(int(i.get('order_quantity', 0)) for i in dist_items)} bottles
-
-Thank you,
-{location_name}"""
-            
-            emails.append({
-                "distributor_id": dist_data["distributor_id"],
-                "distributor_name": dist_data["distributor_name"],
-                "to": dist_data["email"],
-                "subject": f"Order from {location_name} - {today}",
-                "body_text": body_text,
-                "items": email_items,
-                "total_items": sum(int(i.get('order_quantity', 0)) for i in dist_items)
-            })
-        
-        return {
-            "emails": emails,
-            "summary": {
-                "total_distributors": len(emails),
-                "total_items": total_items
-            }
-        }
-
-# ============== V1 USERS ==============
-
-@v1_router.get("/users/me", response_model=UserProfileResponse)
-def get_user_profile(user_id: str = Depends(get_current_user)):
-    """Get full user profile including subscription status"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, email, name, subscription_status, subscription_tier, trial_ends_at,
-                   terms_accepted_at, privacy_accepted_at, created_at
-            FROM users WHERE id = ? AND deleted_at IS NULL
-        """, (user_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
-        return dict(row)
-
-@v1_router.delete("/users/me")
-def delete_user(password: str, user_id: str = Depends(get_current_user)):
-    """Soft delete user account (GDPR compliance)"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT password_hash FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
-        if not verify_password(password, row["password_hash"]):
-            raise HTTPException(status_code=401, detail={"error": "invalid_password", "message": "Password is incorrect"})
-        cursor.execute("""
-            UPDATE users SET deleted_at = ?, email = CONCAT(email, '.deleted.', ?), updated_at = ?
-            WHERE id = ?
-        """, (now_iso(), generate_id()[:8], now_iso(), user_id))
-        conn.commit()
-        return {"success": True, "message": "Account deleted successfully"}
-
-@v1_router.post("/users/me/accept-terms")
-def accept_terms(request: AcceptTermsRequest, user_id: str = Depends(get_current_user)):
-    """Accept terms and privacy policy"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        now = now_iso()
-        cursor.execute("""
-            UPDATE users SET terms_accepted_at = ?, privacy_accepted_at = ?, updated_at = ?
-            WHERE id = ?
-        """, (now, now, now, user_id))
-        conn.commit()
-        return {"success": True, "message": "Terms accepted successfully"}
-
-# ============== V1 ADDITIONAL AUTH ==============
-
-@v1_router.post("/auth/forgot-password")
-def forgot_password(request: ForgotPasswordRequest):
-    """Request password reset"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL",
-                       (request.email.lower().strip(),))
-        row = cursor.fetchone()
-        if row:
-            reset_token = create_password_reset_token(row["id"])
-            expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-            cursor.execute("""
-                UPDATE users SET password_reset_token = ?, password_reset_expires_at = ?
-                WHERE id = ?
-            """, (reset_token, expires_at, row["id"]))
-            conn.commit()
-            return {"success": True, "message": "If an account exists, a reset link has been sent",
-                    "debug_token": reset_token}
-        return {"success": True, "message": "If an account exists, a reset link has been sent"}
-
-@v1_router.post("/auth/reset-password")
-def reset_password(request: ResetPasswordRequest):
-    """Reset password using token"""
-    user_id = verify_password_reset_token(request.token)
-    if not user_id:
-        raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset token"})
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id FROM users WHERE id = ? AND password_reset_token = ? AND password_reset_expires_at > ?
-        """, (user_id, request.token, now_iso()))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset token"})
-        password_hash = get_password_hash(request.new_password)
-        cursor.execute("""
-            UPDATE users SET password_hash = ?, password_reset_token = NULL, password_reset_expires_at = NULL, updated_at = ?
-            WHERE id = ?
-        """, (password_hash, now_iso(), user_id))
-        conn.commit()
-        return {"success": True, "message": "Password reset successfully"}
-
-@v1_router.put("/auth/change-password")
-def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_current_user)):
-    """Change password (requires current password)"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT password_hash FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
-        if not verify_password(request.current_password, row["password_hash"]):
-            raise HTTPException(status_code=401, detail={"error": "invalid_password", "message": "Current password is incorrect"})
-        password_hash = get_password_hash(request.new_password)
-        cursor.execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
-                       (password_hash, now_iso(), user_id))
-        conn.commit()
-        return {"success": True, "message": "Password changed successfully"}
-
-# ============== INCLUDE V1 ROUTER ==============
-
-app.include_router(v1_router)
 
 # ============== ERROR HANDLERS ==============
 

@@ -35,6 +35,14 @@ def init_db():
                 email TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 name TEXT,
+                terms_accepted_at TEXT,
+                privacy_accepted_at TEXT,
+                trial_started_at TEXT,
+                trial_ends_at TEXT,
+                subscription_status TEXT DEFAULT 'trial',
+                subscription_tier TEXT DEFAULT 'starter',
+                password_reset_token TEXT,
+                password_reset_expires_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 deleted_at TEXT
@@ -73,6 +81,7 @@ def init_db():
                 size TEXT,
                 upc TEXT UNIQUE,
                 image_url TEXT,
+                price REAL,
                 scan_count INTEGER DEFAULT 0,
                 verified INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
@@ -251,6 +260,45 @@ def init_db():
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_sync_pending 
             ON sync_queue(user_id, synced_at) WHERE synced_at IS NULL
+        """)
+        
+        # Distributors table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS distributors (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                name TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                rep_name TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_distributors_user 
+            ON distributors(user_id) WHERE deleted_at IS NULL
+        """)
+        
+        # Location-Product-Distributor mapping table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS location_product_distributors (
+                id TEXT PRIMARY KEY,
+                location_id TEXT NOT NULL REFERENCES locations(id),
+                product_id TEXT NOT NULL REFERENCES products(id),
+                distributor_id TEXT NOT NULL REFERENCES distributors(id),
+                created_at TEXT NOT NULL,
+                UNIQUE(location_id, product_id)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_lpd_location 
+            ON location_product_distributors(location_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_lpd_distributor 
+            ON location_product_distributors(distributor_id)
         """)
         
         conn.commit()
