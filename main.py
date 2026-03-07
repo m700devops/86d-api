@@ -982,6 +982,252 @@ def add_scans_bulk(session_id: str, bulk_data: ScanBulkRequest, user_id: str = D
             "scans": scans
         }
 
+# ============== PEN CAPTURE MODE ==============
+
+from pydantic import BaseModel
+from typing import Optional, List
+
+class PenCaptureRequest(BaseModel):
+    session_id: str
+    bottle_image_base64: Optional[str] = None
+    product_id: Optional[str] = None
+    product_name: Optional[str] = None
+    level: float
+    pen_position_y: float
+    captured_at: Optional[str] = None
+    confidence: float
+
+class PenCaptureResponse(BaseModel):
+    scan_id: str
+    status: str
+    bottle_number: int
+    product: Optional[dict] = None
+
+class BatchCaptureRequest(BaseModel):
+    session_id: str
+    captures: List[PenCaptureRequest]
+
+class BatchCaptureResponse(BaseModel):
+    processed: int
+    failed: int
+    bottles: List[dict]
+
+@v1_router.post("/scans/pen-capture", response_model=PenCaptureResponse, status_code=201)
+def pen_capture(capture_data: PenCaptureRequest, user_id: str = Depends(get_current_user)):
+    """Handle rapid-fire bottle captures from continuous pen scanning mode"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Verify session belongs to user and is in progress
+        cursor.execute(
+            "SELECT id, location_id FROM inventory_sessions WHERE id = ? AND user_id = ? AND status = 'in_progress'",
+            (capture_data.session_id, user_id)
+        )
+        session = cursor.fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found",
+                "message": "Active session not found"
+            })
+        
+        now = now_iso()
+        created_at = capture_data.captured_at if capture_data.captured_at else now
+        
+        # Determine product
+        product = None
+        product_id = capture_data.product_id
+        
+        if product_id:
+            # Get existing product
+            cursor.execute("SELECT * FROM products WHERE id = ?", (product_id,))
+            product = cursor.fetchone()
+        elif capture_data.product_name:
+            # Try to find product by name
+            cursor.execute(
+                "SELECT * FROM products WHERE LOWER(name) = LOWER(?) OR LOWER(brand || ' ' || name) = LOWER(?)",
+                (capture_data.product_name, capture_data.product_name)
+            )
+            product = cursor.fetchone()
+            if product:
+                product_id = product["id"]
+        
+        # If no product found, create a placeholder
+        if not product_id:
+            product_id = generate_id()
+            cursor.execute("""
+                INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                product_id,
+                capture_data.product_name or "Unknown Product",
+                None,
+                "uncategorized",
+                None,
+                None,
+                None,
+                0,
+                0,
+                now,
+                now
+            ))
+            cursor.execute("SELECT * FROM products WHERE id = ?", (product_id,))
+            product = cursor.fetchone()
+        
+        # Convert level to level string
+        level_decimal = max(0.0, min(1.0, capture_data.level))
+        if level_decimal >= 0.875:
+            level = "full"
+        elif level_decimal >= 0.625:
+            level = "3/4"
+        elif level_decimal >= 0.375:
+            level = "half"
+        elif level_decimal >= 0.125:
+            level = "1/4"
+        else:
+            level = "empty"
+        
+        # Create scan
+        scan_id = generate_id()
+        cursor.execute("""
+            INSERT INTO scans (id, session_id, product_id, level, level_decimal, quantity, 
+                              detection_method, confidence, pen_position_y, capture_method,
+                              synced_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            scan_id, capture_data.session_id, product_id, level, level_decimal,
+            1, "camera", capture_data.confidence, capture_data.pen_position_y, "pen_mode",
+            now, created_at, now
+        ))
+        
+        # Increment product scan count
+        cursor.execute(
+            "UPDATE products SET scan_count = scan_count + 1, updated_at = ? WHERE id = ?",
+            (now, product_id)
+        )
+        
+        conn.commit()
+        
+        # Get bottle number (count of scans in this session)
+        cursor.execute("SELECT COUNT(*) FROM scans WHERE session_id = ?", (capture_data.session_id,))
+        bottle_number = cursor.fetchone()[0]
+        
+        return {
+            "scan_id": scan_id,
+            "status": "captured",
+            "bottle_number": bottle_number,
+            "product": dict(product) if product else None
+        }
+
+@v1_router.post("/scans/batch", response_model=BatchCaptureResponse, status_code=201)
+def batch_capture(batch_data: BatchCaptureRequest, user_id: str = Depends(get_current_user)):
+    """Sync multiple captures at once (offline support)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Verify session belongs to user and is in progress
+        cursor.execute(
+            "SELECT id FROM inventory_sessions WHERE id = ? AND user_id = ? AND status = 'in_progress'",
+            (batch_data.session_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found",
+                "message": "Active session not found"
+            })
+        
+        processed = 0
+        failed = 0
+        bottles = []
+        now = now_iso()
+        
+        for capture in batch_data.captures:
+            try:
+                created_at = capture.captured_at if capture.captured_at else now
+                
+                # Determine product
+                product_id = capture.product_id
+                if not product_id and capture.product_name:
+                    cursor.execute(
+                        "SELECT id FROM products WHERE LOWER(name) = LOWER(?) OR LOWER(brand || ' ' || name) = LOWER(?)",
+                        (capture.product_name, capture.product_name)
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        product_id = row["id"]
+                
+                # If no product found, create placeholder
+                if not product_id:
+                    product_id = generate_id()
+                    cursor.execute("""
+                        INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        product_id,
+                        capture.product_name or "Unknown Product",
+                        None,
+                        "uncategorized",
+                        None,
+                        None,
+                        None,
+                        0,
+                        0,
+                        now,
+                        now
+                    ))
+                
+                # Convert level
+                level_decimal = max(0.0, min(1.0, capture.level))
+                if level_decimal >= 0.875:
+                    level = "full"
+                elif level_decimal >= 0.625:
+                    level = "3/4"
+                elif level_decimal >= 0.375:
+                    level = "half"
+                elif level_decimal >= 0.125:
+                    level = "1/4"
+                else:
+                    level = "empty"
+                
+                # Create scan
+                scan_id = generate_id()
+                cursor.execute("""
+                    INSERT INTO scans (id, session_id, product_id, level, level_decimal, quantity, 
+                                      detection_method, confidence, pen_position_y, capture_method,
+                                      synced_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    scan_id, batch_data.session_id, product_id, level, level_decimal,
+                    1, "camera", capture.confidence, capture.pen_position_y, "pen_mode",
+                    now, created_at, now
+                ))
+                
+                # Increment product scan count
+                cursor.execute(
+                    "UPDATE products SET scan_count = scan_count + 1, updated_at = ? WHERE id = ?",
+                    (now, product_id)
+                )
+                
+                processed += 1
+                bottles.append({
+                    "scan_id": scan_id,
+                    "product_id": product_id,
+                    "level": level,
+                    "level_decimal": level_decimal,
+                    "confidence": capture.confidence
+                })
+                
+            except Exception as e:
+                failed += 1
+                continue
+        
+        conn.commit()
+        
+        return {
+            "processed": processed,
+            "failed": failed,
+            "bottles": bottles
+        }
+
 @v1_router.post("/inventory/{session_id}/voice", response_model=dict, status_code=201)
 def add_voice_note(session_id: str, voice_data: VoiceNoteCreate, user_id: str = Depends(get_current_user)):
     """Add voice note to session"""

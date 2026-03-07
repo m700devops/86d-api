@@ -31,6 +31,21 @@ def _column_exists(conn, table, column):
     return column in columns
 
 
+def _migrate_scans_table(conn):
+    """Add missing columns to scans table for pen capture mode"""
+    cursor = conn.cursor()
+    
+    new_columns = [
+        ('pen_position_y', 'REAL'),
+        ('capture_method', 'TEXT DEFAULT "manual"'),
+    ]
+    
+    for col_name, col_type in new_columns:
+        if not _column_exists(conn, 'scans', col_name):
+            cursor.execute(f"ALTER TABLE scans ADD COLUMN {col_name} {col_type}")
+            print(f"Added column: scans.{col_name}")
+
+
 def _migrate_users_table(conn):
     """Add missing columns to users table for v1.1 schema"""
     cursor = conn.cursor()
@@ -80,6 +95,9 @@ def init_db():
         
         # Migrate existing users table to add missing columns
         _migrate_users_table(conn)
+        
+        # Migrate scans table for pen capture mode
+        _migrate_scans_table(conn)
         
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_users_email 
@@ -195,6 +213,8 @@ def init_db():
                 quantity INTEGER DEFAULT 1,
                 detection_method TEXT NOT NULL,
                 confidence REAL,
+                pen_position_y REAL,
+                capture_method TEXT DEFAULT 'manual',
                 photo_url TEXT,
                 shelf_location TEXT,
                 notes TEXT,
