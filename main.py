@@ -20,6 +20,8 @@ from helpers import (
 )
 from models import *
 from seed_data import SEED_PRODUCTS
+import google.generativeai as genai
+import os
 
 # Startup time for uptime calculation
 START_TIME = time.time()
@@ -2201,6 +2203,59 @@ def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_c
                        (password_hash, now_iso(), user_id))
         conn.commit()
         return {"success": True, "message": "Password changed successfully"}
+
+# ============== V1 SCANS (Gemini Vision) ==============
+
+class ScanAnalyzeRequest(BaseModel):
+    image: str  # base64 encoded
+
+class ScanAnalyzeResponse(BaseModel):
+    name: str
+    brand: str
+    category: str
+    liquidLevel: float
+    confidence: float
+
+@v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
+def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
+    """Analyze bottle image using Gemini Vision API"""
+    try:
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        response = model.generate_content([
+            {
+                "mime_type": "image/jpeg",
+                "data": request.image
+            },
+            """Analyze this image of a liquor bottle. Look for a pen or marker indicating the liquid level.
+
+Return ONLY a JSON object with these fields:
+{
+    "name": "Full product name",
+    "brand": "Brand name only",
+    "category": "Spirits|Beer|Wine|Other",
+    "liquidLevel": 0.75,
+    "confidence": 0.95
+}
+
+liquidLevel should be a decimal from 0.0 (empty) to 1.0 (full).
+If you see a pen marking the liquid line, use that as the level indicator.
+If no bottle is detected, return null.
+Return ONLY valid JSON, no markdown or explanation."""
+        ])
+        
+        text = response.text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        result = json.loads(text)
+        
+        return ScanAnalyzeResponse(**result)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={
+            "error": "analysis_failed",
+            "message": str(e)
+        })
 
 # ============== INCLUDE V1 ROUTER ==============
 
