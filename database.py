@@ -96,9 +96,6 @@ def init_db():
         # Migrate existing users table to add missing columns
         _migrate_users_table(conn)
         
-        # Migrate scans table for pen capture mode
-        _migrate_scans_table(conn)
-        
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_users_email 
             ON users(email) WHERE deleted_at IS NULL
@@ -236,6 +233,9 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_scans_idempotency 
             ON scans(idempotency_key)
         """)
+        
+        # Migrate scans table for pen capture mode (must be after table creation)
+        _migrate_scans_table(conn)
         
         # Voice notes table
         cursor.execute("""
