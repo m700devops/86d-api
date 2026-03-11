@@ -2221,7 +2221,7 @@ def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_curre
     """Analyze bottle image using Gemini Vision API"""
     try:
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
         response = model.generate_content([
             {
