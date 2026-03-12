@@ -21,6 +21,7 @@ from helpers import (
 from models import *
 from seed_data import SEED_PRODUCTS
 import google.generativeai as genai
+import anthropic
 import os
 
 # Startup time for uptime calculation
@@ -2218,17 +2219,28 @@ class ScanAnalyzeResponse(BaseModel):
 
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
 def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
-    """Analyze bottle image using Gemini Vision API"""
+    """Analyze bottle image using Claude Vision API"""
     try:
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        
-        response = model.generate_content([
-            {
-                "mime_type": "image/jpeg",
-                "data": request.image
-            },
-            """Analyze this image of a liquor bottle. Look for a pen or marker indicating the liquid level.
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+        message = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=256,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": request.image
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": """Analyze this image of a liquor bottle. Look for a pen or marker indicating the liquid level.
 
 Return ONLY a JSON object with these fields:
 {
@@ -2243,14 +2255,18 @@ liquidLevel should be a decimal from 0.0 (empty) to 1.0 (full).
 If you see a pen marking the liquid line, use that as the level indicator.
 If no bottle is detected, return null.
 Return ONLY valid JSON, no markdown or explanation."""
-        ])
-        
-        text = response.text.strip()
+                        }
+                    ]
+                }
+            ]
+        )
+
+        text = message.content[0].text.strip()
         text = text.replace("```json", "").replace("```", "").strip()
         result = json.loads(text)
-        
+
         return ScanAnalyzeResponse(**result)
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail={
             "error": "analysis_failed",
