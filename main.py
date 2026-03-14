@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 import time
 import uuid
 import json
+import traceback
 
 from database import init_db, get_db
 from auth import (
@@ -2261,7 +2262,9 @@ Rules:
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
 async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
     """Analyze bottle image using Claude Vision API"""
+    print("[analyze_bottle] function started", flush=True)
     api_key = os.getenv("ANTHROPIC_API_KEY")
+    print(f"[analyze_bottle] ANTHROPIC_API_KEY present: {bool(api_key)}", flush=True)
     if not api_key:
         raise HTTPException(status_code=503, detail={
             "error": "service_unavailable",
@@ -2273,7 +2276,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
         prompt = PEN_PROMPT if request.mode == "pen" else BOTTLE_PROMPT
 
         message = await client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-sonnet-4-5-20250514",
             max_tokens=300,
             messages=[
                 {
@@ -2337,6 +2340,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             "message": f"Could not parse AI response: {e}"
         })
     except Exception as e:
+        print(f"[analyze_bottle] EXCEPTION: {traceback.format_exc()}", flush=True)
         raise HTTPException(status_code=500, detail={
             "error": "analysis_failed",
             "message": str(e)
