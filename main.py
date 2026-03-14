@@ -2261,15 +2261,20 @@ Rules:
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
 async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
     """Analyze bottle image using Claude Vision API"""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail={
+            "error": "service_unavailable",
+            "message": "ANTHROPIC_API_KEY is not configured on the server"
+        })
+
     try:
-        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        client = anthropic.AsyncAnthropic(api_key=api_key)
         prompt = PEN_PROMPT if request.mode == "pen" else BOTTLE_PROMPT
 
-        import asyncio
-        message = await asyncio.to_thread(
-            client.messages.create,
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
+        message = await client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=300,
             messages=[
                 {
                     "role": "user",
@@ -2289,7 +2294,13 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
         )
 
         text = message.content[0].text.strip()
-        text = text.replace("```json", "").replace("```", "").strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        text = text.strip()
+
         result = json.loads(text)
 
         # Normalise category to lowercase
@@ -2299,6 +2310,10 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
         # Guarantee required fields have sane defaults
         result.setdefault("levelReadable", True)
         result.setdefault("confidence", 0.5)
+        result.setdefault("name", "")
+        result.setdefault("brand", "")
+        result.setdefault("category", "other")
+        result.setdefault("liquidLevel", 0.0)
 
         # If no bottle was found, return None so the mobile app can handle it
         if not result.get("name") and result.get("confidence", 1) == 0:
@@ -2306,6 +2321,21 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
 
         return ScanAnalyzeResponse(**result)
 
+    except anthropic.AuthenticationError:
+        raise HTTPException(status_code=503, detail={
+            "error": "service_unavailable",
+            "message": "AI service authentication failed — check ANTHROPIC_API_KEY"
+        })
+    except anthropic.APIStatusError as e:
+        raise HTTPException(status_code=502, detail={
+            "error": "ai_api_error",
+            "message": f"Anthropic API error {e.status_code}: {e.message}"
+        })
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail={
+            "error": "parse_failed",
+            "message": f"Could not parse AI response: {e}"
+        })
     except Exception as e:
         raise HTTPException(status_code=500, detail={
             "error": "analysis_failed",
