@@ -4,7 +4,13 @@ from contextlib import contextmanager
 from seed_data import SEED_PRODUCTS
 from helpers import generate_id, now_iso
 
-DATABASE_PATH = os.getenv("DATABASE_PATH", "86d.db")
+# Use /opt/render/project/data/ on Render for persistence between restarts,
+# or a custom DATABASE_PATH env var, falling back to the local file.
+_default_db_path = "/opt/render/project/data/86d.db" if os.path.isdir("/opt/render/project") else "86d.db"
+DATABASE_PATH = os.getenv("DATABASE_PATH", _default_db_path)
+
+# Ensure the directory exists
+os.makedirs(os.path.dirname(DATABASE_PATH) if os.path.dirname(DATABASE_PATH) else ".", exist_ok=True)
 
 @contextmanager
 def get_db():

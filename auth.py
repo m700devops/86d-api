@@ -6,10 +6,11 @@ from pydantic import BaseModel
 import secrets
 
 # Security configuration
-SECRET_KEY = "your-secret-key-change-in-production"  # Change in production!
+import os
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
-REFRESH_TOKEN_EXPIRE_DAYS = 7
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7   # 7 days (was 60 min — short lifetime caused re-login loops)
+REFRESH_TOKEN_EXPIRE_DAYS = 30              # 30 days (was 7)
 PASSWORD_RESET_EXPIRE_MINUTES = 60
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
