@@ -166,7 +166,7 @@ def register(user_data: UserCreate):
             
             # Check if email exists
             cursor.execute(
-                "SELECT id FROM users WHERE email = ? AND deleted_at IS NULL",
+                "SELECT id FROM users WHERE email = %s AND deleted_at IS NULL",
                 (user_data.email.lower().strip(),)
             )
             if cursor.fetchone():
@@ -185,7 +185,7 @@ def register(user_data: UserCreate):
                 INSERT INTO users (id, email, password_hash, name, terms_accepted_at, privacy_accepted_at,
                                    trial_started_at, trial_ends_at, subscription_status, subscription_tier,
                                    created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 user_id,
                 user_data.email.lower().strip(),
@@ -243,7 +243,7 @@ def login(credentials: UserLogin):
         cursor.execute(
             """SELECT id, email, password_hash, name, subscription_status, subscription_tier,
                       trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at 
-               FROM users WHERE email = ? AND deleted_at IS NULL""",
+               FROM users WHERE email = %s AND deleted_at IS NULL""",
             (credentials.email.lower().strip(),)
         )
         row = cursor.fetchone()
@@ -308,12 +308,12 @@ def list_products(
         where_clause = "WHERE 1=1"
         params = []
         if category:
-            where_clause += " AND category = ?"
+            where_clause += " AND category = %s"
             params.append(category)
         
         # Get total count
-        cursor.execute(f"SELECT COUNT(*) FROM products {where_clause}", params)
-        total = cursor.fetchone()[0]
+        cursor.execute(f"SELECT COUNT(*) as count FROM products {where_clause}", params)
+        total = cursor.fetchone()["count"]
         
         # Get products
         order_by = {
@@ -326,7 +326,7 @@ def list_products(
             SELECT * FROM products 
             {where_clause}
             ORDER BY {order_by}
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
         """, params + [limit, offset])
         
         products = [dict(row) for row in cursor.fetchall()]
@@ -353,11 +353,11 @@ def search_products(
         search_term = f"%{q}%"
         cursor.execute("""
             SELECT * FROM products 
-            WHERE name LIKE ? OR brand LIKE ? OR upc LIKE ?
-            ORDER BY 
-                CASE WHEN name LIKE ? THEN 0 ELSE 1 END,
+            WHERE name ILIKE %s OR brand ILIKE %s OR upc ILIKE %s
+            ORDER BY
+                CASE WHEN name ILIKE %s THEN 0 ELSE 1 END,
                 scan_count DESC
-            LIMIT ?
+            LIMIT %s
         """, (search_term, search_term, search_term, f"%{q}%", limit))
         
         products = [dict(row) for row in cursor.fetchall()]
@@ -376,7 +376,7 @@ def get_product_by_barcode(upc: str):
     with get_db() as conn:
         cursor = conn.cursor()
         
-        cursor.execute("SELECT * FROM products WHERE upc = ?", (upc,))
+        cursor.execute("SELECT * FROM products WHERE upc = %s", (upc,))
         row = cursor.fetchone()
         
         if not row:
@@ -398,7 +398,7 @@ def create_product(product_data: ProductCreate, user_id: str = Depends(get_curre
         
         # Check UPC if provided
         if product_data.upc:
-            cursor.execute("SELECT * FROM products WHERE upc = ?", (product_data.upc,))
+            cursor.execute("SELECT * FROM products WHERE upc = %s", (product_data.upc,))
             existing = cursor.fetchone()
             if existing:
                 raise HTTPException(status_code=409, detail={
@@ -412,7 +412,7 @@ def create_product(product_data: ProductCreate, user_id: str = Depends(get_curre
         
         cursor.execute("""
             INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             product_id,
             product_data.name,
@@ -452,12 +452,12 @@ def increment_scan_count(product_id: str):
         
         cursor.execute("""
             UPDATE products 
-            SET scan_count = scan_count + 1, updated_at = ?
-            WHERE id = ?
+            SET scan_count = scan_count + 1, updated_at = %s
+            WHERE id = %s
         """, (now_iso(), product_id))
         conn.commit()
         
-        cursor.execute("SELECT scan_count FROM products WHERE id = ?", (product_id,))
+        cursor.execute("SELECT scan_count FROM products WHERE id = %s", (product_id,))
         row = cursor.fetchone()
         
         if not row:
@@ -478,7 +478,7 @@ def list_locations(user_id: str = Depends(get_current_user)):
         
         cursor.execute("""
             SELECT * FROM locations 
-            WHERE user_id = ? AND deleted_at IS NULL
+            WHERE user_id = %s AND deleted_at IS NULL
             ORDER BY created_at DESC
         """, (user_id,))
         
@@ -496,7 +496,7 @@ def create_location(location_data: LocationCreate, user_id: str = Depends(get_cu
         
         cursor.execute("""
             INSERT INTO locations (id, user_id, name, address, timezone, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (
             location_id,
             user_id,
@@ -528,7 +528,7 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
         
         # Verify location belongs to user
         cursor.execute(
-            "SELECT id FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
             (location_id, user_id)
         )
         if not cursor.fetchone():
@@ -543,7 +543,7 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
                    p.updated_at as product_updated_at
             FROM par_levels pl
             JOIN products p ON pl.product_id = p.id
-            WHERE pl.location_id = ?
+            WHERE pl.location_id = %s
         """, (location_id,))
         
         rows = cursor.fetchall()
@@ -581,7 +581,7 @@ def set_par_level(location_id: str, par_data: ParLevelCreate, user_id: str = Dep
         
         # Verify location belongs to user
         cursor.execute(
-            "SELECT id FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
             (location_id, user_id)
         )
         if not cursor.fetchone():
@@ -591,7 +591,7 @@ def set_par_level(location_id: str, par_data: ParLevelCreate, user_id: str = Dep
             })
         
         # Verify product exists
-        cursor.execute("SELECT id FROM products WHERE id = ?", (par_data.product_id,))
+        cursor.execute("SELECT id FROM products WHERE id = %s", (par_data.product_id,))
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail={
                 "error": "not_found",
@@ -603,7 +603,7 @@ def set_par_level(location_id: str, par_data: ParLevelCreate, user_id: str = Dep
         
         cursor.execute("""
             INSERT INTO par_levels (id, location_id, product_id, par_quantity, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT(location_id, product_id) DO UPDATE SET
                 par_quantity = excluded.par_quantity,
                 updated_at = excluded.updated_at
@@ -612,7 +612,7 @@ def set_par_level(location_id: str, par_data: ParLevelCreate, user_id: str = Dep
         
         # Get the actual ID (either inserted or existing)
         cursor.execute(
-            "SELECT id FROM par_levels WHERE location_id = ? AND product_id = ?",
+            "SELECT id FROM par_levels WHERE location_id = %s AND product_id = %s",
             (location_id, par_data.product_id)
         )
         par_id = cursor.fetchone()["id"]
@@ -635,7 +635,7 @@ def set_par_levels_bulk(location_id: str, bulk_data: ParLevelBulkRequest, user_i
         
         # Verify location belongs to user
         cursor.execute(
-            "SELECT id FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
             (location_id, user_id)
         )
         if not cursor.fetchone():
@@ -652,7 +652,7 @@ def set_par_levels_bulk(location_id: str, bulk_data: ParLevelBulkRequest, user_i
             par_id = generate_id()
             cursor.execute("""
                 INSERT INTO par_levels (id, location_id, product_id, par_quantity, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT(location_id, product_id) DO UPDATE SET
                     par_quantity = excluded.par_quantity,
                     updated_at = excluded.updated_at
@@ -660,7 +660,7 @@ def set_par_levels_bulk(location_id: str, bulk_data: ParLevelBulkRequest, user_i
             updated += 1
             
             cursor.execute(
-                "SELECT id FROM par_levels WHERE location_id = ? AND product_id = ?",
+                "SELECT id FROM par_levels WHERE location_id = %s AND product_id = %s",
                 (location_id, par_data.product_id)
             )
             actual_id = cursor.fetchone()["id"]
@@ -690,7 +690,7 @@ def start_inventory(session_data: InventorySessionCreate, user_id: str = Depends
         
         # Verify location belongs to user
         cursor.execute(
-            "SELECT id FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
             (session_data.location_id, user_id)
         )
         if not cursor.fetchone():
@@ -702,7 +702,7 @@ def start_inventory(session_data: InventorySessionCreate, user_id: str = Depends
         # Check for existing active session
         cursor.execute("""
             SELECT id, started_at, user_id FROM inventory_sessions
-            WHERE location_id = ? AND status = 'in_progress'
+            WHERE location_id = %s AND status = 'in_progress'
         """, (session_data.location_id,))
         existing = cursor.fetchone()
         
@@ -724,7 +724,7 @@ def start_inventory(session_data: InventorySessionCreate, user_id: str = Depends
         
         cursor.execute("""
             INSERT INTO inventory_sessions (id, location_id, user_id, started_at, status, device_id, app_version, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'in_progress', ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, 'in_progress', %s, %s, %s, %s)
         """, (session_id, session_data.location_id, user_id, now, session_data.device_id, session_data.app_version, now, now))
         conn.commit()
         
@@ -749,7 +749,7 @@ def get_inventory_session(session_id: str, user_id: str = Depends(get_current_us
             SELECT s.*, l.name as location_name
             FROM inventory_sessions s
             JOIN locations l ON s.location_id = l.id
-            WHERE s.id = ? AND s.user_id = ?
+            WHERE s.id = %s AND s.user_id = %s
         """, (session_id, user_id))
         session_row = cursor.fetchone()
         
@@ -769,7 +769,7 @@ def get_inventory_session(session_id: str, user_id: str = Depends(get_current_us
                    p.updated_at as product_updated_at
             FROM scans sc
             JOIN products p ON sc.product_id = p.id
-            WHERE sc.session_id = ?
+            WHERE sc.session_id = %s
             ORDER BY sc.created_at DESC
         """, (session_id,))
         
@@ -808,7 +808,7 @@ def get_inventory_session(session_id: str, user_id: str = Depends(get_current_us
             scans.append(scan)
         
         # Get voice notes
-        cursor.execute("SELECT * FROM voice_notes WHERE session_id = ? ORDER BY created_at DESC", (session_id,))
+        cursor.execute("SELECT * FROM voice_notes WHERE session_id = %s ORDER BY created_at DESC", (session_id,))
         voice_notes = [dict(row) for row in cursor.fetchall()]
         for vn in voice_notes:
             vn["processed"] = bool(vn["processed"])
@@ -827,7 +827,7 @@ def add_scan(session_id: str, scan_data: ScanCreate, user_id: str = Depends(get_
         
         # Verify session belongs to user and is in progress
         cursor.execute(
-            "SELECT id, location_id FROM inventory_sessions WHERE id = ? AND user_id = ? AND status = 'in_progress'",
+            "SELECT id, location_id FROM inventory_sessions WHERE id = %s AND user_id = %s AND status = 'in_progress'",
             (session_id, user_id)
         )
         session = cursor.fetchone()
@@ -840,7 +840,7 @@ def add_scan(session_id: str, scan_data: ScanCreate, user_id: str = Depends(get_
         # Check idempotency key
         if scan_data.idempotency_key:
             cursor.execute(
-                "SELECT * FROM scans WHERE idempotency_key = ?",
+                "SELECT * FROM scans WHERE idempotency_key = %s",
                 (scan_data.idempotency_key,)
             )
             existing = cursor.fetchone()
@@ -861,7 +861,7 @@ def add_scan(session_id: str, scan_data: ScanCreate, user_id: str = Depends(get_
             INSERT INTO scans (id, session_id, product_id, level, level_decimal, quantity, 
                               detection_method, confidence, photo_url, shelf_location, notes, 
                               idempotency_key, synced_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             scan_id, session_id, scan_data.product_id, scan_data.level, level_decimal,
             scan_data.quantity, scan_data.detection_method, scan_data.confidence,
@@ -871,15 +871,15 @@ def add_scan(session_id: str, scan_data: ScanCreate, user_id: str = Depends(get_
         
         # Increment product scan count
         cursor.execute(
-            "UPDATE products SET scan_count = scan_count + 1, updated_at = ? WHERE id = ?",
+            "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
             (now, scan_data.product_id)
         )
         
         conn.commit()
         
         # Get total scans for session
-        cursor.execute("SELECT COUNT(*) FROM scans WHERE session_id = ?", (session_id,))
-        total = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) as count FROM scans WHERE session_id = %s", (session_id,))
+        total = cursor.fetchone()["count"]
         
         return {
             "scan": {
@@ -910,7 +910,7 @@ def add_scans_bulk(session_id: str, bulk_data: ScanBulkRequest, user_id: str = D
         
         # Verify session belongs to user and is in progress
         cursor.execute(
-            "SELECT id FROM inventory_sessions WHERE id = ? AND user_id = ? AND status = 'in_progress'",
+            "SELECT id FROM inventory_sessions WHERE id = %s AND user_id = %s AND status = 'in_progress'",
             (session_id, user_id)
         )
         if not cursor.fetchone():
@@ -928,7 +928,7 @@ def add_scans_bulk(session_id: str, bulk_data: ScanBulkRequest, user_id: str = D
             # Check idempotency key
             if scan_data.idempotency_key:
                 cursor.execute(
-                    "SELECT * FROM scans WHERE idempotency_key = ?",
+                    "SELECT * FROM scans WHERE idempotency_key = %s",
                     (scan_data.idempotency_key,)
                 )
                 if cursor.fetchone():
@@ -944,7 +944,7 @@ def add_scans_bulk(session_id: str, bulk_data: ScanBulkRequest, user_id: str = D
                 INSERT INTO scans (id, session_id, product_id, level, level_decimal, quantity, 
                                   detection_method, confidence, photo_url, shelf_location, notes, 
                                   idempotency_key, synced_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 scan_id, session_id, scan_data.product_id, scan_data.level, level_decimal,
                 scan_data.quantity, scan_data.detection_method, scan_data.confidence,
@@ -954,7 +954,7 @@ def add_scans_bulk(session_id: str, bulk_data: ScanBulkRequest, user_id: str = D
             
             # Increment product scan count
             cursor.execute(
-                "UPDATE products SET scan_count = scan_count + 1, updated_at = ? WHERE id = ?",
+                "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
                 (now, scan_data.product_id)
             )
             
@@ -1023,7 +1023,7 @@ def pen_capture(capture_data: PenCaptureRequest, user_id: str = Depends(get_curr
         
         # Verify session belongs to user and is in progress
         cursor.execute(
-            "SELECT id, location_id FROM inventory_sessions WHERE id = ? AND user_id = ? AND status = 'in_progress'",
+            "SELECT id, location_id FROM inventory_sessions WHERE id = %s AND user_id = %s AND status = 'in_progress'",
             (capture_data.session_id, user_id)
         )
         session = cursor.fetchone()
@@ -1042,12 +1042,12 @@ def pen_capture(capture_data: PenCaptureRequest, user_id: str = Depends(get_curr
         
         if product_id:
             # Get existing product
-            cursor.execute("SELECT * FROM products WHERE id = ?", (product_id,))
+            cursor.execute("SELECT * FROM products WHERE id = %s", (product_id,))
             product = cursor.fetchone()
         elif capture_data.product_name:
             # Try to find product by name
             cursor.execute(
-                "SELECT * FROM products WHERE LOWER(name) = LOWER(?) OR LOWER(brand || ' ' || name) = LOWER(?)",
+                "SELECT * FROM products WHERE LOWER(name) = LOWER(%s) OR LOWER(brand || ' ' || name) = LOWER(%s)",
                 (capture_data.product_name, capture_data.product_name)
             )
             product = cursor.fetchone()
@@ -1059,7 +1059,7 @@ def pen_capture(capture_data: PenCaptureRequest, user_id: str = Depends(get_curr
             product_id = generate_id()
             cursor.execute("""
                 INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 product_id,
                 capture_data.product_name or "Unknown Product",
@@ -1073,7 +1073,7 @@ def pen_capture(capture_data: PenCaptureRequest, user_id: str = Depends(get_curr
                 now,
                 now
             ))
-            cursor.execute("SELECT * FROM products WHERE id = ?", (product_id,))
+            cursor.execute("SELECT * FROM products WHERE id = %s", (product_id,))
             product = cursor.fetchone()
         
         # Convert level to level string
@@ -1095,7 +1095,7 @@ def pen_capture(capture_data: PenCaptureRequest, user_id: str = Depends(get_curr
             INSERT INTO scans (id, session_id, product_id, level, level_decimal, quantity, 
                               detection_method, confidence, pen_position_y, capture_method,
                               synced_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             scan_id, capture_data.session_id, product_id, level, level_decimal,
             1, "camera", capture_data.confidence, capture_data.pen_position_y, "pen_mode",
@@ -1104,15 +1104,15 @@ def pen_capture(capture_data: PenCaptureRequest, user_id: str = Depends(get_curr
         
         # Increment product scan count
         cursor.execute(
-            "UPDATE products SET scan_count = scan_count + 1, updated_at = ? WHERE id = ?",
+            "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
             (now, product_id)
         )
         
         conn.commit()
         
         # Get bottle number (count of scans in this session)
-        cursor.execute("SELECT COUNT(*) FROM scans WHERE session_id = ?", (capture_data.session_id,))
-        bottle_number = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) as count FROM scans WHERE session_id = %s", (capture_data.session_id,))
+        bottle_number = cursor.fetchone()["count"]
         
         return {
             "scan_id": scan_id,
@@ -1129,7 +1129,7 @@ def batch_capture(batch_data: BatchCaptureRequest, user_id: str = Depends(get_cu
         
         # Verify session belongs to user and is in progress
         cursor.execute(
-            "SELECT id FROM inventory_sessions WHERE id = ? AND user_id = ? AND status = 'in_progress'",
+            "SELECT id FROM inventory_sessions WHERE id = %s AND user_id = %s AND status = 'in_progress'",
             (batch_data.session_id, user_id)
         )
         if not cursor.fetchone():
@@ -1151,7 +1151,7 @@ def batch_capture(batch_data: BatchCaptureRequest, user_id: str = Depends(get_cu
                 product_id = capture.product_id
                 if not product_id and capture.product_name:
                     cursor.execute(
-                        "SELECT id FROM products WHERE LOWER(name) = LOWER(?) OR LOWER(brand || ' ' || name) = LOWER(?)",
+                        "SELECT id FROM products WHERE LOWER(name) = LOWER(%s) OR LOWER(brand || ' ' || name) = LOWER(%s)",
                         (capture.product_name, capture.product_name)
                     )
                     row = cursor.fetchone()
@@ -1163,7 +1163,7 @@ def batch_capture(batch_data: BatchCaptureRequest, user_id: str = Depends(get_cu
                     product_id = generate_id()
                     cursor.execute("""
                         INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         product_id,
                         capture.product_name or "Unknown Product",
@@ -1197,7 +1197,7 @@ def batch_capture(batch_data: BatchCaptureRequest, user_id: str = Depends(get_cu
                     INSERT INTO scans (id, session_id, product_id, level, level_decimal, quantity, 
                                       detection_method, confidence, pen_position_y, capture_method,
                                       synced_at, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     scan_id, batch_data.session_id, product_id, level, level_decimal,
                     1, "camera", capture.confidence, capture.pen_position_y, "pen_mode",
@@ -1206,7 +1206,7 @@ def batch_capture(batch_data: BatchCaptureRequest, user_id: str = Depends(get_cu
                 
                 # Increment product scan count
                 cursor.execute(
-                    "UPDATE products SET scan_count = scan_count + 1, updated_at = ? WHERE id = ?",
+                    "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
                     (now, product_id)
                 )
                 
@@ -1239,7 +1239,7 @@ def add_voice_note(session_id: str, voice_data: VoiceNoteCreate, user_id: str = 
         
         # Verify session belongs to user
         cursor.execute(
-            "SELECT id FROM inventory_sessions WHERE id = ? AND user_id = ?",
+            "SELECT id FROM inventory_sessions WHERE id = %s AND user_id = %s",
             (session_id, user_id)
         )
         if not cursor.fetchone():
@@ -1253,7 +1253,7 @@ def add_voice_note(session_id: str, voice_data: VoiceNoteCreate, user_id: str = 
         
         cursor.execute("""
             INSERT INTO voice_notes (id, session_id, audio_url, transcript, linked_product_id, duration_seconds, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (note_id, session_id, voice_data.audio_url, voice_data.transcript,
               voice_data.linked_product_id, voice_data.duration_seconds, now))
         conn.commit()
@@ -1282,7 +1282,7 @@ def complete_inventory(session_id: str, user_id: str = Depends(get_current_user)
             SELECT s.*, l.name as location_name
             FROM inventory_sessions s
             JOIN locations l ON s.location_id = l.id
-            WHERE s.id = ? AND s.user_id = ? AND s.status = 'in_progress'
+            WHERE s.id = %s AND s.user_id = %s AND s.status = 'in_progress'
         """, (session_id, user_id))
         session = cursor.fetchone()
         
@@ -1301,12 +1301,12 @@ def complete_inventory(session_id: str, user_id: str = Depends(get_current_user)
             SELECT s.*, p.name as product_name, p.category
             FROM scans s
             JOIN products p ON s.product_id = p.id
-            WHERE s.session_id = ?
+            WHERE s.session_id = %s
         """, (session_id,))
         scans = [dict(row) for row in cursor.fetchall()]
         
         # Get par levels for location
-        cursor.execute("SELECT product_id, par_quantity FROM par_levels WHERE location_id = ?", (location_id,))
+        cursor.execute("SELECT product_id, par_quantity FROM par_levels WHERE location_id = %s", (location_id,))
         par_levels = {row["product_id"]: row["par_quantity"] for row in cursor.fetchall()}
         
         # Generate order items
@@ -1318,7 +1318,7 @@ def complete_inventory(session_id: str, user_id: str = Depends(get_current_user)
             product_id = scan["product_id"]
             cursor.execute("""
                 SELECT bottles_used FROM usage_history
-                WHERE location_id = ? AND product_id = ?
+                WHERE location_id = %s AND product_id = %s
                 ORDER BY period_start DESC
                 LIMIT 4
             """, (location_id, product_id))
@@ -1342,8 +1342,8 @@ def complete_inventory(session_id: str, user_id: str = Depends(get_current_user)
         
         cursor.execute("""
             UPDATE inventory_sessions
-            SET status = 'completed', completed_at = ?, total_bottles = ?, duration_seconds = ?, updated_at = ?
-            WHERE id = ?
+            SET status = 'completed', completed_at = %s, total_bottles = %s, duration_seconds = %s, updated_at = %s
+            WHERE id = %s
         """, (now, total_bottles, duration_seconds, now, session_id))
         
         # Create order
@@ -1357,7 +1357,7 @@ def complete_inventory(session_id: str, user_id: str = Depends(get_current_user)
         import json
         cursor.execute("""
             INSERT INTO orders (id, session_id, location_id, order_data, total_items, variance_alerts, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (
             order_id, session_id, location_id,
             json.dumps({"items": order_items}),
@@ -1370,7 +1370,7 @@ def complete_inventory(session_id: str, user_id: str = Depends(get_current_user)
         # Build order items with product names
         order_items_response = []
         for item in order_items:
-            cursor.execute("SELECT name, category FROM products WHERE id = ?", (item["product_id"],))
+            cursor.execute("SELECT name, category FROM products WHERE id = %s", (item["product_id"],))
             product = cursor.fetchone()
             order_items_response.append({
                 "product_id": item["product_id"],
@@ -1409,7 +1409,7 @@ def cancel_inventory(session_id: str, user_id: str = Depends(get_current_user)):
         
         # Verify session belongs to user and is in progress
         cursor.execute(
-            "SELECT id FROM inventory_sessions WHERE id = ? AND user_id = ? AND status = 'in_progress'",
+            "SELECT id FROM inventory_sessions WHERE id = %s AND user_id = %s AND status = 'in_progress'",
             (session_id, user_id)
         )
         if not cursor.fetchone():
@@ -1421,8 +1421,8 @@ def cancel_inventory(session_id: str, user_id: str = Depends(get_current_user)):
         now = now_iso()
         cursor.execute("""
             UPDATE inventory_sessions
-            SET status = 'cancelled', completed_at = ?, updated_at = ?
-            WHERE id = ?
+            SET status = 'cancelled', completed_at = %s, updated_at = %s
+            WHERE id = %s
         """, (now, now, session_id))
         conn.commit()
         
@@ -1448,19 +1448,19 @@ def list_orders(
         cursor = conn.cursor()
         
         # Build query
-        where_clause = "WHERE l.user_id = ?"
+        where_clause = "WHERE l.user_id = %s"
         params = [user_id]
         if location_id:
-            where_clause += " AND o.location_id = ?"
+            where_clause += " AND o.location_id = %s"
             params.append(location_id)
         
         # Get total count
         cursor.execute(f"""
-            SELECT COUNT(*) FROM orders o
+            SELECT COUNT(*) as count FROM orders o
             JOIN locations l ON o.location_id = l.id
             {where_clause}
         """, params)
-        total = cursor.fetchone()[0]
+        total = cursor.fetchone()["count"]
         
         # Get orders
         cursor.execute(f"""
@@ -1469,7 +1469,7 @@ def list_orders(
             JOIN locations l ON o.location_id = l.id
             {where_clause}
             ORDER BY o.created_at DESC
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
         """, params + [limit, offset])
         
         import json
@@ -1512,7 +1512,7 @@ def get_order(order_id: str, user_id: str = Depends(get_current_user)):
             SELECT o.*, l.name as location_name, l.address, l.timezone
             FROM orders o
             JOIN locations l ON o.location_id = l.id
-            WHERE o.id = ? AND l.user_id = ?
+            WHERE o.id = %s AND l.user_id = %s
         """, (order_id, user_id))
         row = cursor.fetchone()
         
@@ -1564,7 +1564,7 @@ def export_order(order_id: str, export_data: OrderExportRequest, user_id: str = 
             SELECT o.*, l.name as location_name
             FROM orders o
             JOIN locations l ON o.location_id = l.id
-            WHERE o.id = ? AND l.user_id = ?
+            WHERE o.id = %s AND l.user_id = %s
         """, (order_id, user_id))
         row = cursor.fetchone()
         
@@ -1619,8 +1619,8 @@ def export_order(order_id: str, export_data: OrderExportRequest, user_id: str = 
         now = now_iso()
         cursor.execute("""
             UPDATE orders
-            SET exported_at = ?, export_format = ?, export_destination = ?
-            WHERE id = ?
+            SET exported_at = %s, export_format = %s, export_destination = %s
+            WHERE id = %s
         """, (now, export_data.format, export_data.destination, order_id))
         conn.commit()
         
@@ -1652,7 +1652,7 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
         # Process sessions
         for session_data in sync_data.sessions:
             # Check if session exists
-            cursor.execute("SELECT id, status FROM inventory_sessions WHERE id = ?", (session_data.id,))
+            cursor.execute("SELECT id, status FROM inventory_sessions WHERE id = %s", (session_data.id,))
             existing = cursor.fetchone()
             
             if existing:
@@ -1660,14 +1660,14 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
                 if existing["status"] == "in_progress" and session_data.status == "completed":
                     cursor.execute("""
                         UPDATE inventory_sessions
-                        SET status = ?, completed_at = ?, updated_at = ?
-                        WHERE id = ?
+                        SET status = %s, completed_at = %s, updated_at = %s
+                        WHERE id = %s
                     """, (session_data.status, session_data.completed_at, now, session_data.id))
                     sessions_updated += 1
             else:
                 # Verify location belongs to user
                 cursor.execute(
-                    "SELECT id FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+                    "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
                     (session_data.location_id, user_id)
                 )
                 if not cursor.fetchone():
@@ -1681,7 +1681,7 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
                 # Create session
                 cursor.execute("""
                     INSERT INTO inventory_sessions (id, location_id, user_id, started_at, completed_at, status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """, (session_data.id, session_data.location_id, user_id, session_data.started_at,
                       session_data.completed_at, session_data.status, now, now))
                 sessions_created += 1
@@ -1691,7 +1691,7 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
                 # Check idempotency
                 if scan_data.idempotency_key:
                     cursor.execute(
-                        "SELECT id FROM scans WHERE idempotency_key = ?",
+                        "SELECT id FROM scans WHERE idempotency_key = %s",
                         (scan_data.idempotency_key,)
                     )
                     if cursor.fetchone():
@@ -1704,7 +1704,7 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
                 cursor.execute("""
                     INSERT INTO scans (id, session_id, product_id, level, level_decimal, quantity,
                                       detection_method, idempotency_key, synced_at, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, 1, %s, %s, %s, %s, %s)
                 """, (scan_id, session_data.id, scan_data.product_id, scan_data.level, level_decimal,
                       scan_data.detection_method, scan_data.idempotency_key, now,
                       scan_data.created_at, now))
@@ -1715,7 +1715,7 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
                 note_id = generate_id()
                 cursor.execute("""
                     INSERT INTO voice_notes (id, session_id, audio_url, transcript, linked_product_id, duration_seconds, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, (note_id, session_data.id, vn_data.audio_url, vn_data.transcript,
                       vn_data.linked_product_id, vn_data.duration_seconds, now))
         
@@ -1723,7 +1723,7 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
         for pl_update in sync_data.par_level_updates:
             # Verify location belongs to user
             cursor.execute(
-                "SELECT id FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+                "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
                 (pl_update.location_id, user_id)
             )
             if not cursor.fetchone():
@@ -1732,7 +1732,7 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
             pl_id = generate_id()
             cursor.execute("""
                 INSERT INTO par_levels (id, location_id, product_id, par_quantity, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT(location_id, product_id) DO UPDATE SET
                     par_quantity = excluded.par_quantity,
                     updated_at = excluded.updated_at
@@ -1751,7 +1751,7 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
             # Get new products
             cursor.execute("""
                 SELECT * FROM products
-                WHERE created_at > ?
+                WHERE created_at > %s
                 ORDER BY created_at DESC
                 LIMIT 50
             """, (sync_data.last_sync_at.isoformat(),))
@@ -1760,7 +1760,7 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
             # Get user's locations
             cursor.execute("""
                 SELECT * FROM locations
-                WHERE user_id = ? AND (created_at > ? OR updated_at > ?)
+                WHERE user_id = %s AND (created_at > %s OR updated_at > %s)
                 AND deleted_at IS NULL
             """, (user_id, sync_data.last_sync_at.isoformat(), sync_data.last_sync_at.isoformat()))
             server_updates["locations"] = [dict(row) for row in cursor.fetchall()]
@@ -1788,7 +1788,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
         
         # Verify location belongs to user
         cursor.execute(
-            "SELECT * FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            "SELECT * FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
             (location_id, user_id)
         )
         location = cursor.fetchone()
@@ -1807,7 +1807,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
                    p.updated_at as product_updated_at
             FROM par_levels pl
             JOIN products p ON pl.product_id = p.id
-            WHERE pl.location_id = ?
+            WHERE pl.location_id = %s
         """, (location_id,))
         
         par_levels = []
@@ -1837,7 +1837,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
         # Get recent sessions
         cursor.execute("""
             SELECT * FROM inventory_sessions
-            WHERE location_id = ?
+            WHERE location_id = %s
             ORDER BY started_at DESC
             LIMIT 5
         """, (location_id,))
@@ -1848,7 +1848,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
             SELECT DISTINCT p.* FROM products p
             JOIN scans s ON p.id = s.product_id
             JOIN inventory_sessions ses ON s.session_id = ses.id
-            WHERE ses.location_id = ?
+            WHERE ses.location_id = %s
             ORDER BY p.name
         """, (location_id,))
         products = [dict(row) for row in cursor.fetchall()]
@@ -1873,7 +1873,7 @@ def list_distributors(user_id: str = Depends(get_current_user)):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM distributors 
-            WHERE user_id = ? AND deleted_at IS NULL
+            WHERE user_id = %s AND deleted_at IS NULL
             ORDER BY name ASC
         """, (user_id,))
         distributors = [dict(row) for row in cursor.fetchall()]
@@ -1888,7 +1888,7 @@ def create_distributor(distributor_data: DistributorCreate, user_id: str = Depen
         now = now_iso()
         cursor.execute("""
             INSERT INTO distributors (id, user_id, name, email, phone, rep_name, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (distributor_id, user_id, distributor_data.name, distributor_data.email,
               distributor_data.phone, distributor_data.rep_name, now, now))
         conn.commit()
@@ -1901,7 +1901,7 @@ def update_distributor(distributor_id: str, distributor_data: DistributorUpdate,
     """Update distributor"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM distributors WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        cursor.execute("SELECT * FROM distributors WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
                        (distributor_id, user_id))
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Distributor not found"})
@@ -1909,21 +1909,21 @@ def update_distributor(distributor_id: str, distributor_data: DistributorUpdate,
         updates = []
         params = []
         if distributor_data.name is not None:
-            updates.append("name = ?")
+            updates.append("name = %s")
             params.append(distributor_data.name)
         if distributor_data.email is not None:
-            updates.append("email = ?")
+            updates.append("email = %s")
             params.append(distributor_data.email)
         if distributor_data.phone is not None:
-            updates.append("phone = ?")
+            updates.append("phone = %s")
             params.append(distributor_data.phone)
         if distributor_data.rep_name is not None:
-            updates.append("rep_name = ?")
+            updates.append("rep_name = %s")
             params.append(distributor_data.rep_name)
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         params.append(now)
         params.append(distributor_id)
-        cursor.execute(f"UPDATE distributors SET {', '.join(updates)} WHERE id = ?", params)
+        cursor.execute(f"UPDATE distributors SET {', '.join(updates)} WHERE id = %s", params)
         conn.commit()
         return {"success": True, "message": "Distributor updated"}
 
@@ -1932,11 +1932,11 @@ def delete_distributor(distributor_id: str, user_id: str = Depends(get_current_u
     """Soft delete distributor"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM distributors WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        cursor.execute("SELECT id FROM distributors WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
                        (distributor_id, user_id))
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Distributor not found"})
-        cursor.execute("UPDATE distributors SET deleted_at = ?, updated_at = ? WHERE id = ?",
+        cursor.execute("UPDATE distributors SET deleted_at = %s, updated_at = %s WHERE id = %s",
                        (now_iso(), now_iso(), distributor_id))
         conn.commit()
         return {"success": True, "message": "Distributor deleted"}
@@ -1947,7 +1947,7 @@ def assign_product_distributor(location_id: str, assignment: LocationProductDist
     """Assign a product to a distributor for a location"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        cursor.execute("SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
                        (location_id, user_id))
         if not cursor.fetchone():
             raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied"})
@@ -1955,7 +1955,7 @@ def assign_product_distributor(location_id: str, assignment: LocationProductDist
         now = now_iso()
         cursor.execute("""
             INSERT INTO location_product_distributors (id, location_id, product_id, distributor_id, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT(location_id, product_id) DO UPDATE SET
                 distributor_id = excluded.distributor_id
         """, (assignment_id, location_id, assignment.product_id, assignment.distributor_id, now))
@@ -1967,7 +1967,7 @@ def list_product_distributors(location_id: str, user_id: str = Depends(get_curre
     """List product-distributor assignments for a location"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM locations WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        cursor.execute("SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
                        (location_id, user_id))
         if not cursor.fetchone():
             raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied"})
@@ -1977,7 +1977,7 @@ def list_product_distributors(location_id: str, user_id: str = Depends(get_curre
             FROM location_product_distributors lpd
             JOIN distributors d ON lpd.distributor_id = d.id
             JOIN products p ON lpd.product_id = p.id
-            WHERE lpd.location_id = ? AND d.deleted_at IS NULL
+            WHERE lpd.location_id = %s AND d.deleted_at IS NULL
         """, (location_id,))
         assignments = []
         for row in cursor.fetchall():
@@ -2003,7 +2003,7 @@ def prepare_order_emails(order_id: str, user_id: str = Depends(get_current_user)
             SELECT o.*, l.name as location_name
             FROM orders o
             JOIN locations l ON o.location_id = l.id
-            WHERE o.id = ? AND l.user_id = ?
+            WHERE o.id = %s AND l.user_id = %s
         """, (order_id, user_id))
         row = cursor.fetchone()
         if not row:
@@ -2022,7 +2022,7 @@ def prepare_order_emails(order_id: str, user_id: str = Depends(get_current_user)
                 SELECT d.id, d.name, d.email
                 FROM location_product_distributors lpd
                 JOIN distributors d ON lpd.distributor_id = d.id
-                WHERE lpd.location_id = ? AND lpd.product_id = ? AND d.deleted_at IS NULL
+                WHERE lpd.location_id = %s AND lpd.product_id = %s AND d.deleted_at IS NULL
             """, (location_id, product_id))
             dist_row = cursor.fetchone()
             if dist_row:
@@ -2107,7 +2107,7 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
         cursor.execute("""
             SELECT id, email, name, subscription_status, subscription_tier, trial_ends_at,
                    terms_accepted_at, privacy_accepted_at, created_at
-            FROM users WHERE id = ? AND deleted_at IS NULL
+            FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
         row = cursor.fetchone()
         if not row:
@@ -2119,15 +2119,15 @@ def delete_user(password: str, user_id: str = Depends(get_current_user)):
     """Soft delete user account (GDPR compliance)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT password_hash FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+        cursor.execute("SELECT password_hash FROM users WHERE id = %s AND deleted_at IS NULL", (user_id,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
         if not verify_password(password, row["password_hash"]):
             raise HTTPException(status_code=401, detail={"error": "invalid_password", "message": "Password is incorrect"})
         cursor.execute("""
-            UPDATE users SET deleted_at = ?, email = CONCAT(email, '.deleted.', ?), updated_at = ?
-            WHERE id = ?
+            UPDATE users SET deleted_at = %s, email = CONCAT(email, '.deleted.', %s), updated_at = %s
+            WHERE id = %s
         """, (now_iso(), generate_id()[:8], now_iso(), user_id))
         conn.commit()
         return {"success": True, "message": "Account deleted successfully"}
@@ -2139,8 +2139,8 @@ def accept_terms(request: AcceptTermsRequest, user_id: str = Depends(get_current
         cursor = conn.cursor()
         now = now_iso()
         cursor.execute("""
-            UPDATE users SET terms_accepted_at = ?, privacy_accepted_at = ?, updated_at = ?
-            WHERE id = ?
+            UPDATE users SET terms_accepted_at = %s, privacy_accepted_at = %s, updated_at = %s
+            WHERE id = %s
         """, (now, now, now, user_id))
         conn.commit()
         return {"success": True, "message": "Terms accepted successfully"}
@@ -2152,15 +2152,15 @@ def forgot_password(request: ForgotPasswordRequest):
     """Request password reset"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL",
+        cursor.execute("SELECT id FROM users WHERE email = %s AND deleted_at IS NULL",
                        (request.email.lower().strip(),))
         row = cursor.fetchone()
         if row:
             reset_token = create_password_reset_token(row["id"])
             expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
             cursor.execute("""
-                UPDATE users SET password_reset_token = ?, password_reset_expires_at = ?
-                WHERE id = ?
+                UPDATE users SET password_reset_token = %s, password_reset_expires_at = %s
+                WHERE id = %s
             """, (reset_token, expires_at, row["id"]))
             conn.commit()
             return {"success": True, "message": "If an account exists, a reset link has been sent",
@@ -2176,14 +2176,14 @@ def reset_password(request: ResetPasswordRequest):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id FROM users WHERE id = ? AND password_reset_token = ? AND password_reset_expires_at > ?
+            SELECT id FROM users WHERE id = %s AND password_reset_token = %s AND password_reset_expires_at > %s
         """, (user_id, request.token, now_iso()))
         if not cursor.fetchone():
             raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset token"})
         password_hash = get_password_hash(request.new_password)
         cursor.execute("""
-            UPDATE users SET password_hash = ?, password_reset_token = NULL, password_reset_expires_at = NULL, updated_at = ?
-            WHERE id = ?
+            UPDATE users SET password_hash = %s, password_reset_token = NULL, password_reset_expires_at = NULL, updated_at = %s
+            WHERE id = %s
         """, (password_hash, now_iso(), user_id))
         conn.commit()
         return {"success": True, "message": "Password reset successfully"}
@@ -2193,14 +2193,14 @@ def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_c
     """Change password (requires current password)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT password_hash FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,))
+        cursor.execute("SELECT password_hash FROM users WHERE id = %s AND deleted_at IS NULL", (user_id,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
         if not verify_password(request.current_password, row["password_hash"]):
             raise HTTPException(status_code=401, detail={"error": "invalid_password", "message": "Current password is incorrect"})
         password_hash = get_password_hash(request.new_password)
-        cursor.execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+        cursor.execute("UPDATE users SET password_hash = %s, updated_at = %s WHERE id = %s",
                        (password_hash, now_iso(), user_id))
         conn.commit()
         return {"success": True, "message": "Password changed successfully"}
