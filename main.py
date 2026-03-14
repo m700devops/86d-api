@@ -2208,7 +2208,8 @@ def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_c
 # ============== V1 SCANS (Gemini Vision) ==============
 
 class ScanAnalyzeRequest(BaseModel):
-    image: str  # base64 encoded
+    image: str          # base64 encoded JPEG
+    mode: str = "bottle"  # "bottle" or "pen"
 
 class ScanAnalyzeResponse(BaseModel):
     name: str
@@ -2216,16 +2217,64 @@ class ScanAnalyzeResponse(BaseModel):
     category: str
     liquidLevel: float
     confidence: float
+    levelReadable: bool = True
+
+BOTTLE_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar inventory.
+
+Identify the bottle and estimate the liquid level by looking at the liquid line visible through the glass.
+
+Return ONLY a JSON object — no markdown, no explanation:
+{
+  "name": "Full product name (e.g. Grey Goose Vodka)",
+  "brand": "Brand only (e.g. Grey Goose)",
+  "category": "spirits",
+  "liquidLevel": 0.75,
+  "confidence": 0.9,
+  "levelReadable": true
+}
+
+Rules:
+- category must be one of: spirits, beer, wine, other
+- liquidLevel is 0.0 (empty) to 1.0 (full) based on the liquid line you can see
+- Set levelReadable to false ONLY if the liquid level genuinely cannot be determined (opaque bottle, too dark, no bottle visible)
+- If no bottle is present at all, return: {"name":"","brand":"","category":"other","liquidLevel":0,"confidence":0,"levelReadable":false}
+- Return ONLY valid JSON."""
+
+PEN_PROMPT = """A pen or marker has been placed touching the liquid surface of a bottle as a level indicator.
+
+Your job: find where the pen tip touches the liquid and calculate what fraction of the bottle is filled.
+
+Return ONLY a JSON object — no markdown, no explanation:
+{
+  "name": "",
+  "brand": "",
+  "category": "spirits",
+  "liquidLevel": 0.6,
+  "confidence": 0.95,
+  "levelReadable": true
+}
+
+Rules:
+- liquidLevel is 0.0 (empty) to 1.0 (full) based on where the pen meets the liquid
+- Return ONLY valid JSON."""
 
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
-def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
+async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
     """Analyze bottle image using Claude Vision API"""
-    try:
-        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail={
+            "error": "service_unavailable",
+            "message": "ANTHROPIC_API_KEY is not configured on the server"
+        })
 
-        message = client.messages.create(
-            model="claude-sonnet-4-5-20250514",
-            max_tokens=256,
+    try:
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        prompt = PEN_PROMPT if request.mode == "pen" else BOTTLE_PROMPT
+
+        message = await client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=300,
             messages=[
                 {
                     "role": "user",
@@ -2235,38 +2284,58 @@ def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_curre
                             "source": {
                                 "type": "base64",
                                 "media_type": "image/jpeg",
-                                "data": request.image
+                                "data": request.image,
                             }
                         },
-                        {
-                            "type": "text",
-                            "text": """Analyze this image of a liquor bottle. Look for a pen or marker indicating the liquid level.
-
-Return ONLY a JSON object with these fields:
-{
-    "name": "Full product name",
-    "brand": "Brand name only",
-    "category": "Spirits|Beer|Wine|Other",
-    "liquidLevel": 0.75,
-    "confidence": 0.95
-}
-
-liquidLevel should be a decimal from 0.0 (empty) to 1.0 (full).
-If you see a pen marking the liquid line, use that as the level indicator.
-If no bottle is detected, return null.
-Return ONLY valid JSON, no markdown or explanation."""
-                        }
+                        {"type": "text", "text": prompt}
                     ]
                 }
-            ]
+            ],
         )
 
         text = message.content[0].text.strip()
-        text = text.replace("```json", "").replace("```", "").strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        text = text.strip()
+
         result = json.loads(text)
+
+        # Normalise category to lowercase
+        if "category" in result:
+            result["category"] = result["category"].lower()
+
+        # Guarantee required fields have sane defaults
+        result.setdefault("levelReadable", True)
+        result.setdefault("confidence", 0.5)
+        result.setdefault("name", "")
+        result.setdefault("brand", "")
+        result.setdefault("category", "other")
+        result.setdefault("liquidLevel", 0.0)
+
+        # If no bottle was found, return None so the mobile app can handle it
+        if not result.get("name") and result.get("confidence", 1) == 0:
+            return JSONResponse(status_code=200, content=None)
 
         return ScanAnalyzeResponse(**result)
 
+    except anthropic.AuthenticationError:
+        raise HTTPException(status_code=503, detail={
+            "error": "service_unavailable",
+            "message": "AI service authentication failed — check ANTHROPIC_API_KEY"
+        })
+    except anthropic.APIStatusError as e:
+        raise HTTPException(status_code=502, detail={
+            "error": "ai_api_error",
+            "message": f"Anthropic API error {e.status_code}: {e.message}"
+        })
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail={
+            "error": "parse_failed",
+            "message": f"Could not parse AI response: {e}"
+        })
     except Exception as e:
         raise HTTPException(status_code=500, detail={
             "error": "analysis_failed",
