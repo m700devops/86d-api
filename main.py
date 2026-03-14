@@ -2265,8 +2265,10 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
         client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         prompt = PEN_PROMPT if request.mode == "pen" else BOTTLE_PROMPT
 
-        message = client.messages.create(
-            model="claude-haiku-4-5-20251001",  # haiku: faster + cheaper for vision tasks
+        import asyncio
+        message = await asyncio.to_thread(
+            client.messages.create,
+            model="claude-haiku-4-5-20251001",
             max_tokens=200,
             messages=[
                 {
@@ -2283,7 +2285,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
                         {"type": "text", "text": prompt}
                     ]
                 }
-            ]
+            ],
         )
 
         text = message.content[0].text.strip()
