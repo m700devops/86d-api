@@ -1,83 +1,33 @@
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import os
 from contextlib import contextmanager
 from seed_data import SEED_PRODUCTS
 from helpers import generate_id, now_iso
 
-# Use /opt/render/project/data/ on Render for persistence between restarts,
-# or a custom DATABASE_PATH env var, falling back to the local file.
-_default_db_path = "/opt/render/project/data/86d.db" if os.path.isdir("/opt/render/project") else "86d.db"
-DATABASE_PATH = os.getenv("DATABASE_PATH", _default_db_path)
-
-# Ensure the directory exists
-os.makedirs(os.path.dirname(DATABASE_PATH) if os.path.dirname(DATABASE_PATH) else ".", exist_ok=True)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL environment variable is required")
 
 @contextmanager
 def get_db():
-    """Get database connection with WAL mode enabled"""
-    conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    
-    # Enable WAL mode for concurrent access
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    
+    """Get a database connection using RealDictCursor for dict-like row access"""
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.cursor_factory = psycopg2.extras.RealDictCursor
     try:
         yield conn
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
-
-def _column_exists(conn, table, column):
-    """Check if a column exists in a table"""
-    cursor = conn.cursor()
-    cursor.execute(f"PRAGMA table_info({table})")
-    columns = [row[1] for row in cursor.fetchall()]
-    return column in columns
-
-
-def _migrate_scans_table(conn):
-    """Add missing columns to scans table for pen capture mode"""
-    cursor = conn.cursor()
-    
-    new_columns = [
-        ('pen_position_y', 'REAL'),
-        ('capture_method', 'TEXT DEFAULT "manual"'),
-    ]
-    
-    for col_name, col_type in new_columns:
-        if not _column_exists(conn, 'scans', col_name):
-            cursor.execute(f"ALTER TABLE scans ADD COLUMN {col_name} {col_type}")
-            print(f"Added column: scans.{col_name}")
-
-
-def _migrate_users_table(conn):
-    """Add missing columns to users table for v1.1 schema"""
-    cursor = conn.cursor()
-    
-    new_columns = [
-        ('terms_accepted_at', 'TEXT'),
-        ('privacy_accepted_at', 'TEXT'),
-        ('trial_started_at', 'TEXT'),
-        ('trial_ends_at', 'TEXT'),
-        ('subscription_status', "TEXT DEFAULT 'trial'"),
-        ('subscription_tier', "TEXT DEFAULT 'starter'"),
-        ('password_reset_token', 'TEXT'),
-        ('password_reset_expires_at', 'TEXT'),
-    ]
-    
-    for col_name, col_type in new_columns:
-        if not _column_exists(conn, 'users', col_name):
-            cursor.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}")
-            print(f"Added column: users.{col_name}")
 
 
 def init_db():
     """Initialize database with tables and seed data"""
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         # Users table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -98,19 +48,11 @@ def init_db():
                 deleted_at TEXT
             )
         """)
-        
-        # Migrate existing users table to add missing columns
-        _migrate_users_table(conn)
-        
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_users_email 
+            CREATE INDEX IF NOT EXISTS idx_users_email
             ON users(email) WHERE deleted_at IS NULL
         """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_users_email 
-            ON users(email) WHERE deleted_at IS NULL
-        """)
-        
+
         # Locations table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS locations (
@@ -125,10 +67,10 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_locations_user 
+            CREATE INDEX IF NOT EXISTS idx_locations_user
             ON locations(user_id) WHERE deleted_at IS NULL
         """)
-        
+
         # Products table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS products (
@@ -147,22 +89,22 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_products_upc 
+            CREATE INDEX IF NOT EXISTS idx_products_upc
             ON products(upc) WHERE upc IS NOT NULL
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_products_search 
+            CREATE INDEX IF NOT EXISTS idx_products_search
             ON products(name, brand)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_products_category 
+            CREATE INDEX IF NOT EXISTS idx_products_category
             ON products(category)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_products_scan_count 
+            CREATE INDEX IF NOT EXISTS idx_products_scan_count
             ON products(scan_count DESC)
         """)
-        
+
         # Par levels table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS par_levels (
@@ -175,10 +117,10 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_par_location 
+            CREATE INDEX IF NOT EXISTS idx_par_location
             ON par_levels(location_id)
         """)
-        
+
         # Inventory sessions table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS inventory_sessions (
@@ -197,14 +139,14 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_sessions_location 
+            CREATE INDEX IF NOT EXISTS idx_sessions_location
             ON inventory_sessions(location_id, started_at DESC)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_sessions_status 
+            CREATE INDEX IF NOT EXISTS idx_sessions_status
             ON inventory_sessions(status) WHERE status = 'in_progress'
         """)
-        
+
         # Scans table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS scans (
@@ -228,21 +170,18 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_scans_session 
+            CREATE INDEX IF NOT EXISTS idx_scans_session
             ON scans(session_id)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_scans_product 
+            CREATE INDEX IF NOT EXISTS idx_scans_product
             ON scans(product_id)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_scans_idempotency 
+            CREATE INDEX IF NOT EXISTS idx_scans_idempotency
             ON scans(idempotency_key)
         """)
-        
-        # Migrate scans table for pen capture mode (must be after table creation)
-        _migrate_scans_table(conn)
-        
+
         # Voice notes table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS voice_notes (
@@ -257,10 +196,10 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_voice_session 
+            CREATE INDEX IF NOT EXISTS idx_voice_session
             ON voice_notes(session_id)
         """)
-        
+
         # Orders table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS orders (
@@ -278,14 +217,14 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_orders_session 
+            CREATE INDEX IF NOT EXISTS idx_orders_session
             ON orders(session_id)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_orders_location 
+            CREATE INDEX IF NOT EXISTS idx_orders_location
             ON orders(location_id, created_at DESC)
         """)
-        
+
         # Usage history table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS usage_history (
@@ -301,10 +240,10 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_usage_location_product 
+            CREATE INDEX IF NOT EXISTS idx_usage_location_product
             ON usage_history(location_id, product_id, period_start DESC)
         """)
-        
+
         # Sync queue table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sync_queue (
@@ -321,10 +260,10 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_sync_pending 
+            CREATE INDEX IF NOT EXISTS idx_sync_pending
             ON sync_queue(user_id, synced_at) WHERE synced_at IS NULL
         """)
-        
+
         # Distributors table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS distributors (
@@ -340,10 +279,10 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_distributors_user 
+            CREATE INDEX IF NOT EXISTS idx_distributors_user
             ON distributors(user_id) WHERE deleted_at IS NULL
         """)
-        
+
         # Location-Product-Distributor mapping table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS location_product_distributors (
@@ -356,30 +295,32 @@ def init_db():
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_lpd_location 
+            CREATE INDEX IF NOT EXISTS idx_lpd_location
             ON location_product_distributors(location_id)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_lpd_distributor 
+            CREATE INDEX IF NOT EXISTS idx_lpd_distributor
             ON location_product_distributors(distributor_id)
         """)
-        
+
         conn.commit()
-        
+
         # Seed products if table is empty
-        cursor.execute("SELECT COUNT(*) FROM products")
-        if cursor.fetchone()[0] == 0:
+        cursor.execute("SELECT COUNT(*) as count FROM products")
+        if cursor.fetchone()["count"] == 0:
             seed_products(conn)
+
 
 def seed_products(conn):
     """Seed the products table with initial data"""
     cursor = conn.cursor()
     now = now_iso()
-    
+
     for product in SEED_PRODUCTS:
         cursor.execute("""
             INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
         """, (
             generate_id(),
             product["name"],
@@ -387,12 +328,12 @@ def seed_products(conn):
             product["category"],
             product.get("size"),
             product.get("upc"),
-            None,  # image_url
-            0,  # scan_count
-            1,  # verified
+            None,
+            0,
+            1,
             now,
             now
         ))
-    
+
     conn.commit()
     print(f"Seeded {len(SEED_PRODUCTS)} products")
