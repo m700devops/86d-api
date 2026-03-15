@@ -2330,6 +2330,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             "message": "AI service authentication failed — check ANTHROPIC_API_KEY"
         })
     except anthropic.APIStatusError as e:
+        print(f"[analyze_bottle] APIStatusError status={e.status_code} message={e.message} body={e.body}", flush=True)
         raise HTTPException(status_code=502, detail={
             "error": "ai_api_error",
             "message": f"Anthropic API error {e.status_code}: {e.message}"
