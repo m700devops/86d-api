@@ -2226,23 +2226,27 @@ BOTTLE_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar
 Identify the bottle and estimate the liquid level accurately.
 
 To measure the liquid level:
-1. Find the BOTTOM of the bottle and the TOP of the bottle (where it would be full to)
-2. Find the actual liquid line — the meniscus where liquid meets air
-3. liquidLevel = (distance from bottom to liquid line) / (total fill height of bottle)
-4. A bottle that looks mostly full with liquid near the top is NOT necessarily 1.0 — be precise
-5. Half full = 0.5, three-quarters = 0.75, one-quarter = 0.25
+1. Identify the FILL ZONE: from the bottom of the bottle up to the base of the shoulder/neck (NOT the very top — the neck holds almost no liquid)
+2. Find the actual liquid line — the visible meniscus where liquid meets air inside the glass
+3. liquidLevel = (height from bottle bottom to liquid line) / (height of the fill zone)
+4. Anchor your estimate against these before returning:
+   - Liquid line at the very top of the fill zone = 1.0 (full)
+   - Liquid line exactly halfway up the fill zone = 0.5 (half)
+   - Liquid line one quarter up the fill zone = 0.25 (quarter)
+5. If your estimate falls between two values, bias toward the LOWER one — overestimating causes under-ordering
 
 Common mistakes to avoid:
-- Do NOT assume a bottle is full just because the label covers most of it
-- Do NOT confuse the bottle shoulder or neck for the liquid line
-- The liquid line is usually visible as a distinct horizontal line inside the glass
+- Do NOT use the neck or cap as the "full" reference point
+- Do NOT assume a bottle is full because the label covers most of it
+- Do NOT confuse the bottle shoulder for the liquid line
+- A bottle that looks "mostly full" visually is often only 0.6–0.7, not 1.0
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
   "name": "Full product name (e.g. Grey Goose Vodka)",
   "brand": "Brand only (e.g. Grey Goose)",
   "category": "spirits",
-  "liquidLevel": 0.75,
+  "liquidLevel": 0.5,
   "confidence": 0.9,
   "levelReadable": true
 }
