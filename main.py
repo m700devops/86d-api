@@ -2223,7 +2223,19 @@ class ScanAnalyzeResponse(BaseModel):
 
 BOTTLE_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar inventory.
 
-Identify the bottle and estimate the liquid level by looking at the liquid line visible through the glass.
+Identify the bottle and estimate the liquid level accurately.
+
+To measure the liquid level:
+1. Find the BOTTOM of the bottle and the TOP of the bottle (where it would be full to)
+2. Find the actual liquid line — the meniscus where liquid meets air
+3. liquidLevel = (distance from bottom to liquid line) / (total fill height of bottle)
+4. A bottle that looks mostly full with liquid near the top is NOT necessarily 1.0 — be precise
+5. Half full = 0.5, three-quarters = 0.75, one-quarter = 0.25
+
+Common mistakes to avoid:
+- Do NOT assume a bottle is full just because the label covers most of it
+- Do NOT confuse the bottle shoulder or neck for the liquid line
+- The liquid line is usually visible as a distinct horizontal line inside the glass
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
@@ -2237,7 +2249,7 @@ Return ONLY a JSON object — no markdown, no explanation:
 
 Rules:
 - category must be one of: spirits, beer, wine, other
-- liquidLevel is 0.0 (empty) to 1.0 (full) based on the liquid line you can see
+- liquidLevel is 0.0 (empty) to 1.0 (full)
 - Set levelReadable to false ONLY if the liquid level genuinely cannot be determined (opaque bottle, too dark, no bottle visible)
 - If no bottle is present at all, return: {"name":"","brand":"","category":"other","liquidLevel":0,"confidence":0,"levelReadable":false}
 - Return ONLY valid JSON."""
