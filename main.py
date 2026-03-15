@@ -2276,7 +2276,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
         prompt = PEN_PROMPT if request.mode == "pen" else BOTTLE_PROMPT
 
         message = await client.messages.create(
-            model="claude-sonnet-4-5-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=300,
             timeout=25.0,
             messages=[
