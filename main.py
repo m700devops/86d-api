@@ -4,6 +4,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
+import asyncio
+import logging
 import time
 import uuid
 import json
@@ -26,6 +28,7 @@ import os
 
 # Startup time for uptime calculation
 START_TIME = time.time()
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -2260,87 +2263,191 @@ Rules:
 
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
 async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
-    """Analyze bottle image using Claude Vision API"""
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
+    """Analyze bottle image using Anthropic with Gemini fallback."""
+    prompt = PEN_PROMPT if request.mode == "pen" else BOTTLE_PROMPT
+
+    def strip_code_fences(text: str) -> str:
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("```", 2)[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return text.strip()
+
+    async def analyze_with_anthropic(api_key: str) -> str:
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+
+        configured_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest").strip()
+        model_candidates = []
+        for model in [
+            configured_model,
+            "claude-3-5-haiku-latest",
+            "claude-3-5-sonnet-latest",
+            "claude-3-haiku-20240307",
+        ]:
+            if model and model not in model_candidates:
+                model_candidates.append(model)
+
+        last_error = None
+        for idx, model in enumerate(model_candidates):
+            try:
+                message = await client.messages.create(
+                    model=model,
+                    max_tokens=300,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/jpeg",
+                                        "data": request.image,
+                                    }
+                                },
+                                {"type": "text", "text": prompt}
+                            ]
+                        }
+                    ],
+                )
+                return message.content[0].text
+            except anthropic.APIStatusError as e:
+                last_error = e
+                is_not_found = e.status_code == 404
+                has_more_models = idx < len(model_candidates) - 1
+                if is_not_found and has_more_models:
+                    logger.warning(
+                        "[analyze_bottle] anthropic model not found, retrying fallback model",
+                        extra={"model": model, "status": e.status_code}
+                    )
+                    continue
+                raise
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("Anthropic request failed without a surfaced error")
+
+    async def analyze_with_gemini(api_key: str) -> str:
+        def _call_gemini() -> str:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-1.5-flash"))
+            response = model.generate_content([
+                {"inline_data": {"mime_type": "image/jpeg", "data": request.image}},
+                prompt,
+            ])
+            if not response or not getattr(response, "text", None):
+                raise ValueError("Gemini returned an empty response")
+            return response.text
+
+        return await asyncio.to_thread(_call_gemini)
+
+    def map_provider_error(provider: str, exc: Exception) -> tuple[int, str, str]:
+        """Map provider SDK errors to stable HTTP status and API error codes."""
+        if provider == "anthropic":
+            if isinstance(exc, anthropic.AuthenticationError):
+                return 503, "service_unavailable", "Anthropic authentication failed — check ANTHROPIC_API_KEY"
+            if isinstance(exc, anthropic.RateLimitError):
+                return 429, "rate_limited", "Anthropic rate limit exceeded"
+            if isinstance(exc, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
+                return 503, "service_unavailable", "Anthropic API is temporarily unavailable"
+
+            status_code = getattr(exc, "status_code", None)
+            if status_code == 404:
+                return 503, "service_unavailable", "Anthropic model not found. Check ANTHROPIC_MODEL or use a supported model alias"
+
+            if isinstance(exc, anthropic.APIStatusError):
+                return 502, "ai_api_error", f"Anthropic API error {exc.status_code}: {exc.message}"
+
+            text = str(exc).lower()
+            if "not_found_error" in text or "model:" in text:
+                return 503, "service_unavailable", "Anthropic model not found. Check ANTHROPIC_MODEL or use a supported model alias"
+
+        return 502, "ai_api_error", f"{provider} error: {exc}"
+
+    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+    gemini_api_key = os.getenv("GOOGLE_API_KEY")
+    logger.info(f"[analyze_bottle] function started")
+    logger.info(f"[analyze_bottle] ANTHROPIC_API_KEY present: {bool(anthropic_api_key)}")
+    if not anthropic_api_key and not gemini_api_key:
         raise HTTPException(status_code=503, detail={
             "error": "service_unavailable",
-            "message": "ANTHROPIC_API_KEY is not configured on the server"
+            "message": "No AI provider configured. Set ANTHROPIC_API_KEY or GOOGLE_API_KEY"
+        })
+
+    provider_errors = []
+    text = None
+
+    if anthropic_api_key:
+        try:
+            text = await analyze_with_anthropic(anthropic_api_key)
+        except Exception as e:
+            status, error, message = map_provider_error("anthropic", e)
+            provider_errors.append({
+                "provider": "anthropic",
+                "status": status,
+                "error": error,
+                "message": message,
+            })
+            logger.warning(
+                f"[analyze_bottle] anthropic failed status={getattr(e, 'status_code', 'n/a')} error={e}"
+            )
+
+    if text is None and gemini_api_key:
+        try:
+            text = await analyze_with_gemini(gemini_api_key)
+        except Exception as e:
+            provider_errors.append({
+                "provider": "gemini",
+                "status": 502,
+                "error": "ai_api_error",
+                "message": f"gemini error: {e}",
+            })
+            logger.warning("[analyze_bottle] gemini failed", extra={"error": str(e)})
+
+    if text is None:
+        if len(provider_errors) == 1:
+            first = provider_errors[0]
+            raise HTTPException(status_code=first["status"], detail={
+                "error": first["error"],
+                "message": first["message"]
+            })
+
+        status_code = 503 if any(err["status"] == 503 for err in provider_errors) else 502
+        error_code = "service_unavailable" if status_code == 503 else "ai_api_error"
+        message = "; ".join(
+            f"{err['provider']}: {err['message']}" for err in provider_errors
+        ) or "All AI providers failed"
+        raise HTTPException(status_code=status_code, detail={
+            "error": error_code,
+            "message": message,
         })
 
     try:
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-        prompt = PEN_PROMPT if request.mode == "pen" else BOTTLE_PROMPT
-
-        message = await client.messages.create(
-            model="claude-3-5-haiku-20241022",
-            max_tokens=300,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": request.image,
-                            }
-                        },
-                        {"type": "text", "text": prompt}
-                    ]
-                }
-            ],
-        )
-
-        text = message.content[0].text.strip()
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        text = text.strip()
-
-        result = json.loads(text)
-
-        # Normalise category to lowercase
-        if "category" in result:
-            result["category"] = result["category"].lower()
-
-        # Guarantee required fields have sane defaults
-        result.setdefault("levelReadable", True)
-        result.setdefault("confidence", 0.5)
-        result.setdefault("name", "")
-        result.setdefault("brand", "")
-        result.setdefault("category", "other")
-        result.setdefault("liquidLevel", 0.0)
-
-        # If no bottle was found, return None so the mobile app can handle it
-        if not result.get("name") and result.get("confidence", 1) == 0:
-            return JSONResponse(status_code=200, content=None)
-
-        return ScanAnalyzeResponse(**result)
-
-    except anthropic.AuthenticationError:
-        raise HTTPException(status_code=503, detail={
-            "error": "service_unavailable",
-            "message": "AI service authentication failed — check ANTHROPIC_API_KEY"
-        })
-    except anthropic.APIStatusError as e:
-        raise HTTPException(status_code=502, detail={
-            "error": "ai_api_error",
-            "message": f"Anthropic API error {e.status_code}: {e.message}"
-        })
+        result = json.loads(strip_code_fences(text))
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=500, detail={
             "error": "parse_failed",
             "message": f"Could not parse AI response: {e}"
         })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={
-            "error": "analysis_failed",
-            "message": str(e)
-        })
+
+    # Normalise category to lowercase
+    if "category" in result:
+        result["category"] = result["category"].lower()
+
+    # Guarantee required fields have sane defaults
+    result.setdefault("levelReadable", True)
+    result.setdefault("confidence", 0.5)
+    result.setdefault("name", "")
+    result.setdefault("brand", "")
+    result.setdefault("category", "other")
+    result.setdefault("liquidLevel", 0.0)
+
+    # If no bottle was found, return None so the mobile app can handle it
+    if not result.get("name") and result.get("confidence", 1) == 0:
+        return JSONResponse(status_code=200, content=None)
+
+    return ScanAnalyzeResponse(**result)
 
 # ============== INCLUDE V1 ROUTER ==============
 
