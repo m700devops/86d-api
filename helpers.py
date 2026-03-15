@@ -2,6 +2,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+# ── Level classification ─────────────────────────────────────────────────────
+# Boundaries (threshold, bucket_above, bucket_below) ordered highest-first.
+_LEVEL_BOUNDARIES = [
+    (0.875, "almost_full", "3/4"),
+    (0.625, "3/4",         "half"),
+    (0.375, "half",        "1/4"),
+    (0.125, "1/4",         "empty"),
+]
+
 def generate_id() -> str:
     """Generate UUID v4 string"""
     return str(uuid.uuid4())
@@ -23,7 +32,7 @@ def level_to_decimal(level: str) -> float:
     return mapping.get(level.lower(), 0.5)
 
 def decimal_to_level(decimal: float) -> str:
-    """Convert decimal to level string"""
+    """Convert decimal to level string using hard thresholds (no hysteresis)."""
     if decimal >= 0.875:
         return "almost_full"
     elif decimal >= 0.625:
@@ -34,6 +43,50 @@ def decimal_to_level(decimal: float) -> str:
         return "1/4"
     else:
         return "empty"
+
+
+def classify_level(
+    level_decimal: float,
+    previous_level: Optional[str] = None,
+    hysteresis: bool = True,
+    deadband: float = 0.03,
+) -> str:
+    """Classify a liquid level decimal with optional hysteresis deadband.
+
+    When hysteresis=True and previous_level is provided, a reading that falls
+    within ±deadband of a boundary will stick with the previous classification
+    rather than flip-flopping.  This prevents a stable half-full bottle from
+    oscillating between 'half' and '3/4' due to small model noise.
+
+    Args:
+        level_decimal:  Raw AI level float, clamped to 0.0–1.0.
+        previous_level: Previously stored bucket label, if known.
+        hysteresis:     Enable deadband near boundaries (default True).
+        deadband:       Half-width of the deadband zone (default ±0.03,
+                        configurable via LEVEL_DEADBAND env var in main.py).
+
+    Returns:
+        Bucket label: 'almost_full' | '3/4' | 'half' | '1/4' | 'empty'
+    """
+    level_decimal = max(0.0, min(1.0, level_decimal))
+    hard = decimal_to_level(level_decimal)
+
+    if not hysteresis or previous_level is None:
+        return hard
+
+    # Already agree — nothing to do.
+    if previous_level == hard:
+        return hard
+
+    # Check if the reading is within deadband of any boundary.
+    for threshold, above, below in _LEVEL_BOUNDARIES:
+        if abs(level_decimal - threshold) < deadband:
+            # In the ambiguous zone: require stronger evidence to cross.
+            if previous_level in (above, below):
+                return previous_level
+            break  # Only one boundary can be nearest; stop checking.
+
+    return hard
 
 def calculate_variance(
     current_usage: float,

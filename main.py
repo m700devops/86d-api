@@ -18,7 +18,7 @@ from auth import (
 )
 from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
-    calculate_variance, generate_order_items
+    classify_level, calculate_variance, generate_order_items
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -1078,19 +1078,10 @@ def pen_capture(capture_data: PenCaptureRequest, user_id: str = Depends(get_curr
             cursor.execute("SELECT * FROM products WHERE id = %s", (product_id,))
             product = cursor.fetchone()
         
-        # Convert level to level string
+        # Convert level to level string using deadband classifier
         level_decimal = max(0.0, min(1.0, capture_data.level))
-        if level_decimal >= 0.875:
-            level = "full"
-        elif level_decimal >= 0.625:
-            level = "3/4"
-        elif level_decimal >= 0.375:
-            level = "half"
-        elif level_decimal >= 0.125:
-            level = "1/4"
-        else:
-            level = "empty"
-        
+        level = classify_level(level_decimal, deadband=LEVEL_DEADBAND)
+
         # Create scan
         scan_id = generate_id()
         cursor.execute("""
@@ -1180,19 +1171,10 @@ def batch_capture(batch_data: BatchCaptureRequest, user_id: str = Depends(get_cu
                         now
                     ))
                 
-                # Convert level
+                # Convert level using deadband classifier
                 level_decimal = max(0.0, min(1.0, capture.level))
-                if level_decimal >= 0.875:
-                    level = "full"
-                elif level_decimal >= 0.625:
-                    level = "3/4"
-                elif level_decimal >= 0.375:
-                    level = "half"
-                elif level_decimal >= 0.125:
-                    level = "1/4"
-                else:
-                    level = "empty"
-                
+                level = classify_level(level_decimal, deadband=LEVEL_DEADBAND)
+
                 # Create scan
                 scan_id = generate_id()
                 cursor.execute("""
@@ -2220,6 +2202,7 @@ class ScanAnalyzeResponse(BaseModel):
     liquidLevel: float
     confidence: float
     levelReadable: bool = True
+    needs_rescan: bool = False  # True when confidence is too low for reliable classification
 
 BOTTLE_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar inventory.
 
@@ -2285,6 +2268,13 @@ ANTHROPIC_MODELS = [
 ]
 
 GEMINI_MODEL = "gemini-1.5-flash"
+
+# Scan accuracy config — override via environment variables if needed.
+# CONFIDENCE_THRESHOLD: AI confidence below this triggers needs_rescan=True.
+# LEVEL_DEADBAND: half-width of the hysteresis deadband (±) around each level
+#                 boundary used by classify_level().
+CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.35"))
+LEVEL_DEADBAND: float = float(os.getenv("LEVEL_DEADBAND", "0.03"))
 
 
 def _strip_code_fences(text: str) -> str:
@@ -2381,6 +2371,10 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
                 result = _parse_ai_result(text)
                 if not result.get("name") and result.get("confidence", 1) == 0:
                     return JSONResponse(status_code=200, content=None)
+                result["needs_rescan"] = (
+                    not result.get("levelReadable", True)
+                    or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
+                )
                 return ScanAnalyzeResponse(**result)
             except anthropic.AuthenticationError:
                 print("[analyze_bottle] Anthropic auth error", flush=True)
@@ -2417,6 +2411,10 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             result = _parse_ai_result(text)
             if not result.get("name") and result.get("confidence", 1) == 0:
                 return JSONResponse(status_code=200, content=None)
+            result["needs_rescan"] = (
+                not result.get("levelReadable", True)
+                or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
+            )
             return ScanAnalyzeResponse(**result)
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=500, detail={
