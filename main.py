@@ -2208,20 +2208,30 @@ BOTTLE_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar
 
 Identify the bottle and estimate the liquid level accurately.
 
+CRITICAL — what to use as evidence:
+- USE ONLY: the liquid meniscus (the curved surface line where liquid meets air) and the air-gap region above it
+- IGNORE COMPLETELY: brand logos, label graphics, printed text, embossing, foil, label position, and decorative elements — even if they appear in the center of the bottle
+- Treat the label as if it were painted on the outside of a clear pipe. It tells you nothing about the fill height.
+
 To measure the liquid level:
 1. Identify the FILL ZONE: from the bottom of the bottle up to the base of the shoulder/neck (NOT the very top — the neck holds almost no liquid)
-2. Find the actual liquid line — the visible meniscus where liquid meets air inside the glass
-3. liquidLevel = (height from bottle bottom to liquid line) / (height of the fill zone)
+2. Find the actual liquid meniscus — the visible curved line where liquid meets the air gap inside the glass
+3. liquidLevel = (height from bottle bottom to meniscus) / (height of the fill zone)
 4. Anchor your estimate against these before returning:
-   - Liquid line at the very top of the fill zone = 1.0 (full)
-   - Liquid line exactly halfway up the fill zone = 0.5 (half)
-   - Liquid line one quarter up the fill zone = 0.25 (quarter)
+   - Meniscus at the very top of the fill zone = 1.0 (full)
+   - Meniscus exactly halfway up the fill zone = 0.5 (half)
+   - Meniscus one quarter up the fill zone = 0.25 (quarter)
 5. If your estimate falls between two values, bias toward the LOWER one — overestimating causes under-ordering
+
+Self-check before returning:
+- Ask yourself: "Did any logo, label graphic, or printed element influence my liquidLevel estimate?"
+- If yes: discard that influence, re-estimate from meniscus/air-gap only, and lower confidence by at least 0.2
 
 Common mistakes to avoid:
 - Do NOT use the neck or cap as the "full" reference point
 - Do NOT assume a bottle is full because the label covers most of it
-- Do NOT confuse the bottle shoulder for the liquid line
+- Do NOT confuse the bottle shoulder for the meniscus
+- Do NOT let a centered logo or graphic pull your estimate toward 0.5
 - A bottle that looks "mostly full" visually is often only 0.6–0.7, not 1.0
 
 Return ONLY a JSON object — no markdown, no explanation:
@@ -2243,7 +2253,22 @@ Rules:
 
 PEN_PROMPT = """A pen or marker has been placed touching the liquid surface of a bottle as a level indicator.
 
-Your job: find where the pen tip touches the liquid and calculate what fraction of the bottle is filled.
+Your job: find where the pen tip contacts the liquid meniscus and calculate what fraction of the bottle is filled.
+
+CRITICAL — what to use as evidence:
+- USE ONLY: the pen-tip contact point with the liquid meniscus, and the visible air-gap above it
+- IGNORE COMPLETELY: brand logos, label graphics, printed text, embossing, and decorative elements — even if centered on the bottle
+- Treat the label as if it were painted on the outside of a clear pipe. Only the pen tip and the liquid boundary matter.
+
+To measure:
+1. Identify the FILL ZONE: from the bottle bottom to the base of the shoulder/neck
+2. Find the exact point where the pen tip meets the liquid meniscus
+3. liquidLevel = (height of pen-tip contact from bottle bottom) / (height of the fill zone)
+4. If your estimate falls between two values, bias toward the LOWER one
+
+Self-check before returning:
+- Ask yourself: "Did any logo, label graphic, or printed element influence my estimate?"
+- If yes: re-estimate from pen-tip contact only and lower confidence by at least 0.2
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
