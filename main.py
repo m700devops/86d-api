@@ -2278,6 +2278,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
         message = await client.messages.create(
             model="claude-sonnet-4-5-20250514",
             max_tokens=300,
+            timeout=25.0,
             messages=[
                 {
                     "role": "user",
@@ -2330,6 +2331,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             "message": "AI service authentication failed — check ANTHROPIC_API_KEY"
         })
     except anthropic.APIStatusError as e:
+        print(f"[analyze_bottle] APIStatusError status={e.status_code} message={e.message} body={e.body}", flush=True)
         raise HTTPException(status_code=502, detail={
             "error": "ai_api_error",
             "message": f"Anthropic API error {e.status_code}: {e.message}"
@@ -2339,12 +2341,21 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             "error": "parse_failed",
             "message": f"Could not parse AI response: {e}"
         })
+    except anthropic.APITimeoutError:
+        print("[analyze_bottle] Anthropic API timed out after 25s", flush=True)
+        raise HTTPException(status_code=504, detail={
+            "error": "ai_timeout",
+            "message": "AI service timed out — image may be too large or service is slow"
+        })
     except Exception as e:
         print(f"[analyze_bottle] EXCEPTION: {traceback.format_exc()}", flush=True)
         raise HTTPException(status_code=500, detail={
             "error": "analysis_failed",
             "message": str(e)
         })
+    except BaseException as e:
+        print(f"[analyze_bottle] BaseException (likely CancelledError): {type(e).__name__}: {e}", flush=True)
+        raise
 
 # ============== MARKET PULSE ENDPOINT ==============
 
