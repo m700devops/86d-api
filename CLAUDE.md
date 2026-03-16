@@ -15,12 +15,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - Anthropic Claude SDK imported and available as fallback
 
 ## Key Files
-- main.py — all routes and app logic (~2400+ lines)
+- main.py — all routes and app logic (~2523 lines, single-file monolith)
 - database.py — PostgreSQL connection (DATABASE_URL required)
 - auth.py — JWT access + refresh tokens
 - helpers.py — level classification, ID generation, variance calc, order generation
 - models.py — Pydantic request/response models
 - seed_data.py — default product catalog
+- test_level_classifier.py — unit tests for helpers.py level logic (run: pytest test_level_classifier.py -v)
 
 ## AI Vision Rules
 - MUST use `gemini-2.0-flash` — **current code at main.py:2295 still says `gemini-1.5-flash`, this is a known bug to fix**
@@ -40,6 +41,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - POST /scans/batch — bulk capture
 - POST /inventory/{session_id}/voice — voice notes
 - POST /inventory/{session_id}/complete
+- GET/POST /distributors — distributor management
 - GET /health, GET / (API info), GET /docs
 
 ## Environment Variables Required
@@ -52,3 +54,4 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - Deployed via Render (see Procfile) — do NOT change without approval
 - Requirements are pinned — check compatibility before upgrading
 - Cannot push directly to main — push to claude/build-ios-preview-ASNee and PR
+- NOTE: README.md is outdated (says SQLite) — ignore it, this app uses PostgreSQL
