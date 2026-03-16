@@ -2214,6 +2214,13 @@ CRITICAL — what to use as evidence:
 - IGNORE COMPLETELY: brand logos, label graphics, printed text, embossing, foil, label position, and decorative elements — even if they appear in the center of the bottle
 - Treat the label as if it were painted on the outside of a clear pipe. It tells you nothing about the fill height.
 
+TRANSPARENT BOTTLES (clear glass + clear/colorless liquid — vodka, gin, tequila blanco, clear rum, sparkling water, etc.):
+- This is the hardest case. The meniscus has very low visual contrast against clear liquid.
+- Look specifically for: faint shadow or distortion at the liquid line, subtle color shift where liquid meets air, slight lens effect at the boundary.
+- If you CANNOT clearly see the meniscus line, set levelReadable to false. DO NOT guess — a false reading is worse than routing to pen mode.
+- If you think you can see the meniscus but are not certain, cap confidence at 0.5 and set levelReadable to false.
+- Only set levelReadable to true if you can unambiguously identify the liquid surface line.
+
 To measure the liquid level:
 1. Identify the FILL ZONE: from the bottom of the bottle up to the base of the shoulder/neck (NOT the very top — the neck holds almost no liquid)
 2. Find the actual liquid meniscus — the visible curved line where liquid meets the air gap inside the glass
@@ -2227,6 +2234,7 @@ To measure the liquid level:
 Self-check before returning:
 - Ask yourself: "Did any logo, label graphic, or printed element influence my liquidLevel estimate?"
 - If yes: discard that influence, re-estimate from meniscus/air-gap only, and lower confidence by at least 0.2
+- Ask yourself: "Is this a clear bottle with clear liquid?" If yes, re-read the TRANSPARENT BOTTLES rules above before returning.
 
 Common mistakes to avoid:
 - Do NOT use the neck or cap as the "full" reference point
@@ -2234,6 +2242,7 @@ Common mistakes to avoid:
 - Do NOT confuse the bottle shoulder for the meniscus
 - Do NOT let a centered logo or graphic pull your estimate toward 0.5
 - A bottle that looks "mostly full" visually is often only 0.6–0.7, not 1.0
+- Do NOT report a confident level for a clear bottle when you cannot see the meniscus — set levelReadable false instead
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
@@ -2248,7 +2257,7 @@ Return ONLY a JSON object — no markdown, no explanation:
 Rules:
 - category must be one of: spirits, beer, wine, other
 - liquidLevel is 0.0 (empty) to 1.0 (full)
-- Set levelReadable to false ONLY if the liquid level genuinely cannot be determined (opaque bottle, too dark, no bottle visible)
+- Set levelReadable to false if: the bottle is opaque, image is too dark, no bottle is visible, OR the bottle and liquid are both clear/transparent and you cannot clearly see the meniscus line
 - If no bottle is present at all, return: {"name":"","brand":"","category":"other","liquidLevel":0,"confidence":0,"levelReadable":false}
 - Return ONLY valid JSON."""
 
