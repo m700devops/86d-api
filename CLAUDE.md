@@ -8,36 +8,47 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - Mobile: https://github.com/m700devops/86d-mobile
 
 ## Stack
-- Python / FastAPI
-- PostgreSQL (via psycopg2, requires DATABASE_URL env var)
+- Python / FastAPI (single-file monolith: main.py)
+- PostgreSQL via psycopg2 (requires DATABASE_URL — app crashes without it)
 - Deployed on Render at https://eight6d-api.onrender.com
-- Google Gemini for AI bottle vision analysis
-- Anthropic Claude SDK also available
+- Google Gemini for AI bottle vision (primary)
+- Anthropic Claude SDK imported and available as fallback
 
 ## Key Files
-- main.py — all routes and app logic (single-file monolith)
-- database.py — PostgreSQL connection setup
-- auth.py — JWT auth (access + refresh tokens)
-- helpers.py — utilities: level classification, ID generation, etc.
+- main.py — all routes and app logic (~2400+ lines)
+- database.py — PostgreSQL connection (DATABASE_URL required)
+- auth.py — JWT access + refresh tokens
+- helpers.py — level classification, ID generation, variance calc, order generation
 - models.py — Pydantic request/response models
 - seed_data.py — default product catalog
 
 ## AI Vision Rules
-- MUST use `gemini-2.0-flash` (NOT 1.5) — current code has `GEMINI_MODEL = "gemini-1.5-flash"` which is wrong
+- MUST use `gemini-2.0-flash` — **current code at main.py:2295 still says `gemini-1.5-flash`, this is a known bug to fix**
+- Model constant: `GEMINI_MODEL = "gemini-2.0-flash"` (update this)
 - Env vars: GEMINI_API_KEY or GOOGLE_API_KEY
-- Anthropic SDK is imported but Gemini is primary for image analysis
+- Claude models available: claude-sonnet-4-6, claude-3-5-sonnet-20241022, claude-3-haiku-20240307
+- Confidence threshold: 0.35 (override via CONFIDENCE_THRESHOLD env var)
+- Level deadband: ±0.03 (override via LEVEL_DEADBAND env var)
+
+## Key API Routes (all under /v1)
+- POST /auth/register, /auth/login, /auth/refresh
+- GET/POST /products, GET /products/search, GET /products/barcode/{upc}
+- GET/POST /locations, GET/POST /locations/{id}/par-levels
+- POST /inventory/start, GET /inventory/{session_id}, POST /inventory/{session_id}/scan
+- POST /inventory/{session_id}/scan/bulk
+- POST /scans/pen-capture — primary pen-based level scan
+- POST /scans/batch — bulk capture
+- POST /inventory/{session_id}/voice — voice notes
+- POST /inventory/{session_id}/complete
+- GET /health, GET / (API info), GET /docs
 
 ## Environment Variables Required
-- DATABASE_URL — PostgreSQL connection string (required, app will crash without it)
+- DATABASE_URL — PostgreSQL connection string (required)
 - GEMINI_API_KEY or GOOGLE_API_KEY — for bottle scanning
 - SECRET_KEY — JWT signing key
+- CONFIDENCE_THRESHOLD, LEVEL_DEADBAND — optional tuning
 
 ## Deploy Rules
-- Deployed via Render (see Procfile)
-- Do NOT change the Procfile without explicit approval
-- Requirements are pinned — check compatibility before upgrading packages
-
-## API Base
-- Version prefix: /v1
-- Health check: GET /health
-- Docs: /docs (FastAPI auto-generated)
+- Deployed via Render (see Procfile) — do NOT change without approval
+- Requirements are pinned — check compatibility before upgrading
+- Cannot push directly to main — push to claude/build-ios-preview-ASNee and PR
