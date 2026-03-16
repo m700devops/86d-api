@@ -2272,6 +2272,7 @@ STEP 1 — Identify the bottle:
 
 STEP 2 — Measure the level using the pen tip:
 - The pen tip is the pointed writing end — the lowest point of the pen where it contacts or enters the liquid
+- The tip must be visibly centered within the bottle's body, not at the edge or between bottles — if the tip appears off-center or between two bottles, set levelReadable to false
 - USE ONLY that single contact point — ignore the pen barrel, which may cross over other bottles
 - Identify the FILL ZONE: from the bottle bottom to the base of the shoulder/neck (not the very top)
 - liquidLevel = (height of pen-tip contact from bottle bottom) / (height of the fill zone)
