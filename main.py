@@ -2290,22 +2290,34 @@ BOTTLE_PEN_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for
 
 Your job: identify the bottle AND use the pen tip to determine the liquid level.
 
-STEP 1 — Identify the bottle:
-- There may be multiple bottles in the frame. Focus ONLY on the bottle the pen is touching — that is the target bottle.
-- Read the label of the target bottle for the full product name and brand
-- Determine the category (spirits, beer, wine, other)
+Work through these steps internally before producing your answer:
 
-STEP 2 — Measure the level using the pen tip:
-- The pen tip is the pointed writing end — the lowest point of the pen where it contacts or enters the liquid
-- The tip must be visibly centered within the bottle's body, not at the edge or between bottles — if the tip appears off-center or between two bottles, set levelReadable to false
-- USE ONLY that single contact point — ignore the pen barrel, which may cross over other bottles
-- Identify the FILL ZONE: from the bottle bottom to the base of the shoulder/neck (not the very top)
-- liquidLevel = (height of pen-tip contact from bottle bottom) / (height of the fill zone)
-- Anchor against: full=1.0, halfway=0.5, quarter=0.25
-- If between two values, bias toward the LOWER one — overestimating causes under-ordering
-- IGNORE completely: brand logos, label graphics, printed text, embossing, decorative elements
+STEP 1 — Identify the target bottle:
+- There may be multiple bottles in the frame. The target bottle is the one the pen is touching.
+- Read the label of the target bottle for the full product name and brand.
+- Determine the category (spirits, beer, wine, other).
 
-Self-check: "Am I reading the pen tip position, not the label or bottle shoulder?" If unsure, lower confidence by 0.2.
+STEP 2 — Outline the bottle geometry:
+- Mentally trace the outer silhouette of the target bottle.
+- Mark the BOTTOM EDGE: the lowest point of the bottle base.
+- Mark the SHOULDER: the point where the bottle body transitions into the neck (where the glass starts narrowing). This is the TOP of the fill zone — NOT the cap or lip.
+- The FILL ZONE height = distance from bottom edge to shoulder. This is your ruler.
+
+STEP 3 — Locate the pen tip:
+- The pen tip is the pointed writing end — the lowest contact point of the pen.
+- The tip must appear visibly inside the bottle's body outline. If it looks off-center or between two bottles, set levelReadable to false.
+- Ignore the pen barrel entirely — it may cross other objects.
+- Mark the pen tip's vertical position within the bottle silhouette.
+
+STEP 4 — Calculate the level:
+- liquidLevel = (distance from bottle bottom to pen tip) / (fill zone height)
+- Cross-check visually: does the pen tip sit at roughly that fraction of the fill zone? If not, re-examine.
+- Do NOT bias up or down — the pen is a physical reference, so report the actual position precisely.
+- IGNORE completely: brand logos, label graphics, printed text, embossing, decorative elements — these are painted on the outside and have no bearing on liquid volume.
+
+Self-check before answering:
+- "Did I anchor to the bottle silhouette, or did a label graphic shift my reference?" If a graphic influenced you, re-measure from the silhouette only.
+- "Is my shoulder mark at the glass narrowing, not the cap?" If unsure, lower confidence by 0.15.
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
