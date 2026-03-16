@@ -2261,6 +2261,41 @@ Rules:
 - If no bottle is present at all, return: {"name":"","brand":"","category":"other","liquidLevel":0,"confidence":0,"levelReadable":false}
 - Return ONLY valid JSON."""
 
+BOTTLE_PEN_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar inventory. A pen or marker has been placed with its tip touching the liquid surface as a level reference.
+
+Your job: identify the bottle AND use the pen tip to determine the liquid level.
+
+STEP 1 — Identify the bottle:
+- Read the label for the full product name and brand
+- Determine the category (spirits, beer, wine, other)
+
+STEP 2 — Measure the level using the pen tip:
+- USE ONLY the pen-tip contact point with the liquid surface — ignore the meniscus entirely
+- Identify the FILL ZONE: from the bottle bottom to the base of the shoulder/neck (not the very top)
+- liquidLevel = (height of pen-tip contact from bottle bottom) / (height of the fill zone)
+- Anchor against: full=1.0, halfway=0.5, quarter=0.25
+- If between two values, bias toward the LOWER one — overestimating causes under-ordering
+- IGNORE completely: brand logos, label graphics, printed text, embossing, decorative elements
+
+Self-check: "Am I reading the pen tip position, not the label or bottle shoulder?" If unsure, lower confidence by 0.2.
+
+Return ONLY a JSON object — no markdown, no explanation:
+{
+  "name": "Full product name (e.g. Grey Goose Vodka)",
+  "brand": "Brand only (e.g. Grey Goose)",
+  "category": "spirits",
+  "liquidLevel": 0.5,
+  "confidence": 0.9,
+  "levelReadable": true
+}
+
+Rules:
+- category must be one of: spirits, beer, wine, other
+- liquidLevel is 0.0 (empty) to 1.0 (full)
+- Set levelReadable to false ONLY if no pen is visible in the image or no bottle is present
+- If no bottle is present at all, return: {"name":"","brand":"","category":"other","liquidLevel":0,"confidence":0,"levelReadable":false}
+- Return ONLY valid JSON."""
+
 PEN_PROMPT = """A pen or marker has been placed touching the liquid surface of a bottle as a level indicator.
 
 Your job: find where the pen tip contacts the liquid meniscus and calculate what fraction of the bottle is filled.
@@ -2419,7 +2454,12 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             "message": "No AI provider API keys configured on the server"
         })
 
-    prompt = PEN_PROMPT if request.mode == "pen" else BOTTLE_PROMPT
+    if request.mode == "pen":
+        prompt = PEN_PROMPT
+    elif request.mode == "bottle_pen":
+        prompt = BOTTLE_PEN_PROMPT
+    else:
+        prompt = BOTTLE_PROMPT
     last_error: Exception = None
 
     # ── Try OpenAI GPT-4o ──────────────────────────────────────────────────
