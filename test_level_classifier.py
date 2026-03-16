@@ -5,7 +5,7 @@ Run with:
     cd 86d-api && python -m pytest test_level_classifier.py -v
 """
 import pytest
-from helpers import decimal_to_level, classify_level
+from helpers import decimal_to_level, classify_level, smooth_level
 
 
 # ── decimal_to_level (hard thresholds, no hysteresis) ────────────────────────
@@ -180,3 +180,96 @@ class TestNeedsRescanLogic:
 
     def test_both_bad_triggers(self):
         assert self._needs_rescan(0.10, False) is True
+
+
+# ── confidence-aware stickiness ───────────────────────────────────────────────
+
+class TestConfidenceAwareStickiness:
+    """
+    Low confidence widens the effective deadband so borderline reads stick
+    harder to the previous label.
+
+    Default deadband = 0.03.  At confidence=0.0 it doubles to 0.06.
+    3/4-half boundary = 0.625  →  at conf=0.0 zone becomes [0.565, 0.685].
+    """
+
+    def test_high_confidence_crosses_boundary_normally(self):
+        # 0.66 is outside default deadband (0.655); high confidence → cross
+        assert classify_level(0.66, previous_level="half", confidence=0.9) == "3/4"
+
+    def test_low_confidence_keeps_previous_near_boundary(self):
+        # 0.66 at conf=0.0 → effective deadband=0.06 → zone=[0.565, 0.685]
+        # 0.66 is inside that zone, so previous label sticks
+        assert classify_level(0.66, previous_level="half", confidence=0.0) == "half"
+
+    def test_low_confidence_still_crosses_when_far_from_boundary(self):
+        # 0.75 is far above 0.625 regardless of confidence → should cross
+        assert classify_level(0.75, previous_level="half", confidence=0.0) == "3/4"
+
+    def test_mid_confidence_partial_widening(self):
+        # confidence=0.25 → scale = 2 - 0.5 = 1.5 → effective deadband = 0.045
+        # zone = [0.580, 0.670].  0.66 is inside → sticks.
+        assert classify_level(0.66, previous_level="half", confidence=0.25) == "half"
+
+    def test_confidence_at_threshold_boundary_no_widening(self):
+        # confidence=0.5 → scale=1.0 → effective deadband unchanged at 0.03
+        # 0.66 > 0.655 → outside deadband → crosses
+        assert classify_level(0.66, previous_level="half", confidence=0.5) == "3/4"
+
+    def test_confidence_none_behaves_as_before(self):
+        # When confidence not supplied, behaviour is identical to pre-change
+        assert classify_level(0.63, previous_level="half") == "half"
+        assert classify_level(0.66, previous_level="half") == "3/4"
+
+    def test_repeated_low_confidence_sequence_near_625_flips_at_most_once(self):
+        """Acceptance test: 10 reads near 0.625 with low confidence flip ≤ 1 time."""
+        readings = [0.61, 0.64, 0.62, 0.63, 0.60, 0.65, 0.62, 0.64, 0.61, 0.63]
+        level = "half"
+        flips = 0
+        for r in readings:
+            new = classify_level(r, previous_level=level, confidence=0.3)
+            if new != level:
+                flips += 1
+            level = new
+        assert flips <= 1, f"Expected ≤1 flip near 0.625 boundary, got {flips}"
+
+
+# ── smooth_level ──────────────────────────────────────────────────────────────
+
+class TestSmoothLevel:
+    def test_single_reading_returns_itself(self):
+        assert smooth_level([0.6]) == 0.6
+
+    def test_median_of_three_odd(self):
+        assert smooth_level([0.5, 0.9, 0.6]) == 0.6
+
+    def test_median_of_three_even_window_two(self):
+        # window=2 → take last 2: [0.6, 0.9] → median = (0.6+0.9)/2 = 0.75
+        assert smooth_level([0.5, 0.6, 0.9], window=2) == 0.75
+
+    def test_outlier_does_not_move_median(self):
+        # Single glare spike (0.95) in a stable half-full sequence
+        assert smooth_level([0.50, 0.52, 0.95]) == 0.52
+
+    def test_empty_list_returns_zero(self):
+        assert smooth_level([]) == 0.0
+
+    def test_clamps_above_one(self):
+        assert smooth_level([1.1, 1.2, 1.3]) == 1.0
+
+    def test_clamps_below_zero(self):
+        assert smooth_level([-0.1, -0.2, -0.3]) == 0.0
+
+    def test_window_larger_than_list_uses_all(self):
+        # Only 2 readings available, window=5 → uses both
+        assert smooth_level([0.4, 0.6], window=5) == 0.5
+
+    def test_uses_only_last_n_readings(self):
+        # History: [0.2, 0.2, 0.6, 0.6, 0.6] → last 3: [0.6, 0.6, 0.6]
+        assert smooth_level([0.2, 0.2, 0.6, 0.6, 0.6], window=3) == 0.6
+
+    def test_stabilization_prevents_bucket_flip_on_spike(self):
+        """A glare spike (0.95) smoothed against two 0.5 reads stays near half."""
+        smoothed = smooth_level([0.50, 0.50, 0.95], window=3)
+        # Median is 0.50 — well below the 0.625 boundary
+        assert smoothed < 0.625

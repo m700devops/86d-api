@@ -50,6 +50,7 @@ def classify_level(
     previous_level: Optional[str] = None,
     hysteresis: bool = True,
     deadband: float = 0.03,
+    confidence: Optional[float] = None,
 ) -> str:
     """Classify a liquid level decimal with optional hysteresis deadband.
 
@@ -58,12 +59,18 @@ def classify_level(
     rather than flip-flopping.  This prevents a stable half-full bottle from
     oscillating between 'half' and '3/4' due to small model noise.
 
+    Confidence-aware stickiness: when confidence is provided and below 0.5,
+    the effective deadband widens proportionally so low-confidence reads near
+    a boundary stick harder to the previous label.  At confidence=0.0 the
+    deadband doubles; at confidence=0.5 it is unchanged.
+
     Args:
         level_decimal:  Raw AI level float, clamped to 0.0–1.0.
         previous_level: Previously stored bucket label, if known.
         hysteresis:     Enable deadband near boundaries (default True).
         deadband:       Half-width of the deadband zone (default ±0.03,
                         configurable via LEVEL_DEADBAND env var in main.py).
+        confidence:     AI confidence [0, 1]. When < 0.5 the deadband widens.
 
     Returns:
         Bucket label: 'almost_full' | '3/4' | 'half' | '1/4' | 'empty'
@@ -78,15 +85,47 @@ def classify_level(
     if previous_level == hard:
         return hard
 
-    # Check if the reading is within deadband of any boundary.
+    # Widen the deadband when confidence is low (confidence < 0.5 → scale up).
+    # Formula: effective = deadband * (2 - confidence * 2), clamped to [deadband, deadband*2].
+    # confidence=0.5 → 1.0x, confidence=0.0 → 2.0x.
+    effective_deadband = deadband
+    if confidence is not None and confidence < 0.5:
+        scale = 2.0 - confidence * 2.0  # linear: 1.0 at conf=0.5, 2.0 at conf=0.0
+        effective_deadband = deadband * scale
+
+    # Check if the reading is within effective deadband of any boundary.
     for threshold, above, below in _LEVEL_BOUNDARIES:
-        if abs(level_decimal - threshold) < deadband:
+        if abs(level_decimal - threshold) < effective_deadband:
             # In the ambiguous zone: require stronger evidence to cross.
             if previous_level in (above, below):
                 return previous_level
             break  # Only one boundary can be nearest; stop checking.
 
     return hard
+
+
+def smooth_level(readings: list, window: int = 3) -> float:
+    """Return the median of the last *window* readings, clamped to [0, 1].
+
+    Used for temporal smoothing: pass the last N raw liquidLevel floats from
+    the AI (including the current one) and get back a stable value for
+    bucketing.  A single outlier read (glare, angle) won't flip the bucket.
+
+    Args:
+        readings: List of raw liquidLevel floats in chronological order.
+        window:   How many recent readings to include (default 3).
+
+    Returns:
+        Median float in [0, 1].  Returns 0.0 for an empty list.
+    """
+    if not readings:
+        return 0.0
+    recent = readings[-window:]
+    sorted_vals = sorted(recent)
+    mid = len(sorted_vals) // 2
+    if len(sorted_vals) % 2 == 0:
+        return max(0.0, min(1.0, (sorted_vals[mid - 1] + sorted_vals[mid]) / 2.0))
+    return max(0.0, min(1.0, sorted_vals[mid]))
 
 def calculate_variance(
     current_usage: float,
