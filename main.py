@@ -31,8 +31,13 @@ START_TIME = time.time()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize database on startup"""
-    init_db()
+    """Initialize database on startup - non-blocking"""
+    try:
+        # Run init_db in thread pool to avoid blocking startup
+        await asyncio.to_thread(init_db)
+        print("[lifespan] Database initialized successfully", flush=True)
+    except Exception as e:
+        print(f"[lifespan] Database init warning (may already exist): {e}", flush=True)
     yield
 
 app = FastAPI(
@@ -41,6 +46,26 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# ============== HEALTH CHECK (must be BEFORE router includes) ==============
+# Render health check - must respond quickly on root path
+@app.get("/")
+async def health_check():
+    """Health check for Render and load balancers"""
+    return {
+        "status": "ok",
+        "service": "86d-api",
+        "uptime": time.time() - START_TIME
+    }
+
+@app.get("/health")
+async def health_check_alt():
+    """Alternative health check endpoint"""
+    return {
+        "status": "ok", 
+        "service": "86d-api",
+        "uptime": time.time() - START_TIME
+    }
 
 # CORS middleware - allow all origins for mobile app
 app.add_middleware(
