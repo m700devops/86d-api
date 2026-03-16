@@ -2271,7 +2271,8 @@ STEP 1 — Identify the bottle:
 - Determine the category (spirits, beer, wine, other)
 
 STEP 2 — Measure the level using the pen tip:
-- USE ONLY the pen-tip contact point with the liquid surface — ignore the meniscus entirely
+- The pen tip is the pointed writing end — the lowest point of the pen where it contacts or enters the liquid
+- USE ONLY that single contact point — ignore the pen barrel, which may cross over other bottles
 - Identify the FILL ZONE: from the bottle bottom to the base of the shoulder/neck (not the very top)
 - liquidLevel = (height of pen-tip contact from bottle bottom) / (height of the fill zone)
 - Anchor against: full=1.0, halfway=0.5, quarter=0.25
