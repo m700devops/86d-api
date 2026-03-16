@@ -2239,6 +2239,13 @@ CRITICAL — what to use as evidence:
 - IGNORE COMPLETELY: brand logos, label graphics, printed text, embossing, foil, label position, and decorative elements — even if they appear in the center of the bottle
 - Treat the label as if it were painted on the outside of a clear pipe. It tells you nothing about the fill height.
 
+TRANSPARENT BOTTLES (clear glass + clear/colorless liquid — vodka, gin, tequila blanco, clear rum, sparkling water, etc.):
+- This is the hardest case. The meniscus has very low visual contrast against clear liquid.
+- Look specifically for: faint shadow or distortion at the liquid line, subtle color shift where liquid meets air, slight lens effect at the boundary.
+- If you CANNOT clearly see the meniscus line, set levelReadable to false. DO NOT guess — a false reading is worse than routing to pen mode.
+- If you think you can see the meniscus but are not certain, cap confidence at 0.5 and set levelReadable to false.
+- Only set levelReadable to true if you can unambiguously identify the liquid surface line.
+
 To measure the liquid level:
 1. Identify the FILL ZONE: from the bottom of the bottle up to the base of the shoulder/neck (NOT the very top — the neck holds almost no liquid)
 2. Find the actual liquid meniscus — the visible curved line where liquid meets the air gap inside the glass
@@ -2252,6 +2259,7 @@ To measure the liquid level:
 Self-check before returning:
 - Ask yourself: "Did any logo, label graphic, or printed element influence my liquidLevel estimate?"
 - If yes: discard that influence, re-estimate from meniscus/air-gap only, and lower confidence by at least 0.2
+- Ask yourself: "Is this a clear bottle with clear liquid?" If yes, re-read the TRANSPARENT BOTTLES rules above before returning.
 
 Common mistakes to avoid:
 - Do NOT use the neck or cap as the "full" reference point
@@ -2259,6 +2267,7 @@ Common mistakes to avoid:
 - Do NOT confuse the bottle shoulder for the meniscus
 - Do NOT let a centered logo or graphic pull your estimate toward 0.5
 - A bottle that looks "mostly full" visually is often only 0.6–0.7, not 1.0
+- Do NOT report a confident level for a clear bottle when you cannot see the meniscus — set levelReadable false instead
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
@@ -2273,7 +2282,45 @@ Return ONLY a JSON object — no markdown, no explanation:
 Rules:
 - category must be one of: spirits, beer, wine, other
 - liquidLevel is 0.0 (empty) to 1.0 (full)
-- Set levelReadable to false ONLY if the liquid level genuinely cannot be determined (opaque bottle, too dark, no bottle visible)
+- Set levelReadable to false if: the bottle is opaque, image is too dark, no bottle is visible, OR the bottle and liquid are both clear/transparent and you cannot clearly see the meniscus line
+- If no bottle is present at all, return: {"name":"","brand":"","category":"other","liquidLevel":0,"confidence":0,"levelReadable":false}
+- Return ONLY valid JSON."""
+
+BOTTLE_PEN_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar inventory. A pen or marker has been placed with its tip touching the liquid surface as a level reference.
+
+Your job: identify the bottle AND use the pen tip to determine the liquid level.
+
+STEP 1 — Identify the bottle:
+- There may be multiple bottles in the frame. Focus ONLY on the bottle the pen is touching — that is the target bottle.
+- Read the label of the target bottle for the full product name and brand
+- Determine the category (spirits, beer, wine, other)
+
+STEP 2 — Measure the level using the pen tip:
+- The pen tip is the pointed writing end — the lowest point of the pen where it contacts or enters the liquid
+- The tip must be visibly centered within the bottle's body, not at the edge or between bottles — if the tip appears off-center or between two bottles, set levelReadable to false
+- USE ONLY that single contact point — ignore the pen barrel, which may cross over other bottles
+- Identify the FILL ZONE: from the bottle bottom to the base of the shoulder/neck (not the very top)
+- liquidLevel = (height of pen-tip contact from bottle bottom) / (height of the fill zone)
+- Anchor against: full=1.0, halfway=0.5, quarter=0.25
+- If between two values, bias toward the LOWER one — overestimating causes under-ordering
+- IGNORE completely: brand logos, label graphics, printed text, embossing, decorative elements
+
+Self-check: "Am I reading the pen tip position, not the label or bottle shoulder?" If unsure, lower confidence by 0.2.
+
+Return ONLY a JSON object — no markdown, no explanation:
+{
+  "name": "Full product name (e.g. Grey Goose Vodka)",
+  "brand": "Brand only (e.g. Grey Goose)",
+  "category": "spirits",
+  "liquidLevel": 0.5,
+  "confidence": 0.9,
+  "levelReadable": true
+}
+
+Rules:
+- category must be one of: spirits, beer, wine, other
+- liquidLevel is 0.0 (empty) to 1.0 (full)
+- Set levelReadable to false ONLY if no pen is visible in the image or no bottle is present
 - If no bottle is present at all, return: {"name":"","brand":"","category":"other","liquidLevel":0,"confidence":0,"levelReadable":false}
 - Return ONLY valid JSON."""
 
@@ -2435,7 +2482,12 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             "message": "No AI provider API keys configured on the server"
         })
 
-    prompt = PEN_PROMPT if request.mode == "pen" else BOTTLE_PROMPT
+    if request.mode == "pen":
+        prompt = PEN_PROMPT
+    elif request.mode == "bottle_pen":
+        prompt = BOTTLE_PEN_PROMPT
+    else:
+        prompt = BOTTLE_PROMPT
     last_error: Exception = None
 
     # ── Try OpenAI GPT-4o ──────────────────────────────────────────────────
