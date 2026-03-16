@@ -18,7 +18,7 @@ from auth import (
 )
 from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
-    classify_level, calculate_variance, generate_order_items
+    classify_level, smooth_level, calculate_variance, generate_order_items
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -2192,8 +2192,9 @@ def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_c
 # ============== V1 SCANS (Gemini Vision) ==============
 
 class ScanAnalyzeRequest(BaseModel):
-    image: str          # base64 encoded JPEG
-    mode: str = "bottle"  # "bottle" or "pen"
+    image: str                          # base64 encoded JPEG
+    mode: str = "bottle"                # "bottle" or "pen"
+    previous_readings: list[float] = [] # last N raw liquidLevel floats for smoothing (optional)
 
 class ScanAnalyzeResponse(BaseModel):
     name: str
@@ -2290,11 +2291,17 @@ OPENAI_MODEL = "gpt-4o"
 GEMINI_MODEL = "gemini-2.0-flash"
 
 # Scan accuracy config — override via environment variables if needed.
-# CONFIDENCE_THRESHOLD: AI confidence below this triggers needs_rescan=True.
-# LEVEL_DEADBAND: half-width of the hysteresis deadband (±) around each level
-#                 boundary used by classify_level().
+# CONFIDENCE_THRESHOLD:     AI confidence below this triggers needs_rescan=True.
+# LEVEL_DEADBAND:           half-width of the hysteresis deadband (±) around
+#                           each level boundary used by classify_level().
+# LEVEL_STABILIZATION:      master toggle for smoothing + confidence-aware
+#                           stickiness. Set to "false" to disable for rollback.
+# SMOOTHING_WINDOW:         how many consecutive readings to median-smooth
+#                           (client passes previous_readings in the request).
 CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.35"))
 LEVEL_DEADBAND: float = float(os.getenv("LEVEL_DEADBAND", "0.03"))
+LEVEL_STABILIZATION: bool = os.getenv("LEVEL_STABILIZATION", "true").lower() not in ("false", "0", "no")
+SMOOTHING_WINDOW: int = max(1, int(os.getenv("SMOOTHING_WINDOW", "3")))
 
 
 def _strip_code_fences(text: str) -> str:
@@ -2317,6 +2324,36 @@ def _parse_ai_result(text: str) -> dict:
     result.setdefault("brand", "")
     result.setdefault("category", "other")
     result.setdefault("liquidLevel", 0.0)
+    return result
+
+
+def _apply_stabilization(result: dict, previous_readings: list[float]) -> dict:
+    """Apply temporal smoothing and confidence-aware stickiness when enabled.
+
+    Mutates and returns the result dict.  Safe to call even when
+    LEVEL_STABILIZATION is False — it becomes a no-op.
+    """
+    if not LEVEL_STABILIZATION:
+        return result
+
+    confidence = result.get("confidence", 0.5)
+
+    # Temporal smoothing: median the last N readings (including this one).
+    if previous_readings:
+        all_readings = list(previous_readings) + [result["liquidLevel"]]
+        smoothed = smooth_level(all_readings, SMOOTHING_WINDOW)
+        print(
+            f"[stabilization] raw={result['liquidLevel']:.3f} "
+            f"smoothed={smoothed:.3f} window={min(len(all_readings), SMOOTHING_WINDOW)}",
+            flush=True,
+        )
+        result["liquidLevel"] = smoothed
+
+    # Confidence-aware stickiness is handled inside classify_level() via the
+    # confidence kwarg — no extra work needed here; classify_level widens the
+    # deadband automatically when confidence < 0.5.
+    # (Callers that bucket should pass confidence= to classify_level.)
+
     return result
 
 
@@ -2384,6 +2421,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             result = _parse_ai_result(text)
             if not result.get("name") and result.get("confidence", 1) == 0:
                 return JSONResponse(status_code=200, content=None)
+            result = _apply_stabilization(result, request.previous_readings)
             result["needs_rescan"] = (
                 not result.get("levelReadable", True)
                 or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
@@ -2415,6 +2453,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             result = _parse_ai_result(text)
             if not result.get("name") and result.get("confidence", 1) == 0:
                 return JSONResponse(status_code=200, content=None)
+            result = _apply_stabilization(result, request.previous_readings)
             result["needs_rescan"] = (
                 not result.get("levelReadable", True)
                 or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
