@@ -2266,7 +2266,8 @@ BOTTLE_PEN_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for
 Your job: identify the bottle AND use the pen tip to determine the liquid level.
 
 STEP 1 — Identify the bottle:
-- Read the label for the full product name and brand
+- There may be multiple bottles in the frame. Focus ONLY on the bottle the pen is touching — that is the target bottle.
+- Read the label of the target bottle for the full product name and brand
 - Determine the category (spirits, beer, wine, other)
 
 STEP 2 — Measure the level using the pen tip:
