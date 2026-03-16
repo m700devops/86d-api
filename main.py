@@ -2277,7 +2277,7 @@ STEP 2 — Measure the level using the pen tip:
 - Identify the FILL ZONE: from the bottle bottom to the base of the shoulder/neck (not the very top)
 - liquidLevel = (height of pen-tip contact from bottle bottom) / (height of the fill zone)
 - Anchor against: full=1.0, halfway=0.5, quarter=0.25
-- If between two values, bias toward the LOWER one — overestimating causes under-ordering
+- Report the pen tip position as accurately as possible — do NOT bias up or down; the pen is a physical reference so precision matters more than conservative rounding
 - IGNORE completely: brand logos, label graphics, printed text, embossing, decorative elements
 
 Self-check: "Am I reading the pen tip position, not the label or bottle shoulder?" If unsure, lower confidence by 0.2.
