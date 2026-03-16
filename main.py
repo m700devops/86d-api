@@ -23,7 +23,7 @@ from helpers import (
 from models import *
 from seed_data import SEED_PRODUCTS
 import google.generativeai as genai
-import anthropic
+import openai
 import os
 
 # Startup time for uptime calculation
@@ -2286,13 +2286,8 @@ Rules:
 
 # ─── AI provider helpers ───────────────────────────────────────────────────
 
-ANTHROPIC_MODELS = [
-    "claude-sonnet-4-6",
-    "claude-3-5-sonnet-20241022",
-    "claude-3-haiku-20240307",
-]
-
-GEMINI_MODEL = "gemini-1.5-flash"
+OPENAI_MODEL = "gpt-4o"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 # Scan accuracy config — override via environment variables if needed.
 # CONFIDENCE_THRESHOLD: AI confidence below this triggers needs_rescan=True.
@@ -2325,15 +2320,10 @@ def _parse_ai_result(text: str) -> dict:
     return result
 
 
-def _is_model_not_found(e: anthropic.APIStatusError) -> bool:
-    combined = (str(e.message) + str(e.body)).lower()
-    return e.status_code == 404 and "model" in combined
-
-
-async def _call_anthropic(api_key: str, model: str, prompt: str, image_data: str) -> str:
-    client = anthropic.AsyncAnthropic(api_key=api_key)
-    message = await client.messages.create(
-        model=model,
+async def _call_openai(api_key: str, prompt: str, image_data: str) -> str:
+    client = openai.AsyncOpenAI(api_key=api_key)
+    response = await client.chat.completions.create(
+        model=OPENAI_MODEL,
         max_tokens=300,
         timeout=25.0,
         messages=[
@@ -2341,19 +2331,18 @@ async def _call_anthropic(api_key: str, model: str, prompt: str, image_data: str
                 "role": "user",
                 "content": [
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
-                            "data": image_data,
-                        }
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_data}",
+                            "detail": "high",
+                        },
                     },
-                    {"type": "text", "text": prompt}
-                ]
+                    {"type": "text", "text": prompt},
+                ],
             }
         ],
     )
-    return message.content[0].text.strip()
+    return response.choices[0].message.content.strip()
 
 
 async def _call_gemini(api_key: str, prompt: str, image_data: str) -> str:
@@ -2370,15 +2359,15 @@ async def _call_gemini(api_key: str, prompt: str, image_data: str) -> str:
 
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
 async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
-    """Analyze bottle image using Claude Vision with Gemini fallback"""
+    """Analyze bottle image using OpenAI GPT-4o with Gemini 2.0 Flash fallback"""
     print("[analyze_bottle] function started", flush=True)
 
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    print(f"[analyze_bottle] ANTHROPIC_API_KEY present: {bool(anthropic_key)}", flush=True)
+    print(f"[analyze_bottle] OPENAI_API_KEY present: {bool(openai_key)}", flush=True)
     print(f"[analyze_bottle] GEMINI_API_KEY present: {bool(gemini_key)}", flush=True)
 
-    if not anthropic_key and not gemini_key:
+    if not openai_key and not gemini_key:
         raise HTTPException(status_code=503, detail={
             "error": "service_unavailable",
             "message": "No AI provider API keys configured on the server"
@@ -2387,48 +2376,38 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
     prompt = PEN_PROMPT if request.mode == "pen" else BOTTLE_PROMPT
     last_error: Exception = None
 
-    # ── Try Anthropic models in order ──────────────────────────────────────
-    if anthropic_key:
-        for model in ANTHROPIC_MODELS:
-            try:
-                print(f"[analyze_bottle] trying Anthropic model={model}", flush=True)
-                text = await _call_anthropic(anthropic_key, model, prompt, request.image)
-                result = _parse_ai_result(text)
-                if not result.get("name") and result.get("confidence", 1) == 0:
-                    return JSONResponse(status_code=200, content=None)
-                result["needs_rescan"] = (
-                    not result.get("levelReadable", True)
-                    or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
-                )
-                return ScanAnalyzeResponse(**result)
-            except anthropic.AuthenticationError:
-                print("[analyze_bottle] Anthropic auth error", flush=True)
-                raise HTTPException(status_code=503, detail={
-                    "error": "service_unavailable",
-                    "message": "AI service authentication failed — check ANTHROPIC_API_KEY"
-                })
-            except anthropic.APIStatusError as e:
-                print(f"[analyze_bottle] APIStatusError model={model} status={e.status_code} message={e.message} body={e.body}", flush=True)
-                last_error = e
-                if _is_model_not_found(e):
-                    print(f"[analyze_bottle] model not found, trying next candidate", flush=True)
-                    continue
-                break  # non-retryable — fall through to Gemini
-            except anthropic.APITimeoutError as e:
-                print(f"[analyze_bottle] Anthropic timeout on model={model}", flush=True)
-                last_error = e
-                break
-            except json.JSONDecodeError as e:
-                raise HTTPException(status_code=500, detail={
-                    "error": "parse_failed",
-                    "message": f"Could not parse AI response: {e}"
-                })
-            except Exception as e:
-                print(f"[analyze_bottle] unexpected error on model={model}: {traceback.format_exc()}", flush=True)
-                last_error = e
-                break
+    # ── Try OpenAI GPT-4o ──────────────────────────────────────────────────
+    if openai_key:
+        try:
+            print(f"[analyze_bottle] trying OpenAI model={OPENAI_MODEL}", flush=True)
+            text = await _call_openai(openai_key, prompt, request.image)
+            result = _parse_ai_result(text)
+            if not result.get("name") and result.get("confidence", 1) == 0:
+                return JSONResponse(status_code=200, content=None)
+            result["needs_rescan"] = (
+                not result.get("levelReadable", True)
+                or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
+            )
+            return ScanAnalyzeResponse(**result)
+        except openai.AuthenticationError:
+            print("[analyze_bottle] OpenAI auth error", flush=True)
+            raise HTTPException(status_code=503, detail={
+                "error": "service_unavailable",
+                "message": "AI service authentication failed — check OPENAI_API_KEY"
+            })
+        except openai.APITimeoutError as e:
+            print("[analyze_bottle] OpenAI timeout", flush=True)
+            last_error = e
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=500, detail={
+                "error": "parse_failed",
+                "message": f"Could not parse AI response: {e}"
+            })
+        except Exception as e:
+            print(f"[analyze_bottle] OpenAI unexpected error: {traceback.format_exc()}", flush=True)
+            last_error = e
 
-    # ── Gemini fallback ────────────────────────────────────────────────────
+    # ── Gemini 2.0 Flash fallback ──────────────────────────────────────────
     if gemini_key:
         try:
             print(f"[analyze_bottle] falling back to Gemini model={GEMINI_MODEL}", flush=True)
@@ -2451,7 +2430,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             last_error = e
 
     # ── All providers failed ───────────────────────────────────────────────
-    if isinstance(last_error, anthropic.APITimeoutError):
+    if isinstance(last_error, openai.APITimeoutError):
         raise HTTPException(status_code=504, detail={
             "error": "ai_timeout",
             "message": "AI service timed out — image may be too large or service is slow"
