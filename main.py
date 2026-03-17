@@ -2225,6 +2225,7 @@ class ScanAnalyzeResponse(BaseModel):
     name: str
     brand: str
     category: str
+    product_type: str = ""  # Specific class/type (e.g. Tennessee Whiskey, Blended Scotch Whisky, Vodka)
     liquidLevel: float
     confidence: float
     levelReadable: bool = True
@@ -2271,19 +2272,23 @@ Common mistakes to avoid:
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
-  "name": "Full product name (e.g. Grey Goose Vodka)",
-  "brand": "Brand only (e.g. Grey Goose)",
+  "name": "Variant/expression name only (e.g. Old No. 7, Red Label, Original)",
+  "brand": "Brand/distillery name only (e.g. Jack Daniel's, Johnnie Walker, Grey Goose)",
   "category": "spirits",
+  "product_type": "Specific class and type (e.g. Tennessee Whiskey, Blended Scotch Whisky, Vodka, London Dry Gin, Dark Rum)",
   "liquidLevel": 0.5,
   "confidence": 0.9,
   "levelReadable": true
 }
 
 Rules:
+- name: variant/expression only — do NOT include the brand name in this field
+- brand: brand/distillery name only — do NOT include the variant or product type
+- product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka). Use the label's own designation when visible.
 - category must be one of: spirits, beer, wine, other
 - liquidLevel is 0.0 (empty) to 1.0 (full)
 - Set levelReadable to false if: the bottle is opaque, image is too dark, no bottle is visible, OR the bottle and liquid are both clear/transparent and you cannot clearly see the meniscus line
-- If no bottle is present at all, return: {"name":"","brand":"","category":"other","liquidLevel":0,"confidence":0,"levelReadable":false}
+- If no bottle is present at all, return: {"name":"","brand":"","category":"other","product_type":"","liquidLevel":0,"confidence":0,"levelReadable":false}
 - Return ONLY valid JSON."""
 
 BOTTLE_PEN_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar inventory. A pen or marker has been placed with its tip touching the liquid surface as a level reference.
@@ -2321,19 +2326,23 @@ Self-check before answering:
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
-  "name": "Full product name (e.g. Grey Goose Vodka)",
-  "brand": "Brand only (e.g. Grey Goose)",
+  "name": "Variant/expression name only (e.g. Old No. 7, Red Label, Original)",
+  "brand": "Brand/distillery name only (e.g. Jack Daniel's, Johnnie Walker, Grey Goose)",
   "category": "spirits",
+  "product_type": "Specific class and type (e.g. Tennessee Whiskey, Blended Scotch Whisky, Vodka, London Dry Gin, Dark Rum)",
   "liquidLevel": 0.5,
   "confidence": 0.9,
   "levelReadable": true
 }
 
 Rules:
+- name: variant/expression only — do NOT include the brand name in this field
+- brand: brand/distillery name only — do NOT include the variant or product type
+- product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka). Use the label's own designation when visible.
 - category must be one of: spirits, beer, wine, other
 - liquidLevel is 0.0 (empty) to 1.0 (full)
 - Set levelReadable to false ONLY if no pen is visible in the image or no bottle is present
-- If no bottle is present at all, return: {"name":"","brand":"","category":"other","liquidLevel":0,"confidence":0,"levelReadable":false}
+- If no bottle is present at all, return: {"name":"","brand":"","category":"other","product_type":"","liquidLevel":0,"confidence":0,"levelReadable":false}
 - Return ONLY valid JSON."""
 
 PEN_PROMPT = """A pen or marker has been placed touching the liquid surface of a bottle as a level indicator.
@@ -2360,6 +2369,7 @@ Return ONLY a JSON object — no markdown, no explanation:
   "name": "",
   "brand": "",
   "category": "spirits",
+  "product_type": "",
   "liquidLevel": 0.6,
   "confidence": 0.95,
   "levelReadable": true
@@ -2407,6 +2417,7 @@ def _parse_ai_result(text: str) -> dict:
     result.setdefault("name", "")
     result.setdefault("brand", "")
     result.setdefault("category", "other")
+    result.setdefault("product_type", "")
     result.setdefault("liquidLevel", 0.0)
     return result
 
