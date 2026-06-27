@@ -290,8 +290,8 @@ def login(credentials: UserLogin):
                 "id": row["id"],
                 "email": row["email"],
                 "name": row["name"],
-                "subscription_status": row["subscription_status"],
-                "subscription_tier": row["subscription_tier"],
+                "subscription_status": row["subscription_status"] or "trial",
+                "subscription_tier": row["subscription_tier"] or "starter",
                 "trial_ends_at": row["trial_ends_at"],
                 "terms_accepted_at": row["terms_accepted_at"],
                 "privacy_accepted_at": row["privacy_accepted_at"],
@@ -1010,234 +1010,6 @@ def add_scans_bulk(session_id: str, bulk_data: ScanBulkRequest, user_id: str = D
             "created": created,
             "duplicates": duplicates,
             "scans": scans
-        }
-
-# ============== PEN CAPTURE MODE ==============
-
-from pydantic import BaseModel
-from typing import Optional, List
-
-class PenCaptureRequest(BaseModel):
-    session_id: str
-    bottle_image_base64: Optional[str] = None
-    product_id: Optional[str] = None
-    product_name: Optional[str] = None
-    level: float
-    pen_position_y: float
-    captured_at: Optional[str] = None
-    confidence: float
-
-class PenCaptureResponse(BaseModel):
-    scan_id: str
-    status: str
-    bottle_number: int
-    product: Optional[dict] = None
-
-class BatchCaptureRequest(BaseModel):
-    session_id: str
-    captures: List[PenCaptureRequest]
-
-class BatchCaptureResponse(BaseModel):
-    processed: int
-    failed: int
-    bottles: List[dict]
-
-@v1_router.post("/scans/pen-capture", response_model=PenCaptureResponse, status_code=201)
-def pen_capture(capture_data: PenCaptureRequest, user_id: str = Depends(get_current_user)):
-    """Handle rapid-fire bottle captures from continuous pen scanning mode"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        # Verify session belongs to user and is in progress
-        cursor.execute(
-            "SELECT id, location_id FROM inventory_sessions WHERE id = %s AND user_id = %s AND status = 'in_progress'",
-            (capture_data.session_id, user_id)
-        )
-        session = cursor.fetchone()
-        if not session:
-            raise HTTPException(status_code=404, detail={
-                "error": "not_found",
-                "message": "Active session not found"
-            })
-        
-        now = now_iso()
-        created_at = capture_data.captured_at if capture_data.captured_at else now
-        
-        # Determine product
-        product = None
-        product_id = capture_data.product_id
-        
-        if product_id:
-            # Get existing product
-            cursor.execute("SELECT * FROM products WHERE id = %s", (product_id,))
-            product = cursor.fetchone()
-        elif capture_data.product_name:
-            # Try to find product by name
-            cursor.execute(
-                "SELECT * FROM products WHERE LOWER(name) = LOWER(%s) OR LOWER(brand || ' ' || name) = LOWER(%s)",
-                (capture_data.product_name, capture_data.product_name)
-            )
-            product = cursor.fetchone()
-            if product:
-                product_id = product["id"]
-        
-        # If no product found, create a placeholder
-        if not product_id:
-            product_id = generate_id()
-            cursor.execute("""
-                INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                product_id,
-                capture_data.product_name or "Unknown Product",
-                None,
-                "uncategorized",
-                None,
-                None,
-                None,
-                0,
-                0,
-                now,
-                now
-            ))
-            cursor.execute("SELECT * FROM products WHERE id = %s", (product_id,))
-            product = cursor.fetchone()
-        
-        # Convert level to level string using deadband classifier
-        level_decimal = max(0.0, min(1.0, capture_data.level))
-        level = classify_level(level_decimal, deadband=LEVEL_DEADBAND)
-
-        # Create scan
-        scan_id = generate_id()
-        cursor.execute("""
-            INSERT INTO scans (id, session_id, product_id, level, level_decimal, quantity, 
-                              detection_method, confidence, pen_position_y, capture_method,
-                              synced_at, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            scan_id, capture_data.session_id, product_id, level, level_decimal,
-            1, "camera", capture_data.confidence, capture_data.pen_position_y, "pen_mode",
-            now, created_at, now
-        ))
-        
-        # Increment product scan count
-        cursor.execute(
-            "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
-            (now, product_id)
-        )
-        
-        conn.commit()
-        
-        # Get bottle number (count of scans in this session)
-        cursor.execute("SELECT COUNT(*) as count FROM scans WHERE session_id = %s", (capture_data.session_id,))
-        bottle_number = cursor.fetchone()["count"]
-        
-        return {
-            "scan_id": scan_id,
-            "status": "captured",
-            "bottle_number": bottle_number,
-            "product": dict(product) if product else None
-        }
-
-@v1_router.post("/scans/batch", response_model=BatchCaptureResponse, status_code=201)
-def batch_capture(batch_data: BatchCaptureRequest, user_id: str = Depends(get_current_user)):
-    """Sync multiple captures at once (offline support)"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        # Verify session belongs to user and is in progress
-        cursor.execute(
-            "SELECT id FROM inventory_sessions WHERE id = %s AND user_id = %s AND status = 'in_progress'",
-            (batch_data.session_id, user_id)
-        )
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail={
-                "error": "not_found",
-                "message": "Active session not found"
-            })
-        
-        processed = 0
-        failed = 0
-        bottles = []
-        now = now_iso()
-        
-        for capture in batch_data.captures:
-            try:
-                created_at = capture.captured_at if capture.captured_at else now
-                
-                # Determine product
-                product_id = capture.product_id
-                if not product_id and capture.product_name:
-                    cursor.execute(
-                        "SELECT id FROM products WHERE LOWER(name) = LOWER(%s) OR LOWER(brand || ' ' || name) = LOWER(%s)",
-                        (capture.product_name, capture.product_name)
-                    )
-                    row = cursor.fetchone()
-                    if row:
-                        product_id = row["id"]
-                
-                # If no product found, create placeholder
-                if not product_id:
-                    product_id = generate_id()
-                    cursor.execute("""
-                        INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                        product_id,
-                        capture.product_name or "Unknown Product",
-                        None,
-                        "uncategorized",
-                        None,
-                        None,
-                        None,
-                        0,
-                        0,
-                        now,
-                        now
-                    ))
-                
-                # Convert level using deadband classifier
-                level_decimal = max(0.0, min(1.0, capture.level))
-                level = classify_level(level_decimal, deadband=LEVEL_DEADBAND)
-
-                # Create scan
-                scan_id = generate_id()
-                cursor.execute("""
-                    INSERT INTO scans (id, session_id, product_id, level, level_decimal, quantity, 
-                                      detection_method, confidence, pen_position_y, capture_method,
-                                      synced_at, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    scan_id, batch_data.session_id, product_id, level, level_decimal,
-                    1, "camera", capture.confidence, capture.pen_position_y, "pen_mode",
-                    now, created_at, now
-                ))
-                
-                # Increment product scan count
-                cursor.execute(
-                    "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
-                    (now, product_id)
-                )
-                
-                processed += 1
-                bottles.append({
-                    "scan_id": scan_id,
-                    "product_id": product_id,
-                    "level": level,
-                    "level_decimal": level_decimal,
-                    "confidence": capture.confidence
-                })
-                
-            except Exception as e:
-                failed += 1
-                continue
-        
-        conn.commit()
-        
-        return {
-            "processed": processed,
-            "failed": failed,
-            "bottles": bottles
         }
 
 @v1_router.post("/inventory/{session_id}/voice", response_model=dict, status_code=201)
@@ -2121,7 +1893,10 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
-        return dict(row)
+        result = dict(row)
+        result["subscription_status"] = result.get("subscription_status") or "trial"
+        result["subscription_tier"] = result.get("subscription_tier") or "starter"
+        return result
 
 @v1_router.delete("/users/me")
 def delete_user(password: str, user_id: str = Depends(get_current_user)):
@@ -2218,7 +1993,6 @@ def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_c
 
 class ScanAnalyzeRequest(BaseModel):
     image: str                          # base64 encoded JPEG
-    mode: str = "bottle"                # "bottle" or "pen"
     previous_readings: list[float] = [] # last N raw liquidLevel floats for smoothing (optional)
 
 class ScanAnalyzeResponse(BaseModel):
@@ -2230,6 +2004,37 @@ class ScanAnalyzeResponse(BaseModel):
     confidence: float
     levelReadable: bool = True
     needs_rescan: bool = False  # True when confidence is too low for reliable classification
+    matched_product_id: Optional[str] = None
+
+PRODUCT_CATALOG = """KNOWN PRODUCTS — if you can identify the bottle, match to the closest entry below (use exact brand/name spelling). If the bottle is not listed, use your best judgment.
+
+Vodka: Tito's Handmade, Grey Goose, Absolut, Ketel One, Belvedere, Stolichnaya, Svedka, New Amsterdam, Skyy, Pinnacle, Cîroc, Deep Eddy, Wheatley, Three Olives, Smirnoff, Burnett's, Luksusowa, Reyka, Iceberg, Prairie Organic, Finlandia, Russian Standard, Żubrówka, UV Blue, Seagram's Extra Smooth
+Bourbon: Buffalo Trace, Maker's Mark, Woodford Reserve, Knob Creek, Four Roses Small Batch, Bulleit Bourbon, Wild Turkey 101, Eagle Rare 10, Blanton's Original, Weller Special Reserve, Elijah Craig Small Batch, Heaven Hill, Jim Beam White, Old Forester 86, Larceny Small Batch, Basil Hayden's, Angel's Envy, Russell's Reserve 10, Evan Williams Black, Very Old Barton, 1792 Small Batch, Bardstown Bourbon Discovery, Henry McKenna, W.L. Weller 12, Pappy Van Winkle 15
+Tennessee Whiskey: Jack Daniel's Old No. 7, Jack Daniel's Gentleman Jack, Jack Daniel's Single Barrel Select, Jack Daniel's Tennessee Honey, George Dickel No. 12, George Dickel Rye
+Irish Whiskey: Jameson, Jameson Black Barrel, Bushmills Original, Tullamore D.E.W., Redbreast 12, Powers Gold Label, The Irishman Founder's Reserve, Connemara Peated, Writers' Tears Copper Pot, Slane Irish Whiskey, Proper No. Twelve, Kilbeggan Traditional
+Scotch Blended: Johnnie Walker Red, Johnnie Walker Black, Johnnie Walker Double Black, Johnnie Walker Gold Reserve, Dewar's White Label, Dewar's 12, Chivas Regal 12, Famous Grouse, Monkey Shoulder, Cutty Sark, J&B Rare, Clan MacGregor, Scoresby, Bell's Original, Grant's Family Reserve
+Scotch Single Malt: Glenfiddich 12, Glenfiddich 15, Macallan 12 Sherry Oak, Macallan 12 Double Cask, Glenlivet 12, Glenlivet 15, Oban 14, Laphroaig 10, Balvenie 12 DoubleWood, Highland Park 12, Dalmore 12, Auchentoshan Three Wood, Bruichladdich The Classic Laddie, Talisker 10, Springbank 10, Ardbeg 10, Bunnahabhain 12
+Rye Whiskey: Bulleit Rye, WhistlePig 10, Sazerac Rye, High West Rendezvous Rye, Redemption Rye, Rittenhouse Rye 100, George Dickel Rye, Templeton Rye, Knob Creek Rye, Old Overholt Rye, Pikesville Rye, Lot 40 Rye
+Canadian Whisky: Crown Royal Deluxe, Crown Royal Apple, Crown Royal Peach, Crown Royal Black, Canadian Club, Pendleton Original, Forty Creek Barrel Select, Seagram's VO
+Japanese Whisky: Suntory Toki, Nikka Coffey Grain, Hibiki Japanese Harmony, Yamazaki 12, Hakushu 12, Roku Gin (Japanese gin)
+Tequila Blanco: Patrón Silver, Don Julio Blanco, Casamigos Blanco, Herradura Silver, Espolòn Blanco, Olmeca Altos Plata, El Jimador Silver, Jose Cuervo Silver, 1800 Silver, Milagro Silver, Clase Azul Plata, Hornitos Plata, Lunazul Blanco, Cazadores Blanco, Teremana Blanco
+Tequila Reposado: Patrón Reposado, Don Julio Reposado, Casamigos Reposado, Herradura Reposado, Olmeca Altos Reposado, Espolòn Reposado, 1800 Reposado, Cazadores Reposado
+Tequila Añejo: Don Julio Añejo, Patrón Añejo, Casamigos Añejo, 1800 Añejo, Herradura Añejo, Gran Centenario Añejo
+Mezcal: Del Maguey Vida, Ilegal Joven, Montelobos, Banhez Ensemble,Putaendo, Wahaka Madre Cuishe,Putaendo, Alipús San Andres
+Gin: Tanqueray London Dry, Tanqueray No. Ten, Hendrick's, Bombay Sapphire, Beefeater London Dry, Sipsmith London Dry, Aviation American Gin, The Botanist, Monkey 47, Plymouth Gin, New Amsterdam Gin, Malfy Con Limone, Empress 1908, Fords Gin, Nolet's Silver, Hayman's Old Tom, Drumshanbo Gunpowder Irish Gin
+Rum White/Silver: Bacardi Superior, Bacardi Gold, Plantation 3 Stars, Mount Gay Eclipse, Cruzan Light, Flor de Caña Extra Dry 4, Don Q Cristal, Brugal Extra Dry
+Rum Dark/Spiced: Captain Morgan Original Spiced, Kraken Black Spiced, Sailor Jerry Spiced, Myers's Original Dark, Gosling's Black Seal, Diplomatico Reserva Exclusiva, Appleton Estate Signature, El Dorado 12, Zaya Gran Reserva, Angostura 1919, Pusser's Blue Label, Plantation Original Dark, Ron Zacapa 23
+Brandy/Cognac: Hennessy VS, Hennessy VSOP, Rémy Martin VSOP, Rémy Martin 1738, Courvoisier VS, Martell VS, E&J VSOP, Paul Masson Grande Amber VSOP, Korbel California Brandy, Christian Brothers VS, Torres 10 Imperial Brandy
+Liqueurs/Triple Sec: Cointreau, Grand Marnier Cordon Rouge, DeKuyper Triple Sec, Patron Citrónge, Blue Curaçao, Luxardo Maraschino
+Amaretto/Nut: Disaronno Originale, Amaretto di Saronno, Frangelico Hazelnut, Nocello Walnut, Kahlúa Original, Kahlúa Especial, Tia Maria Coffee
+Cream/Sweet: Baileys Original Irish Cream, RumChata, Carolans Irish Cream, St. Brendan's Irish Cream, Mozart Dark Chocolate
+Herbal/Bitter: Jägermeister, Campari, Aperol, Fernet-Branca, Cynar, Aperol, Amaro Averna, Montenegro Amaro, Bénédictine, Chartreuse Green, Chartreuse Yellow, Lillet Blanc, Lillet Rosé
+Fruit/Berry: Chambord Black Raspberry, Midori Melon, Peach Schnapps DeKuyper, St-Germain Elderflower, Crème de Cassis, Limoncello Pallini, Aperol, Pama Pomegranate
+Peppermint/Cinnamon: Fireball Cinnamon Whisky, Rumple Minze Peppermint, DeKuyper Peppermint Schnapps, Templeton Rye Cinnamon
+Coconut/Tropical: Malibu Coconut Rum, DKNY Coconut, Malibu Mango, Blue Chair Bay Coconut
+Vermouth/Fortified: Martini & Rossi Sweet Vermouth, Martini & Rossi Dry Vermouth, Noilly Prat Dry, Dolin Dry, Carpano Antica Formula, Mancino Secco
+Beer (common): Bud Light, Budweiser, Coors Light, Miller Lite, Miller High Life, Corona Extra, Modelo Especial, Dos Equis Lager, Heineken, Stella Artois, Blue Moon Belgian White, Shock Top, Sam Adams Boston Lager, Guinness Draught, Sierra Nevada Pale Ale, Lagunitas IPA, Bell's Two Hearted
+Wine (common): Kim Crawford Sauvignon Blanc, Kendall-Jackson Vintner's Reserve Chardonnay, Josh Cellars Cabernet Sauvignon, La Marca Prosecco, Meiomi Pinot Noir, Whispering Angel Rosé, Barefoot Pinot Grigio, Bogle Essential Red, Chateau Ste. Michelle Riesling"""
 
 BOTTLE_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar inventory.
 
@@ -2243,7 +2048,7 @@ CRITICAL — what to use as evidence:
 TRANSPARENT BOTTLES (clear glass + clear/colorless liquid — vodka, gin, tequila blanco, clear rum, sparkling water, etc.):
 - This is the hardest case. The meniscus has very low visual contrast against clear liquid.
 - Look specifically for: faint shadow or distortion at the liquid line, subtle color shift where liquid meets air, slight lens effect at the boundary.
-- If you CANNOT clearly see the meniscus line, set levelReadable to false. DO NOT guess — a false reading is worse than routing to pen mode.
+- If you CANNOT clearly see the meniscus line, set levelReadable to false. DO NOT guess — an uncertain reading is worse than setting levelReadable false.
 - If you think you can see the meniscus but are not certain, cap confidence at 0.5 and set levelReadable to false.
 - Only set levelReadable to true if you can unambiguously identify the liquid surface line.
 
@@ -2289,95 +2094,10 @@ Rules:
 - liquidLevel is 0.0 (empty) to 1.0 (full)
 - Set levelReadable to false if: the bottle is opaque, image is too dark, no bottle is visible, OR the bottle and liquid are both clear/transparent and you cannot clearly see the meniscus line
 - If no bottle is present at all, return: {"name":"","brand":"","category":"other","product_type":"","liquidLevel":0,"confidence":0,"levelReadable":false}
-- Return ONLY valid JSON."""
+- Return ONLY valid JSON.
 
-BOTTLE_PEN_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar inventory. A pen or marker has been placed with its tip touching the liquid surface as a level reference.
+""" + PRODUCT_CATALOG
 
-Your job: identify the bottle AND use the pen tip to determine the liquid level.
-
-Work through these steps internally before producing your answer:
-
-STEP 1 — Identify the target bottle:
-- There may be multiple bottles in the frame. The target bottle is the one the pen is touching.
-- Read the label of the target bottle for the full product name and brand.
-- Determine the category (spirits, beer, wine, other).
-
-STEP 2 — Outline the bottle geometry:
-- Mentally trace the outer silhouette of the target bottle.
-- Mark the BOTTOM EDGE: the lowest point of the bottle base.
-- Mark the SHOULDER: the point where the bottle body transitions into the neck (where the glass starts narrowing). This is the TOP of the fill zone — NOT the cap or lip.
-- The FILL ZONE height = distance from bottom edge to shoulder. This is your ruler.
-
-STEP 3 — Locate the pen tip:
-- The pen tip is the pointed writing end — the lowest contact point of the pen.
-- The tip must appear visibly inside the bottle's body outline. If it looks off-center or between two bottles, set levelReadable to false.
-- Ignore the pen barrel entirely — it may cross other objects.
-- Mark the pen tip's vertical position within the bottle silhouette.
-
-STEP 4 — Calculate the level:
-- liquidLevel = (distance from bottle bottom to pen tip) / (fill zone height)
-- Cross-check visually: does the pen tip sit at roughly that fraction of the fill zone? If not, re-examine.
-- Do NOT bias up or down — the pen is a physical reference, so report the actual position precisely.
-- IGNORE completely: brand logos, label graphics, printed text, embossing, decorative elements — these are painted on the outside and have no bearing on liquid volume.
-
-Self-check before answering:
-- "Did I anchor to the bottle silhouette, or did a label graphic shift my reference?" If a graphic influenced you, re-measure from the silhouette only.
-- "Is my shoulder mark at the glass narrowing, not the cap?" If unsure, lower confidence by 0.15.
-
-Return ONLY a JSON object — no markdown, no explanation:
-{
-  "name": "Variant/expression name only (e.g. Old No. 7, Red Label, Original)",
-  "brand": "Brand/distillery name only (e.g. Jack Daniel's, Johnnie Walker, Grey Goose)",
-  "category": "spirits",
-  "product_type": "Specific class and type (e.g. Tennessee Whiskey, Blended Scotch Whisky, Vodka, London Dry Gin, Dark Rum)",
-  "liquidLevel": 0.5,
-  "confidence": 0.9,
-  "levelReadable": true
-}
-
-Rules:
-- name: variant/expression only — do NOT include the brand name in this field
-- brand: brand/distillery name only — do NOT include the variant or product type
-- product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka). Use the label's own designation when visible.
-- category must be one of: spirits, beer, wine, other
-- liquidLevel is 0.0 (empty) to 1.0 (full)
-- Set levelReadable to false ONLY if no pen is visible in the image or no bottle is present
-- If no bottle is present at all, return: {"name":"","brand":"","category":"other","product_type":"","liquidLevel":0,"confidence":0,"levelReadable":false}
-- Return ONLY valid JSON."""
-
-PEN_PROMPT = """A pen or marker has been placed touching the liquid surface of a bottle as a level indicator.
-
-Your job: find where the pen tip contacts the liquid meniscus and calculate what fraction of the bottle is filled.
-
-CRITICAL — what to use as evidence:
-- USE ONLY: the pen-tip contact point with the liquid meniscus, and the visible air-gap above it
-- IGNORE COMPLETELY: brand logos, label graphics, printed text, embossing, and decorative elements — even if centered on the bottle
-- Treat the label as if it were painted on the outside of a clear pipe. Only the pen tip and the liquid boundary matter.
-
-To measure:
-1. Identify the FILL ZONE: from the bottle bottom to the base of the shoulder/neck
-2. Find the exact point where the pen tip meets the liquid meniscus
-3. liquidLevel = (height of pen-tip contact from bottle bottom) / (height of the fill zone)
-4. If your estimate falls between two values, bias toward the LOWER one
-
-Self-check before returning:
-- Ask yourself: "Did any logo, label graphic, or printed element influence my estimate?"
-- If yes: re-estimate from pen-tip contact only and lower confidence by at least 0.2
-
-Return ONLY a JSON object — no markdown, no explanation:
-{
-  "name": "",
-  "brand": "",
-  "category": "spirits",
-  "product_type": "",
-  "liquidLevel": 0.6,
-  "confidence": 0.95,
-  "levelReadable": true
-}
-
-Rules:
-- liquidLevel is 0.0 (empty) to 1.0 (full) based on where the pen meets the liquid
-- Return ONLY valid JSON."""
 
 # ─── AI provider helpers ───────────────────────────────────────────────────
 
@@ -2489,6 +2209,49 @@ async def _call_gemini(api_key: str, prompt: str, image_data: str) -> str:
     return response.text.strip()
 
 
+def match_product(name: str, brand: str) -> Optional[str]:
+    """Best-effort match of AI-detected bottle to products table. Returns product id or None."""
+    if not brand:
+        return None
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            # Attempt 1: brand exact match + name contained in product name
+            cursor.execute("""
+                SELECT id, name FROM products
+                WHERE LOWER(brand) = LOWER(%s)
+                AND LOWER(name) LIKE '%%' || LOWER(%s) || '%%'
+                ORDER BY scan_count DESC
+                LIMIT 1
+            """, (brand, name))
+            row = cursor.fetchone()
+            if row:
+                return row["id"]
+            # Attempt 2: brand-only match — if only one product for this brand, use it
+            cursor.execute("""
+                SELECT id FROM products
+                WHERE LOWER(brand) = LOWER(%s)
+            """, (brand,))
+            rows = cursor.fetchall()
+            if len(rows) == 1:
+                return rows[0]["id"]
+            # Attempt 3: brand substring match (handles "Jack Daniels" vs "Jack Daniel's")
+            cursor.execute("""
+                SELECT id, name FROM products
+                WHERE LOWER(brand) LIKE '%%' || LOWER(%s) || '%%'
+                OR LOWER(%s) LIKE '%%' || LOWER(brand) || '%%'
+                ORDER BY scan_count DESC
+                LIMIT 1
+            """, (brand, brand))
+            row = cursor.fetchone()
+            if row:
+                return row["id"]
+            return None
+    except Exception as e:
+        print(f"[match_product] error: {e}", flush=True)
+        return None
+
+
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
 async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
     """Analyze bottle image using OpenAI GPT-4o with Gemini 2.0 Flash fallback"""
@@ -2505,12 +2268,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             "message": "No AI provider API keys configured on the server"
         })
 
-    if request.mode == "pen":
-        prompt = PEN_PROMPT
-    elif request.mode == "bottle_pen":
-        prompt = BOTTLE_PEN_PROMPT
-    else:
-        prompt = BOTTLE_PROMPT
+    prompt = BOTTLE_PROMPT
     last_error: Exception = None
 
     # ── Try OpenAI GPT-4o ──────────────────────────────────────────────────
@@ -2526,6 +2284,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
                 not result.get("levelReadable", True)
                 or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
             )
+            result["matched_product_id"] = match_product(result.get("name", ""), result.get("brand", ""))
             return ScanAnalyzeResponse(**result)
         except openai.AuthenticationError:
             print("[analyze_bottle] OpenAI auth error", flush=True)
@@ -2558,6 +2317,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
                 not result.get("levelReadable", True)
                 or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
             )
+            result["matched_product_id"] = match_product(result.get("name", ""), result.get("brand", ""))
             return ScanAnalyzeResponse(**result)
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=500, detail={

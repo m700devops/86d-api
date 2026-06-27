@@ -15,7 +15,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - Anthropic Claude SDK imported and available as fallback
 
 ## Key Files
-- main.py — all routes and app logic (~2523 lines, single-file monolith)
+- main.py — all routes and app logic (~2327 lines, single-file monolith)
 - database.py — PostgreSQL connection (DATABASE_URL required)
 - auth.py — JWT access + refresh tokens
 - helpers.py — level classification, ID generation, variance calc, order generation
@@ -24,8 +24,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_level_classifier.py — unit tests for helpers.py level logic (run: pytest test_level_classifier.py -v)
 
 ## AI Vision Rules
-- MUST use `gemini-2.0-flash` — **current code at main.py:2295 still says `gemini-1.5-flash`, this is a known bug to fix**
-- Model constant: `GEMINI_MODEL = "gemini-2.0-flash"` (update this)
+- MUST use `gemini-2.0-flash` — model constant set at main.py:2076 (`GEMINI_MODEL = "gemini-2.0-flash"`) ✓ fixed
+- Model constant: `GEMINI_MODEL = "gemini-2.0-flash"`
 - Env vars: GEMINI_API_KEY or GOOGLE_API_KEY
 - Claude models available: claude-sonnet-4-6, claude-3-5-sonnet-20241022, claude-3-haiku-20240307
 - Confidence threshold: 0.35 (override via CONFIDENCE_THRESHOLD env var)

@@ -1,7 +1,11 @@
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 import os
+import time
+import threading
 from contextlib import contextmanager
+from typing import Optional
 from seed_data import SEED_PRODUCTS
 from helpers import generate_id, now_iso
 
@@ -9,18 +13,123 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable is required")
 
+# ── Connection pool ───────────────────────────────────────────────────────────
+# Max 10 keeps us well under Render free-tier's 22-connection cap.
+# Pool is lazy-initialised on first get_db() call and rebuilt automatically
+# after all retries are exhausted on a dead-connection burst.
+
+_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
+_pool_lock = threading.Lock()
+
+_CONN_ERRORS = (psycopg2.OperationalError, psycopg2.InterfaceError)
+_BACKOFF = (0.3, 0.6)   # seconds between attempts 1→2 and 2→3
+
+
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pool
+    if _pool is not None:
+        return _pool
+    with _pool_lock:
+        if _pool is None:
+            _pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,
+                dsn=DATABASE_URL,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=5,
+                keepalives_count=3,
+            )
+    return _pool
+
+
+def _drop_conn(pool: psycopg2.pool.ThreadedConnectionPool, conn) -> None:
+    """Return a single bad connection to the pool and close it immediately."""
+    try:
+        pool.putconn(conn, close=True)
+    except Exception:
+        pass
+
+
+def _drain_pool(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
+    """Close every connection and null out the global pool reference."""
+    global _pool
+    with _pool_lock:
+        try:
+            pool.closeall()
+        except Exception:
+            pass
+        if _pool is pool:
+            _pool = None
+
+
 @contextmanager
 def get_db():
-    """Get a database connection using RealDictCursor for dict-like row access"""
-    conn = psycopg2.connect(DATABASE_URL)
-    conn.cursor_factory = psycopg2.extras.RealDictCursor
+    """Borrow a validated connection from the pool.
+
+    Acquire + validate phase (up to 3 attempts, 0.3s / 0.6s backoff):
+      - getconn() from pool
+      - SELECT 1 ping to confirm the connection is alive
+      - If either fails with OperationalError/InterfaceError, drop only that
+        conn (putconn close=True) and retry
+      - After all retries exhausted, drain the whole pool and re-raise so the
+        next caller gets a fresh pool
+
+    User-code phase (inside the yield):
+      - Any OperationalError/InterfaceError → rollback, drop the conn, re-raise
+        (no retry — the caller's transaction is already broken)
+      - Any other exception → rollback, return conn to pool normally, re-raise
+    """
+    conn = None
+    pool = None
+    last_error: Exception = Exception("unreachable")
+
+    # TODO: handle psycopg2.pool.PoolError (all 10 conns checked out) at scale
+    for attempt in range(3):
+        try:
+            pool = _get_pool()
+            conn = pool.getconn()
+            conn.cursor_factory = psycopg2.extras.RealDictCursor
+            # Validate — catches silently-dead idle connections
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            break  # conn is good
+        except _CONN_ERRORS as exc:
+            last_error = exc
+            if conn is not None:
+                _drop_conn(pool, conn)
+                conn = None
+            if attempt < 2:
+                time.sleep(_BACKOFF[attempt])
+            else:
+                # All retries exhausted — drain so next caller starts fresh
+                print(f"[db] pool drained after 3 failed attempts: {last_error}", flush=True)
+                _drain_pool(pool)
+                pool = None
+                raise
+
+    # ── User code ────────────────────────────────────────────────────────────
     try:
         yield conn
+    except _CONN_ERRORS:
+        # Broken mid-transaction — drop this conn, don't return it to pool
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if pool is not None:
+            _drop_conn(pool, conn)
+        conn = None
+        raise
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        conn.close()
+        if conn is not None and pool is not None:
+            pool.putconn(conn)
 
 
 def init_db():
@@ -305,35 +414,59 @@ def init_db():
 
         conn.commit()
 
-        # Seed products if table is empty
-        cursor.execute("SELECT COUNT(*) as count FROM products")
-        if cursor.fetchone()["count"] == 0:
-            seed_products(conn)
+        # Backfill subscription fields for old accounts that pre-date those columns
+        cursor.execute("""
+            UPDATE users
+            SET subscription_status = 'trial', updated_at = %s
+            WHERE subscription_status IS NULL
+        """, (now_iso(),))
+        cursor.execute("""
+            UPDATE users
+            SET subscription_tier = 'starter', updated_at = %s
+            WHERE subscription_tier IS NULL
+        """, (now_iso(),))
+        conn.commit()
+
+        # Seed products — always runs but is idempotent (checks name+brand before insert)
+        seed_products(conn)
 
 
 def seed_products(conn):
-    """Seed the products table with initial data"""
+    """Seed the products table — idempotent, safe to run on every startup."""
     cursor = conn.cursor()
     now = now_iso()
+    inserted = 0
+    skipped = 0
 
     for product in SEED_PRODUCTS:
+        name = product["name"]
+        brand = product.get("brand")
+        upc = product.get("upc")
+
+        # Skip if this name+brand already exists (handles re-deploys and partial seeds)
+        cursor.execute(
+            "SELECT id FROM products WHERE name = %s AND (brand = %s OR (brand IS NULL AND %s IS NULL))",
+            (name, brand, brand)
+        )
+        if cursor.fetchone():
+            skipped += 1
+            continue
+
+        # Also skip if this UPC already exists (guards against data errors in seed list)
+        if upc:
+            cursor.execute("SELECT id FROM products WHERE upc = %s", (upc,))
+            if cursor.fetchone():
+                skipped += 1
+                continue
+
         cursor.execute("""
             INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO NOTHING
         """, (
-            generate_id(),
-            product["name"],
-            product.get("brand"),
-            product["category"],
-            product.get("size"),
-            product.get("upc"),
-            None,
-            0,
-            1,
-            now,
-            now
+            generate_id(), name, brand, product["category"],
+            product.get("size"), upc, None, 0, 1, now, now
         ))
+        inserted += 1
 
     conn.commit()
-    print(f"Seeded {len(SEED_PRODUCTS)} products")
+    print(f"Products: {inserted} inserted, {skipped} already existed ({len(SEED_PRODUCTS)} total in catalog)")
