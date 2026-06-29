@@ -2097,6 +2097,8 @@ class ScanAnalyzeResponse(BaseModel):
     levelReadable: bool = True
     needs_rescan: bool = False  # True when confidence is too low for reliable classification
     matched_product_id: Optional[str] = None
+    is_new_product: bool = False
+    match_method: str = "none"  # "exact", "auto_created", "none"
 
 PRODUCT_CATALOG = """KNOWN PRODUCTS — if you can identify the bottle, match to the closest entry below (use exact brand/name spelling). If the bottle is not listed, use your best judgment.
 
@@ -2208,6 +2210,9 @@ CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.35"))
 LEVEL_DEADBAND: float = float(os.getenv("LEVEL_DEADBAND", "0.03"))
 LEVEL_STABILIZATION: bool = os.getenv("LEVEL_STABILIZATION", "true").lower() not in ("false", "0", "no")
 SMOOTHING_WINDOW: int = max(1, int(os.getenv("SMOOTHING_WINDOW", "3")))
+PROVIDER_TIMEOUT: float = float(os.getenv("PROVIDER_TIMEOUT", "4.0"))
+TOTAL_SCAN_TIMEOUT_SEC: float = float(os.getenv("TOTAL_SCAN_TIMEOUT_SEC", "8.0"))
+AUTO_CREATE_CONFIDENCE: float = float(os.getenv("AUTO_CREATE_CONFIDENCE", "0.4"))
 
 
 def _strip_code_fences(text: str) -> str:
@@ -2266,25 +2271,28 @@ def _apply_stabilization(result: dict, previous_readings: list[float]) -> dict:
 
 async def _call_openai(api_key: str, prompt: str, image_data: str) -> str:
     client = openai.AsyncOpenAI(api_key=api_key)
-    response = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        max_tokens=300,
-        timeout=25.0,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_data}",
-                            "detail": "high",
+    response = await asyncio.wait_for(
+        client.chat.completions.create(
+            model=OPENAI_MODEL,
+            max_tokens=300,
+            timeout=60.0,  # SDK fallback; asyncio.wait_for is the real gate
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_data}",
+                                "detail": "high",
+                            },
                         },
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
+        ),
+        timeout=PROVIDER_TIMEOUT,
     )
     return response.choices[0].message.content.strip()
 
@@ -2294,59 +2302,160 @@ async def _call_gemini(api_key: str, prompt: str, image_data: str) -> str:
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(GEMINI_MODEL)
     image_bytes = base64.b64decode(image_data)
-    response = await asyncio.to_thread(
-        model.generate_content,
-        [prompt, {"mime_type": "image/jpeg", "data": image_bytes}]
+    response = await asyncio.wait_for(
+        asyncio.to_thread(
+            model.generate_content,
+            [prompt, {"mime_type": "image/jpeg", "data": image_bytes}]
+        ),
+        timeout=PROVIDER_TIMEOUT,
     )
     return response.text.strip()
 
 
-def match_product(name: str, brand: str) -> Optional[str]:
-    """Best-effort match of AI-detected bottle to products table. Returns product id or None."""
-    if not brand:
-        return None
+def _match_or_create_product(result: dict, user_id: str) -> tuple:
+    """Exact-match AI result against products table; auto-create if confidence high enough.
+
+    Returns (matched_product_id, is_new_product, match_method).
+    Never raises — on any DB error returns (None, False, "none").
+    """
+    name = result.get("name", "").strip()
+    brand = result.get("brand", "").strip() or None
+    confidence = result.get("confidence", 0.0)
+
+    if not name:
+        return (None, False, "none")
+
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            # Attempt 1: brand exact match + name contained in product name
-            cursor.execute("""
-                SELECT id, name FROM products
-                WHERE LOWER(brand) = LOWER(%s)
-                AND LOWER(name) LIKE '%%' || LOWER(%s) || '%%'
-                ORDER BY scan_count DESC
-                LIMIT 1
-            """, (brand, name))
-            row = cursor.fetchone()
-            if row:
-                return row["id"]
-            # Attempt 2: brand-only match — if only one product for this brand, use it
+
+            # Step A — exact match on name + brand (case-insensitive)
             cursor.execute("""
                 SELECT id FROM products
-                WHERE LOWER(brand) = LOWER(%s)
-            """, (brand,))
-            rows = cursor.fetchall()
-            if len(rows) == 1:
-                return rows[0]["id"]
-            # Attempt 3: brand substring match (handles "Jack Daniels" vs "Jack Daniel's")
-            cursor.execute("""
-                SELECT id, name FROM products
-                WHERE LOWER(brand) LIKE '%%' || LOWER(%s) || '%%'
-                OR LOWER(%s) LIKE '%%' || LOWER(brand) || '%%'
-                ORDER BY scan_count DESC
+                WHERE LOWER(name) = LOWER(%s)
+                  AND (
+                    (brand IS NULL AND %s IS NULL)
+                    OR LOWER(COALESCE(brand, '')) = LOWER(COALESCE(%s, ''))
+                  )
+                  AND deleted_at IS NULL
+                ORDER BY verified DESC, scan_count DESC
                 LIMIT 1
-            """, (brand, brand))
+            """, (name, brand, brand))
             row = cursor.fetchone()
             if row:
-                return row["id"]
-            return None
+                cursor.execute(
+                    "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
+                    (now_iso(), row["id"])
+                )
+                conn.commit()
+                return (row["id"], False, "exact")
+
+            # Step B — auto-create if confidence is sufficient
+            if confidence >= AUTO_CREATE_CONFIDENCE:
+                category = result.get("category", "other") or "other"
+                new_id = generate_id()
+                now = now_iso()
+                cursor.execute("""
+                    INSERT INTO products
+                        (id, name, brand, category, size, upc, image_url,
+                         scan_count, verified, source, created_by_user_id, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, NULL, NULL, NULL, 1, 0, 'scan_auto', %s, %s, %s)
+                """, (new_id, name, brand, category, user_id, now, now))
+                conn.commit()
+                print(f"[match_product] auto-created product id={new_id} name={name!r} brand={brand!r}", flush=True)
+                return (new_id, True, "auto_created")
+
+            # Step C — confidence too low, no match
+            return (None, False, "none")
+
     except Exception as e:
-        print(f"[match_product] error: {e}", flush=True)
-        return None
+        print(f"[match_product] error (returning none): {e}", flush=True)
+        return (None, False, "none")
+
+
+def _process_ai_result(text: str, request: ScanAnalyzeRequest, user_id: str):
+    """Parse AI text, apply stabilization, do product matching.
+
+    Returns ScanAnalyzeResponse, or JSONResponse(200, None) when no bottle detected.
+    Raises json.JSONDecodeError on unparseable text.
+    """
+    result = _parse_ai_result(text)
+    if not result.get("name") and result.get("confidence", 1) == 0:
+        return JSONResponse(status_code=200, content=None)
+    result = _apply_stabilization(result, request.previous_readings)
+    result["needs_rescan"] = (
+        not result.get("levelReadable", True)
+        or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
+    )
+    matched_id, is_new, method = _match_or_create_product(result, user_id)
+    result["matched_product_id"] = matched_id
+    result["is_new_product"] = is_new
+    result["match_method"] = method
+    return ScanAnalyzeResponse(**result)
+
+
+async def _run_providers(openai_key, gemini_key, prompt, request, user_id):
+    """Try OpenAI then Gemini. Falls through on per-provider timeout.
+    Returns ScanAnalyzeResponse or JSONResponse. Raises HTTPException on fatal errors."""
+    last_error = None
+
+    if openai_key:
+        try:
+            print(f"[analyze_bottle] trying OpenAI model={OPENAI_MODEL} timeout={PROVIDER_TIMEOUT}s", flush=True)
+            text = await _call_openai(openai_key, prompt, request.image)
+            return _process_ai_result(text, request, user_id)
+        except openai.AuthenticationError:
+            raise HTTPException(status_code=503, detail={
+                "error": "service_unavailable",
+                "message": "AI service authentication failed — check OPENAI_API_KEY"
+            })
+        except (asyncio.TimeoutError, openai.APITimeoutError) as e:
+            print(f"[analyze_bottle] OpenAI timed out after {PROVIDER_TIMEOUT}s, trying fallback", flush=True)
+            last_error = e
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=500, detail={
+                "error": "parse_failed",
+                "message": f"Could not parse AI response: {e}"
+            })
+        except Exception as e:
+            print(f"[analyze_bottle] OpenAI unexpected error: {traceback.format_exc()}", flush=True)
+            last_error = e
+
+    if gemini_key:
+        try:
+            print(f"[analyze_bottle] trying Gemini model={GEMINI_MODEL} timeout={PROVIDER_TIMEOUT}s", flush=True)
+            text = await _call_gemini(gemini_key, prompt, request.image)
+            return _process_ai_result(text, request, user_id)
+        except asyncio.TimeoutError as e:
+            print(f"[analyze_bottle] Gemini timed out after {PROVIDER_TIMEOUT}s", flush=True)
+            last_error = e
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=500, detail={
+                "error": "parse_failed",
+                "message": f"Could not parse Gemini response: {e}"
+            })
+        except Exception as e:
+            print(f"[analyze_bottle] Gemini error: {traceback.format_exc()}", flush=True)
+            last_error = e
+
+    if isinstance(last_error, (asyncio.TimeoutError, openai.APITimeoutError)):
+        raise HTTPException(status_code=504, detail={
+            "error": "ai_timeout",
+            "message": "AI service timed out — image may be too large or service is slow"
+        })
+    raise HTTPException(status_code=502, detail={
+        "error": "ai_api_error",
+        "message": f"All AI providers failed: {last_error}"
+    })
 
 
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
 async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
-    """Analyze bottle image using OpenAI GPT-4o with Gemini 2.0 Flash fallback"""
+    """Analyze bottle image using OpenAI GPT-4o with Gemini 2.0 Flash fallback.
+
+    Per-provider cap: PROVIDER_TIMEOUT (default 4s) — on timeout falls through to next provider.
+    Total wall-clock cap: TOTAL_SCAN_TIMEOUT_SEC (default 8s) — returns empty 200 on expiry.
+    """
     print("[analyze_bottle] function started", flush=True)
 
     openai_key = os.getenv("OPENAI_API_KEY")
@@ -2360,76 +2469,14 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             "message": "No AI provider API keys configured on the server"
         })
 
-    prompt = BOTTLE_PROMPT
-    last_error: Exception = None
-
-    # ── Try OpenAI GPT-4o ──────────────────────────────────────────────────
-    if openai_key:
-        try:
-            print(f"[analyze_bottle] trying OpenAI model={OPENAI_MODEL}", flush=True)
-            text = await _call_openai(openai_key, prompt, request.image)
-            result = _parse_ai_result(text)
-            if not result.get("name") and result.get("confidence", 1) == 0:
-                return JSONResponse(status_code=200, content=None)
-            result = _apply_stabilization(result, request.previous_readings)
-            result["needs_rescan"] = (
-                not result.get("levelReadable", True)
-                or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
-            )
-            result["matched_product_id"] = match_product(result.get("name", ""), result.get("brand", ""))
-            return ScanAnalyzeResponse(**result)
-        except openai.AuthenticationError:
-            print("[analyze_bottle] OpenAI auth error", flush=True)
-            raise HTTPException(status_code=503, detail={
-                "error": "service_unavailable",
-                "message": "AI service authentication failed — check OPENAI_API_KEY"
-            })
-        except openai.APITimeoutError as e:
-            print("[analyze_bottle] OpenAI timeout", flush=True)
-            last_error = e
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=500, detail={
-                "error": "parse_failed",
-                "message": f"Could not parse AI response: {e}"
-            })
-        except Exception as e:
-            print(f"[analyze_bottle] OpenAI unexpected error: {traceback.format_exc()}", flush=True)
-            last_error = e
-
-    # ── Gemini 2.0 Flash fallback ──────────────────────────────────────────
-    if gemini_key:
-        try:
-            print(f"[analyze_bottle] falling back to Gemini model={GEMINI_MODEL}", flush=True)
-            text = await _call_gemini(gemini_key, prompt, request.image)
-            result = _parse_ai_result(text)
-            if not result.get("name") and result.get("confidence", 1) == 0:
-                return JSONResponse(status_code=200, content=None)
-            result = _apply_stabilization(result, request.previous_readings)
-            result["needs_rescan"] = (
-                not result.get("levelReadable", True)
-                or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
-            )
-            result["matched_product_id"] = match_product(result.get("name", ""), result.get("brand", ""))
-            return ScanAnalyzeResponse(**result)
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=500, detail={
-                "error": "parse_failed",
-                "message": f"Could not parse Gemini response: {e}"
-            })
-        except Exception as e:
-            print(f"[analyze_bottle] Gemini error: {traceback.format_exc()}", flush=True)
-            last_error = e
-
-    # ── All providers failed ───────────────────────────────────────────────
-    if isinstance(last_error, openai.APITimeoutError):
-        raise HTTPException(status_code=504, detail={
-            "error": "ai_timeout",
-            "message": "AI service timed out — image may be too large or service is slow"
-        })
-    raise HTTPException(status_code=502, detail={
-        "error": "ai_api_error",
-        "message": f"All AI providers failed: {last_error}"
-    })
+    try:
+        return await asyncio.wait_for(
+            _run_providers(openai_key, gemini_key, BOTTLE_PROMPT, request, user_id),
+            timeout=TOTAL_SCAN_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        print(f"[analyze_bottle] total timeout exceeded ({TOTAL_SCAN_TIMEOUT_SEC}s)", flush=True)
+        return JSONResponse(status_code=200, content=None)
 
 # ============== MARKET PULSE ENDPOINT ==============
 

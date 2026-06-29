@@ -438,6 +438,29 @@ def init_db():
                 print(f"[db] migrated par_levels: added {col} {col_type}", flush=True)
         conn.commit()
 
+        # Migrate products: add source, created_by_user_id, deleted_at if absent
+        products_migrations = [
+            ("source", "TEXT DEFAULT 'manual'"),
+            ("created_by_user_id", "TEXT"),
+            ("deleted_at", "TEXT"),
+        ]
+        for col, col_def in products_migrations:
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'products' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE products ADD COLUMN {col} {col_def}")
+                print(f"[db] migrated products: added {col} {col_def}", flush=True)
+        conn.commit()
+
+        # Backfill source: seed rows (verified=1) → 'seed', others keep 'manual'
+        cursor.execute("""
+            UPDATE products SET source = 'seed', updated_at = %s
+            WHERE verified = 1 AND (source IS NULL OR source = 'manual')
+        """, (now_iso(),))
+        conn.commit()
+
 
         # Seed products — always runs but is idempotent (checks name+brand before insert)
         seed_products(conn)
