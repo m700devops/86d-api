@@ -128,6 +128,8 @@ class LocationListResponse(BaseModel):
 class ParLevelBase(BaseModel):
     product_id: str
     par_quantity: float = Field(..., gt=0)
+    full_quantity: Optional[float] = Field(default=0.0, ge=0)
+    current_stock: Optional[float] = Field(default=0.0, ge=0)
 
 class ParLevelCreate(ParLevelBase):
     pass
@@ -141,8 +143,10 @@ class ParLevelResponse(BaseModel):
     product_id: str
     product: Optional[ProductResponse] = None
     par_quantity: float
+    full_quantity: float = 0.0
+    current_stock: float = 0.0
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -152,6 +156,20 @@ class ParLevelListResponse(BaseModel):
 class ParLevelBulkResponse(BaseModel):
     updated: int
     par_levels: List[ParLevelResponse]
+
+class ProductStockUpdate(BaseModel):
+    """PATCH /locations/{loc}/products/{prod} — update full, current_stock, and/or par."""
+    full: Optional[float] = Field(default=None, ge=0, le=999.99)
+    current_stock: Optional[float] = Field(default=None, ge=0, le=999.99)
+    par: Optional[float] = Field(default=None, gt=0)
+
+class ProductStockResponse(BaseModel):
+    location_id: str
+    product_id: str
+    full: float
+    current_stock: float
+    par: Optional[float]
+    updated_at: str
 
 # ============== SCAN MODELS ==============
 

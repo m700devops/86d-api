@@ -581,6 +581,8 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
                 "location_id": row["location_id"],
                 "product_id": row["product_id"],
                 "par_quantity": row["par_quantity"],
+                "full_quantity": float(row["full_quantity"] or 0),
+                "current_stock": float(row["current_stock"] or 0),
                 "updated_at": row["updated_at"],
                 "product": {
                     "id": row["product_id"],
@@ -597,7 +599,7 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
                 }
             }
             par_levels.append(pl)
-        
+
         return {"par_levels": par_levels}
 
 @v1_router.post("/locations/{location_id}/par-levels", response_model=dict)
@@ -629,27 +631,32 @@ def set_par_level(location_id: str, par_data: ParLevelCreate, user_id: str = Dep
         par_id = generate_id()
         
         cursor.execute("""
-            INSERT INTO par_levels (id, location_id, product_id, par_quantity, updated_at)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(location_id, product_id) DO UPDATE SET
                 par_quantity = excluded.par_quantity,
+                full_quantity = COALESCE(excluded.full_quantity, par_levels.full_quantity, 0),
+                current_stock = COALESCE(excluded.current_stock, par_levels.current_stock, 0),
                 updated_at = excluded.updated_at
-        """, (par_id, location_id, par_data.product_id, par_data.par_quantity, now))
+        """, (par_id, location_id, par_data.product_id, par_data.par_quantity,
+              par_data.full_quantity or 0, par_data.current_stock or 0, now))
         conn.commit()
-        
+
         # Get the actual ID (either inserted or existing)
         cursor.execute(
             "SELECT id FROM par_levels WHERE location_id = %s AND product_id = %s",
             (location_id, par_data.product_id)
         )
         par_id = cursor.fetchone()["id"]
-        
+
         return {
             "par_level": {
                 "id": par_id,
                 "location_id": location_id,
                 "product_id": par_data.product_id,
                 "par_quantity": par_data.par_quantity,
+                "full_quantity": par_data.full_quantity or 0,
+                "current_stock": par_data.current_stock or 0,
                 "updated_at": now
             }
         }
@@ -678,33 +685,116 @@ def set_par_levels_bulk(location_id: str, bulk_data: ParLevelBulkRequest, user_i
         for par_data in bulk_data.par_levels:
             par_id = generate_id()
             cursor.execute("""
-                INSERT INTO par_levels (id, location_id, product_id, par_quantity, updated_at)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(location_id, product_id) DO UPDATE SET
                     par_quantity = excluded.par_quantity,
+                    full_quantity = COALESCE(excluded.full_quantity, par_levels.full_quantity, 0),
+                    current_stock = COALESCE(excluded.current_stock, par_levels.current_stock, 0),
                     updated_at = excluded.updated_at
-            """, (par_id, location_id, par_data.product_id, par_data.par_quantity, now))
+            """, (par_id, location_id, par_data.product_id, par_data.par_quantity,
+                  par_data.full_quantity or 0, par_data.current_stock or 0, now))
             updated += 1
-            
+
             cursor.execute(
                 "SELECT id FROM par_levels WHERE location_id = %s AND product_id = %s",
                 (location_id, par_data.product_id)
             )
             actual_id = cursor.fetchone()["id"]
-            
+
             par_levels.append({
                 "id": actual_id,
                 "location_id": location_id,
                 "product_id": par_data.product_id,
                 "par_quantity": par_data.par_quantity,
+                "full_quantity": par_data.full_quantity or 0,
+                "current_stock": par_data.current_stock or 0,
                 "updated_at": now
             })
         
         conn.commit()
-        
+
         return {
             "updated": updated,
             "par_levels": par_levels
+        }
+
+@v1_router.get("/locations/{location_id}/products/{product_id}", response_model=ProductStockResponse)
+def get_product_stock(location_id: str, product_id: str, user_id: str = Depends(get_current_user)):
+    """Get full/current_stock/par for a specific product at a location."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied to this location"})
+
+        cursor.execute(
+            "SELECT par_quantity, full_quantity, current_stock, updated_at FROM par_levels WHERE location_id = %s AND product_id = %s",
+            (location_id, product_id)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "No stock record for this product at this location"})
+
+        return {
+            "location_id": location_id,
+            "product_id": product_id,
+            "full": float(row["full_quantity"] or 0),
+            "current_stock": float(row["current_stock"] or 0),
+            "par": float(row["par_quantity"]) if row["par_quantity"] is not None else None,
+            "updated_at": row["updated_at"],
+        }
+
+@v1_router.patch("/locations/{location_id}/products/{product_id}", response_model=ProductStockResponse)
+def update_product_stock(location_id: str, product_id: str, data: ProductStockUpdate, user_id: str = Depends(get_current_user)):
+    """Update full/current_stock/par for a specific product at a location (upserts par_levels row)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied to this location"})
+
+        cursor.execute("SELECT id FROM products WHERE id = %s", (product_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Product not found"})
+
+        now = now_iso()
+        # Fetch existing row so we can preserve unchanged fields
+        cursor.execute(
+            "SELECT par_quantity, full_quantity, current_stock FROM par_levels WHERE location_id = %s AND product_id = %s",
+            (location_id, product_id)
+        )
+        existing = cursor.fetchone()
+
+        new_par = data.par if data.par is not None else (float(existing["par_quantity"]) if existing else 1.0)
+        new_full = data.full if data.full is not None else (float(existing["full_quantity"] or 0) if existing else 0.0)
+        new_stock = data.current_stock if data.current_stock is not None else (float(existing["current_stock"] or 0) if existing else 0.0)
+
+        par_id = generate_id()
+        cursor.execute("""
+            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT(location_id, product_id) DO UPDATE SET
+                par_quantity = excluded.par_quantity,
+                full_quantity = excluded.full_quantity,
+                current_stock = excluded.current_stock,
+                updated_at = excluded.updated_at
+        """, (par_id, location_id, product_id, new_par, new_full, new_stock, now))
+        conn.commit()
+
+        return {
+            "location_id": location_id,
+            "product_id": product_id,
+            "full": new_full,
+            "current_stock": new_stock,
+            "par": new_par,
+            "updated_at": now,
         }
 
 # ============== INVENTORY SESSIONS ==============
@@ -1512,8 +1602,8 @@ def sync_data(sync_data: SyncRequest, user_id: str = Depends(get_current_user)):
             
             pl_id = generate_id()
             cursor.execute("""
-                INSERT INTO par_levels (id, location_id, product_id, par_quantity, updated_at)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, updated_at)
+                VALUES (%s, %s, %s, %s, 0, 0, %s)
                 ON CONFLICT(location_id, product_id) DO UPDATE SET
                     par_quantity = excluded.par_quantity,
                     updated_at = excluded.updated_at
@@ -1598,6 +1688,8 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
                 "location_id": row["location_id"],
                 "product_id": row["product_id"],
                 "par_quantity": row["par_quantity"],
+                "full_quantity": float(row["full_quantity"] or 0),
+                "current_stock": float(row["current_stock"] or 0),
                 "updated_at": row["updated_at"],
                 "product": {
                     "id": row["product_id"],
@@ -1614,7 +1706,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
                 }
             }
             par_levels.append(pl)
-        
+
         # Get recent sessions
         cursor.execute("""
             SELECT * FROM inventory_sessions

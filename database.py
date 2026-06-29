@@ -427,6 +427,18 @@ def init_db():
         """, (now_iso(),))
         conn.commit()
 
+        # Migrate par_levels: add full_quantity and current_stock columns if absent
+        for col, col_type in [("full_quantity", "NUMERIC(10,2)"), ("current_stock", "NUMERIC(10,2)")]:
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'par_levels' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE par_levels ADD COLUMN {col} {col_type} DEFAULT 0")
+                print(f"[db] migrated par_levels: added {col} {col_type}", flush=True)
+        conn.commit()
+
+
         # Seed products — always runs but is idempotent (checks name+brand before insert)
         seed_products(conn)
 
