@@ -67,7 +67,7 @@ class RefreshResponse(BaseModel):
 class ProductBase(BaseModel):
     name: str
     brand: Optional[str] = None
-    category: str = Field(..., pattern="^(spirits|beer|wine|other)$")
+    category: str = Field(..., pattern="^(spirits|beer|wine|soda|mixer|water|juice|other)$")
     size: Optional[str] = None
     upc: Optional[str] = None
     price: Optional[float] = None

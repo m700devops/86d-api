@@ -324,7 +324,7 @@ def refresh_token(refresh_data: RefreshRequest):
 def list_products(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    category: Optional[str] = Query(None, pattern="^(spirits|beer|wine|other)$"),
+    category: Optional[str] = Query(None, pattern="^(spirits|beer|wine|soda|mixer|water|juice|other)$"),
     sort: str = Query("name", pattern="^(name|scan_count|created_at)$")
 ):
     """List products with pagination and filters"""
