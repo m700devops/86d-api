@@ -495,11 +495,11 @@ def seed_products(conn):
                 continue
 
         cursor.execute("""
-            INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, source, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             generate_id(), name, brand, product["category"],
-            product.get("size"), upc, None, 0, 1, now, now
+            product.get("size"), upc, None, 0, 1, 'seed', now, now
         ))
         inserted += 1
 

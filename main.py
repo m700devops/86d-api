@@ -2128,9 +2128,11 @@ Peppermint/Cinnamon: Fireball Cinnamon Whisky, Rumple Minze Peppermint, DeKuyper
 Coconut/Tropical: Malibu Coconut Rum, DKNY Coconut, Malibu Mango, Blue Chair Bay Coconut
 Vermouth/Fortified: Martini & Rossi Sweet Vermouth, Martini & Rossi Dry Vermouth, Noilly Prat Dry, Dolin Dry, Carpano Antica Formula, Mancino Secco
 Beer (common): Bud Light, Budweiser, Coors Light, Miller Lite, Miller High Life, Corona Extra, Modelo Especial, Dos Equis Lager, Heineken, Stella Artois, Blue Moon Belgian White, Shock Top, Sam Adams Boston Lager, Guinness Draught, Sierra Nevada Pale Ale, Lagunitas IPA, Bell's Two Hearted
-Wine (common): Kim Crawford Sauvignon Blanc, Kendall-Jackson Vintner's Reserve Chardonnay, Josh Cellars Cabernet Sauvignon, La Marca Prosecco, Meiomi Pinot Noir, Whispering Angel Rosé, Barefoot Pinot Grigio, Bogle Essential Red, Chateau Ste. Michelle Riesling"""
+Wine (common): Kim Crawford Sauvignon Blanc, Kendall-Jackson Vintner's Reserve Chardonnay, Josh Cellars Cabernet Sauvignon, La Marca Prosecco, Meiomi Pinot Noir, Whispering Angel Rosé, Barefoot Pinot Grigio, Bogle Essential Red, Chateau Ste. Michelle Riesling
+Soda (common): Sprite Original, Coca-Cola Classic, Coca-Cola Diet Coke, Pepsi Original, Fanta Orange, Canada Dry Ginger Ale
+Mixers/Juice (common): Schweppes Tonic Water, Fever-Tree Tonic Water, Schweppes Club Soda, Red Bull Energy Drink, Ocean Spray Cranberry Juice, Tropicana Orange Juice, Dole Pineapple Juice, Rose's Lime Juice, Rose's Grenadine"""
 
-BOTTLE_PROMPT = """You are analyzing a photo of a liquor/beverage bottle for bar inventory.
+BOTTLE_PROMPT = """You are analyzing a photo of a beverage container (liquor, beer, wine, soda, mixers, water — glass, plastic, or can) for bar inventory.
 
 Identify the bottle and estimate the liquid level accurately.
 
@@ -2173,8 +2175,8 @@ Return ONLY a JSON object — no markdown, no explanation:
 {
   "name": "Variant/expression name only (e.g. Old No. 7, Red Label, Original)",
   "brand": "Brand/distillery name only (e.g. Jack Daniel's, Johnnie Walker, Grey Goose)",
-  "category": "spirits",
-  "product_type": "Specific class and type (e.g. Tennessee Whiskey, Blended Scotch Whisky, Vodka, London Dry Gin, Dark Rum)",
+  "category": "one of: spirits | beer | wine | soda | mixer | water | juice | other",
+  "product_type": "Specific class and type (e.g. Tennessee Whiskey, Blended Scotch Whisky, Vodka, London Dry Gin, Dark Rum, Lemon-Lime Soda, Cola, Tonic Water)",
   "liquidLevel": 0.5,
   "confidence": 0.9,
   "levelReadable": true
@@ -2183,8 +2185,8 @@ Return ONLY a JSON object — no markdown, no explanation:
 Rules:
 - name: variant/expression only — do NOT include the brand name in this field
 - brand: brand/distillery name only — do NOT include the variant or product type
-- product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka). Use the label's own designation when visible.
-- category must be one of: spirits, beer, wine, other
+- product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka, Lemon-Lime Soda, Cola, Tonic Water, Energy Drink). Use the label's own designation when visible.
+- category must be one of: spirits, beer, wine, soda, mixer, water, juice, other
 - liquidLevel is 0.0 (empty) to 1.0 (full)
 - Set levelReadable to false if: the bottle is opaque, image is too dark, no bottle is visible, OR the bottle and liquid are both clear/transparent and you cannot clearly see the meniscus line
 - If no bottle is present at all, return: {"name":"","brand":"","category":"other","product_type":"","liquidLevel":0,"confidence":0,"levelReadable":false}
@@ -2210,8 +2212,8 @@ CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.35"))
 LEVEL_DEADBAND: float = float(os.getenv("LEVEL_DEADBAND", "0.03"))
 LEVEL_STABILIZATION: bool = os.getenv("LEVEL_STABILIZATION", "true").lower() not in ("false", "0", "no")
 SMOOTHING_WINDOW: int = max(1, int(os.getenv("SMOOTHING_WINDOW", "3")))
-PROVIDER_TIMEOUT: float = float(os.getenv("PROVIDER_TIMEOUT", "4.0"))
-TOTAL_SCAN_TIMEOUT_SEC: float = float(os.getenv("TOTAL_SCAN_TIMEOUT_SEC", "8.0"))
+PROVIDER_TIMEOUT: float = float(os.getenv("PROVIDER_TIMEOUT", "9.0"))
+TOTAL_SCAN_TIMEOUT_SEC: float = float(os.getenv("TOTAL_SCAN_TIMEOUT_SEC", "20.0"))
 AUTO_CREATE_CONFIDENCE: float = float(os.getenv("AUTO_CREATE_CONFIDENCE", "0.4"))
 
 
@@ -2453,8 +2455,8 @@ async def _run_providers(openai_key, gemini_key, prompt, request, user_id):
 async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
     """Analyze bottle image using OpenAI GPT-4o with Gemini 2.0 Flash fallback.
 
-    Per-provider cap: PROVIDER_TIMEOUT (default 4s) — on timeout falls through to next provider.
-    Total wall-clock cap: TOTAL_SCAN_TIMEOUT_SEC (default 8s) — returns empty 200 on expiry.
+    Per-provider cap: PROVIDER_TIMEOUT (default 9s) — on timeout falls through to next provider.
+    Total wall-clock cap: TOTAL_SCAN_TIMEOUT_SEC (default 20s) — returns empty 200 on expiry.
     """
     print("[analyze_bottle] function started", flush=True)
 

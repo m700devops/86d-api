@@ -441,4 +441,22 @@ SEED_PRODUCTS = [
     {"name": 'Freixenet Cordon Negro Brut 750ml', "brand": 'Freixenet', "category": 'wine', "size": '750ml', "upc": '03000000440'},
     {"name": 'Moet Brut Imperial 750ml', "brand": 'Moet', "category": 'wine', "size": '750ml', "upc": '03000000441'},
     {"name": 'Veuve Clicquot Brut Yellow Label 750ml', "brand": 'Veuve Clicquot', "category": 'wine', "size": '750ml', "upc": '03000000442'},
+    # Soda / soft drinks — names are variant-only (no brand, no size) so AI scan
+    # results can exact-match: _match_or_create_product compares LOWER(name)+brand.
+    {"name": 'Original', "brand": 'Sprite', "category": 'soda', "size": '2L', "upc": '04000000001'},
+    {"name": 'Classic', "brand": 'Coca-Cola', "category": 'soda', "size": '2L', "upc": '04000000002'},
+    {"name": 'Diet Coke', "brand": 'Coca-Cola', "category": 'soda', "size": '2L', "upc": '04000000003'},
+    {"name": 'Original', "brand": 'Pepsi', "category": 'soda', "size": '2L', "upc": '04000000004'},
+    {"name": 'Orange', "brand": 'Fanta', "category": 'soda', "size": '2L', "upc": '04000000005'},
+    {"name": 'Ginger Ale', "brand": 'Canada Dry', "category": 'soda', "size": '2L', "upc": '04000000006'},
+    # Mixers / juices
+    {"name": 'Tonic Water', "brand": 'Schweppes', "category": 'mixer', "size": '1L', "upc": '04000000007'},
+    {"name": 'Tonic Water', "brand": 'Fever-Tree', "category": 'mixer', "size": '500ml', "upc": '04000000008'},
+    {"name": 'Club Soda', "brand": 'Schweppes', "category": 'mixer', "size": '1L', "upc": '04000000009'},
+    {"name": 'Energy Drink', "brand": 'Red Bull', "category": 'mixer', "size": '8.4oz', "upc": '04000000010'},
+    {"name": 'Cranberry Juice', "brand": 'Ocean Spray', "category": 'mixer', "size": '64oz', "upc": '04000000011'},
+    {"name": 'Orange Juice', "brand": 'Tropicana', "category": 'mixer', "size": '52oz', "upc": '04000000012'},
+    {"name": 'Pineapple Juice', "brand": 'Dole', "category": 'mixer', "size": '46oz', "upc": '04000000013'},
+    {"name": 'Lime Juice', "brand": "Rose's", "category": 'mixer', "size": '1L', "upc": '04000000014'},
+    {"name": 'Grenadine', "brand": "Rose's", "category": 'mixer', "size": '1L', "upc": '04000000015'},
 ]
