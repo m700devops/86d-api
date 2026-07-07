@@ -2134,70 +2134,38 @@ Wine (common): Kim Crawford Sauvignon Blanc, Kendall-Jackson Vintner's Reserve C
 Soda (common): Sprite Original, Coca-Cola Classic, Coca-Cola Diet Coke, Pepsi Original, Fanta Orange, Canada Dry Ginger Ale
 Mixers/Juice (common): Schweppes Tonic Water, Fever-Tree Tonic Water, Schweppes Club Soda, Red Bull Energy Drink, Ocean Spray Cranberry Juice, Tropicana Orange Juice, Dole Pineapple Juice, Rose's Lime Juice, Rose's Grenadine"""
 
-BOTTLE_PROMPT = """You are analyzing a photo of a beverage container (liquor, beer, wine, soda, mixers, water — glass, plastic, or can) for bar inventory.
+BOTTLE_PROMPT = """You are identifying a beverage container (liquor, beer, wine, soda, mixers, water — glass, plastic, or can) from a photo for bar inventory.
 
-Identify the bottle and estimate the liquid level accurately.
+Your ONLY job is to identify the exact product. Nothing else matters.
 
-CRITICAL — identifying the product (name/brand):
-- The name and brand MUST come from text printed on the label. TRANSCRIBE the label exactly as printed — identification is a reading task, not a recall task.
+CRITICAL — identification is a READING task, not a recall task:
+- The name and brand MUST come from text printed on the label. TRANSCRIBE the label exactly as printed.
 - Do NOT infer the flavor or variant from the liquid color, cap color, bottle shape, or from which variants are most popular for that brand. Example: if a Gatorade label prints "BLUE BOLT", the name is "Blue Bolt" — NOT "Glacier Freeze", "Cool Blue", or any other blue variant you associate with the brand.
 - If the variant name is not clearly legible in the photo, use the generic descriptor printed on the label (e.g. "Sports Drink") as the name and cap confidence at 0.5. A generic name is always better than a guessed variant.
 - Before returning, self-check: "Can I point to the exact pixels where the name I'm returning is printed?" If not, you are guessing — fall back to the generic descriptor.
 
-CRITICAL — what to use as evidence:
-- USE ONLY: the liquid meniscus (the curved surface line where liquid meets air) and the air-gap region above it
-- IGNORE COMPLETELY: brand logos, label graphics, printed text, embossing, foil, label position, and decorative elements — even if they appear in the center of the bottle
-- Treat the label as if it were painted on the outside of a clear pipe. It tells you nothing about the fill height.
-
-TRANSPARENT BOTTLES (clear glass + clear/colorless liquid — vodka, gin, tequila blanco, clear rum, sparkling water, etc.):
-- This is the hardest case. The meniscus has very low visual contrast against clear liquid.
-- Look specifically for: faint shadow or distortion at the liquid line, subtle color shift where liquid meets air, slight lens effect at the boundary.
-- If you CANNOT clearly see the meniscus line, set levelReadable to false. DO NOT guess — an uncertain reading is worse than setting levelReadable false.
-- If you think you can see the meniscus but are not certain, cap confidence at 0.5 and set levelReadable to false.
-- Only set levelReadable to true if you can unambiguously identify the liquid surface line.
-
-To measure the liquid level:
-1. Identify the FILL ZONE: from the bottom of the bottle up to the base of the shoulder/neck (NOT the very top — the neck holds almost no liquid)
-2. Find the actual liquid meniscus — the visible curved line where liquid meets the air gap inside the glass
-3. liquidLevel = (height from bottle bottom to meniscus) / (height of the fill zone)
-4. Anchor your estimate against these before returning:
-   - Meniscus at the very top of the fill zone = 1.0 (full)
-   - Meniscus exactly halfway up the fill zone = 0.5 (half)
-   - Meniscus one quarter up the fill zone = 0.25 (quarter)
-5. If your estimate falls between two values, bias toward the LOWER one — overestimating causes under-ordering
-
-Self-check before returning:
-- Ask yourself: "Did any logo, label graphic, or printed element influence my liquidLevel estimate?"
-- If yes: discard that influence, re-estimate from meniscus/air-gap only, and lower confidence by at least 0.2
-- Ask yourself: "Is this a clear bottle with clear liquid?" If yes, re-read the TRANSPARENT BOTTLES rules above before returning.
-
-Common mistakes to avoid:
-- Do NOT use the neck or cap as the "full" reference point
-- Do NOT assume a bottle is full because the label covers most of it
-- Do NOT confuse the bottle shoulder for the meniscus
-- Do NOT let a centered logo or graphic pull your estimate toward 0.5
-- A bottle that looks "mostly full" visually is often only 0.6–0.7, not 1.0
-- Do NOT report a confident level for a clear bottle when you cannot see the meniscus — set levelReadable false instead
+How to read the label:
+1. Find the largest brand wordmark (e.g. GATORADE, JACK DANIEL'S) — that is the brand.
+2. Find the variant/expression/flavor text, usually smaller and near the brand (e.g. BLUE BOLT, OLD NO. 7, RED LABEL) — that is the name.
+3. Use any printed class designation for product_type (e.g. SPORTS DRINK, TENNESSEE WHISKEY, LONDON DRY GIN).
+4. If the label is angled, partially hidden, or blurry, transcribe what is clearly legible and lower confidence accordingly — never fill gaps from memory.
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
-  "name": "Variant/expression name only (e.g. Old No. 7, Red Label, Original)",
-  "brand": "Brand/distillery name only (e.g. Jack Daniel's, Johnnie Walker, Grey Goose)",
+  "name": "Variant/expression name only (e.g. Old No. 7, Red Label, Blue Bolt, Original)",
+  "brand": "Brand/distillery name only (e.g. Jack Daniel's, Johnnie Walker, Gatorade)",
   "category": "one of: spirits | beer | wine | soda | mixer | water | juice | other",
-  "product_type": "Specific class and type (e.g. Tennessee Whiskey, Blended Scotch Whisky, Vodka, London Dry Gin, Dark Rum, Lemon-Lime Soda, Cola, Tonic Water)",
-  "liquidLevel": 0.5,
-  "confidence": 0.9,
-  "levelReadable": true
+  "product_type": "Specific class and type (e.g. Tennessee Whiskey, Blended Scotch Whisky, Vodka, Lemon-Lime Soda, Sports Drink)",
+  "confidence": 0.9
 }
 
 Rules:
 - name: variant/expression only — do NOT include the brand name in this field
 - brand: brand/distillery name only — do NOT include the variant or product type
-- product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka, Lemon-Lime Soda, Cola, Tonic Water, Energy Drink). Use the label's own designation when visible.
+- product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka, Lemon-Lime Soda, Cola, Tonic Water, Sports Drink, Energy Drink). Use the label's own designation when visible.
 - category must be one of: spirits, beer, wine, soda, mixer, water, juice, other
-- liquidLevel is 0.0 (empty) to 1.0 (full)
-- Set levelReadable to false if: the bottle is opaque, image is too dark, no bottle is visible, OR the bottle and liquid are both clear/transparent and you cannot clearly see the meniscus line
-- If no bottle is present at all, return: {"name":"","brand":"","category":"other","product_type":"","liquidLevel":0,"confidence":0,"levelReadable":false}
+- confidence is 0.0-1.0 and reflects how certain you are of the EXACT product (brand + variant)
+- If no bottle or can is present at all, return: {"name":"","brand":"","category":"other","product_type":"","confidence":0}
 - Return ONLY valid JSON.
 
 """ + PRODUCT_CATALOG
