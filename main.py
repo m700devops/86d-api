@@ -2102,7 +2102,7 @@ class ScanAnalyzeResponse(BaseModel):
     is_new_product: bool = False
     match_method: str = "none"  # "exact", "auto_created", "none"
 
-PRODUCT_CATALOG = """KNOWN PRODUCTS — if you can identify the bottle, match to the closest entry below (use exact brand/name spelling). If the bottle is not listed, use your best judgment.
+PRODUCT_CATALOG = """KNOWN PRODUCTS — spelling normalization ONLY. If the product you READ OFF THE LABEL appears below, use this exact spelling. NEVER use this list to substitute a different variant than the one printed on the label; products not listed are fine as transcribed.
 
 Vodka: Tito's Handmade, Grey Goose, Absolut, Ketel One, Belvedere, Stolichnaya, Svedka, New Amsterdam, Skyy, Pinnacle, Cîroc, Deep Eddy, Wheatley, Three Olives, Smirnoff, Burnett's, Luksusowa, Reyka, Iceberg, Prairie Organic, Finlandia, Russian Standard, Żubrówka, UV Blue, Seagram's Extra Smooth
 Bourbon: Buffalo Trace, Maker's Mark, Woodford Reserve, Knob Creek, Four Roses Small Batch, Bulleit Bourbon, Wild Turkey 101, Eagle Rare 10, Blanton's Original, Weller Special Reserve, Elijah Craig Small Batch, Heaven Hill, Jim Beam White, Old Forester 86, Larceny Small Batch, Basil Hayden's, Angel's Envy, Russell's Reserve 10, Evan Williams Black, Very Old Barton, 1792 Small Batch, Bardstown Bourbon Discovery, Henry McKenna, W.L. Weller 12, Pappy Van Winkle 15
@@ -2137,6 +2137,12 @@ Mixers/Juice (common): Schweppes Tonic Water, Fever-Tree Tonic Water, Schweppes 
 BOTTLE_PROMPT = """You are analyzing a photo of a beverage container (liquor, beer, wine, soda, mixers, water — glass, plastic, or can) for bar inventory.
 
 Identify the bottle and estimate the liquid level accurately.
+
+CRITICAL — identifying the product (name/brand):
+- The name and brand MUST come from text printed on the label. TRANSCRIBE the label exactly as printed — identification is a reading task, not a recall task.
+- Do NOT infer the flavor or variant from the liquid color, cap color, bottle shape, or from which variants are most popular for that brand. Example: if a Gatorade label prints "BLUE BOLT", the name is "Blue Bolt" — NOT "Glacier Freeze", "Cool Blue", or any other blue variant you associate with the brand.
+- If the variant name is not clearly legible in the photo, use the generic descriptor printed on the label (e.g. "Sports Drink") as the name and cap confidence at 0.5. A generic name is always better than a guessed variant.
+- Before returning, self-check: "Can I point to the exact pixels where the name I'm returning is printed?" If not, you are guessing — fall back to the generic descriptor.
 
 CRITICAL — what to use as evidence:
 - USE ONLY: the liquid meniscus (the curved surface line where liquid meets air) and the air-gap region above it
