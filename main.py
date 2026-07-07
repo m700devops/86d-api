@@ -38,6 +38,8 @@ async def lifespan(app: FastAPI):
         print("[lifespan] Database initialized successfully", flush=True)
     except Exception as e:
         print(f"[lifespan] Database init warning (may already exist): {e}", flush=True)
+    # Pre-warm AI provider connections so the first scan is fast (best-effort)
+    asyncio.create_task(_warm_providers())
     yield
 
 app = FastAPI(
@@ -2314,6 +2316,49 @@ async def _call_gemini(api_key: str, prompt: str, image_data: str) -> str:
     return response.text.strip()
 
 
+async def _warm_providers() -> dict:
+    """Open TLS connections / init the AI clients so the first real scan doesn't
+    pay the cold-path setup (observed ~8s extra on the first scan). Best-effort,
+    never raises. Costs ~1 token per provider per call."""
+    openai_key = os.getenv("OPENAI_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    warmed = {"openai": False, "gemini": False}
+
+    if openai_key:
+        try:
+            client = openai.AsyncOpenAI(api_key=openai_key)
+            await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "ping"}],
+                ),
+                timeout=8,
+            )
+            warmed["openai"] = True
+        except Exception as e:
+            print(f"[warm] OpenAI warm-up failed (non-fatal): {e}", flush=True)
+
+    if gemini_key:
+        try:
+            genai.configure(api_key=gemini_key)
+            model = genai.GenerativeModel(GEMINI_MODEL)
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    model.generate_content,
+                    "ping",
+                    generation_config={"max_output_tokens": 1},
+                ),
+                timeout=8,
+            )
+            warmed["gemini"] = True
+        except Exception as e:
+            print(f"[warm] Gemini warm-up failed (non-fatal): {e}", flush=True)
+
+    print(f"[warm] providers warmed: {warmed}", flush=True)
+    return warmed
+
+
 def _match_or_create_product(result: dict, user_id: str) -> tuple:
     """Exact-match AI result against products table; auto-create if confidence high enough.
 
@@ -2449,6 +2494,13 @@ async def _run_providers(openai_key, gemini_key, prompt, request, user_id):
         "error": "ai_api_error",
         "message": f"All AI providers failed: {last_error}"
     })
+
+
+@v1_router.post("/scans/warm")
+async def warm_scan(user_id: str = Depends(get_current_user)):
+    """Pre-warm the AI vision path — the app calls this when the scan screen
+    opens so the first bottle scan is as fast as the rest."""
+    return {"warmed": await _warm_providers()}
 
 
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
