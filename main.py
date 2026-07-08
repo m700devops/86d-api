@@ -2144,9 +2144,14 @@ CRITICAL — identification is a READING task, not a recall task:
 - If the variant name is not clearly legible in the photo, use the generic descriptor printed on the label (e.g. "Sports Drink") as the name and cap confidence at 0.5. A generic name is always better than a guessed variant.
 - Before returning, self-check: "Can I point to the exact pixels where the name I'm returning is printed?" If not, you are guessing — fall back to the generic descriptor.
 
+BASE PRODUCTS — descriptors are not variant names:
+- Many flagship products print NO variant name — only the brand plus a flavor/class descriptor. Example: a standard Sprite bottle prints "Sprite" and "Carbonated Lemon-Lime Flavored Drink". "Lemon-Lime" there is a DESCRIPTOR of the base product, not a variant.
+- When the label shows only the brand + a descriptor (no explicit variant), return name "Original". This must be deterministic: every scan of that same bottle must produce the same name.
+- Return a distinct variant name ONLY when the label prints an explicit variant (e.g. "Zero Sugar", "Cherry", "Blue Bolt", "Tropical Mix"). Descriptor phrases like "flavored drink", "original taste", "classic", "carbonated beverage" mean base product → "Original".
+
 How to read the label:
 1. Find the largest brand wordmark (e.g. GATORADE, JACK DANIEL'S) — that is the brand.
-2. Find the variant/expression/flavor text, usually smaller and near the brand (e.g. BLUE BOLT, OLD NO. 7, RED LABEL) — that is the name.
+2. Find the variant/expression/flavor text, usually smaller and near the brand (e.g. BLUE BOLT, OLD NO. 7, RED LABEL) — that is the name. If there is no variant text — only a flavor/class descriptor — the name is "Original".
 3. Use any printed class designation for product_type (e.g. SPORTS DRINK, TENNESSEE WHISKEY, LONDON DRY GIN).
 4. If the label is angled, partially hidden, or blurry, transcribe what is clearly legible and lower confidence accordingly — never fill gaps from memory.
 
@@ -2160,7 +2165,7 @@ Return ONLY a JSON object — no markdown, no explanation:
 }
 
 Rules:
-- name: variant/expression only — do NOT include the brand name in this field
+- name: variant/expression only — do NOT include the brand name in this field. Use "Original" for a brand's base product with no printed variant name.
 - brand: brand/distillery name only — do NOT include the variant or product type
 - product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka, Lemon-Lime Soda, Cola, Tonic Water, Sports Drink, Energy Drink). Use the label's own designation when visible.
 - category must be one of: spirits, beer, wine, soda, mixer, water, juice, other
