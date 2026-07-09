@@ -25,6 +25,8 @@ from seed_data import SEED_PRODUCTS
 import google.generativeai as genai
 import openai
 import os
+import httpx
+from pydantic import BaseModel, Field
 
 # Startup time for uptime calculation
 START_TIME = time.time()
@@ -1971,6 +1973,122 @@ Thank you,
                 "total_items": total_items
             }
         }
+
+# ============== ORDER EMAIL SENDING (Resend) ==============
+# Requires RESEND_API_KEY on the server. Until a domain is verified in Resend,
+# ORDER_EMAIL_FROM must stay on the sandbox sender (onboarding@resend.dev),
+# which can only deliver to the Resend account owner's own address.
+
+class OrderEmailItem(BaseModel):
+    name: str
+    quantity: float
+    size: str = ""
+
+
+class DistributorOrder(BaseModel):
+    distributor_id: str
+    items: list[OrderEmailItem] = Field(min_length=1)
+
+
+class SendOrderEmailsRequest(BaseModel):
+    location_name: str = "your bar"
+    orders: list[DistributorOrder] = Field(min_length=1, max_length=50)
+
+
+def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str) -> tuple[bool, str | None]:
+    """Send one email through the Resend API. Returns (ok, error_message)."""
+    sender = os.getenv("ORDER_EMAIL_FROM", "86'd Orders <onboarding@resend.dev>")
+    try:
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"from": sender, "to": [to_email], "subject": subject, "text": body_text},
+            timeout=15.0,
+        )
+        if resp.status_code in (200, 201):
+            return (True, None)
+        try:
+            detail = resp.json().get("message", resp.text[:200])
+        except Exception:
+            detail = resp.text[:200]
+        return (False, f"{resp.status_code}: {detail}")
+    except Exception as e:
+        return (False, str(e))
+
+
+@v1_router.post("/orders/email")
+def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(get_current_user)):
+    """Send order emails to distributors, one email per distributor."""
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail={
+            "error": "email_not_configured",
+            "message": "Email sending is not configured on the server (RESEND_API_KEY missing)"
+        })
+
+    today = datetime.now(timezone.utc).strftime("%B %d, %Y")
+    results = []
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for order in request.orders:
+            cursor.execute(
+                "SELECT id, name, email FROM distributors WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+                (order.distributor_id, user_id)
+            )
+            dist = cursor.fetchone()
+            if not dist:
+                results.append({
+                    "distributor_id": order.distributor_id, "distributor_name": None,
+                    "email": None, "status": "failed", "error": "Distributor not found"
+                })
+                continue
+            if not dist["email"]:
+                results.append({
+                    "distributor_id": dist["id"], "distributor_name": dist["name"],
+                    "email": None, "status": "no_email",
+                    "error": "No email address on file for this distributor"
+                })
+                continue
+
+            lines = []
+            total_qty = 0.0
+            for item in order.items:
+                qty = item.quantity
+                total_qty += qty
+                qty_str = str(int(qty)) if qty == int(qty) else f"{qty:g}"
+                size_str = f" {item.size}" if item.size else ""
+                lines.append(f"- {item.name}{size_str} x {qty_str}")
+
+            total_str = str(int(total_qty)) if total_qty == int(total_qty) else f"{total_qty:g}"
+            subject = f"Order from {request.location_name} — {today}"
+            body_text = f"""Hi {dist['name']},
+
+Please prepare the following order for {request.location_name}:
+
+{chr(10).join(lines)}
+
+Total: {total_str} bottles
+
+Thank you,
+{request.location_name}
+(sent via 86'd bar inventory)"""
+
+            ok, error = _send_via_resend(api_key, dist["email"], subject, body_text)
+            results.append({
+                "distributor_id": dist["id"], "distributor_name": dist["name"],
+                "email": dist["email"], "status": "sent" if ok else "failed",
+                "error": error
+            })
+            if not ok:
+                print(f"[send_order_emails] failed for {dist['name']} <{dist['email']}>: {error}", flush=True)
+
+    sent = sum(1 for r in results if r["status"] == "sent")
+    return {
+        "results": results,
+        "sent": sent,
+        "failed": len(results) - sent,
+    }
 
 # ============== V1 USERS ==============
 
