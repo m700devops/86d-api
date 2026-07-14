@@ -427,6 +427,17 @@ def init_db():
         """, (now_iso(),))
         conn.commit()
 
+        # Migrate users: add business_name and manager_name columns if absent
+        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT")]:
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'users' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+                print(f"[db] migrated users: added {col} {col_type}", flush=True)
+        conn.commit()
+
         # Migrate par_levels: add full_quantity and current_stock columns if absent
         for col, col_type in [("full_quantity", "NUMERIC(10,2)"), ("current_stock", "NUMERIC(10,2)")]:
             cursor.execute("""

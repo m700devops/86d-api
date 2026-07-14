@@ -1995,14 +1995,17 @@ class SendOrderEmailsRequest(BaseModel):
     orders: list[DistributorOrder] = Field(min_length=1, max_length=50)
 
 
-def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str) -> tuple[bool, str | None]:
+def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None) -> tuple[bool, str | None]:
     """Send one email through the Resend API. Returns (ok, error_message)."""
     sender = os.getenv("ORDER_EMAIL_FROM", "86'd Orders <onboarding@resend.dev>")
+    payload = {"from": sender, "to": [to_email], "subject": subject, "text": body_text}
+    if reply_to:
+        payload["reply_to"] = reply_to
     try:
         resp = httpx.post(
             "https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {api_key}"},
-            json={"from": sender, "to": [to_email], "subject": subject, "text": body_text},
+            json=payload,
             timeout=15.0,
         )
         if resp.status_code in (200, 201):
@@ -2031,6 +2034,21 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
 
     with get_db() as conn:
         cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT name, email, business_name, manager_name FROM users WHERE id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        user_row = cursor.fetchone()
+        business_name = (user_row["business_name"] if user_row else None) or request.location_name
+        manager_name = (user_row["manager_name"] if user_row else None) or (user_row["name"] if user_row else None) or business_name
+        reply_to = user_row["email"] if user_row else None
+        location_suffix = (
+            f" ({request.location_name})"
+            if request.location_name and request.location_name != business_name
+            else ""
+        )
+
         for order in request.orders:
             cursor.execute(
                 "SELECT id, name, email FROM distributors WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
@@ -2061,20 +2079,21 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
                 lines.append(f"- {item.name}{size_str} x {qty_str}")
 
             total_str = str(int(total_qty)) if total_qty == int(total_qty) else f"{total_qty:g}"
-            subject = f"Order from {request.location_name} — {today}"
+            subject = f"Order from {business_name} — {today}"
             body_text = f"""Hi {dist['name']},
 
-Please prepare the following order for {request.location_name}:
+This is an order from {business_name}{location_suffix}. Please prepare the following for pickup/delivery:
 
 {chr(10).join(lines)}
 
 Total: {total_str} bottles
 
 Thank you,
-{request.location_name}
+{manager_name}
+{business_name}
 (sent via 86'd bar inventory)"""
 
-            ok, error = _send_via_resend(api_key, dist["email"], subject, body_text)
+            ok, error = _send_via_resend(api_key, dist["email"], subject, body_text, reply_to=reply_to)
             results.append({
                 "distributor_id": dist["id"], "distributor_name": dist["name"],
                 "email": dist["email"], "status": "sent" if ok else "failed",
@@ -2098,13 +2117,42 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, email, name, subscription_status, subscription_tier, trial_ends_at,
-                   terms_accepted_at, privacy_accepted_at, created_at
+            SELECT id, email, name, business_name, manager_name, subscription_status,
+                   subscription_tier, trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
+        result = dict(row)
+        result["subscription_status"] = result.get("subscription_status") or "trial"
+        result["subscription_tier"] = result.get("subscription_tier") or "starter"
+        return result
+
+@v1_router.patch("/users/me", response_model=UserProfileResponse)
+def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(get_current_user)):
+    """Update the current user's business_name / manager_name."""
+    updates = request.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail={"error": "no_fields", "message": "No fields to update"})
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        set_clauses = ", ".join(f"{col} = %s" for col in updates)
+        cursor.execute(
+            f"UPDATE users SET {set_clauses}, updated_at = %s WHERE id = %s AND deleted_at IS NULL",
+            (*updates.values(), now_iso(), user_id)
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
+        conn.commit()
+
+        cursor.execute("""
+            SELECT id, email, name, business_name, manager_name, subscription_status,
+                   subscription_tier, trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
+            FROM users WHERE id = %s AND deleted_at IS NULL
+        """, (user_id,))
+        row = cursor.fetchone()
         result = dict(row)
         result["subscription_status"] = result.get("subscription_status") or "trial"
         result["subscription_tier"] = result.get("subscription_tier") or "starter"
