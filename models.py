@@ -14,19 +14,25 @@ class UserCreate(UserBase):
 
 class UserResponse(UserBase):
     id: str
+    business_name: Optional[str] = None
+    manager_name: Optional[str] = None
     subscription_status: str = "trial"
     subscription_tier: str = "starter"
     trial_ends_at: Optional[datetime] = None
     terms_accepted_at: Optional[datetime] = None
     privacy_accepted_at: Optional[datetime] = None
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 class UserProfileResponse(UserResponse):
     """Full user profile including subscription details"""
     pass
+
+class UpdateProfileRequest(BaseModel):
+    business_name: Optional[str] = Field(default=None, max_length=200)
+    manager_name: Optional[str] = Field(default=None, max_length=200)
 
 class AcceptTermsRequest(BaseModel):
     terms_version: str
