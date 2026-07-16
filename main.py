@@ -1443,6 +1443,7 @@ def list_orders(
                 "location_name": order["location_name"],
                 "business_name": order_data.get("business_name"),
                 "manager_name": order_data.get("manager_name"),
+                "staff_name": order_data.get("staff_name"),
                 "distributors": order_data.get("distributors", []),
                 "total_items": order["total_items"],
                 "estimated_cost": order["estimated_cost"],
@@ -1495,6 +1496,7 @@ def get_order(order_id: str, user_id: str = Depends(get_current_user)):
                 },
                 "business_name": order_data.get("business_name"),
                 "manager_name": order_data.get("manager_name"),
+                "staff_name": order_data.get("staff_name"),
                 "distributors": order_data.get("distributors", []),
                 "total_items": order["total_items"],
                 "estimated_cost": order["estimated_cost"],
@@ -2070,6 +2072,7 @@ class DistributorOrder(BaseModel):
 class SendOrderEmailsRequest(BaseModel):
     location_id: str
     location_name: str = "your bar"
+    staff_name: str | None = None
     orders: list[DistributorOrder] = Field(min_length=1, max_length=50)
 
 
@@ -2226,6 +2229,7 @@ Thank you,
             "items": all_items,
             "business_name": business_name,
             "manager_name": manager_name,
+            "staff_name": request.staff_name,
             "location_name": request.location_name,
             "total_cost": total_cost if total_cost > 0 else None,
         }

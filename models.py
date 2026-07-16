@@ -313,6 +313,7 @@ class OrderResponse(BaseModel):
     location_name: Optional[str] = None
     business_name: Optional[str] = None
     manager_name: Optional[str] = None
+    staff_name: Optional[str] = None
     distributors: List[OrderDistributor] = []
     total_items: int
     estimated_cost: Optional[float] = None
