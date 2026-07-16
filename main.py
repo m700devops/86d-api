@@ -13,7 +13,8 @@ import traceback
 from database import init_db, get_db
 from auth import (
     get_password_hash, verify_password, create_access_token,
-    create_refresh_token, verify_token
+    create_refresh_token, verify_token,
+    PASSWORD_RESET_EXPIRE_MINUTES, PASSWORD_RESET_RESEND_COOLDOWN_SECONDS
 )
 from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
@@ -2339,27 +2340,46 @@ def forgot_password(request: ForgotPasswordRequest):
     email = request.email.lower().strip()
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, name FROM users WHERE email = %s AND deleted_at IS NULL", (email,))
+        cursor.execute(
+            "SELECT id, name, password_reset_expires_at FROM users WHERE email = %s AND deleted_at IS NULL",
+            (email,)
+        )
         row = cursor.fetchone()
         if row:
-            code = f"{random.randint(0, 999999):06d}"
-            expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
-            cursor.execute("""
-                UPDATE users SET password_reset_token = %s, password_reset_expires_at = %s
-                WHERE id = %s
-            """, (code, expires_at, row["id"]))
-            conn.commit()
+            # A code issued within the cooldown window is still fresh enough
+            # in the recipient's inbox — skip regenerating/resending so a
+            # rapid double-tap (or deliberate spam) doesn't fire two emails
+            # or invalidate a code the user is mid-typing.
+            existing_expiry = row.get("password_reset_expires_at")
+            issued_recently = False
+            if existing_expiry:
+                try:
+                    remaining = datetime.fromisoformat(existing_expiry) - datetime.now(timezone.utc)
+                    issued_recently = remaining.total_seconds() > (
+                        PASSWORD_RESET_EXPIRE_MINUTES * 60 - PASSWORD_RESET_RESEND_COOLDOWN_SECONDS
+                    )
+                except ValueError:
+                    issued_recently = False
 
-            api_key = os.getenv("RESEND_API_KEY")
-            if api_key:
-                ok, error = _send_via_resend(
-                    api_key, email,
-                    "Your 86'd password reset code",
-                    f"""Hi{' ' + row['name'] if row['name'] else ''},
+            if not issued_recently:
+                code = f"{random.randint(0, 999999):06d}"
+                expires_at = (datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_EXPIRE_MINUTES)).isoformat()
+                cursor.execute("""
+                    UPDATE users SET password_reset_token = %s, password_reset_expires_at = %s
+                    WHERE id = %s
+                """, (code, expires_at, row["id"]))
+                conn.commit()
+
+                api_key = os.getenv("RESEND_API_KEY")
+                if api_key:
+                    ok, error = _send_via_resend(
+                        api_key, email,
+                        "Your 86'd password reset code",
+                        f"""Hi{' ' + row['name'] if row['name'] else ''},
 
 Your password reset code is: {code}
 
-This code expires in 30 minutes. If you didn't request this, you can ignore this email.
+This code expires in {PASSWORD_RESET_EXPIRE_MINUTES} minutes. If you didn't request this, you can ignore this email.
 
 (sent via 86'd bar inventory)"""
                 )

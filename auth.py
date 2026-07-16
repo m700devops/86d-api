@@ -3,7 +3,6 @@ from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
-import secrets
 
 # Security configuration
 import os
@@ -11,7 +10,8 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7   # 7 days (was 60 min — short lifetime caused re-login loops)
 REFRESH_TOKEN_EXPIRE_DAYS = 30              # 30 days (was 7)
-PASSWORD_RESET_EXPIRE_MINUTES = 60
+PASSWORD_RESET_EXPIRE_MINUTES = 30          # emailed 6-digit code — short-lived, see /auth/forgot-password
+PASSWORD_RESET_RESEND_COOLDOWN_SECONDS = 60 # don't re-send/regenerate on rapid repeat requests
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -70,33 +70,3 @@ def verify_token(token: str, token_type: str = "access") -> Optional[str]:
         return None
 
 
-def generate_password_reset_token() -> str:
-    """Generate a secure password reset token"""
-    return secrets.token_urlsafe(32)
-
-
-def create_password_reset_token(user_id: str) -> str:
-    """Create a password reset token with expiration"""
-    expire = datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_EXPIRE_MINUTES)
-    to_encode = {
-        "sub": user_id,
-        "exp": expire,
-        "type": "password_reset",
-        "iat": datetime.now(timezone.utc)
-    }
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-
-def verify_password_reset_token(token: str) -> Optional[str]:
-    """Verify a password reset token and return user_id if valid"""
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: str = payload.get("sub")
-        token_type_claim: str = payload.get("type", "")
-        
-        if user_id is None or token_type_claim != "password_reset":
-            return None
-            
-        return user_id
-    except JWTError:
-        return None
