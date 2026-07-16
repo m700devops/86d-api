@@ -12,9 +12,8 @@ import traceback
 
 from database import init_db, get_db
 from auth import (
-    get_password_hash, verify_password, create_access_token, 
-    create_refresh_token, verify_token, create_password_reset_token,
-    verify_password_reset_token
+    get_password_hash, verify_password, create_access_token,
+    create_refresh_token, verify_token
 )
 from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
@@ -26,6 +25,7 @@ import google.generativeai as genai
 import openai
 import os
 import httpx
+import random
 from pydantic import BaseModel, Field
 
 # Startup time for uptime calculation
@@ -2263,42 +2263,65 @@ def accept_terms(request: AcceptTermsRequest, user_id: str = Depends(get_current
 
 @v1_router.post("/auth/forgot-password")
 def forgot_password(request: ForgotPasswordRequest):
-    """Request password reset"""
+    """Email a 6-digit reset code, valid for 30 minutes.
+
+    Always returns the same generic response regardless of whether the
+    account exists or the email actually sent — do not leak either signal
+    to the caller. The code itself is only ever delivered by email, never
+    in the API response (it used to be, via a `debug_token` field — that
+    was a full account-takeover hole for anyone who knew a user's email)."""
+    email = request.email.lower().strip()
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE email = %s AND deleted_at IS NULL",
-                       (request.email.lower().strip(),))
+        cursor.execute("SELECT id, name FROM users WHERE email = %s AND deleted_at IS NULL", (email,))
         row = cursor.fetchone()
         if row:
-            reset_token = create_password_reset_token(row["id"])
-            expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            code = f"{random.randint(0, 999999):06d}"
+            expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
             cursor.execute("""
                 UPDATE users SET password_reset_token = %s, password_reset_expires_at = %s
                 WHERE id = %s
-            """, (reset_token, expires_at, row["id"]))
+            """, (code, expires_at, row["id"]))
             conn.commit()
-            return {"success": True, "message": "If an account exists, a reset link has been sent",
-                    "debug_token": reset_token}
-        return {"success": True, "message": "If an account exists, a reset link has been sent"}
+
+            api_key = os.getenv("RESEND_API_KEY")
+            if api_key:
+                ok, error = _send_via_resend(
+                    api_key, email,
+                    "Your 86'd password reset code",
+                    f"""Hi{' ' + row['name'] if row['name'] else ''},
+
+Your password reset code is: {code}
+
+This code expires in 30 minutes. If you didn't request this, you can ignore this email.
+
+(sent via 86'd bar inventory)"""
+                )
+                if not ok:
+                    print(f"[forgot_password] failed to send reset email to {email}: {error}", flush=True)
+            else:
+                print(f"[forgot_password] RESEND_API_KEY missing — reset code not sent for {email}", flush=True)
+
+    return {"success": True, "message": "If an account exists, a reset code has been sent"}
 
 @v1_router.post("/auth/reset-password")
 def reset_password(request: ResetPasswordRequest):
-    """Reset password using token"""
-    user_id = verify_password_reset_token(request.token)
-    if not user_id:
-        raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset token"})
+    """Reset password using the emailed 6-digit code"""
+    email = request.email.lower().strip()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id FROM users WHERE id = %s AND password_reset_token = %s AND password_reset_expires_at > %s
-        """, (user_id, request.token, now_iso()))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset token"})
+            SELECT id FROM users
+            WHERE email = %s AND password_reset_token = %s AND password_reset_expires_at > %s AND deleted_at IS NULL
+        """, (email, request.token.strip(), now_iso()))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset code"})
         password_hash = get_password_hash(request.new_password)
         cursor.execute("""
             UPDATE users SET password_hash = %s, password_reset_token = NULL, password_reset_expires_at = NULL, updated_at = %s
             WHERE id = %s
-        """, (password_hash, now_iso(), user_id))
+        """, (password_hash, now_iso(), row["id"]))
         conn.commit()
         return {"success": True, "message": "Password reset successfully"}
 
