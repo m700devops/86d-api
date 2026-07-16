@@ -412,6 +412,21 @@ def init_db():
             ON location_product_distributors(distributor_id)
         """)
 
+        # Inventory drafts: one in-progress (unsent) scan session per user+location,
+        # backing up the mobile app's local AsyncStorage copy against device loss.
+        # Deliberately separate from the older scans/inventory_sessions tables,
+        # which are shaped around the removed pen-detection flow (level/confidence/
+        # pen_position_y) and don't match the current bottle-count data model.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_drafts (
+                user_id TEXT NOT NULL REFERENCES users(id),
+                location_id TEXT NOT NULL REFERENCES locations(id),
+                bottles_data TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, location_id)
+            )
+        """)
+
         conn.commit()
 
         # Backfill subscription fields for old accounts that pre-date those columns

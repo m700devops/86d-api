@@ -276,6 +276,18 @@ class InventoryCompleteResponse(BaseModel):
     session: InventorySessionResponse
     order: dict
 
+# ============== INVENTORY DRAFT MODELS ==============
+# A "draft" backs up the mobile app's in-progress (unsent) scan session —
+# opaque client-shaped bottle rows, not validated field-by-field server-side.
+
+class InventoryDraftRequest(BaseModel):
+    location_id: str
+    bottles: List[dict] = []
+
+class InventoryDraftResponse(BaseModel):
+    bottles: Optional[List[dict]] = None
+    updated_at: Optional[datetime] = None
+
 # ============== ORDER MODELS ==============
 # An "order" is created when the user sends order emails from the mobile app
 # (see send_order_emails in main.py) — it's a record of what was sent to which

@@ -1309,6 +1309,72 @@ def cancel_inventory(session_id: str, user_id: str = Depends(get_current_user)):
             }
         }
 
+# ============== INVENTORY DRAFTS ==============
+# Server-side backup of the mobile app's in-progress (unsent) scan session,
+# on top of its local AsyncStorage copy — protects against a lost/reinstalled
+# device, not just an app-kill mid-shift. One draft per user+location.
+
+@v1_router.put("/inventory/draft", response_model=dict)
+def save_inventory_draft(request: InventoryDraftRequest, user_id: str = Depends(get_current_user)):
+    """Upsert the current draft for a location. An empty bottles list deletes it."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (request.location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Location not found"})
+
+        if not request.bottles:
+            cursor.execute(
+                "DELETE FROM inventory_drafts WHERE user_id = %s AND location_id = %s",
+                (user_id, request.location_id)
+            )
+            conn.commit()
+            return {"success": True}
+
+        now = now_iso()
+        cursor.execute("""
+            INSERT INTO inventory_drafts (user_id, location_id, bottles_data, updated_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id, location_id) DO UPDATE
+            SET bottles_data = EXCLUDED.bottles_data, updated_at = EXCLUDED.updated_at
+        """, (user_id, request.location_id, json.dumps(request.bottles), now))
+        conn.commit()
+        return {"success": True}
+
+@v1_router.get("/inventory/draft", response_model=InventoryDraftResponse)
+def get_inventory_draft(location_id: str, user_id: str = Depends(get_current_user)):
+    """Fetch the saved draft for a location, if any."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT d.bottles_data, d.updated_at FROM inventory_drafts d
+            JOIN locations l ON d.location_id = l.id
+            WHERE d.user_id = %s AND d.location_id = %s AND l.user_id = %s
+        """, (user_id, location_id, user_id))
+        row = cursor.fetchone()
+        if not row:
+            return {"bottles": None, "updated_at": None}
+        try:
+            bottles = json.loads(row["bottles_data"])
+        except Exception:
+            bottles = None
+        return {"bottles": bottles, "updated_at": row["updated_at"]}
+
+@v1_router.delete("/inventory/draft", response_model=dict)
+def delete_inventory_draft(location_id: str, user_id: str = Depends(get_current_user)):
+    """Explicitly clear a draft, e.g. once its order has been sent."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM inventory_drafts WHERE user_id = %s AND location_id = %s",
+            (user_id, location_id)
+        )
+        conn.commit()
+        return {"success": True}
+
 # ============== ORDERS ==============
 
 @v1_router.get("/orders", response_model=OrderListResponse)
