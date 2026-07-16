@@ -284,6 +284,7 @@ class OrderLineItem(BaseModel):
     name: str
     quantity: float
     size: Optional[str] = None
+    price: Optional[float] = None
 
 class OrderDistributor(BaseModel):
     distributor_id: Optional[str] = None
@@ -301,6 +302,7 @@ class OrderResponse(BaseModel):
     manager_name: Optional[str] = None
     distributors: List[OrderDistributor] = []
     total_items: int
+    estimated_cost: Optional[float] = None
     created_at: datetime
     exported_at: Optional[datetime] = None
     export_format: Optional[str] = None

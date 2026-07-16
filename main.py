@@ -1314,21 +1314,35 @@ def cancel_inventory(session_id: str, user_id: str = Depends(get_current_user)):
 @v1_router.get("/orders", response_model=OrderListResponse)
 def list_orders(
     location_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    q: Optional[str] = None,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     user_id: str = Depends(get_current_user)
 ):
-    """List orders for user's locations"""
+    """List orders for user's locations, optionally filtered by date range and a
+    free-text search over distributor/item names (matched against the stored
+    order_data blob)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         # Build query
         where_clause = "WHERE l.user_id = %s"
         params = [user_id]
         if location_id:
             where_clause += " AND o.location_id = %s"
             params.append(location_id)
-        
+        if start_date:
+            where_clause += " AND o.created_at >= %s"
+            params.append(start_date)
+        if end_date:
+            where_clause += " AND o.created_at <= %s"
+            params.append(end_date)
+        if q:
+            where_clause += " AND o.order_data ILIKE %s"
+            params.append(f"%{q}%")
+
         # Get total count
         cursor.execute(f"""
             SELECT COUNT(*) as count FROM orders o
@@ -1364,6 +1378,7 @@ def list_orders(
                 "manager_name": order_data.get("manager_name"),
                 "distributors": order_data.get("distributors", []),
                 "total_items": order["total_items"],
+                "estimated_cost": order["estimated_cost"],
                 "created_at": order["created_at"],
                 "exported_at": order["exported_at"],
                 "export_format": order["export_format"],
@@ -1415,6 +1430,7 @@ def get_order(order_id: str, user_id: str = Depends(get_current_user)):
                 "manager_name": order_data.get("manager_name"),
                 "distributors": order_data.get("distributors", []),
                 "total_items": order["total_items"],
+                "estimated_cost": order["estimated_cost"],
                 "created_at": order["created_at"],
                 "exported_at": order["exported_at"],
                 "export_format": order["export_format"],
@@ -1976,6 +1992,7 @@ class OrderEmailItem(BaseModel):
     name: str
     quantity: float
     size: str = ""
+    price: float | None = None
 
 
 class DistributorOrder(BaseModel):
@@ -2053,7 +2070,10 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
         )
 
         for order in request.orders:
-            item_dicts = [{"name": i.name, "quantity": i.quantity, "size": i.size or None} for i in order.items]
+            item_dicts = [
+                {"name": i.name, "quantity": i.quantity, "size": i.size or None, "price": i.price}
+                for i in order.items
+            ]
             all_items.extend(item_dicts)
 
             cursor.execute(
@@ -2131,19 +2151,23 @@ Thank you,
 
         order_id = generate_id()
         sent_emails = [r["email"] for r in results if r["status"] == "sent" and r["email"]]
+        total_cost = sum(
+            item["price"] * item["quantity"] for item in all_items if item.get("price") is not None
+        )
         order_data = {
             "distributors": order_distributors,
             "items": all_items,
             "business_name": business_name,
             "manager_name": manager_name,
             "location_name": request.location_name,
+            "total_cost": total_cost if total_cost > 0 else None,
         }
         cursor.execute("""
-            INSERT INTO orders (id, session_id, location_id, order_data, total_items, exported_at, export_format, export_destination, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO orders (id, session_id, location_id, order_data, total_items, estimated_cost, exported_at, export_format, export_destination, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             order_id, session_id, request.location_id, json.dumps(order_data), len(all_items),
-            now, "email", ", ".join(sent_emails) or None, now
+            order_data["total_cost"], now, "email", ", ".join(sent_emails) or None, now
         ))
         conn.commit()
 
