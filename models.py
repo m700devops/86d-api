@@ -276,30 +276,36 @@ class InventoryCompleteResponse(BaseModel):
     order: dict
 
 # ============== ORDER MODELS ==============
+# An "order" is created when the user sends order emails from the mobile app
+# (see send_order_emails in main.py) — it's a record of what was sent to which
+# distributors, not tied to the older par-level inventory-session flow.
 
-class OrderItem(BaseModel):
-    product_id: str
-    product_name: str
-    category: str
-    current_amount: float
-    par_level: float
-    order_quantity: float
-    urgency: str
+class OrderLineItem(BaseModel):
+    name: str
+    quantity: float
+    size: Optional[str] = None
+
+class OrderDistributor(BaseModel):
+    distributor_id: Optional[str] = None
+    distributor_name: Optional[str] = None
+    email: Optional[str] = None
+    status: str  # sent | failed | no_email
+    items: List[OrderLineItem] = []
 
 class OrderResponse(BaseModel):
     id: str
     session_id: str
     location_id: str
     location_name: Optional[str] = None
-    items: List[OrderItem]
-    variance_alerts: List[dict]
+    business_name: Optional[str] = None
+    manager_name: Optional[str] = None
+    distributors: List[OrderDistributor] = []
     total_items: int
-    estimated_cost: Optional[float] = None
     created_at: datetime
     exported_at: Optional[datetime] = None
     export_format: Optional[str] = None
     export_destination: Optional[str] = None
-    
+
     class Config:
         from_attributes = True
 

@@ -1347,31 +1347,29 @@ def list_orders(
             LIMIT %s OFFSET %s
         """, params + [limit, offset])
         
-        import json
         orders = []
         for row in cursor.fetchall():
             order = dict(row)
             try:
-                order_data = json.loads(order.get("order_data", "{}"))
-                items = order_data.get("items", [])
-            except:
-                items = []
-            
+                order_data = json.loads(order.get("order_data") or "{}")
+            except Exception:
+                order_data = {}
+
             orders.append({
                 "id": order["id"],
                 "session_id": order["session_id"],
                 "location_id": order["location_id"],
                 "location_name": order["location_name"],
-                "items": items,
-                "variance_alerts": [],
+                "business_name": order_data.get("business_name"),
+                "manager_name": order_data.get("manager_name"),
+                "distributors": order_data.get("distributors", []),
                 "total_items": order["total_items"],
-                "estimated_cost": order["estimated_cost"],
                 "created_at": order["created_at"],
                 "exported_at": order["exported_at"],
                 "export_format": order["export_format"],
                 "export_destination": order["export_destination"]
             })
-        
+
         return {
             "orders": orders,
             "total": total
@@ -1397,19 +1395,12 @@ def get_order(order_id: str, user_id: str = Depends(get_current_user)):
                 "message": "Order not found"
             })
         
-        import json
         order = dict(row)
         try:
-            order_data = json.loads(order.get("order_data", "{}"))
-            items = order_data.get("items", [])
-        except:
-            items = []
-        
-        try:
-            variance_alerts = json.loads(order.get("variance_alerts", "[]"))
-        except:
-            variance_alerts = []
-        
+            order_data = json.loads(order.get("order_data") or "{}")
+        except Exception:
+            order_data = {}
+
         return {
             "order": {
                 "id": order["id"],
@@ -1420,12 +1411,14 @@ def get_order(order_id: str, user_id: str = Depends(get_current_user)):
                     "address": order["address"],
                     "timezone": order["timezone"]
                 },
-                "items": items,
-                "variance_alerts": variance_alerts,
+                "business_name": order_data.get("business_name"),
+                "manager_name": order_data.get("manager_name"),
+                "distributors": order_data.get("distributors", []),
                 "total_items": order["total_items"],
-                "estimated_cost": order["estimated_cost"],
                 "created_at": order["created_at"],
-                "exported_at": order["exported_at"]
+                "exported_at": order["exported_at"],
+                "export_format": order["export_format"],
+                "export_destination": order["export_destination"]
             }
         }
 
@@ -1991,6 +1984,7 @@ class DistributorOrder(BaseModel):
 
 
 class SendOrderEmailsRequest(BaseModel):
+    location_id: str
     location_name: str = "your bar"
     orders: list[DistributorOrder] = Field(min_length=1, max_length=50)
 
@@ -2031,9 +2025,18 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
 
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
     results = []
+    order_distributors = []  # mirrors `results` but also carries each distributor's line items, for order history
+    all_items = []
 
     with get_db() as conn:
         cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (request.location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Location not found"})
 
         cursor.execute(
             "SELECT name, email, business_name, manager_name FROM users WHERE id = %s AND deleted_at IS NULL",
@@ -2050,6 +2053,9 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
         )
 
         for order in request.orders:
+            item_dicts = [{"name": i.name, "quantity": i.quantity, "size": i.size or None} for i in order.items]
+            all_items.extend(item_dicts)
+
             cursor.execute(
                 "SELECT id, name, email FROM distributors WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
                 (order.distributor_id, user_id)
@@ -2060,12 +2066,20 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
                     "distributor_id": order.distributor_id, "distributor_name": None,
                     "email": None, "status": "failed", "error": "Distributor not found"
                 })
+                order_distributors.append({
+                    "distributor_id": order.distributor_id, "distributor_name": None,
+                    "email": None, "status": "failed", "items": item_dicts
+                })
                 continue
             if not dist["email"]:
                 results.append({
                     "distributor_id": dist["id"], "distributor_name": dist["name"],
                     "email": None, "status": "no_email",
                     "error": "No email address on file for this distributor"
+                })
+                order_distributors.append({
+                    "distributor_id": dist["id"], "distributor_name": dist["name"],
+                    "email": None, "status": "no_email", "items": item_dicts
                 })
                 continue
 
@@ -2099,11 +2113,43 @@ Thank you,
                 "email": dist["email"], "status": "sent" if ok else "failed",
                 "error": error
             })
+            order_distributors.append({
+                "distributor_id": dist["id"], "distributor_name": dist["name"],
+                "email": dist["email"], "status": "sent" if ok else "failed", "items": item_dicts
+            })
             if not ok:
                 print(f"[send_order_emails] failed for {dist['name']} <{dist['email']}>: {error}", flush=True)
 
+        # Persist a record of this order for history, regardless of send outcome —
+        # the manager should be able to look back at what was attempted/ordered.
+        now = now_iso()
+        session_id = generate_id()
+        cursor.execute("""
+            INSERT INTO inventory_sessions (id, location_id, user_id, started_at, completed_at, status, total_bottles, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, 'completed', %s, %s, %s)
+        """, (session_id, request.location_id, user_id, now, now, len(all_items), now, now))
+
+        order_id = generate_id()
+        sent_emails = [r["email"] for r in results if r["status"] == "sent" and r["email"]]
+        order_data = {
+            "distributors": order_distributors,
+            "items": all_items,
+            "business_name": business_name,
+            "manager_name": manager_name,
+            "location_name": request.location_name,
+        }
+        cursor.execute("""
+            INSERT INTO orders (id, session_id, location_id, order_data, total_items, exported_at, export_format, export_destination, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            order_id, session_id, request.location_id, json.dumps(order_data), len(all_items),
+            now, "email", ", ".join(sent_emails) or None, now
+        ))
+        conn.commit()
+
     sent = sum(1 for r in results if r["status"] == "sent")
     return {
+        "order_id": order_id,
         "results": results,
         "sent": sent,
         "failed": len(results) - sent,
