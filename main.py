@@ -12,9 +12,9 @@ import traceback
 
 from database import init_db, get_db
 from auth import (
-    get_password_hash, verify_password, create_access_token, 
-    create_refresh_token, verify_token, create_password_reset_token,
-    verify_password_reset_token
+    get_password_hash, verify_password, create_access_token,
+    create_refresh_token, verify_token,
+    PASSWORD_RESET_EXPIRE_MINUTES, PASSWORD_RESET_RESEND_COOLDOWN_SECONDS
 )
 from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
@@ -26,6 +26,7 @@ import google.generativeai as genai
 import openai
 import os
 import httpx
+import random
 from pydantic import BaseModel, Field
 
 # Startup time for uptime calculation
@@ -1309,26 +1310,106 @@ def cancel_inventory(session_id: str, user_id: str = Depends(get_current_user)):
             }
         }
 
+# ============== INVENTORY DRAFTS ==============
+# Server-side backup of the mobile app's in-progress (unsent) scan session,
+# on top of its local AsyncStorage copy — protects against a lost/reinstalled
+# device, not just an app-kill mid-shift. One draft per user+location.
+
+@v1_router.put("/inventory/draft", response_model=dict)
+def save_inventory_draft(request: InventoryDraftRequest, user_id: str = Depends(get_current_user)):
+    """Upsert the current draft for a location. An empty bottles list deletes it."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (request.location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Location not found"})
+
+        if not request.bottles:
+            cursor.execute(
+                "DELETE FROM inventory_drafts WHERE user_id = %s AND location_id = %s",
+                (user_id, request.location_id)
+            )
+            conn.commit()
+            return {"success": True}
+
+        now = now_iso()
+        cursor.execute("""
+            INSERT INTO inventory_drafts (user_id, location_id, bottles_data, updated_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id, location_id) DO UPDATE
+            SET bottles_data = EXCLUDED.bottles_data, updated_at = EXCLUDED.updated_at
+        """, (user_id, request.location_id, json.dumps(request.bottles), now))
+        conn.commit()
+        return {"success": True}
+
+@v1_router.get("/inventory/draft", response_model=InventoryDraftResponse)
+def get_inventory_draft(location_id: str, user_id: str = Depends(get_current_user)):
+    """Fetch the saved draft for a location, if any."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT d.bottles_data, d.updated_at FROM inventory_drafts d
+            JOIN locations l ON d.location_id = l.id
+            WHERE d.user_id = %s AND d.location_id = %s AND l.user_id = %s
+        """, (user_id, location_id, user_id))
+        row = cursor.fetchone()
+        if not row:
+            return {"bottles": None, "updated_at": None}
+        try:
+            bottles = json.loads(row["bottles_data"])
+        except Exception:
+            bottles = None
+        return {"bottles": bottles, "updated_at": row["updated_at"]}
+
+@v1_router.delete("/inventory/draft", response_model=dict)
+def delete_inventory_draft(location_id: str, user_id: str = Depends(get_current_user)):
+    """Explicitly clear a draft, e.g. once its order has been sent."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM inventory_drafts WHERE user_id = %s AND location_id = %s",
+            (user_id, location_id)
+        )
+        conn.commit()
+        return {"success": True}
+
 # ============== ORDERS ==============
 
 @v1_router.get("/orders", response_model=OrderListResponse)
 def list_orders(
     location_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    q: Optional[str] = None,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     user_id: str = Depends(get_current_user)
 ):
-    """List orders for user's locations"""
+    """List orders for user's locations, optionally filtered by date range and a
+    free-text search over distributor/item names (matched against the stored
+    order_data blob)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         # Build query
         where_clause = "WHERE l.user_id = %s"
         params = [user_id]
         if location_id:
             where_clause += " AND o.location_id = %s"
             params.append(location_id)
-        
+        if start_date:
+            where_clause += " AND o.created_at >= %s"
+            params.append(start_date)
+        if end_date:
+            where_clause += " AND o.created_at <= %s"
+            params.append(end_date)
+        if q:
+            where_clause += " AND o.order_data ILIKE %s"
+            params.append(f"%{q}%")
+
         # Get total count
         cursor.execute(f"""
             SELECT COUNT(*) as count FROM orders o
@@ -1347,23 +1428,23 @@ def list_orders(
             LIMIT %s OFFSET %s
         """, params + [limit, offset])
         
-        import json
         orders = []
         for row in cursor.fetchall():
             order = dict(row)
             try:
-                order_data = json.loads(order.get("order_data", "{}"))
-                items = order_data.get("items", [])
-            except:
-                items = []
-            
+                order_data = json.loads(order.get("order_data") or "{}")
+            except Exception:
+                order_data = {}
+
             orders.append({
                 "id": order["id"],
                 "session_id": order["session_id"],
                 "location_id": order["location_id"],
                 "location_name": order["location_name"],
-                "items": items,
-                "variance_alerts": [],
+                "business_name": order_data.get("business_name"),
+                "manager_name": order_data.get("manager_name"),
+                "staff_name": order_data.get("staff_name"),
+                "distributors": order_data.get("distributors", []),
                 "total_items": order["total_items"],
                 "estimated_cost": order["estimated_cost"],
                 "created_at": order["created_at"],
@@ -1371,7 +1452,7 @@ def list_orders(
                 "export_format": order["export_format"],
                 "export_destination": order["export_destination"]
             })
-        
+
         return {
             "orders": orders,
             "total": total
@@ -1397,19 +1478,12 @@ def get_order(order_id: str, user_id: str = Depends(get_current_user)):
                 "message": "Order not found"
             })
         
-        import json
         order = dict(row)
         try:
-            order_data = json.loads(order.get("order_data", "{}"))
-            items = order_data.get("items", [])
-        except:
-            items = []
-        
-        try:
-            variance_alerts = json.loads(order.get("variance_alerts", "[]"))
-        except:
-            variance_alerts = []
-        
+            order_data = json.loads(order.get("order_data") or "{}")
+        except Exception:
+            order_data = {}
+
         return {
             "order": {
                 "id": order["id"],
@@ -1420,12 +1494,16 @@ def get_order(order_id: str, user_id: str = Depends(get_current_user)):
                     "address": order["address"],
                     "timezone": order["timezone"]
                 },
-                "items": items,
-                "variance_alerts": variance_alerts,
+                "business_name": order_data.get("business_name"),
+                "manager_name": order_data.get("manager_name"),
+                "staff_name": order_data.get("staff_name"),
+                "distributors": order_data.get("distributors", []),
                 "total_items": order["total_items"],
                 "estimated_cost": order["estimated_cost"],
                 "created_at": order["created_at"],
-                "exported_at": order["exported_at"]
+                "exported_at": order["exported_at"],
+                "export_format": order["export_format"],
+                "export_destination": order["export_destination"]
             }
         }
 
@@ -1983,6 +2061,7 @@ class OrderEmailItem(BaseModel):
     name: str
     quantity: float
     size: str = ""
+    price: float | None = None
 
 
 class DistributorOrder(BaseModel):
@@ -1991,7 +2070,9 @@ class DistributorOrder(BaseModel):
 
 
 class SendOrderEmailsRequest(BaseModel):
+    location_id: str
     location_name: str = "your bar"
+    staff_name: str | None = None
     orders: list[DistributorOrder] = Field(min_length=1, max_length=50)
 
 
@@ -2031,9 +2112,18 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
 
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
     results = []
+    order_distributors = []  # mirrors `results` but also carries each distributor's line items, for order history
+    all_items = []
 
     with get_db() as conn:
         cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (request.location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Location not found"})
 
         cursor.execute(
             "SELECT name, email, business_name, manager_name FROM users WHERE id = %s AND deleted_at IS NULL",
@@ -2050,6 +2140,12 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
         )
 
         for order in request.orders:
+            item_dicts = [
+                {"name": i.name, "quantity": i.quantity, "size": i.size or None, "price": i.price}
+                for i in order.items
+            ]
+            all_items.extend(item_dicts)
+
             cursor.execute(
                 "SELECT id, name, email FROM distributors WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
                 (order.distributor_id, user_id)
@@ -2060,12 +2156,20 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
                     "distributor_id": order.distributor_id, "distributor_name": None,
                     "email": None, "status": "failed", "error": "Distributor not found"
                 })
+                order_distributors.append({
+                    "distributor_id": order.distributor_id, "distributor_name": None,
+                    "email": None, "status": "failed", "items": item_dicts
+                })
                 continue
             if not dist["email"]:
                 results.append({
                     "distributor_id": dist["id"], "distributor_name": dist["name"],
                     "email": None, "status": "no_email",
                     "error": "No email address on file for this distributor"
+                })
+                order_distributors.append({
+                    "distributor_id": dist["id"], "distributor_name": dist["name"],
+                    "email": None, "status": "no_email", "items": item_dicts
                 })
                 continue
 
@@ -2099,11 +2203,48 @@ Thank you,
                 "email": dist["email"], "status": "sent" if ok else "failed",
                 "error": error
             })
+            order_distributors.append({
+                "distributor_id": dist["id"], "distributor_name": dist["name"],
+                "email": dist["email"], "status": "sent" if ok else "failed", "items": item_dicts
+            })
             if not ok:
                 print(f"[send_order_emails] failed for {dist['name']} <{dist['email']}>: {error}", flush=True)
 
+        # Persist a record of this order for history, regardless of send outcome —
+        # the manager should be able to look back at what was attempted/ordered.
+        now = now_iso()
+        session_id = generate_id()
+        cursor.execute("""
+            INSERT INTO inventory_sessions (id, location_id, user_id, started_at, completed_at, status, total_bottles, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, 'completed', %s, %s, %s)
+        """, (session_id, request.location_id, user_id, now, now, len(all_items), now, now))
+
+        order_id = generate_id()
+        sent_emails = [r["email"] for r in results if r["status"] == "sent" and r["email"]]
+        total_cost = sum(
+            item["price"] * item["quantity"] for item in all_items if item.get("price") is not None
+        )
+        order_data = {
+            "distributors": order_distributors,
+            "items": all_items,
+            "business_name": business_name,
+            "manager_name": manager_name,
+            "staff_name": request.staff_name,
+            "location_name": request.location_name,
+            "total_cost": total_cost if total_cost > 0 else None,
+        }
+        cursor.execute("""
+            INSERT INTO orders (id, session_id, location_id, order_data, total_items, estimated_cost, exported_at, export_format, export_destination, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            order_id, session_id, request.location_id, json.dumps(order_data), len(all_items),
+            order_data["total_cost"], now, "email", ", ".join(sent_emails) or None, now
+        ))
+        conn.commit()
+
     sent = sum(1 for r in results if r["status"] == "sent")
     return {
+        "order_id": order_id,
         "results": results,
         "sent": sent,
         "failed": len(results) - sent,
@@ -2193,42 +2334,84 @@ def accept_terms(request: AcceptTermsRequest, user_id: str = Depends(get_current
 
 @v1_router.post("/auth/forgot-password")
 def forgot_password(request: ForgotPasswordRequest):
-    """Request password reset"""
+    """Email a 6-digit reset code, valid for 30 minutes.
+
+    Always returns the same generic response regardless of whether the
+    account exists or the email actually sent — do not leak either signal
+    to the caller. The code itself is only ever delivered by email, never
+    in the API response (it used to be, via a `debug_token` field — that
+    was a full account-takeover hole for anyone who knew a user's email)."""
+    email = request.email.lower().strip()
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE email = %s AND deleted_at IS NULL",
-                       (request.email.lower().strip(),))
+        cursor.execute(
+            "SELECT id, name, password_reset_expires_at FROM users WHERE email = %s AND deleted_at IS NULL",
+            (email,)
+        )
         row = cursor.fetchone()
         if row:
-            reset_token = create_password_reset_token(row["id"])
-            expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-            cursor.execute("""
-                UPDATE users SET password_reset_token = %s, password_reset_expires_at = %s
-                WHERE id = %s
-            """, (reset_token, expires_at, row["id"]))
-            conn.commit()
-            return {"success": True, "message": "If an account exists, a reset link has been sent",
-                    "debug_token": reset_token}
-        return {"success": True, "message": "If an account exists, a reset link has been sent"}
+            # A code issued within the cooldown window is still fresh enough
+            # in the recipient's inbox — skip regenerating/resending so a
+            # rapid double-tap (or deliberate spam) doesn't fire two emails
+            # or invalidate a code the user is mid-typing.
+            existing_expiry = row.get("password_reset_expires_at")
+            issued_recently = False
+            if existing_expiry:
+                try:
+                    remaining = datetime.fromisoformat(existing_expiry) - datetime.now(timezone.utc)
+                    issued_recently = remaining.total_seconds() > (
+                        PASSWORD_RESET_EXPIRE_MINUTES * 60 - PASSWORD_RESET_RESEND_COOLDOWN_SECONDS
+                    )
+                except ValueError:
+                    issued_recently = False
+
+            if not issued_recently:
+                code = f"{random.randint(0, 999999):06d}"
+                expires_at = (datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_EXPIRE_MINUTES)).isoformat()
+                cursor.execute("""
+                    UPDATE users SET password_reset_token = %s, password_reset_expires_at = %s
+                    WHERE id = %s
+                """, (code, expires_at, row["id"]))
+                conn.commit()
+
+                api_key = os.getenv("RESEND_API_KEY")
+                if api_key:
+                    ok, error = _send_via_resend(
+                        api_key, email,
+                        "Your 86'd password reset code",
+                        f"""Hi{' ' + row['name'] if row['name'] else ''},
+
+Your password reset code is: {code}
+
+This code expires in {PASSWORD_RESET_EXPIRE_MINUTES} minutes. If you didn't request this, you can ignore this email.
+
+(sent via 86'd bar inventory)"""
+                )
+                if not ok:
+                    print(f"[forgot_password] failed to send reset email to {email}: {error}", flush=True)
+            else:
+                print(f"[forgot_password] RESEND_API_KEY missing — reset code not sent for {email}", flush=True)
+
+    return {"success": True, "message": "If an account exists, a reset code has been sent"}
 
 @v1_router.post("/auth/reset-password")
 def reset_password(request: ResetPasswordRequest):
-    """Reset password using token"""
-    user_id = verify_password_reset_token(request.token)
-    if not user_id:
-        raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset token"})
+    """Reset password using the emailed 6-digit code"""
+    email = request.email.lower().strip()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id FROM users WHERE id = %s AND password_reset_token = %s AND password_reset_expires_at > %s
-        """, (user_id, request.token, now_iso()))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset token"})
+            SELECT id FROM users
+            WHERE email = %s AND password_reset_token = %s AND password_reset_expires_at > %s AND deleted_at IS NULL
+        """, (email, request.token.strip(), now_iso()))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset code"})
         password_hash = get_password_hash(request.new_password)
         cursor.execute("""
             UPDATE users SET password_hash = %s, password_reset_token = NULL, password_reset_expires_at = NULL, updated_at = %s
             WHERE id = %s
-        """, (password_hash, now_iso(), user_id))
+        """, (password_hash, now_iso(), row["id"]))
         conn.commit()
         return {"success": True, "message": "Password reset successfully"}
 
