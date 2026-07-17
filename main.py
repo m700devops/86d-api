@@ -211,7 +211,7 @@ def register(user_data: UserCreate):
             user_id = generate_id()
             now = now_iso()
             password_hash = get_password_hash(user_data.password)
-            trial_ends = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
+            trial_ends = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
             
             cursor.execute("""
                 INSERT INTO users (id, email, password_hash, name, terms_accepted_at, privacy_accepted_at,
@@ -2251,7 +2251,7 @@ Thank you,
     }
 
 # ============== BILLING (Stripe) ==============
-# No card is ever collected at signup — every account gets a 14-day trial
+# No card is ever collected at signup — every account gets a 30-day trial
 # (see register_user) and only talks to Stripe once they hit "Subscribe."
 # Checkout happens in the system browser (not an embedded webview), and a
 # webhook is the only thing that ever flips subscription_status to 'active'.
