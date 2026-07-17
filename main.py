@@ -43,6 +43,8 @@ async def lifespan(app: FastAPI):
         print(f"[lifespan] Database init warning (may already exist): {e}", flush=True)
     # Pre-warm AI provider connections so the first scan is fast (best-effort)
     asyncio.create_task(_warm_providers())
+    # Periodic trial-ending reminder emails (best-effort, runs for the life of the process)
+    asyncio.create_task(_trial_reminder_loop())
     yield
 
 app = FastAPI(
@@ -2279,6 +2281,81 @@ def is_entitled(subscription_status: str, trial_ends_at) -> bool:
         except Exception:
             return True  # unparsable date shouldn't lock someone out
     return False
+
+
+# Trial ending is a hard, silent cliff otherwise — a heads-up email a few
+# days out, on top of the in-app banner, so it's not a total surprise.
+TRIAL_REMINDER_DAYS_BEFORE = 5
+TRIAL_REMINDER_CHECK_INTERVAL_SECONDS = 6 * 60 * 60  # every 6 hours
+
+
+def _send_trial_reminder_emails():
+    """Email trial users whose trial ends within TRIAL_REMINDER_DAYS_BEFORE
+    days and haven't been reminded yet. Runs on a background loop, not
+    per-request — see _trial_reminder_loop / lifespan."""
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key:
+        return
+
+    now = datetime.now(timezone.utc)
+    cutoff = (now + timedelta(days=TRIAL_REMINDER_DAYS_BEFORE)).isoformat()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, email, name, manager_name, trial_ends_at
+            FROM users
+            WHERE subscription_status = 'trial'
+              AND trial_reminder_sent_at IS NULL
+              AND trial_ends_at IS NOT NULL
+              AND trial_ends_at <= %s
+              AND trial_ends_at > %s
+              AND deleted_at IS NULL
+        """, (cutoff, now.isoformat()))
+        rows = cursor.fetchall()
+
+        for row in rows:
+            try:
+                ends = datetime.fromisoformat(row["trial_ends_at"])
+                if ends.tzinfo is None:
+                    ends = ends.replace(tzinfo=timezone.utc)
+                days_left = max(0, (ends - now).days)
+                display_name = row["manager_name"] or row["name"] or "there"
+                date_str = ends.strftime("%B %d, %Y")
+
+                subject = f"Your 86'd trial ends in {days_left} day{'s' if days_left != 1 else ''}"
+                body = f"""Hi {display_name},
+
+Your free trial of 86'd ends on {date_str}. After that, you'll need an active subscription to keep scanning, ordering, and tracking your bar's inventory — nothing you've entered will be lost, but you won't be able to use the app again until you subscribe.
+
+Open the 86'd app and tap Subscribe to keep going without any interruption.
+
+Thanks,
+The 86'd team"""
+
+                ok, error = _send_via_resend(api_key, row["email"], subject, body)
+                if ok:
+                    cursor.execute(
+                        "UPDATE users SET trial_reminder_sent_at = %s, updated_at = %s WHERE id = %s",
+                        (now_iso(), now_iso(), row["id"])
+                    )
+                    conn.commit()
+                else:
+                    print(f"[trial_reminder] failed to email {row['email']}: {error}", flush=True)
+            except Exception as e:
+                print(f"[trial_reminder] error processing user {row['id']}: {e}", flush=True)
+
+
+async def _trial_reminder_loop():
+    """Runs for the life of the process, periodically checking for trial
+    users who need a reminder email. Best-effort — errors never crash
+    the app or block startup."""
+    while True:
+        try:
+            await asyncio.to_thread(_send_trial_reminder_emails)
+        except Exception as e:
+            print(f"[trial_reminder] loop error: {e}", flush=True)
+        await asyncio.sleep(TRIAL_REMINDER_CHECK_INTERVAL_SECONDS)
 
 
 @v1_router.post("/billing/create-checkout-session")
