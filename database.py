@@ -442,8 +442,8 @@ def init_db():
         """, (now_iso(),))
         conn.commit()
 
-        # Migrate users: add business_name and manager_name columns if absent
-        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT")]:
+        # Migrate users: add business_name, manager_name, stripe_customer_id columns if absent
+        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'users' AND column_name = %s

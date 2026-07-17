@@ -2250,6 +2250,156 @@ Thank you,
         "failed": len(results) - sent,
     }
 
+# ============== BILLING (Stripe) ==============
+# No card is ever collected at signup — every account gets a 14-day trial
+# (see register_user) and only talks to Stripe once they hit "Subscribe."
+# Checkout happens in the system browser (not an embedded webview), and a
+# webhook is the only thing that ever flips subscription_status to 'active'.
+
+import stripe
+
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+APP_BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://eight6d-api.onrender.com")
+
+
+def is_entitled(subscription_status: str, trial_ends_at) -> bool:
+    """True if the account can use paid features right now: an active paid
+    subscription, or a trial that hasn't expired yet."""
+    if subscription_status == "active":
+        return True
+    if subscription_status == "trial":
+        if not trial_ends_at:
+            return True
+        try:
+            ends = trial_ends_at if isinstance(trial_ends_at, datetime) else datetime.fromisoformat(str(trial_ends_at))
+            if ends.tzinfo is None:
+                ends = ends.replace(tzinfo=timezone.utc)
+            return ends > datetime.now(timezone.utc)
+        except Exception:
+            return True  # unparsable date shouldn't lock someone out
+    return False
+
+
+@v1_router.post("/billing/create-checkout-session")
+def create_checkout_session(user_id: str = Depends(get_current_user)):
+    """Create a Stripe Checkout session for the current user and hand back
+    its URL — the app opens this in Safari, it never touches Stripe directly."""
+    if not stripe.api_key:
+        raise HTTPException(status_code=503, detail={
+            "error": "billing_not_configured",
+            "message": "Billing isn't set up on the server yet (STRIPE_SECRET_KEY missing)"
+        })
+    price_id = os.getenv("STRIPE_PRICE_ID")
+    if not price_id:
+        raise HTTPException(status_code=503, detail={
+            "error": "billing_not_configured",
+            "message": "Billing isn't set up on the server yet (STRIPE_PRICE_ID missing)"
+        })
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT email, stripe_customer_id FROM users WHERE id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
+
+        customer_id = row["stripe_customer_id"]
+        if not customer_id:
+            customer = stripe.Customer.create(email=row["email"], metadata={"user_id": user_id})
+            customer_id = customer.id
+            cursor.execute(
+                "UPDATE users SET stripe_customer_id = %s, updated_at = %s WHERE id = %s",
+                (customer_id, now_iso(), user_id)
+            )
+            conn.commit()
+
+    session = stripe.checkout.Session.create(
+        customer=customer_id,
+        mode="subscription",
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{APP_BASE_URL}/billing/success",
+        cancel_url=f"{APP_BASE_URL}/billing/cancel",
+        client_reference_id=user_id,
+        subscription_data={"metadata": {"user_id": user_id}},
+    )
+    return {"checkout_url": session.url}
+
+
+def _billing_page(title: str, message: str) -> str:
+    return f"""
+        <html>
+          <head><meta name="viewport" content="width=device-width, initial-scale=1" /></head>
+          <body style="font-family: -apple-system, sans-serif; background: #0F0F0F; color: #fff;
+                       display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+            <div style="text-align: center; padding: 24px;">
+              <h1 style="margin-bottom: 8px;">{title}</h1>
+              <p style="color: #999;">{message}</p>
+            </div>
+          </body>
+        </html>
+    """
+
+
+@app.get("/billing/success")
+def billing_success():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_billing_page("You're all set!", "Head back to the 86'd app — your subscription is active."))
+
+
+@app.get("/billing/cancel")
+def billing_cancel():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_billing_page("No charge made", "You can head back to the 86'd app any time to subscribe."))
+
+
+@app.post("/billing/webhook")
+async def billing_webhook(request: Request):
+    """Stripe calls this directly — verified via signature, not a user JWT.
+    This is the only thing allowed to flip subscription_status to 'active'."""
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    if not webhook_secret:
+        raise HTTPException(status_code=503, detail={"error": "webhook_not_configured"})
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except (ValueError, stripe.error.SignatureVerificationError):
+        raise HTTPException(status_code=400, detail={"error": "invalid_signature"})
+
+    obj = event["data"]["object"]
+    now = now_iso()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        if event["type"] == "checkout.session.completed":
+            user_id = obj.get("client_reference_id") or (obj.get("metadata") or {}).get("user_id")
+            customer_id = obj.get("customer")
+            if user_id:
+                cursor.execute(
+                    "UPDATE users SET subscription_status = 'active', stripe_customer_id = %s, updated_at = %s WHERE id = %s",
+                    (customer_id, now, user_id)
+                )
+                conn.commit()
+
+        elif event["type"] in ("customer.subscription.updated", "customer.subscription.deleted"):
+            customer_id = obj.get("customer")
+            status = obj.get("status")  # active, past_due, canceled, unpaid, etc.
+            new_status = "active" if status == "active" else ("trial" if status == "trialing" else "canceled")
+            if customer_id:
+                cursor.execute(
+                    "UPDATE users SET subscription_status = %s, updated_at = %s WHERE stripe_customer_id = %s",
+                    (new_status, now, customer_id)
+                )
+                conn.commit()
+
+    return {"received": True}
+
 # ============== V1 USERS ==============
 
 @v1_router.get("/users/me", response_model=UserProfileResponse)
@@ -2839,6 +2989,19 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
     Total wall-clock cap: TOTAL_SCAN_TIMEOUT_SEC (default 20s) — returns empty 200 on expiry.
     """
     print("[analyze_bottle] function started", flush=True)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT subscription_status, trial_ends_at FROM users WHERE id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        sub_row = cursor.fetchone()
+    if not sub_row or not is_entitled(sub_row["subscription_status"], sub_row["trial_ends_at"]):
+        raise HTTPException(status_code=402, detail={
+            "error": "trial_expired",
+            "message": "Your free trial has ended — subscribe to keep scanning."
+        })
 
     openai_key = os.getenv("OPENAI_API_KEY")
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
