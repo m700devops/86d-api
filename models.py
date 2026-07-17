@@ -114,16 +114,24 @@ class LocationBase(BaseModel):
     name: str
     address: Optional[str] = None
     timezone: str = "America/New_York"
+    # 'nearest' (default) — round to nearest whole bottle, so a shortfall
+    # under half a bottle doesn't trigger an order. 'up' — always round a
+    # shortfall up, never under-orders. Per-location since risk tolerance
+    # genuinely varies bar to bar.
+    order_rounding_mode: str = "nearest"
 
 class LocationCreate(LocationBase):
     pass
+
+class LocationUpdate(BaseModel):
+    order_rounding_mode: Optional[str] = Field(None, pattern="^(up|nearest)$")
 
 class LocationResponse(LocationBase):
     id: str
     user_id: str
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 

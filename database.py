@@ -487,6 +487,16 @@ def init_db():
         """, (now_iso(),))
         conn.commit()
 
+        # Migrate locations: add order_rounding_mode if absent
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'locations' AND column_name = 'order_rounding_mode'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE locations ADD COLUMN order_rounding_mode TEXT DEFAULT 'nearest'")
+            print("[db] migrated locations: added order_rounding_mode TEXT DEFAULT 'nearest'", flush=True)
+        conn.commit()
+
 
         # Seed products — always runs but is idempotent (checks name+brand before insert)
         seed_products(conn)

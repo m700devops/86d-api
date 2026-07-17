@@ -549,10 +549,38 @@ def create_location(location_data: LocationCreate, user_id: str = Depends(get_cu
                 "name": location_data.name,
                 "address": location_data.address,
                 "timezone": location_data.timezone,
+                "order_rounding_mode": "nearest",
                 "created_at": now,
                 "updated_at": now
             }
         }
+
+@v1_router.patch("/locations/{location_id}", response_model=LocationResponse)
+def update_location(location_id: str, updates: LocationUpdate, user_id: str = Depends(get_current_user)):
+    """Update a location's settings — currently just order_rounding_mode."""
+    fields = updates.model_dump(exclude_unset=True, exclude_none=True)
+    if not fields:
+        raise HTTPException(status_code=400, detail={"error": "no_fields", "message": "Nothing to update"})
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Location not found"})
+
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        now = now_iso()
+        cursor.execute(
+            f"UPDATE locations SET {set_clause}, updated_at = %s WHERE id = %s",
+            (*fields.values(), now, location_id)
+        )
+        conn.commit()
+
+        cursor.execute("SELECT * FROM locations WHERE id = %s", (location_id,))
+        return dict(cursor.fetchone())
 
 @v1_router.get("/locations/{location_id}/par-levels", response_model=ParLevelListResponse)
 def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
