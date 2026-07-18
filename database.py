@@ -442,8 +442,8 @@ def init_db():
         """, (now_iso(),))
         conn.commit()
 
-        # Migrate users: add business_name, manager_name, stripe_customer_id, trial_reminder_sent_at columns if absent
-        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT")]:
+        # Migrate users: add business_name, manager_name, stripe_customer_id, trial_reminder_sent_at, password_changed_at columns if absent
+        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'users' AND column_name = %s
@@ -484,6 +484,20 @@ def init_db():
         cursor.execute("""
             UPDATE products SET source = 'seed', updated_at = %s
             WHERE verified = 1 AND (source IS NULL OR source = 'manual')
+        """, (now_iso(),))
+        conn.commit()
+
+        # One-time grandfather: accounts created during development got 14-day
+        # trials that will have already lapsed by the time trial enforcement
+        # deploys — without this, deploying locks out every existing account
+        # (including demo/test accounts) the moment the paywall goes live.
+        # Fixed literal dates keep this idempotent: it can never re-extend.
+        cursor.execute("""
+            UPDATE users
+            SET trial_ends_at = '2026-08-18T00:00:00+00:00', updated_at = %s
+            WHERE subscription_status = 'trial'
+              AND created_at < '2026-07-19'
+              AND (trial_ends_at IS NULL OR trial_ends_at < '2026-08-18')
         """, (now_iso(),))
         conn.commit()
 

@@ -13,7 +13,7 @@ import traceback
 from database import init_db, get_db
 from auth import (
     get_password_hash, verify_password, create_access_token,
-    create_refresh_token, verify_token,
+    create_refresh_token, verify_token, get_token_claims,
     PASSWORD_RESET_EXPIRE_MINUTES, PASSWORD_RESET_RESEND_COOLDOWN_SECONDS
 )
 from helpers import (
@@ -120,6 +120,35 @@ v1_router = APIRouter(prefix="/v1")
 
 # ============== DEPENDENCIES ==============
 
+def _token_survives_password_change(user_id: str, issued_at) -> bool:
+    """A JWT is only revocable through this check: tokens issued before the
+    user's last password change are dead. This is what actually signs out an
+    ex-employee's phone when the manager changes the bar's password — without
+    it, old tokens stay valid for up to 30 days no matter what.
+
+    Also returns False for deleted accounts still holding valid tokens.
+    1-second grace on the comparison: iat is floored to whole seconds, so a
+    token minted in the same instant as the change must not self-revoke."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT password_changed_at FROM users WHERE id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+    if not row:
+        return False
+    if not row["password_changed_at"] or issued_at is None:
+        return True
+    try:
+        changed = datetime.fromisoformat(row["password_changed_at"])
+        if changed.tzinfo is None:
+            changed = changed.replace(tzinfo=timezone.utc)
+        return float(issued_at) >= changed.timestamp() - 1
+    except Exception:
+        return True  # unparsable timestamp shouldn't lock everyone out
+
+
 def get_current_user(authorization: str = Header(None)) -> str:
     """Extract and verify JWT token from Authorization header"""
     if not authorization:
@@ -127,22 +156,22 @@ def get_current_user(authorization: str = Header(None)) -> str:
             "error": "unauthorized",
             "message": "Authorization header required"
         })
-    
+
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail={
             "error": "unauthorized",
             "message": "Invalid authorization scheme"
         })
-    
-    user_id = verify_token(token, "access")
-    if not user_id:
+
+    claims = get_token_claims(token, "access")
+    if not claims or not _token_survives_password_change(claims["sub"], claims.get("iat")):
         raise HTTPException(status_code=401, detail={
             "error": "token_expired",
             "message": "Token expired or invalid"
         })
-    
-    return user_id
+
+    return claims["sub"]
 
 # ============== HEALTH & INFO ==============
 
@@ -350,14 +379,16 @@ def login(credentials: UserLogin):
 @v1_router.post("/auth/refresh", response_model=RefreshResponse)
 def refresh_token(refresh_data: RefreshRequest):
     """Get new access token using refresh token"""
-    user_id = verify_token(refresh_data.refresh_token, "refresh")
-    if not user_id:
+    claims = get_token_claims(refresh_data.refresh_token, "refresh")
+    # Same password-change revocation as access tokens — otherwise a stolen
+    # refresh token could keep minting fresh access tokens for 30 days.
+    if not claims or not _token_survives_password_change(claims["sub"], claims.get("iat")):
         raise HTTPException(status_code=401, detail={
             "error": "token_expired",
             "message": "Refresh token expired or invalid"
         })
-    
-    access_token = create_access_token(user_id)
+
+    access_token = create_access_token(claims["sub"])
     return {
         "access_token": access_token,
         "expires_in": 3600
@@ -2162,12 +2193,14 @@ class SendOrderEmailsRequest(BaseModel):
     orders: list[DistributorOrder] = Field(min_length=1, max_length=50)
 
 
-def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None) -> tuple[bool, str | None]:
+def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None, bcc: str | None = None) -> tuple[bool, str | None]:
     """Send one email through the Resend API. Returns (ok, error_message)."""
     sender = os.getenv("ORDER_EMAIL_FROM", "86'd Orders <onboarding@resend.dev>")
     payload = {"from": sender, "to": [to_email], "subject": subject, "text": body_text}
     if reply_to:
         payload["reply_to"] = reply_to
+    if bcc and bcc.lower() != to_email.lower():
+        payload["bcc"] = [bcc]
     try:
         resp = httpx.post(
             "https://api.resend.com/emails",
@@ -2283,7 +2316,10 @@ Thank you,
 {business_name}
 (sent via 86'd bar inventory)"""
 
-            ok, error = _send_via_resend(api_key, dist["email"], subject, body_text, reply_to=reply_to)
+            # BCC the bar's own email: proof in the manager's inbox that the
+            # order went out, and a paper trail if a distributor claims they
+            # never received it. "Sent" only means Resend accepted it.
+            ok, error = _send_via_resend(api_key, dist["email"], subject, body_text, reply_to=reply_to, bcc=reply_to)
             results.append({
                 "distributor_id": dist["id"], "distributor_name": dist["name"],
                 "email": dist["email"], "status": "sent" if ok else "failed",
@@ -2505,6 +2541,95 @@ def _billing_page(title: str, message: str) -> str:
     """
 
 
+# ============== LEGAL PAGES ==============
+# Hosted here so the app's Terms/Privacy links and the App Store's required
+# privacy-policy URL have somewhere real to point. Plain-language boilerplate
+# for a bar-inventory SaaS — have a professional review before serious scale.
+
+LEGAL_CONTACT = os.getenv("LEGAL_CONTACT_EMAIL", "southportai@hotmail.com")
+
+
+def _legal_page(title: str, body_html: str) -> str:
+    return f"""
+        <html>
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>{title} — 86'd</title>
+          </head>
+          <body style="font-family: -apple-system, sans-serif; background: #0F0F0F; color: #E5E5E5;
+                       max-width: 640px; margin: 0 auto; padding: 32px 20px; line-height: 1.6;">
+            <h1 style="color: #FF6B35;">{title}</h1>
+            <p style="color: #999;">86'd Bar Inventory · Last updated July 19, 2026</p>
+            {body_html}
+            <p style="color: #999; margin-top: 40px;">Questions: <a href="mailto:{LEGAL_CONTACT}" style="color: #FFD700;">{LEGAL_CONTACT}</a></p>
+          </body>
+        </html>
+    """
+
+
+@app.get("/legal/privacy")
+def legal_privacy():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_legal_page("Privacy Policy", """
+        <h2>What we collect</h2>
+        <p>Your account details (name, email, business name), your bar's inventory data
+        (products, counts, par levels, prices, orders, distributor contacts, staff names you add),
+        and the bottle photos you take while scanning.</p>
+        <h2>How photos are used</h2>
+        <p>Bottle photos are sent to our AI providers (OpenAI and Google) solely to identify the
+        bottle, and are not stored on our servers after identification.</p>
+        <h2>Payments</h2>
+        <p>Subscriptions are processed by Stripe. We never see or store your card number.</p>
+        <h2>Service providers</h2>
+        <p>We use Render (hosting), Stripe (payments), Resend (email delivery), and OpenAI/Google
+        (bottle identification). Each receives only what's needed to provide their function.</p>
+        <h2>What we don't do</h2>
+        <p>We do not sell your data, and we do not share your bar's inventory or ordering
+        information with anyone except the service providers above.</p>
+        <h2>Deleting your data</h2>
+        <p>You can permanently delete your account and its data at any time from
+        Settings &rarr; Delete Account inside the app.</p>
+        <h2>Security</h2>
+        <p>Data is encrypted in transit. Passwords are stored hashed, never in plain text.</p>
+    """))
+
+
+@app.get("/legal/terms")
+def legal_terms():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_legal_page("Terms of Service", """
+        <h2>The service</h2>
+        <p>86'd is a bar inventory tool: scan bottles, track counts and par levels, and send
+        orders to your distributors by email.</p>
+        <h2>Your account</h2>
+        <p>You're responsible for activity on your account and for keeping your password private.
+        If a staff member with access leaves, change your password in Settings — that signs out
+        every other device.</p>
+        <h2>Subscription &amp; trial</h2>
+        <p>New accounts get a free 30-day trial with no card required. After that, continued use
+        requires a paid subscription, billed through Stripe. Cancel anytime; your data stays
+        intact and access resumes if you re-subscribe.</p>
+        <h2>Important: verify your orders</h2>
+        <p>AI bottle identification and inventory math can contain errors. Order quantities are
+        suggestions calculated from the counts and par levels you enter. <strong>Always review an
+        order before sending it</strong> — you are responsible for what is ordered from your
+        distributors, and 86'd is not liable for ordering errors, over-purchases, or stockouts.</p>
+        <h2>Email delivery</h2>
+        <p>"Sent" means our email provider accepted the message. We can't guarantee a distributor
+        reads or acts on an order — confirm important orders directly.</p>
+        <h2>Acceptable use</h2>
+        <p>Don't abuse the service, attempt to access other accounts' data, or use it for
+        anything unlawful.</p>
+        <h2>Warranty &amp; liability</h2>
+        <p>The service is provided "as is" without warranties. To the maximum extent permitted by
+        law, our total liability is limited to the amount you paid in the past 12 months.</p>
+        <h2>Changes</h2>
+        <p>We may update these terms; continued use after an update is acceptance of the new
+        terms.</p>
+    """))
+
+
 @app.get("/billing/success")
 def billing_success():
     from fastapi.responses import HTMLResponse
@@ -2721,16 +2846,23 @@ def reset_password(request: ResetPasswordRequest):
         if not row:
             raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset code"})
         password_hash = get_password_hash(request.new_password)
+        now = now_iso()
+        # password_changed_at revokes every previously issued token — a reset
+        # is exactly when you want all old devices signed out
         cursor.execute("""
-            UPDATE users SET password_hash = %s, password_reset_token = NULL, password_reset_expires_at = NULL, updated_at = %s
+            UPDATE users SET password_hash = %s, password_changed_at = %s,
+                             password_reset_token = NULL, password_reset_expires_at = NULL, updated_at = %s
             WHERE id = %s
-        """, (password_hash, now_iso(), row["id"]))
+        """, (password_hash, now, now, row["id"]))
         conn.commit()
         return {"success": True, "message": "Password reset successfully"}
 
 @v1_router.put("/auth/change-password")
 def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_current_user)):
-    """Change password (requires current password)"""
+    """Change password (requires current password). Revokes every existing
+    token — including this device's — so fresh tokens are returned for the
+    caller to store; every OTHER device (e.g. an ex-employee's phone) is
+    signed out the moment its next request hits the server."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT password_hash FROM users WHERE id = %s AND deleted_at IS NULL", (user_id,))
@@ -2740,10 +2872,16 @@ def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_c
         if not verify_password(request.current_password, row["password_hash"]):
             raise HTTPException(status_code=401, detail={"error": "invalid_password", "message": "Current password is incorrect"})
         password_hash = get_password_hash(request.new_password)
-        cursor.execute("UPDATE users SET password_hash = %s, updated_at = %s WHERE id = %s",
-                       (password_hash, now_iso(), user_id))
+        now = now_iso()
+        cursor.execute("UPDATE users SET password_hash = %s, password_changed_at = %s, updated_at = %s WHERE id = %s",
+                       (password_hash, now, now, user_id))
         conn.commit()
-        return {"success": True, "message": "Password changed successfully"}
+    return {
+        "success": True,
+        "message": "Password changed successfully",
+        "access_token": create_access_token(user_id),
+        "refresh_token": create_refresh_token(user_id),
+    }
 
 # ============== V1 SCANS (Gemini Vision) ==============
 
