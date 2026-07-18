@@ -38,6 +38,10 @@ class AcceptTermsRequest(BaseModel):
     terms_version: str
     privacy_version: str
 
+class DeleteAccountRequest(BaseModel):
+    # In the body, not a query param — passwords don't belong in URLs/logs
+    password: str
+
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
@@ -125,10 +129,14 @@ class LocationCreate(LocationBase):
 
 class LocationUpdate(BaseModel):
     order_rounding_mode: Optional[str] = Field(None, pattern="^(up|nearest)$")
+    # Named staff list for order attribution ("who counted") — labels, not
+    # accounts. Stored per-location so every device on the account sees it.
+    staff_names: Optional[List[str]] = None
 
 class LocationResponse(LocationBase):
     id: str
     user_id: str
+    staff_names: List[str] = []
     created_at: datetime
     updated_at: datetime
 
@@ -160,6 +168,7 @@ class ParLevelResponse(BaseModel):
     par_quantity: float
     full_quantity: float = 0.0
     current_stock: float = 0.0
+    price: Optional[float] = None
     updated_at: datetime
 
     class Config:
@@ -173,10 +182,13 @@ class ParLevelBulkResponse(BaseModel):
     par_levels: List[ParLevelResponse]
 
 class ProductStockUpdate(BaseModel):
-    """PATCH /locations/{loc}/products/{prod} — update full, current_stock, and/or par."""
+    """PATCH /locations/{loc}/products/{prod} — update full, current_stock, par, and/or price."""
     full: Optional[float] = Field(default=None, ge=0, le=999.99)
     current_stock: Optional[float] = Field(default=None, ge=0, le=999.99)
     par: Optional[float] = Field(default=None, gt=0)
+    # Per-location bottle price (what THIS bar pays) — deliberately not on the
+    # shared products table, where one bar's price would leak to every bar.
+    price: Optional[float] = Field(default=None, ge=0)
 
 class ProductStockResponse(BaseModel):
     location_id: str
@@ -184,6 +196,7 @@ class ProductStockResponse(BaseModel):
     full: float
     current_stock: float
     par: Optional[float]
+    price: Optional[float] = None
     updated_at: str
 
 # ============== SCAN MODELS ==============

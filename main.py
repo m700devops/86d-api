@@ -35,6 +35,15 @@ START_TIME = time.time()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database on startup - non-blocking"""
+    # auth.py falls back to a hardcoded SECRET_KEY when the env var is unset —
+    # with the default, anyone can forge login tokens for any account. Scream
+    # about it at startup so it can't go unnoticed on a real deployment.
+    from auth import SECRET_KEY as _sk
+    if _sk == "your-secret-key-change-in-production":
+        print("=" * 70, flush=True)
+        print("[SECURITY] SECRET_KEY env var is NOT set — using the default!", flush=True)
+        print("[SECURITY] Anyone can forge auth tokens. Set SECRET_KEY on Render NOW.", flush=True)
+        print("=" * 70, flush=True)
     try:
         # Run init_db in thread pool to avoid blocking startup
         await asyncio.to_thread(init_db)
@@ -267,27 +276,56 @@ def register(user_data: UserCreate):
             "debug": str(e)
         })
 
+# Login throttling — in-memory, per-email. Enough to make credential
+# stuffing impractical on a single-instance deployment without adding a
+# dependency; resets on process restart, which is fine for this purpose.
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 15 * 60
+_login_failures: dict[str, list[float]] = {}
+
+
+def _login_locked(email: str) -> bool:
+    cutoff = time.time() - LOGIN_LOCKOUT_SECONDS
+    attempts = [t for t in _login_failures.get(email, []) if t > cutoff]
+    _login_failures[email] = attempts
+    return len(attempts) >= LOGIN_MAX_FAILURES
+
+
+def _record_login_failure(email: str) -> None:
+    _login_failures.setdefault(email, []).append(time.time())
+
+
 @v1_router.post("/auth/login", response_model=TokenResponse)
 def login(credentials: UserLogin):
     """Authenticate and get tokens"""
+    email = credentials.email.lower().strip()
+    if _login_locked(email):
+        raise HTTPException(status_code=429, detail={
+            "error": "too_many_attempts",
+            "message": "Too many failed attempts — try again in 15 minutes, or reset your password."
+        })
+
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         # Find user
         cursor.execute(
             """SELECT id, email, password_hash, name, subscription_status, subscription_tier,
-                      trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at 
+                      trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
                FROM users WHERE email = %s AND deleted_at IS NULL""",
-            (credentials.email.lower().strip(),)
+            (email,)
         )
         row = cursor.fetchone()
-        
+
         if not row or not verify_password(credentials.password, row["password_hash"]):
+            _record_login_failure(email)
             raise HTTPException(status_code=401, detail={
                 "error": "invalid_credentials",
                 "message": "Invalid email or password"
             })
-        
+
+        _login_failures.pop(email, None)
+
         # Generate tokens
         access_token = create_access_token(row["id"])
         refresh_token = create_refresh_token(row["id"])
@@ -504,19 +542,29 @@ def increment_scan_count(product_id: str):
 
 # ============== LOCATIONS ==============
 
+def _location_row(row) -> dict:
+    """DB row → response dict: staff_names is stored as a JSON TEXT column."""
+    loc = dict(row)
+    try:
+        loc["staff_names"] = json.loads(loc.get("staff_names") or "[]")
+    except Exception:
+        loc["staff_names"] = []
+    loc["order_rounding_mode"] = loc.get("order_rounding_mode") or "nearest"
+    return loc
+
 @v1_router.get("/locations", response_model=LocationListResponse)
 def list_locations(user_id: str = Depends(get_current_user)):
     """List user's locations"""
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         cursor.execute("""
-            SELECT * FROM locations 
+            SELECT * FROM locations
             WHERE user_id = %s AND deleted_at IS NULL
             ORDER BY created_at DESC
         """, (user_id,))
-        
-        locations = [dict(row) for row in cursor.fetchall()]
+
+        locations = [_location_row(row) for row in cursor.fetchall()]
         return {"locations": locations}
 
 @v1_router.post("/locations", response_model=dict, status_code=201)
@@ -550,6 +598,7 @@ def create_location(location_data: LocationCreate, user_id: str = Depends(get_cu
                 "address": location_data.address,
                 "timezone": location_data.timezone,
                 "order_rounding_mode": "nearest",
+                "staff_names": [],
                 "created_at": now,
                 "updated_at": now
             }
@@ -557,10 +606,12 @@ def create_location(location_data: LocationCreate, user_id: str = Depends(get_cu
 
 @v1_router.patch("/locations/{location_id}", response_model=LocationResponse)
 def update_location(location_id: str, updates: LocationUpdate, user_id: str = Depends(get_current_user)):
-    """Update a location's settings — currently just order_rounding_mode."""
+    """Update a location's settings — order_rounding_mode and/or staff_names."""
     fields = updates.model_dump(exclude_unset=True, exclude_none=True)
     if not fields:
         raise HTTPException(status_code=400, detail={"error": "no_fields", "message": "Nothing to update"})
+    if "staff_names" in fields:
+        fields["staff_names"] = json.dumps(fields["staff_names"])
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -580,7 +631,7 @@ def update_location(location_id: str, updates: LocationUpdate, user_id: str = De
         conn.commit()
 
         cursor.execute("SELECT * FROM locations WHERE id = %s", (location_id,))
-        return dict(cursor.fetchone())
+        return _location_row(cursor.fetchone())
 
 @v1_router.get("/locations/{location_id}/par-levels", response_model=ParLevelListResponse)
 def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
@@ -618,6 +669,7 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
                 "par_quantity": row["par_quantity"],
                 "full_quantity": float(row["full_quantity"] or 0),
                 "current_stock": float(row["current_stock"] or 0),
+                "price": float(row["price"]) if row["price"] else None,
                 "updated_at": row["updated_at"],
                 "product": {
                     "id": row["product_id"],
@@ -802,7 +854,7 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         now = now_iso()
         # Fetch existing row so we can preserve unchanged fields
         cursor.execute(
-            "SELECT par_quantity, full_quantity, current_stock FROM par_levels WHERE location_id = %s AND product_id = %s",
+            "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels WHERE location_id = %s AND product_id = %s",
             (location_id, product_id)
         )
         existing = cursor.fetchone()
@@ -810,17 +862,19 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         new_par = data.par if data.par is not None else (float(existing["par_quantity"]) if existing else 1.0)
         new_full = data.full if data.full is not None else (float(existing["full_quantity"] or 0) if existing else 0.0)
         new_stock = data.current_stock if data.current_stock is not None else (float(existing["current_stock"] or 0) if existing else 0.0)
+        new_price = data.price if data.price is not None else (float(existing["price"] or 0) if existing else 0.0)
 
         par_id = generate_id()
         cursor.execute("""
-            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, price, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(location_id, product_id) DO UPDATE SET
                 par_quantity = excluded.par_quantity,
                 full_quantity = excluded.full_quantity,
                 current_stock = excluded.current_stock,
+                price = excluded.price,
                 updated_at = excluded.updated_at
-        """, (par_id, location_id, product_id, new_par, new_full, new_stock, now))
+        """, (par_id, location_id, product_id, new_par, new_full, new_stock, new_price, now))
         conn.commit()
 
         return {
@@ -829,6 +883,7 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
             "full": new_full,
             "current_stock": new_stock,
             "par": new_par,
+            "price": new_price if new_price > 0 else None,
             "updated_at": now,
         }
 
@@ -1802,6 +1857,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
                 "par_quantity": row["par_quantity"],
                 "full_quantity": float(row["full_quantity"] or 0),
                 "current_stock": float(row["current_stock"] or 0),
+                "price": float(row["price"]) if row["price"] else None,
                 "updated_at": row["updated_at"],
                 "product": {
                     "id": row["product_id"],
@@ -2555,15 +2611,17 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
         return result
 
 @v1_router.delete("/users/me")
-def delete_user(password: str, user_id: str = Depends(get_current_user)):
-    """Soft delete user account (GDPR compliance)"""
+def delete_user(request: DeleteAccountRequest, user_id: str = Depends(get_current_user)):
+    """Soft delete user account (GDPR / App Store guideline 5.1.1 compliance).
+    Password re-confirmation comes in the request body — it was previously a
+    query parameter, which put passwords in URLs and access logs."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT password_hash FROM users WHERE id = %s AND deleted_at IS NULL", (user_id,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
-        if not verify_password(password, row["password_hash"]):
+        if not verify_password(request.password, row["password_hash"]):
             raise HTTPException(status_code=401, detail={"error": "invalid_password", "message": "Password is incorrect"})
         cursor.execute("""
             UPDATE users SET deleted_at = %s, email = CONCAT(email, '.deleted.', %s), updated_at = %s

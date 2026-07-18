@@ -453,8 +453,8 @@ def init_db():
                 print(f"[db] migrated users: added {col} {col_type}", flush=True)
         conn.commit()
 
-        # Migrate par_levels: add full_quantity and current_stock columns if absent
-        for col, col_type in [("full_quantity", "NUMERIC(10,2)"), ("current_stock", "NUMERIC(10,2)")]:
+        # Migrate par_levels: add full_quantity, current_stock, price columns if absent
+        for col, col_type in [("full_quantity", "NUMERIC(10,2)"), ("current_stock", "NUMERIC(10,2)"), ("price", "NUMERIC(10,2)")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'par_levels' AND column_name = %s
@@ -487,14 +487,15 @@ def init_db():
         """, (now_iso(),))
         conn.commit()
 
-        # Migrate locations: add order_rounding_mode if absent
-        cursor.execute("""
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'locations' AND column_name = 'order_rounding_mode'
-        """)
-        if not cursor.fetchone():
-            cursor.execute("ALTER TABLE locations ADD COLUMN order_rounding_mode TEXT DEFAULT 'nearest'")
-            print("[db] migrated locations: added order_rounding_mode TEXT DEFAULT 'nearest'", flush=True)
+        # Migrate locations: add order_rounding_mode and staff_names if absent
+        for col, col_def in [("order_rounding_mode", "TEXT DEFAULT 'nearest'"), ("staff_names", "TEXT")]:
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'locations' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE locations ADD COLUMN {col} {col_def}")
+                print(f"[db] migrated locations: added {col} {col_def}", flush=True)
         conn.commit()
 
 
