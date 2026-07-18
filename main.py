@@ -32,18 +32,38 @@ from pydantic import BaseModel, Field
 # Startup time for uptime calculation
 START_TIME = time.time()
 
+# Error reporting — a no-op if SENTRY_DSN isn't set, so this is safe to ship
+# before you've created a Sentry account. Once set, unhandled exceptions in
+# any request (including the AI scan path, billing, everything) show up in
+# the Sentry dashboard instead of only in Render logs nobody's watching.
+_sentry_dsn = os.getenv("SENTRY_DSN")
+if _sentry_dsn:
+    import sentry_sdk
+    sentry_sdk.init(dsn=_sentry_dsn, traces_sample_rate=0.1, send_default_pii=False)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database on startup - non-blocking"""
-    # auth.py falls back to a hardcoded SECRET_KEY when the env var is unset —
-    # with the default, anyone can forge login tokens for any account. Scream
-    # about it at startup so it can't go unnoticed on a real deployment.
+    # One consolidated report of every env var this app depends on, instead
+    # of discovering a missing one via a confused customer weeks from now.
     from auth import SECRET_KEY as _sk
-    if _sk == "your-secret-key-change-in-production":
-        print("=" * 70, flush=True)
-        print("[SECURITY] SECRET_KEY env var is NOT set — using the default!", flush=True)
-        print("[SECURITY] Anyone can forge auth tokens. Set SECRET_KEY on Render NOW.", flush=True)
-        print("=" * 70, flush=True)
+    _config_checks = [
+        ("SECRET_KEY", _sk != "your-secret-key-change-in-production", "CRITICAL — anyone can forge login tokens for any account"),
+        ("OPENAI_API_KEY", bool(os.getenv("OPENAI_API_KEY")), "primary bottle-scan provider will fail over to Gemini"),
+        ("GEMINI_API_KEY / GOOGLE_API_KEY", bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")), "no fallback if OpenAI is down/rate-limited"),
+        ("RESEND_API_KEY", bool(os.getenv("RESEND_API_KEY")), "order emails and password resets cannot send"),
+        ("STRIPE_SECRET_KEY", bool(os.getenv("STRIPE_SECRET_KEY")), "checkout/billing endpoints will 503"),
+        ("STRIPE_PRICE_ID", bool(os.getenv("STRIPE_PRICE_ID")), "checkout endpoint will 503 — nobody can subscribe"),
+        ("STRIPE_WEBHOOK_SECRET", bool(os.getenv("STRIPE_WEBHOOK_SECRET")), "payments won't activate subscriptions — customers pay and stay locked out"),
+        ("SENTRY_DSN", bool(_sentry_dsn), "no error visibility (optional but recommended)"),
+    ]
+    missing = [(name, note) for name, ok, note in _config_checks if not ok]
+    print("=" * 70, flush=True)
+    print(f"[startup] config check: {len(_config_checks) - len(missing)}/{len(_config_checks)} set", flush=True)
+    for name, note in missing:
+        print(f"[startup]   MISSING {name} — {note}", flush=True)
+    print("=" * 70, flush=True)
     try:
         # Run init_db in thread pool to avoid blocking startup
         await asyncio.to_thread(init_db)
