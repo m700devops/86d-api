@@ -13,7 +13,7 @@ import traceback
 from database import init_db, get_db
 from auth import (
     get_password_hash, verify_password, create_access_token,
-    create_refresh_token, verify_token,
+    create_refresh_token, verify_token, get_token_claims,
     PASSWORD_RESET_EXPIRE_MINUTES, PASSWORD_RESET_RESEND_COOLDOWN_SECONDS
 )
 from helpers import (
@@ -32,9 +32,38 @@ from pydantic import BaseModel, Field
 # Startup time for uptime calculation
 START_TIME = time.time()
 
+# Error reporting — a no-op if SENTRY_DSN isn't set, so this is safe to ship
+# before you've created a Sentry account. Once set, unhandled exceptions in
+# any request (including the AI scan path, billing, everything) show up in
+# the Sentry dashboard instead of only in Render logs nobody's watching.
+_sentry_dsn = os.getenv("SENTRY_DSN")
+if _sentry_dsn:
+    import sentry_sdk
+    sentry_sdk.init(dsn=_sentry_dsn, traces_sample_rate=0.1, send_default_pii=False)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database on startup - non-blocking"""
+    # One consolidated report of every env var this app depends on, instead
+    # of discovering a missing one via a confused customer weeks from now.
+    from auth import SECRET_KEY as _sk
+    _config_checks = [
+        ("SECRET_KEY", _sk != "your-secret-key-change-in-production", "CRITICAL — anyone can forge login tokens for any account"),
+        ("OPENAI_API_KEY", bool(os.getenv("OPENAI_API_KEY")), "primary bottle-scan provider will fail over to Gemini"),
+        ("GEMINI_API_KEY / GOOGLE_API_KEY", bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")), "no fallback if OpenAI is down/rate-limited"),
+        ("RESEND_API_KEY", bool(os.getenv("RESEND_API_KEY")), "order emails and password resets cannot send"),
+        ("STRIPE_SECRET_KEY", bool(os.getenv("STRIPE_SECRET_KEY")), "checkout/billing endpoints will 503"),
+        ("STRIPE_PRICE_ID", bool(os.getenv("STRIPE_PRICE_ID")), "checkout endpoint will 503 — nobody can subscribe"),
+        ("STRIPE_WEBHOOK_SECRET", bool(os.getenv("STRIPE_WEBHOOK_SECRET")), "payments won't activate subscriptions — customers pay and stay locked out"),
+        ("SENTRY_DSN", bool(_sentry_dsn), "no error visibility (optional but recommended)"),
+    ]
+    missing = [(name, note) for name, ok, note in _config_checks if not ok]
+    print("=" * 70, flush=True)
+    print(f"[startup] config check: {len(_config_checks) - len(missing)}/{len(_config_checks)} set", flush=True)
+    for name, note in missing:
+        print(f"[startup]   MISSING {name} — {note}", flush=True)
+    print("=" * 70, flush=True)
     try:
         # Run init_db in thread pool to avoid blocking startup
         await asyncio.to_thread(init_db)
@@ -43,6 +72,8 @@ async def lifespan(app: FastAPI):
         print(f"[lifespan] Database init warning (may already exist): {e}", flush=True)
     # Pre-warm AI provider connections so the first scan is fast (best-effort)
     asyncio.create_task(_warm_providers())
+    # Periodic trial-ending reminder emails (best-effort, runs for the life of the process)
+    asyncio.create_task(_trial_reminder_loop())
     yield
 
 app = FastAPI(
@@ -63,14 +94,9 @@ async def health_check():
         "uptime": time.time() - START_TIME
     }
 
-@app.get("/health")
-async def health_check_alt():
-    """Alternative health check endpoint"""
-    return {
-        "status": "ok", 
-        "service": "86d-api",
-        "uptime": time.time() - START_TIME
-    }
+# NOTE: /health is defined further down (with a real database connectivity
+# check) — don't add a second handler here or it will shadow that one and
+# uptime monitoring will miss database outages.
 
 # CORS middleware - allow all origins for mobile app
 app.add_middleware(
@@ -109,6 +135,35 @@ v1_router = APIRouter(prefix="/v1")
 
 # ============== DEPENDENCIES ==============
 
+def _token_survives_password_change(user_id: str, issued_at) -> bool:
+    """A JWT is only revocable through this check: tokens issued before the
+    user's last password change are dead. This is what actually signs out an
+    ex-employee's phone when the manager changes the bar's password — without
+    it, old tokens stay valid for up to 30 days no matter what.
+
+    Also returns False for deleted accounts still holding valid tokens.
+    1-second grace on the comparison: iat is floored to whole seconds, so a
+    token minted in the same instant as the change must not self-revoke."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT password_changed_at FROM users WHERE id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+    if not row:
+        return False
+    if not row["password_changed_at"] or issued_at is None:
+        return True
+    try:
+        changed = datetime.fromisoformat(row["password_changed_at"])
+        if changed.tzinfo is None:
+            changed = changed.replace(tzinfo=timezone.utc)
+        return float(issued_at) >= changed.timestamp() - 1
+    except Exception:
+        return True  # unparsable timestamp shouldn't lock everyone out
+
+
 def get_current_user(authorization: str = Header(None)) -> str:
     """Extract and verify JWT token from Authorization header"""
     if not authorization:
@@ -116,22 +171,22 @@ def get_current_user(authorization: str = Header(None)) -> str:
             "error": "unauthorized",
             "message": "Authorization header required"
         })
-    
+
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail={
             "error": "unauthorized",
             "message": "Invalid authorization scheme"
         })
-    
-    user_id = verify_token(token, "access")
-    if not user_id:
+
+    claims = get_token_claims(token, "access")
+    if not claims or not _token_survives_password_change(claims["sub"], claims.get("iat")):
         raise HTTPException(status_code=401, detail={
             "error": "token_expired",
             "message": "Token expired or invalid"
         })
-    
-    return user_id
+
+    return claims["sub"]
 
 # ============== HEALTH & INFO ==============
 
@@ -211,7 +266,7 @@ def register(user_data: UserCreate):
             user_id = generate_id()
             now = now_iso()
             password_hash = get_password_hash(user_data.password)
-            trial_ends = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
+            trial_ends = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
             
             cursor.execute("""
                 INSERT INTO users (id, email, password_hash, name, terms_accepted_at, privacy_accepted_at,
@@ -265,27 +320,56 @@ def register(user_data: UserCreate):
             "debug": str(e)
         })
 
+# Login throttling — in-memory, per-email. Enough to make credential
+# stuffing impractical on a single-instance deployment without adding a
+# dependency; resets on process restart, which is fine for this purpose.
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 15 * 60
+_login_failures: dict[str, list[float]] = {}
+
+
+def _login_locked(email: str) -> bool:
+    cutoff = time.time() - LOGIN_LOCKOUT_SECONDS
+    attempts = [t for t in _login_failures.get(email, []) if t > cutoff]
+    _login_failures[email] = attempts
+    return len(attempts) >= LOGIN_MAX_FAILURES
+
+
+def _record_login_failure(email: str) -> None:
+    _login_failures.setdefault(email, []).append(time.time())
+
+
 @v1_router.post("/auth/login", response_model=TokenResponse)
 def login(credentials: UserLogin):
     """Authenticate and get tokens"""
+    email = credentials.email.lower().strip()
+    if _login_locked(email):
+        raise HTTPException(status_code=429, detail={
+            "error": "too_many_attempts",
+            "message": "Too many failed attempts — try again in 15 minutes, or reset your password."
+        })
+
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         # Find user
         cursor.execute(
             """SELECT id, email, password_hash, name, subscription_status, subscription_tier,
-                      trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at 
+                      trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
                FROM users WHERE email = %s AND deleted_at IS NULL""",
-            (credentials.email.lower().strip(),)
+            (email,)
         )
         row = cursor.fetchone()
-        
+
         if not row or not verify_password(credentials.password, row["password_hash"]):
+            _record_login_failure(email)
             raise HTTPException(status_code=401, detail={
                 "error": "invalid_credentials",
                 "message": "Invalid email or password"
             })
-        
+
+        _login_failures.pop(email, None)
+
         # Generate tokens
         access_token = create_access_token(row["id"])
         refresh_token = create_refresh_token(row["id"])
@@ -310,14 +394,16 @@ def login(credentials: UserLogin):
 @v1_router.post("/auth/refresh", response_model=RefreshResponse)
 def refresh_token(refresh_data: RefreshRequest):
     """Get new access token using refresh token"""
-    user_id = verify_token(refresh_data.refresh_token, "refresh")
-    if not user_id:
+    claims = get_token_claims(refresh_data.refresh_token, "refresh")
+    # Same password-change revocation as access tokens — otherwise a stolen
+    # refresh token could keep minting fresh access tokens for 30 days.
+    if not claims or not _token_survives_password_change(claims["sub"], claims.get("iat")):
         raise HTTPException(status_code=401, detail={
             "error": "token_expired",
             "message": "Refresh token expired or invalid"
         })
-    
-    access_token = create_access_token(user_id)
+
+    access_token = create_access_token(claims["sub"])
     return {
         "access_token": access_token,
         "expires_in": 3600
@@ -502,19 +588,29 @@ def increment_scan_count(product_id: str):
 
 # ============== LOCATIONS ==============
 
+def _location_row(row) -> dict:
+    """DB row → response dict: staff_names is stored as a JSON TEXT column."""
+    loc = dict(row)
+    try:
+        loc["staff_names"] = json.loads(loc.get("staff_names") or "[]")
+    except Exception:
+        loc["staff_names"] = []
+    loc["order_rounding_mode"] = loc.get("order_rounding_mode") or "nearest"
+    return loc
+
 @v1_router.get("/locations", response_model=LocationListResponse)
 def list_locations(user_id: str = Depends(get_current_user)):
     """List user's locations"""
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         cursor.execute("""
-            SELECT * FROM locations 
+            SELECT * FROM locations
             WHERE user_id = %s AND deleted_at IS NULL
             ORDER BY created_at DESC
         """, (user_id,))
-        
-        locations = [dict(row) for row in cursor.fetchall()]
+
+        locations = [_location_row(row) for row in cursor.fetchall()]
         return {"locations": locations}
 
 @v1_router.post("/locations", response_model=dict, status_code=201)
@@ -547,10 +643,41 @@ def create_location(location_data: LocationCreate, user_id: str = Depends(get_cu
                 "name": location_data.name,
                 "address": location_data.address,
                 "timezone": location_data.timezone,
+                "order_rounding_mode": "nearest",
+                "staff_names": [],
                 "created_at": now,
                 "updated_at": now
             }
         }
+
+@v1_router.patch("/locations/{location_id}", response_model=LocationResponse)
+def update_location(location_id: str, updates: LocationUpdate, user_id: str = Depends(get_current_user)):
+    """Update a location's settings — order_rounding_mode and/or staff_names."""
+    fields = updates.model_dump(exclude_unset=True, exclude_none=True)
+    if not fields:
+        raise HTTPException(status_code=400, detail={"error": "no_fields", "message": "Nothing to update"})
+    if "staff_names" in fields:
+        fields["staff_names"] = json.dumps(fields["staff_names"])
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Location not found"})
+
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        now = now_iso()
+        cursor.execute(
+            f"UPDATE locations SET {set_clause}, updated_at = %s WHERE id = %s",
+            (*fields.values(), now, location_id)
+        )
+        conn.commit()
+
+        cursor.execute("SELECT * FROM locations WHERE id = %s", (location_id,))
+        return _location_row(cursor.fetchone())
 
 @v1_router.get("/locations/{location_id}/par-levels", response_model=ParLevelListResponse)
 def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
@@ -588,6 +715,7 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
                 "par_quantity": row["par_quantity"],
                 "full_quantity": float(row["full_quantity"] or 0),
                 "current_stock": float(row["current_stock"] or 0),
+                "price": float(row["price"]) if row["price"] else None,
                 "updated_at": row["updated_at"],
                 "product": {
                     "id": row["product_id"],
@@ -772,7 +900,7 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         now = now_iso()
         # Fetch existing row so we can preserve unchanged fields
         cursor.execute(
-            "SELECT par_quantity, full_quantity, current_stock FROM par_levels WHERE location_id = %s AND product_id = %s",
+            "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels WHERE location_id = %s AND product_id = %s",
             (location_id, product_id)
         )
         existing = cursor.fetchone()
@@ -780,17 +908,19 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         new_par = data.par if data.par is not None else (float(existing["par_quantity"]) if existing else 1.0)
         new_full = data.full if data.full is not None else (float(existing["full_quantity"] or 0) if existing else 0.0)
         new_stock = data.current_stock if data.current_stock is not None else (float(existing["current_stock"] or 0) if existing else 0.0)
+        new_price = data.price if data.price is not None else (float(existing["price"] or 0) if existing else 0.0)
 
         par_id = generate_id()
         cursor.execute("""
-            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, price, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(location_id, product_id) DO UPDATE SET
                 par_quantity = excluded.par_quantity,
                 full_quantity = excluded.full_quantity,
                 current_stock = excluded.current_stock,
+                price = excluded.price,
                 updated_at = excluded.updated_at
-        """, (par_id, location_id, product_id, new_par, new_full, new_stock, now))
+        """, (par_id, location_id, product_id, new_par, new_full, new_stock, new_price, now))
         conn.commit()
 
         return {
@@ -799,6 +929,7 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
             "full": new_full,
             "current_stock": new_stock,
             "par": new_par,
+            "price": new_price if new_price > 0 else None,
             "updated_at": now,
         }
 
@@ -1772,6 +1903,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
                 "par_quantity": row["par_quantity"],
                 "full_quantity": float(row["full_quantity"] or 0),
                 "current_stock": float(row["current_stock"] or 0),
+                "price": float(row["price"]) if row["price"] else None,
                 "updated_at": row["updated_at"],
                 "product": {
                     "id": row["product_id"],
@@ -2076,12 +2208,14 @@ class SendOrderEmailsRequest(BaseModel):
     orders: list[DistributorOrder] = Field(min_length=1, max_length=50)
 
 
-def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None) -> tuple[bool, str | None]:
+def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None, bcc: str | None = None) -> tuple[bool, str | None]:
     """Send one email through the Resend API. Returns (ok, error_message)."""
     sender = os.getenv("ORDER_EMAIL_FROM", "86'd Orders <onboarding@resend.dev>")
     payload = {"from": sender, "to": [to_email], "subject": subject, "text": body_text}
     if reply_to:
         payload["reply_to"] = reply_to
+    if bcc and bcc.lower() != to_email.lower():
+        payload["bcc"] = [bcc]
     try:
         resp = httpx.post(
             "https://api.resend.com/emails",
@@ -2197,7 +2331,10 @@ Thank you,
 {business_name}
 (sent via 86'd bar inventory)"""
 
-            ok, error = _send_via_resend(api_key, dist["email"], subject, body_text, reply_to=reply_to)
+            # BCC the bar's own email: proof in the manager's inbox that the
+            # order went out, and a paper trail if a distributor claims they
+            # never received it. "Sent" only means Resend accepted it.
+            ok, error = _send_via_resend(api_key, dist["email"], subject, body_text, reply_to=reply_to, bcc=reply_to)
             results.append({
                 "distributor_id": dist["id"], "distributor_name": dist["name"],
                 "email": dist["email"], "status": "sent" if ok else "failed",
@@ -2250,6 +2387,320 @@ Thank you,
         "failed": len(results) - sent,
     }
 
+# ============== BILLING (Stripe) ==============
+# No card is ever collected at signup — every account gets a 30-day trial
+# (see register_user) and only talks to Stripe once they hit "Subscribe."
+# Checkout happens in the system browser (not an embedded webview), and a
+# webhook is the only thing that ever flips subscription_status to 'active'.
+
+import stripe
+
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+APP_BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://eight6d-api.onrender.com")
+
+
+def is_entitled(subscription_status: str, trial_ends_at) -> bool:
+    """True if the account can use paid features right now: an active paid
+    subscription, or a trial that hasn't expired yet."""
+    if subscription_status == "active":
+        return True
+    if subscription_status == "trial":
+        if not trial_ends_at:
+            return True
+        try:
+            ends = trial_ends_at if isinstance(trial_ends_at, datetime) else datetime.fromisoformat(str(trial_ends_at))
+            if ends.tzinfo is None:
+                ends = ends.replace(tzinfo=timezone.utc)
+            return ends > datetime.now(timezone.utc)
+        except Exception:
+            return True  # unparsable date shouldn't lock someone out
+    return False
+
+
+# Trial ending is a hard, silent cliff otherwise — a heads-up email a few
+# days out, on top of the in-app banner, so it's not a total surprise.
+TRIAL_REMINDER_DAYS_BEFORE = 5
+TRIAL_REMINDER_CHECK_INTERVAL_SECONDS = 6 * 60 * 60  # every 6 hours
+
+
+def _send_trial_reminder_emails():
+    """Email trial users whose trial ends within TRIAL_REMINDER_DAYS_BEFORE
+    days and haven't been reminded yet. Runs on a background loop, not
+    per-request — see _trial_reminder_loop / lifespan."""
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key:
+        return
+
+    now = datetime.now(timezone.utc)
+    cutoff = (now + timedelta(days=TRIAL_REMINDER_DAYS_BEFORE)).isoformat()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, email, name, manager_name, trial_ends_at
+            FROM users
+            WHERE subscription_status = 'trial'
+              AND trial_reminder_sent_at IS NULL
+              AND trial_ends_at IS NOT NULL
+              AND trial_ends_at <= %s
+              AND trial_ends_at > %s
+              AND deleted_at IS NULL
+        """, (cutoff, now.isoformat()))
+        rows = cursor.fetchall()
+
+        for row in rows:
+            try:
+                ends = datetime.fromisoformat(row["trial_ends_at"])
+                if ends.tzinfo is None:
+                    ends = ends.replace(tzinfo=timezone.utc)
+                days_left = max(0, (ends - now).days)
+                display_name = row["manager_name"] or row["name"] or "there"
+                date_str = ends.strftime("%B %d, %Y")
+
+                subject = f"Your 86'd trial ends in {days_left} day{'s' if days_left != 1 else ''}"
+                body = f"""Hi {display_name},
+
+Your free trial of 86'd ends on {date_str}. After that, you'll need an active subscription to keep scanning, ordering, and tracking your bar's inventory — nothing you've entered will be lost, but you won't be able to use the app again until you subscribe.
+
+Open the 86'd app and tap Subscribe to keep going without any interruption.
+
+Thanks,
+The 86'd team"""
+
+                ok, error = _send_via_resend(api_key, row["email"], subject, body)
+                if ok:
+                    cursor.execute(
+                        "UPDATE users SET trial_reminder_sent_at = %s, updated_at = %s WHERE id = %s",
+                        (now_iso(), now_iso(), row["id"])
+                    )
+                    conn.commit()
+                else:
+                    print(f"[trial_reminder] failed to email {row['email']}: {error}", flush=True)
+            except Exception as e:
+                print(f"[trial_reminder] error processing user {row['id']}: {e}", flush=True)
+
+
+async def _trial_reminder_loop():
+    """Runs for the life of the process, periodically checking for trial
+    users who need a reminder email. Best-effort — errors never crash
+    the app or block startup."""
+    while True:
+        try:
+            await asyncio.to_thread(_send_trial_reminder_emails)
+        except Exception as e:
+            print(f"[trial_reminder] loop error: {e}", flush=True)
+        await asyncio.sleep(TRIAL_REMINDER_CHECK_INTERVAL_SECONDS)
+
+
+@v1_router.post("/billing/create-checkout-session")
+def create_checkout_session(user_id: str = Depends(get_current_user)):
+    """Create a Stripe Checkout session for the current user and hand back
+    its URL — the app opens this in Safari, it never touches Stripe directly."""
+    if not stripe.api_key:
+        raise HTTPException(status_code=503, detail={
+            "error": "billing_not_configured",
+            "message": "Billing isn't set up on the server yet (STRIPE_SECRET_KEY missing)"
+        })
+    price_id = os.getenv("STRIPE_PRICE_ID")
+    if not price_id:
+        raise HTTPException(status_code=503, detail={
+            "error": "billing_not_configured",
+            "message": "Billing isn't set up on the server yet (STRIPE_PRICE_ID missing)"
+        })
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT email, stripe_customer_id FROM users WHERE id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
+
+        customer_id = row["stripe_customer_id"]
+        if not customer_id:
+            customer = stripe.Customer.create(email=row["email"], metadata={"user_id": user_id})
+            customer_id = customer.id
+            cursor.execute(
+                "UPDATE users SET stripe_customer_id = %s, updated_at = %s WHERE id = %s",
+                (customer_id, now_iso(), user_id)
+            )
+            conn.commit()
+
+    session = stripe.checkout.Session.create(
+        customer=customer_id,
+        mode="subscription",
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{APP_BASE_URL}/billing/success",
+        cancel_url=f"{APP_BASE_URL}/billing/cancel",
+        client_reference_id=user_id,
+        subscription_data={"metadata": {"user_id": user_id}},
+    )
+    return {"checkout_url": session.url}
+
+
+def _billing_page(title: str, message: str) -> str:
+    return f"""
+        <html>
+          <head><meta name="viewport" content="width=device-width, initial-scale=1" /></head>
+          <body style="font-family: -apple-system, sans-serif; background: #0F0F0F; color: #fff;
+                       display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+            <div style="text-align: center; padding: 24px;">
+              <h1 style="margin-bottom: 8px;">{title}</h1>
+              <p style="color: #999;">{message}</p>
+            </div>
+          </body>
+        </html>
+    """
+
+
+# ============== LEGAL PAGES ==============
+# Hosted here so the app's Terms/Privacy links and the App Store's required
+# privacy-policy URL have somewhere real to point. Plain-language boilerplate
+# for a bar-inventory SaaS — have a professional review before serious scale.
+
+LEGAL_CONTACT = os.getenv("LEGAL_CONTACT_EMAIL", "southportai@hotmail.com")
+
+
+def _legal_page(title: str, body_html: str) -> str:
+    return f"""
+        <html>
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>{title} — 86'd</title>
+          </head>
+          <body style="font-family: -apple-system, sans-serif; background: #0F0F0F; color: #E5E5E5;
+                       max-width: 640px; margin: 0 auto; padding: 32px 20px; line-height: 1.6;">
+            <h1 style="color: #FF6B35;">{title}</h1>
+            <p style="color: #999;">86'd Bar Inventory · Last updated July 19, 2026</p>
+            {body_html}
+            <p style="color: #999; margin-top: 40px;">Questions: <a href="mailto:{LEGAL_CONTACT}" style="color: #FFD700;">{LEGAL_CONTACT}</a></p>
+          </body>
+        </html>
+    """
+
+
+@app.get("/legal/privacy")
+def legal_privacy():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_legal_page("Privacy Policy", """
+        <h2>What we collect</h2>
+        <p>Your account details (name, email, business name), your bar's inventory data
+        (products, counts, par levels, prices, orders, distributor contacts, staff names you add),
+        and the bottle photos you take while scanning.</p>
+        <h2>How photos are used</h2>
+        <p>Bottle photos are sent to our AI providers (OpenAI and Google) solely to identify the
+        bottle, and are not stored on our servers after identification.</p>
+        <h2>Payments</h2>
+        <p>Subscriptions are processed by Stripe. We never see or store your card number.</p>
+        <h2>Service providers</h2>
+        <p>We use Render (hosting), Stripe (payments), Resend (email delivery), and OpenAI/Google
+        (bottle identification). Each receives only what's needed to provide their function.</p>
+        <h2>What we don't do</h2>
+        <p>We do not sell your data, and we do not share your bar's inventory or ordering
+        information with anyone except the service providers above.</p>
+        <h2>Deleting your data</h2>
+        <p>You can permanently delete your account and its data at any time from
+        Settings &rarr; Delete Account inside the app.</p>
+        <h2>Security</h2>
+        <p>Data is encrypted in transit. Passwords are stored hashed, never in plain text.</p>
+    """))
+
+
+@app.get("/legal/terms")
+def legal_terms():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_legal_page("Terms of Service", """
+        <h2>The service</h2>
+        <p>86'd is a bar inventory tool: scan bottles, track counts and par levels, and send
+        orders to your distributors by email.</p>
+        <h2>Your account</h2>
+        <p>You're responsible for activity on your account and for keeping your password private.
+        If a staff member with access leaves, change your password in Settings — that signs out
+        every other device.</p>
+        <h2>Subscription &amp; trial</h2>
+        <p>New accounts get a free 30-day trial with no card required. After that, continued use
+        requires a paid subscription, billed through Stripe. Cancel anytime; your data stays
+        intact and access resumes if you re-subscribe.</p>
+        <h2>Important: verify your orders</h2>
+        <p>AI bottle identification and inventory math can contain errors. Order quantities are
+        suggestions calculated from the counts and par levels you enter. <strong>Always review an
+        order before sending it</strong> — you are responsible for what is ordered from your
+        distributors, and 86'd is not liable for ordering errors, over-purchases, or stockouts.</p>
+        <h2>Email delivery</h2>
+        <p>"Sent" means our email provider accepted the message. We can't guarantee a distributor
+        reads or acts on an order — confirm important orders directly.</p>
+        <h2>Acceptable use</h2>
+        <p>Don't abuse the service, attempt to access other accounts' data, or use it for
+        anything unlawful.</p>
+        <h2>Warranty &amp; liability</h2>
+        <p>The service is provided "as is" without warranties. To the maximum extent permitted by
+        law, our total liability is limited to the amount you paid in the past 12 months.</p>
+        <h2>Changes</h2>
+        <p>We may update these terms; continued use after an update is acceptance of the new
+        terms.</p>
+    """))
+
+
+@app.get("/billing/success")
+def billing_success():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_billing_page("You're all set!", "Head back to the 86'd app — your subscription is active."))
+
+
+@app.get("/billing/cancel")
+def billing_cancel():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_billing_page("No charge made", "You can head back to the 86'd app any time to subscribe."))
+
+
+@app.post("/billing/webhook")
+async def billing_webhook(request: Request):
+    """Stripe calls this directly — verified via signature, not a user JWT.
+    This is the only thing allowed to flip subscription_status to 'active'."""
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    if not webhook_secret:
+        raise HTTPException(status_code=503, detail={"error": "webhook_not_configured"})
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except (ValueError, stripe.error.SignatureVerificationError):
+        raise HTTPException(status_code=400, detail={"error": "invalid_signature"})
+
+    obj = event["data"]["object"]
+    now = now_iso()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        if event["type"] == "checkout.session.completed":
+            user_id = obj.get("client_reference_id") or (obj.get("metadata") or {}).get("user_id")
+            customer_id = obj.get("customer")
+            if user_id:
+                cursor.execute(
+                    "UPDATE users SET subscription_status = 'active', stripe_customer_id = %s, updated_at = %s WHERE id = %s",
+                    (customer_id, now, user_id)
+                )
+                conn.commit()
+
+        elif event["type"] in ("customer.subscription.updated", "customer.subscription.deleted"):
+            customer_id = obj.get("customer")
+            status = obj.get("status")  # active, past_due, canceled, unpaid, etc.
+            new_status = "active" if status == "active" else ("trial" if status == "trialing" else "canceled")
+            if customer_id:
+                cursor.execute(
+                    "UPDATE users SET subscription_status = %s, updated_at = %s WHERE stripe_customer_id = %s",
+                    (new_status, now, customer_id)
+                )
+                conn.commit()
+
+    return {"received": True}
+
 # ============== V1 USERS ==============
 
 @v1_router.get("/users/me", response_model=UserProfileResponse)
@@ -2300,15 +2751,17 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
         return result
 
 @v1_router.delete("/users/me")
-def delete_user(password: str, user_id: str = Depends(get_current_user)):
-    """Soft delete user account (GDPR compliance)"""
+def delete_user(request: DeleteAccountRequest, user_id: str = Depends(get_current_user)):
+    """Soft delete user account (GDPR / App Store guideline 5.1.1 compliance).
+    Password re-confirmation comes in the request body — it was previously a
+    query parameter, which put passwords in URLs and access logs."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT password_hash FROM users WHERE id = %s AND deleted_at IS NULL", (user_id,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
-        if not verify_password(password, row["password_hash"]):
+        if not verify_password(request.password, row["password_hash"]):
             raise HTTPException(status_code=401, detail={"error": "invalid_password", "message": "Password is incorrect"})
         cursor.execute("""
             UPDATE users SET deleted_at = %s, email = CONCAT(email, '.deleted.', %s), updated_at = %s
@@ -2408,16 +2861,23 @@ def reset_password(request: ResetPasswordRequest):
         if not row:
             raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset code"})
         password_hash = get_password_hash(request.new_password)
+        now = now_iso()
+        # password_changed_at revokes every previously issued token — a reset
+        # is exactly when you want all old devices signed out
         cursor.execute("""
-            UPDATE users SET password_hash = %s, password_reset_token = NULL, password_reset_expires_at = NULL, updated_at = %s
+            UPDATE users SET password_hash = %s, password_changed_at = %s,
+                             password_reset_token = NULL, password_reset_expires_at = NULL, updated_at = %s
             WHERE id = %s
-        """, (password_hash, now_iso(), row["id"]))
+        """, (password_hash, now, now, row["id"]))
         conn.commit()
         return {"success": True, "message": "Password reset successfully"}
 
 @v1_router.put("/auth/change-password")
 def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_current_user)):
-    """Change password (requires current password)"""
+    """Change password (requires current password). Revokes every existing
+    token — including this device's — so fresh tokens are returned for the
+    caller to store; every OTHER device (e.g. an ex-employee's phone) is
+    signed out the moment its next request hits the server."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT password_hash FROM users WHERE id = %s AND deleted_at IS NULL", (user_id,))
@@ -2427,10 +2887,16 @@ def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_c
         if not verify_password(request.current_password, row["password_hash"]):
             raise HTTPException(status_code=401, detail={"error": "invalid_password", "message": "Current password is incorrect"})
         password_hash = get_password_hash(request.new_password)
-        cursor.execute("UPDATE users SET password_hash = %s, updated_at = %s WHERE id = %s",
-                       (password_hash, now_iso(), user_id))
+        now = now_iso()
+        cursor.execute("UPDATE users SET password_hash = %s, password_changed_at = %s, updated_at = %s WHERE id = %s",
+                       (password_hash, now, now, user_id))
         conn.commit()
-        return {"success": True, "message": "Password changed successfully"}
+    return {
+        "success": True,
+        "message": "Password changed successfully",
+        "access_token": create_access_token(user_id),
+        "refresh_token": create_refresh_token(user_id),
+    }
 
 # ============== V1 SCANS (Gemini Vision) ==============
 
@@ -2839,6 +3305,19 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
     Total wall-clock cap: TOTAL_SCAN_TIMEOUT_SEC (default 20s) — returns empty 200 on expiry.
     """
     print("[analyze_bottle] function started", flush=True)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT subscription_status, trial_ends_at FROM users WHERE id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        sub_row = cursor.fetchone()
+    if not sub_row or not is_entitled(sub_row["subscription_status"], sub_row["trial_ends_at"]):
+        raise HTTPException(status_code=402, detail={
+            "error": "trial_expired",
+            "message": "Your free trial has ended — subscribe to keep scanning."
+        })
 
     openai_key = os.getenv("OPENAI_API_KEY")
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")

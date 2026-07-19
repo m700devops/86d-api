@@ -55,17 +55,20 @@ def create_refresh_token(user_id: str) -> str:
 
 def verify_token(token: str, token_type: str = "access") -> Optional[str]:
     """Verify JWT token and return user_id if valid"""
+    claims = get_token_claims(token, token_type)
+    return claims.get("sub") if claims else None
+
+
+def get_token_claims(token: str, token_type: str = "access") -> Optional[dict]:
+    """Verify a JWT and return its full claims (sub, iat, ...) — for callers
+    that need the issued-at time (password-change revocation)."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: str = payload.get("sub")
-        token_type_claim: str = payload.get("type", "access")
-        
-        if user_id is None:
+        if payload.get("sub") is None:
             return None
-        if token_type_claim != token_type:
+        if payload.get("type", "access") != token_type:
             return None
-            
-        return user_id
+        return payload
     except JWTError:
         return None
 
