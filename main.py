@@ -94,14 +94,9 @@ async def health_check():
         "uptime": time.time() - START_TIME
     }
 
-@app.get("/health")
-async def health_check_alt():
-    """Alternative health check endpoint"""
-    return {
-        "status": "ok", 
-        "service": "86d-api",
-        "uptime": time.time() - START_TIME
-    }
+# NOTE: /health is defined further down (with a real database connectivity
+# check) — don't add a second handler here or it will shadow that one and
+# uptime monitoring will miss database outages.
 
 # CORS middleware - allow all origins for mobile app
 app.add_middleware(
