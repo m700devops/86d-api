@@ -215,7 +215,7 @@ def health_check():
     """Health check with database connectivity test"""
     try:
         with get_db() as conn:
-            conn.execute("SELECT 1")
+            conn.cursor().execute("SELECT 1")
         return {
             "status": "healthy",
             "database": "connected",
