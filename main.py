@@ -2701,6 +2701,30 @@ async def billing_webhook(request: Request):
 
     return {"received": True}
 
+# TEMPORARY — one-off admin utility to activate an account without waiting
+# on Stripe, for pre-launch testing. Guarded by SECRET_KEY as a bearer
+# token. Remove this route once no longer needed.
+@app.post("/admin/activate-account")
+async def admin_activate_account(request: Request):
+    if request.headers.get("x-admin-secret") != os.getenv("SECRET_KEY"):
+        raise HTTPException(status_code=403, detail={"error": "forbidden"})
+    body = await request.json()
+    email = (body.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail={"error": "email required"})
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET subscription_status = 'active', updated_at = %s "
+            "WHERE lower(email) = %s RETURNING id, email, subscription_status",
+            (now_iso(), email)
+        )
+        row = cursor.fetchone()
+        conn.commit()
+        if not row:
+            raise HTTPException(status_code=404, detail={"error": "user not found"})
+        return dict(row)
+
 # ============== V1 USERS ==============
 
 @v1_router.get("/users/me", response_model=UserProfileResponse)
