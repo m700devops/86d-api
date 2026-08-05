@@ -412,6 +412,36 @@ def init_db():
             ON location_product_distributors(distributor_id)
         """)
 
+        # Product aliases: name/brand phrasings that should resolve to an existing
+        # product instead of creating a new one. Written when someone merges a
+        # duplicate, so the phrasing that caused the split stops causing it.
+        # Stored pre-normalized (see helpers.normalize_match_text) — the matcher
+        # looks these up with an equality check, not a fuzzy one.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS product_aliases (
+                id TEXT PRIMARY KEY,
+                product_id TEXT NOT NULL REFERENCES products(id),
+                norm_name TEXT NOT NULL,
+                norm_brand TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(norm_name, norm_brand)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_product_aliases_product
+            ON product_aliases(product_id)
+        """)
+
+        # Supports the normalized/swapped lookups in _match_or_create_product.
+        # The expressions must match helpers.NORM_SQL exactly to be usable.
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_products_norm_name_brand
+            ON products (
+                regexp_replace(lower(coalesce(name, '')), '[^a-z0-9]+', '', 'g'),
+                regexp_replace(lower(coalesce(brand, '')), '[^a-z0-9]+', '', 'g')
+            )
+        """)
+
         # Inventory drafts: one in-progress (unsent) scan session per user+location,
         # backing up the mobile app's local AsyncStorage copy against device loss.
         # Deliberately separate from the older scans/inventory_sessions tables,

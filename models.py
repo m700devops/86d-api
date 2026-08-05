@@ -181,6 +181,11 @@ class ParLevelBulkResponse(BaseModel):
     updated: int
     par_levels: List[ParLevelResponse]
 
+class ProductMergeRequest(BaseModel):
+    """POST /products/{product_id}/merge — fold a duplicate into the real product."""
+    target_product_id: str = Field(min_length=1)
+
+
 class ProductStockUpdate(BaseModel):
     """PATCH /locations/{loc}/products/{prod} — update full, current_stock, par, and/or price."""
     full: Optional[float] = Field(default=None, ge=0, le=999.99)
