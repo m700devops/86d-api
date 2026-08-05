@@ -2812,6 +2812,25 @@ def legal_terms():
     """))
 
 
+@app.get("/support")
+def support_page():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_legal_page("Support", f"""
+        <h2>Get help</h2>
+        <p>Questions, bugs, or feature requests — email
+        <a href="mailto:{LEGAL_CONTACT}" style="color: #FFD700;">{LEGAL_CONTACT}</a>
+        and we'll get back to you.</p>
+        <h2>Common questions</h2>
+        <p><strong>A bottle scanned wrong.</strong> Tap the bottle in Review, then retry the
+        scan or correct the name/count by hand — the count always overrides what the camera read.</p>
+        <p><strong>Two bottles for the same product.</strong> Open Pricing under Management, find
+        the duplicate under "Needs a price," and tap the merge icon to combine it with the correct one.</p>
+        <p><strong>An order didn't reach a distributor.</strong> Check the address in Settings under
+        Distributors, then resend from Order History.</p>
+        <p><strong>Forgot your password.</strong> Use "Forgot password?" on the sign-in screen.</p>
+    """))
+
+
 @app.get("/billing/success")
 def billing_success():
     from fastapi.responses import HTMLResponse
