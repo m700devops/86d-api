@@ -71,6 +71,9 @@ class RefreshRequest(BaseModel):
 
 class RefreshResponse(BaseModel):
     access_token: str
+    # Rotated on every refresh — the client stores this and the 30-day
+    # window rolls forward, so active users are never hard-logged-out.
+    refresh_token: Optional[str] = None
     expires_in: int = 3600
 
 # ============== PRODUCT MODELS ==============
@@ -180,6 +183,11 @@ class ParLevelListResponse(BaseModel):
 class ParLevelBulkResponse(BaseModel):
     updated: int
     par_levels: List[ParLevelResponse]
+
+class ProductMergeRequest(BaseModel):
+    """POST /products/{product_id}/merge — fold a duplicate into the real product."""
+    target_product_id: str = Field(min_length=1)
+
 
 class ProductStockUpdate(BaseModel):
     """PATCH /locations/{loc}/products/{prod} — update full, current_stock, par, and/or price."""

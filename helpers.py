@@ -1,6 +1,27 @@
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+
+
+# ── Product match keys ───────────────────────────────────────────────────────
+# The AI transcribes a label freshly on every scan, so the same bottle can come
+# back as "Jack Daniel's" one time and "Jack Daniels" the next. Comparing raw
+# strings makes those two different products; comparing on this key doesn't.
+#
+# Stripping every non-alphanumeric (rather than just lowercasing) is what folds
+# apostrophes, hyphens and spacing together. NORM_SQL below must stay in lockstep
+# with this function — the matcher compares values produced by one against values
+# produced by the other, and a drift between them silently stops matching.
+
+def normalize_match_text(value: Optional[str]) -> str:
+    """Collapse a product name/brand into a comparison key."""
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+# Postgres equivalent of normalize_match_text, for matching inside a query.
+# `{col}` is substituted with the column expression to normalize.
+NORM_SQL = "regexp_replace(lower(coalesce({col}, '')), '[^a-z0-9]+', '', 'g')"
 
 # ── Level classification ─────────────────────────────────────────────────────
 # Boundaries (threshold, bucket_above, bucket_below) ordered highest-first.

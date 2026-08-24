@@ -18,7 +18,8 @@ from auth import (
 )
 from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
-    classify_level, smooth_level, calculate_variance, generate_order_items
+    classify_level, smooth_level, calculate_variance, generate_order_items,
+    normalize_match_text, NORM_SQL
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -404,8 +405,14 @@ def refresh_token(refresh_data: RefreshRequest):
         })
 
     access_token = create_access_token(claims["sub"])
+    # Rotate the refresh token too. Without this, the token issued at login
+    # is a fixed 30-day clock and every user — however active — gets kicked
+    # to the login screen a month after signing in. Rotation makes the
+    # 30-day expiry a rolling idle window instead: only an account that
+    # hasn't opened the app in 30 days has to log in again.
     return {
         "access_token": access_token,
+        "refresh_token": create_refresh_token(claims["sub"]),
         "expires_in": 3600
     }
 
@@ -423,7 +430,7 @@ def list_products(
         cursor = conn.cursor()
         
         # Build query
-        where_clause = "WHERE 1=1"
+        where_clause = "WHERE deleted_at IS NULL"
         params = []
         if category:
             where_clause += " AND category = %s"
@@ -470,8 +477,8 @@ def search_products(
         
         search_term = f"%{q}%"
         cursor.execute("""
-            SELECT * FROM products 
-            WHERE name ILIKE %s OR brand ILIKE %s OR upc ILIKE %s
+            SELECT * FROM products
+            WHERE deleted_at IS NULL AND (name ILIKE %s OR brand ILIKE %s OR upc ILIKE %s)
             ORDER BY
                 CASE WHEN name ILIKE %s THEN 0 ELSE 1 END,
                 scan_count DESC
@@ -494,7 +501,7 @@ def get_product_by_barcode(upc: str):
     with get_db() as conn:
         cursor = conn.cursor()
         
-        cursor.execute("SELECT * FROM products WHERE upc = %s", (upc,))
+        cursor.execute("SELECT * FROM products WHERE upc = %s AND deleted_at IS NULL", (upc,))
         row = cursor.fetchone()
         
         if not row:
@@ -585,6 +592,188 @@ def increment_scan_count(product_id: str):
             })
         
         return {"scan_count": row["scan_count"]}
+
+
+@v1_router.post("/products/{product_id}/merge", response_model=dict)
+def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Depends(get_current_user)):
+    """Fold a duplicate product (`product_id`) into the one to keep.
+
+    Moves this user's per-location data — prices/pars and distributor assignments —
+    off the duplicate and onto the keeper, records the duplicate's phrasing as an
+    alias so a later scan resolves to the keeper instead of splitting off again,
+    then retires the duplicate.
+
+    Only the caller's own rows are touched. The products table is a shared catalog,
+    so a verified (seed) product is never retired by this — a bar merging its own
+    scan-created duplicate must not delete a bottle out from under other accounts.
+    """
+    source_id = product_id
+    target_id = data.target_product_id
+
+    if source_id == target_id:
+        raise HTTPException(status_code=400, detail={
+            "error": "invalid_merge", "message": "A product cannot be merged into itself"
+        })
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT id, name, brand, verified, created_by_user_id FROM products "
+            "WHERE id = %s AND deleted_at IS NULL",
+            (source_id,)
+        )
+        source = cursor.fetchone()
+        cursor.execute(
+            "SELECT id FROM products WHERE id = %s AND deleted_at IS NULL",
+            (target_id,)
+        )
+        target = cursor.fetchone()
+
+        if not source or not target:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "Product not found"
+            })
+
+        if source["verified"]:
+            raise HTTPException(status_code=400, detail={
+                "error": "invalid_merge",
+                "message": "This bottle is part of the shared catalog and can't be merged away. "
+                           "Merge the duplicate into it instead."
+            })
+
+        now = now_iso()
+        cursor.execute(
+            "SELECT id FROM locations WHERE user_id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        location_ids = [r["id"] for r in cursor.fetchall()]
+
+        # products is a shared catalog keyed by id, so the caller must actually
+        # own or use the duplicate being retired — otherwise anyone who learns a
+        # product id (e.g. via /products/search) could retire or alias a bottle
+        # that belongs to another account's bar.
+        source_used_by_caller = False
+        if location_ids:
+            cursor.execute("""
+                SELECT 1 FROM par_levels WHERE location_id = ANY(%s) AND product_id = %s
+                UNION
+                SELECT 1 FROM location_product_distributors WHERE location_id = ANY(%s) AND product_id = %s
+                LIMIT 1
+            """, (location_ids, source_id, location_ids, source_id))
+            source_used_by_caller = cursor.fetchone() is not None
+
+        if source["created_by_user_id"] != user_id and not source_used_by_caller:
+            raise HTTPException(status_code=403, detail={
+                "error": "not_owned",
+                "message": "You can only merge duplicates you created or use at one of your bars"
+            })
+
+        moved_par_levels = 0
+        moved_assignments = 0
+
+        for location_id in location_ids:
+            # par_levels is UNIQUE(location_id, product_id), so a row can only be
+            # repointed when the keeper has none here; otherwise the two are folded
+            # together. Price prefers whichever side actually has one, and the
+            # count/par keep the larger value rather than summing — a merge run
+            # after an order was already sent must not silently double what's
+            # on hand.
+            cursor.execute(
+                "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels "
+                "WHERE location_id = %s AND product_id = %s",
+                (location_id, source_id)
+            )
+            src_row = cursor.fetchone()
+
+            if src_row:
+                cursor.execute(
+                    "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels "
+                    "WHERE location_id = %s AND product_id = %s",
+                    (location_id, target_id)
+                )
+                tgt_row = cursor.fetchone()
+
+                if tgt_row:
+                    merged_price = float(tgt_row["price"] or 0) or float(src_row["price"] or 0)
+                    cursor.execute("""
+                        UPDATE par_levels
+                        SET par_quantity = %s, full_quantity = %s, current_stock = %s,
+                            price = %s, updated_at = %s
+                        WHERE location_id = %s AND product_id = %s
+                    """, (
+                        max(float(tgt_row["par_quantity"] or 0), float(src_row["par_quantity"] or 0)),
+                        max(float(tgt_row["full_quantity"] or 0), float(src_row["full_quantity"] or 0)),
+                        max(float(tgt_row["current_stock"] or 0), float(src_row["current_stock"] or 0)),
+                        merged_price, now, location_id, target_id
+                    ))
+                    cursor.execute(
+                        "DELETE FROM par_levels WHERE location_id = %s AND product_id = %s",
+                        (location_id, source_id)
+                    )
+                else:
+                    cursor.execute("""
+                        UPDATE par_levels SET product_id = %s, updated_at = %s
+                        WHERE location_id = %s AND product_id = %s
+                    """, (target_id, now, location_id, source_id))
+                moved_par_levels += 1
+
+            # Same UNIQUE(location_id, product_id) shape: keep the assignment the
+            # keeper already has, otherwise carry the duplicate's over. Runs even
+            # when there's no par_levels row here, since a distributor assignment
+            # can exist on its own via /locations/{id}/product-distributors.
+            cursor.execute(
+                "SELECT id FROM location_product_distributors WHERE location_id = %s AND product_id = %s",
+                (location_id, source_id)
+            )
+            if not cursor.fetchone():
+                continue
+
+            cursor.execute(
+                "SELECT id FROM location_product_distributors WHERE location_id = %s AND product_id = %s",
+                (location_id, target_id)
+            )
+            if cursor.fetchone():
+                cursor.execute(
+                    "DELETE FROM location_product_distributors WHERE location_id = %s AND product_id = %s",
+                    (location_id, source_id)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE location_product_distributors SET product_id = %s "
+                    "WHERE location_id = %s AND product_id = %s",
+                    (target_id, location_id, source_id)
+                )
+            moved_assignments += 1
+
+        # Record the phrasing that split off so the next scan of it lands on the
+        # keeper. ON CONFLICT keeps an existing alias rather than repointing it —
+        # the first resolution wins, and a later merge can't quietly hijack it.
+        cursor.execute("""
+            INSERT INTO product_aliases (id, product_id, norm_name, norm_brand, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (norm_name, norm_brand) DO NOTHING
+        """, (
+            generate_id(), target_id,
+            normalize_match_text(source["name"]),
+            normalize_match_text(source["brand"]),
+            now,
+        ))
+
+        cursor.execute(
+            "UPDATE products SET deleted_at = %s, updated_at = %s WHERE id = %s",
+            (now, now, source_id)
+        )
+        conn.commit()
+
+        return {
+            "merged": True,
+            "source_product_id": source_id,
+            "target_product_id": target_id,
+            "par_levels_moved": moved_par_levels,
+            "assignments_moved": moved_assignments,
+        }
+
 
 # ============== LOCATIONS ==============
 
@@ -905,7 +1094,20 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         )
         existing = cursor.fetchone()
 
-        new_par = data.par if data.par is not None else (float(existing["par_quantity"]) if existing else 1.0)
+        # A price-only PATCH against a product this location has never counted is
+        # the Pricing screen filling in the price book, not somebody setting a par.
+        # generate_order_items iterates par_levels rather than scans, so defaulting
+        # that fresh row's par to 1 would emit a phantom "critical" order line for a
+        # bottle nobody ever scanned. Start it at 0 instead; a real count sets it later.
+        pricing_only_new_row = (
+            existing is None
+            and data.price is not None
+            and data.par is None
+            and data.full is None
+            and data.current_stock is None
+        )
+        default_par = 0.0 if pricing_only_new_row else 1.0
+        new_par = data.par if data.par is not None else (float(existing["par_quantity"]) if existing else default_par)
         new_full = data.full if data.full is not None else (float(existing["full_quantity"] or 0) if existing else 0.0)
         new_stock = data.current_stock if data.current_stock is not None else (float(existing["current_stock"] or 0) if existing else 0.0)
         new_price = data.price if data.price is not None else (float(existing["price"] or 0) if existing else 0.0)
@@ -1935,7 +2137,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
             SELECT DISTINCT p.* FROM products p
             JOIN scans s ON p.id = s.product_id
             JOIN inventory_sessions ses ON s.session_id = ses.id
-            WHERE ses.location_id = %s
+            WHERE ses.location_id = %s AND p.deleted_at IS NULL
             ORDER BY p.name
         """, (location_id,))
         products = [dict(row) for row in cursor.fetchall()]
@@ -2645,6 +2847,25 @@ def legal_terms():
     """))
 
 
+@app.get("/support")
+def support_page():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_legal_page("Support", f"""
+        <h2>Get help</h2>
+        <p>Questions, bugs, or feature requests — email
+        <a href="mailto:{LEGAL_CONTACT}" style="color: #FFD700;">{LEGAL_CONTACT}</a>
+        and we'll get back to you.</p>
+        <h2>Common questions</h2>
+        <p><strong>A bottle scanned wrong.</strong> Tap the bottle in Review, then retry the
+        scan or correct the name/count by hand — the count always overrides what the camera read.</p>
+        <p><strong>Two bottles for the same product.</strong> Open Pricing under Management, find
+        the duplicate under "Needs a price," and tap the merge icon to combine it with the correct one.</p>
+        <p><strong>An order didn't reach a distributor.</strong> Check the address in Settings under
+        Distributors, then resend from Order History.</p>
+        <p><strong>Forgot your password.</strong> Use "Forgot password?" on the sign-in screen.</p>
+    """))
+
+
 @app.get("/billing/success")
 def billing_success():
     from fastapi.responses import HTMLResponse
@@ -2691,7 +2912,17 @@ async def billing_webhook(request: Request):
         elif event["type"] in ("customer.subscription.updated", "customer.subscription.deleted"):
             customer_id = obj.get("customer")
             status = obj.get("status")  # active, past_due, canceled, unpaid, etc.
-            new_status = "active" if status == "active" else ("trial" if status == "trialing" else "canceled")
+            # past_due = a renewal charge failed but Stripe is still retrying
+            # the card (smart retries + dunning emails, typically about a
+            # week). An expired card that gets replaced mid-dunning recovers
+            # on its own — locking the bar out of their inventory during that
+            # window punishes a paying customer for a card hiccup. Access is
+            # cut when Stripe actually gives up: canceled / unpaid.
+            new_status = (
+                "active" if status in ("active", "past_due")
+                else "trial" if status == "trialing"
+                else "canceled"
+            )
             if customer_id:
                 cursor.execute(
                     "UPDATE users SET subscription_status = %s, updated_at = %s WHERE stripe_customer_id = %s",
@@ -3034,7 +3265,12 @@ LEVEL_STABILIZATION: bool = os.getenv("LEVEL_STABILIZATION", "true").lower() not
 SMOOTHING_WINDOW: int = max(1, int(os.getenv("SMOOTHING_WINDOW", "3")))
 PROVIDER_TIMEOUT: float = float(os.getenv("PROVIDER_TIMEOUT", "9.0"))
 TOTAL_SCAN_TIMEOUT_SEC: float = float(os.getenv("TOTAL_SCAN_TIMEOUT_SEC", "20.0"))
-AUTO_CREATE_CONFIDENCE: float = float(os.getenv("AUTO_CREATE_CONFIDENCE", "0.4"))
+# Must stay above the 0.5 ceiling BOTTLE_PROMPT puts on an unreadable label. At
+# the old 0.4 an illegible photo cleared this bar and minted a second product for
+# a bottle already in the catalog ("Gatorade / Sports Drink" beside "Gatorade /
+# Blue Bolt"). This only gates creating NEW products — matching an existing one
+# runs before the check, so a legible scan of a known bottle is unaffected.
+AUTO_CREATE_CONFIDENCE: float = float(os.getenv("AUTO_CREATE_CONFIDENCE", "0.6"))
 
 
 def _strip_code_fences(text: str) -> str:
@@ -3178,7 +3414,16 @@ async def _warm_providers() -> dict:
 
 
 def _match_or_create_product(result: dict, user_id: str) -> tuple:
-    """Exact-match AI result against products table; auto-create if confidence high enough.
+    """Match AI result against products table; auto-create if confidence high enough.
+
+    Matching widens in stages, cheapest and most certain first: exact strings, then
+    punctuation-insensitive, then an explicit alias recorded by a merge, then the
+    name/brand fields swapped, then the two fields concatenated. Every stage after
+    the first exists because the AI re-reads the label on each scan and can phrase
+    the same bottle differently — "Gatorade"/"Blue Bolt" one time, "Blue Bolt"/
+    "Gatorade" or a single "Gatorade Blue Bolt" the next. Without them each variant
+    becomes its own product, which splits counts (and so over-orders), splits the
+    price book, and drops the distributor assignment.
 
     Returns (matched_product_id, is_new_product, match_method).
     Never raises — on any DB error returns (None, False, "none").
@@ -3190,9 +3435,22 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
     if not name:
         return (None, False, "none")
 
+    norm_name = normalize_match_text(name)
+    norm_brand = normalize_match_text(brand)
+    norm_col_name = NORM_SQL.format(col="name")
+    norm_col_brand = NORM_SQL.format(col="brand")
+
     try:
         with get_db() as conn:
             cursor = conn.cursor()
+
+            def _claim(product_id: str, method: str) -> tuple:
+                cursor.execute(
+                    "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
+                    (now_iso(), product_id)
+                )
+                conn.commit()
+                return (product_id, False, method)
 
             # Step A — exact match on name + brand (case-insensitive)
             cursor.execute("""
@@ -3208,14 +3466,67 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
             """, (name, brand, brand))
             row = cursor.fetchone()
             if row:
-                cursor.execute(
-                    "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
-                    (now_iso(), row["id"])
-                )
-                conn.commit()
-                return (row["id"], False, "exact")
+                return _claim(row["id"], "exact")
 
-            # Step B — auto-create if confidence is sufficient
+            # Step B — same, ignoring punctuation and spacing
+            cursor.execute(f"""
+                SELECT id FROM products
+                WHERE {norm_col_name} = %s AND {norm_col_brand} = %s
+                  AND deleted_at IS NULL
+                ORDER BY verified DESC, scan_count DESC
+                LIMIT 1
+            """, (norm_name, norm_brand))
+            row = cursor.fetchone()
+            if row:
+                return _claim(row["id"], "normalized")
+
+            # Step C — an alias a merge recorded, so a phrasing someone already
+            # resolved by hand never splits back off into a new product.
+            cursor.execute("""
+                SELECT pa.product_id FROM product_aliases pa
+                JOIN products p ON p.id = pa.product_id
+                WHERE pa.norm_name = %s AND pa.norm_brand = %s
+                  AND p.deleted_at IS NULL
+                LIMIT 1
+            """, (norm_name, norm_brand))
+            row = cursor.fetchone()
+            if row:
+                return _claim(row["product_id"], "alias")
+
+            # Step D — the two fields swapped
+            if norm_name and norm_brand:
+                cursor.execute(f"""
+                    SELECT id FROM products
+                    WHERE {norm_col_name} = %s AND {norm_col_brand} = %s
+                      AND deleted_at IS NULL
+                    ORDER BY verified DESC, scan_count DESC
+                    LIMIT 1
+                """, (norm_brand, norm_name))
+                row = cursor.fetchone()
+                if row:
+                    return _claim(row["id"], "swapped")
+
+            # Step E — brand and name run together, catching the case where the AI
+            # returns the whole label as one field ("Gatorade Blue Bolt" / "").
+            # Short keys are skipped: a two- or three-character run collides far
+            # too easily to be evidence of the same product.
+            combined = f"{norm_brand}{norm_name}"
+            if len(combined) >= 6:
+                cursor.execute(f"""
+                    SELECT id FROM products
+                    WHERE (
+                            ({norm_col_brand} || {norm_col_name}) = %s
+                         OR ({norm_col_name} || {norm_col_brand}) = %s
+                          )
+                      AND deleted_at IS NULL
+                    ORDER BY verified DESC, scan_count DESC
+                    LIMIT 1
+                """, (combined, combined))
+                row = cursor.fetchone()
+                if row:
+                    return _claim(row["id"], "combined")
+
+            # Step F — auto-create if confidence is sufficient
             if confidence >= AUTO_CREATE_CONFIDENCE:
                 category = result.get("category", "other") or "other"
                 new_id = generate_id()
