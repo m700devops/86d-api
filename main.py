@@ -2137,7 +2137,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
             SELECT DISTINCT p.* FROM products p
             JOIN scans s ON p.id = s.product_id
             JOIN inventory_sessions ses ON s.session_id = ses.id
-            WHERE ses.location_id = %s
+            WHERE ses.location_id = %s AND p.deleted_at IS NULL
             ORDER BY p.name
         """, (location_id,))
         products = [dict(row) for row in cursor.fetchall()]
