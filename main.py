@@ -430,7 +430,7 @@ def list_products(
         cursor = conn.cursor()
         
         # Build query
-        where_clause = "WHERE 1=1"
+        where_clause = "WHERE deleted_at IS NULL"
         params = []
         if category:
             where_clause += " AND category = %s"
@@ -477,8 +477,8 @@ def search_products(
         
         search_term = f"%{q}%"
         cursor.execute("""
-            SELECT * FROM products 
-            WHERE name ILIKE %s OR brand ILIKE %s OR upc ILIKE %s
+            SELECT * FROM products
+            WHERE deleted_at IS NULL AND (name ILIKE %s OR brand ILIKE %s OR upc ILIKE %s)
             ORDER BY
                 CASE WHEN name ILIKE %s THEN 0 ELSE 1 END,
                 scan_count DESC
@@ -501,7 +501,7 @@ def get_product_by_barcode(upc: str):
     with get_db() as conn:
         cursor = conn.cursor()
         
-        cursor.execute("SELECT * FROM products WHERE upc = %s", (upc,))
+        cursor.execute("SELECT * FROM products WHERE upc = %s AND deleted_at IS NULL", (upc,))
         row = cursor.fetchone()
         
         if not row:
@@ -619,7 +619,8 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT id, name, brand, verified FROM products WHERE id = %s AND deleted_at IS NULL",
+            "SELECT id, name, brand, verified, created_by_user_id FROM products "
+            "WHERE id = %s AND deleted_at IS NULL",
             (source_id,)
         )
         source = cursor.fetchone()
@@ -648,6 +649,26 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
         )
         location_ids = [r["id"] for r in cursor.fetchall()]
 
+        # products is a shared catalog keyed by id, so the caller must actually
+        # own or use the duplicate being retired — otherwise anyone who learns a
+        # product id (e.g. via /products/search) could retire or alias a bottle
+        # that belongs to another account's bar.
+        source_used_by_caller = False
+        if location_ids:
+            cursor.execute("""
+                SELECT 1 FROM par_levels WHERE location_id = ANY(%s) AND product_id = %s
+                UNION
+                SELECT 1 FROM location_product_distributors WHERE location_id = ANY(%s) AND product_id = %s
+                LIMIT 1
+            """, (location_ids, source_id, location_ids, source_id))
+            source_used_by_caller = cursor.fetchone() is not None
+
+        if source["created_by_user_id"] != user_id and not source_used_by_caller:
+            raise HTTPException(status_code=403, detail={
+                "error": "not_owned",
+                "message": "You can only merge duplicates you created or use at one of your bars"
+            })
+
         moved_par_levels = 0
         moved_assignments = 0
 
@@ -664,42 +685,50 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
                 (location_id, source_id)
             )
             src_row = cursor.fetchone()
-            if not src_row:
-                continue
 
-            cursor.execute(
-                "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels "
-                "WHERE location_id = %s AND product_id = %s",
-                (location_id, target_id)
-            )
-            tgt_row = cursor.fetchone()
-
-            if tgt_row:
-                merged_price = float(tgt_row["price"] or 0) or float(src_row["price"] or 0)
-                cursor.execute("""
-                    UPDATE par_levels
-                    SET par_quantity = %s, full_quantity = %s, current_stock = %s,
-                        price = %s, updated_at = %s
-                    WHERE location_id = %s AND product_id = %s
-                """, (
-                    max(float(tgt_row["par_quantity"] or 0), float(src_row["par_quantity"] or 0)),
-                    max(float(tgt_row["full_quantity"] or 0), float(src_row["full_quantity"] or 0)),
-                    max(float(tgt_row["current_stock"] or 0), float(src_row["current_stock"] or 0)),
-                    merged_price, now, location_id, target_id
-                ))
+            if src_row:
                 cursor.execute(
-                    "DELETE FROM par_levels WHERE location_id = %s AND product_id = %s",
-                    (location_id, source_id)
+                    "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels "
+                    "WHERE location_id = %s AND product_id = %s",
+                    (location_id, target_id)
                 )
-            else:
-                cursor.execute("""
-                    UPDATE par_levels SET product_id = %s, updated_at = %s
-                    WHERE location_id = %s AND product_id = %s
-                """, (target_id, now, location_id, source_id))
-            moved_par_levels += 1
+                tgt_row = cursor.fetchone()
+
+                if tgt_row:
+                    merged_price = float(tgt_row["price"] or 0) or float(src_row["price"] or 0)
+                    cursor.execute("""
+                        UPDATE par_levels
+                        SET par_quantity = %s, full_quantity = %s, current_stock = %s,
+                            price = %s, updated_at = %s
+                        WHERE location_id = %s AND product_id = %s
+                    """, (
+                        max(float(tgt_row["par_quantity"] or 0), float(src_row["par_quantity"] or 0)),
+                        max(float(tgt_row["full_quantity"] or 0), float(src_row["full_quantity"] or 0)),
+                        max(float(tgt_row["current_stock"] or 0), float(src_row["current_stock"] or 0)),
+                        merged_price, now, location_id, target_id
+                    ))
+                    cursor.execute(
+                        "DELETE FROM par_levels WHERE location_id = %s AND product_id = %s",
+                        (location_id, source_id)
+                    )
+                else:
+                    cursor.execute("""
+                        UPDATE par_levels SET product_id = %s, updated_at = %s
+                        WHERE location_id = %s AND product_id = %s
+                    """, (target_id, now, location_id, source_id))
+                moved_par_levels += 1
 
             # Same UNIQUE(location_id, product_id) shape: keep the assignment the
-            # keeper already has, otherwise carry the duplicate's over.
+            # keeper already has, otherwise carry the duplicate's over. Runs even
+            # when there's no par_levels row here, since a distributor assignment
+            # can exist on its own via /locations/{id}/product-distributors.
+            cursor.execute(
+                "SELECT id FROM location_product_distributors WHERE location_id = %s AND product_id = %s",
+                (location_id, source_id)
+            )
+            if not cursor.fetchone():
+                continue
+
             cursor.execute(
                 "SELECT id FROM location_product_distributors WHERE location_id = %s AND product_id = %s",
                 (location_id, target_id)
