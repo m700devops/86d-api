@@ -405,8 +405,14 @@ def refresh_token(refresh_data: RefreshRequest):
         })
 
     access_token = create_access_token(claims["sub"])
+    # Rotate the refresh token too. Without this, the token issued at login
+    # is a fixed 30-day clock and every user — however active — gets kicked
+    # to the login screen a month after signing in. Rotation makes the
+    # 30-day expiry a rolling idle window instead: only an account that
+    # hasn't opened the app in 30 days has to log in again.
     return {
         "access_token": access_token,
+        "refresh_token": create_refresh_token(claims["sub"]),
         "expires_in": 3600
     }
 
@@ -2877,7 +2883,17 @@ async def billing_webhook(request: Request):
         elif event["type"] in ("customer.subscription.updated", "customer.subscription.deleted"):
             customer_id = obj.get("customer")
             status = obj.get("status")  # active, past_due, canceled, unpaid, etc.
-            new_status = "active" if status == "active" else ("trial" if status == "trialing" else "canceled")
+            # past_due = a renewal charge failed but Stripe is still retrying
+            # the card (smart retries + dunning emails, typically about a
+            # week). An expired card that gets replaced mid-dunning recovers
+            # on its own — locking the bar out of their inventory during that
+            # window punishes a paying customer for a card hiccup. Access is
+            # cut when Stripe actually gives up: canceled / unpaid.
+            new_status = (
+                "active" if status in ("active", "past_due")
+                else "trial" if status == "trialing"
+                else "canceled"
+            )
             if customer_id:
                 cursor.execute(
                     "UPDATE users SET subscription_status = %s, updated_at = %s WHERE stripe_customer_id = %s",

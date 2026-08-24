@@ -71,6 +71,9 @@ class RefreshRequest(BaseModel):
 
 class RefreshResponse(BaseModel):
     access_token: str
+    # Rotated on every refresh — the client stores this and the 30-day
+    # window rolls forward, so active users are never hard-logged-out.
+    refresh_token: Optional[str] = None
     expires_in: int = 3600
 
 # ============== PRODUCT MODELS ==============
