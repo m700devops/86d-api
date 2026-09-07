@@ -2745,6 +2745,44 @@ def create_checkout_session(user_id: str = Depends(get_current_user)):
     return {"checkout_url": session.url}
 
 
+@v1_router.post("/billing/create-portal-session")
+def create_portal_session(user_id: str = Depends(get_current_user)):
+    """Create a Stripe Billing Portal session for the current user — lets an
+    already-subscribed customer cancel, change card, or view invoices in
+    Stripe's own hosted UI. Same pattern as checkout: the app just opens the
+    URL in the system browser, nothing Stripe-related runs in-app."""
+    if not stripe.api_key:
+        raise HTTPException(status_code=503, detail={
+            "error": "billing_not_configured",
+            "message": "Billing isn't set up on the server yet (STRIPE_SECRET_KEY missing)"
+        })
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT stripe_customer_id FROM users WHERE id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
+        customer_id = row["stripe_customer_id"]
+
+    # A Stripe customer only exists once someone has actually been through
+    # checkout — a trial user who's never subscribed has nothing to manage.
+    if not customer_id:
+        raise HTTPException(status_code=400, detail={
+            "error": "no_billing_account",
+            "message": "No billing account on file yet — subscribe first."
+        })
+
+    session = stripe.billing_portal.Session.create(
+        customer=customer_id,
+        return_url=f"{APP_BASE_URL}/billing/portal-return",
+    )
+    return {"portal_url": session.url}
+
+
 def _billing_page(title: str, message: str) -> str:
     return f"""
         <html>
@@ -2878,6 +2916,12 @@ def billing_success():
 def billing_cancel():
     from fastapi.responses import HTMLResponse
     return HTMLResponse(_billing_page("No charge made", "You can head back to the 86'd app any time to subscribe."))
+
+
+@app.get("/billing/portal-return")
+def billing_portal_return():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_billing_page("All done", "Head back to the 86'd app — any changes are already saved."))
 
 
 @app.post("/billing/webhook")
