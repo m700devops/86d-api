@@ -2743,6 +2743,37 @@ def create_checkout_session(user_id: str = Depends(get_current_user)):
     return {"checkout_url": session.url}
 
 
+@v1_router.post("/billing/create-portal-session")
+def create_portal_session(user_id: str = Depends(get_current_user)):
+    """Create a Stripe Billing Portal session so a subscriber can manage or
+    cancel their subscription — the app opens this in Safari, same as checkout."""
+    if not stripe.api_key:
+        raise HTTPException(status_code=503, detail={
+            "error": "billing_not_configured",
+            "message": "Billing isn't set up on the server yet (STRIPE_SECRET_KEY missing)"
+        })
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT stripe_customer_id FROM users WHERE id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        if not row or not row["stripe_customer_id"]:
+            raise HTTPException(status_code=404, detail={
+                "error": "no_stripe_customer",
+                "message": "No billing account found yet — subscribe first."
+            })
+        customer_id = row["stripe_customer_id"]
+
+    session = stripe.billing_portal.Session.create(
+        customer=customer_id,
+        return_url=f"{APP_BASE_URL}/billing/success",
+    )
+    return {"portal_url": session.url}
+
+
 def _billing_page(title: str, message: str) -> str:
     return f"""
         <html>
