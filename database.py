@@ -532,6 +532,8 @@ def init_db():
         conn.commit()
 
         # Migrate locations: add order_rounding_mode and staff_names if absent
+        # (order_rounding_mode is superseded by reorder_threshold below — the
+        # column is left in place rather than dropped, just unused now)
         for col, col_def in [("order_rounding_mode", "TEXT DEFAULT 'nearest'"), ("staff_names", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -540,6 +542,17 @@ def init_db():
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE locations ADD COLUMN {col} {col_def}")
                 print(f"[db] migrated locations: added {col} {col_def}", flush=True)
+        conn.commit()
+
+        # Migrate locations: add reorder_threshold if absent — fraction of par
+        # a product must fall below before it's flagged for reorder.
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'locations' AND column_name = 'reorder_threshold'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE locations ADD COLUMN reorder_threshold NUMERIC(3,2) DEFAULT 0.7")
+            print("[db] migrated locations: added reorder_threshold NUMERIC(3,2) DEFAULT 0.7", flush=True)
         conn.commit()
 
 

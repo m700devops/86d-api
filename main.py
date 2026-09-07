@@ -784,7 +784,7 @@ def _location_row(row) -> dict:
         loc["staff_names"] = json.loads(loc.get("staff_names") or "[]")
     except Exception:
         loc["staff_names"] = []
-    loc["order_rounding_mode"] = loc.get("order_rounding_mode") or "nearest"
+    loc["reorder_threshold"] = float(loc.get("reorder_threshold") or 0.7)
     return loc
 
 @v1_router.get("/locations", response_model=LocationListResponse)
@@ -832,7 +832,7 @@ def create_location(location_data: LocationCreate, user_id: str = Depends(get_cu
                 "name": location_data.name,
                 "address": location_data.address,
                 "timezone": location_data.timezone,
-                "order_rounding_mode": "nearest",
+                "reorder_threshold": 0.7,
                 "staff_names": [],
                 "created_at": now,
                 "updated_at": now
@@ -841,7 +841,7 @@ def create_location(location_data: LocationCreate, user_id: str = Depends(get_cu
 
 @v1_router.patch("/locations/{location_id}", response_model=LocationResponse)
 def update_location(location_id: str, updates: LocationUpdate, user_id: str = Depends(get_current_user)):
-    """Update a location's settings — order_rounding_mode and/or staff_names."""
+    """Update a location's settings — reorder_threshold and/or staff_names."""
     fields = updates.model_dump(exclude_unset=True, exclude_none=True)
     if not fields:
         raise HTTPException(status_code=400, detail={"error": "no_fields", "message": "Nothing to update"})

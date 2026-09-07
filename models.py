@@ -121,17 +121,17 @@ class LocationBase(BaseModel):
     name: str
     address: Optional[str] = None
     timezone: str = "America/New_York"
-    # 'nearest' (default) — round to nearest whole bottle, so a shortfall
-    # under half a bottle doesn't trigger an order. 'up' — always round a
-    # shortfall up, never under-orders. Per-location since risk tolerance
-    # genuinely varies bar to bar.
-    order_rounding_mode: str = "nearest"
+    # Fraction of par a product's stock must fall below before it's flagged
+    # for reorder (e.g. 0.7 = reorder once stock drops below 70% of par).
+    # Per-location since risk tolerance genuinely varies bar to bar — a busy
+    # bar wants an early warning (0.8), a slow one can wait longer (0.5).
+    reorder_threshold: float = 0.7
 
 class LocationCreate(LocationBase):
     pass
 
 class LocationUpdate(BaseModel):
-    order_rounding_mode: Optional[str] = Field(None, pattern="^(up|nearest)$")
+    reorder_threshold: Optional[float] = Field(None, ge=0.5, le=0.8)
     # Named staff list for order attribution ("who counted") — labels, not
     # accounts. Stored per-location so every device on the account sees it.
     staff_names: Optional[List[str]] = None
