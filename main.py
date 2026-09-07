@@ -2145,7 +2145,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
             p["verified"] = bool(p["verified"])
         
         return {
-            "location": dict(location),
+            "location": _location_row(location),
             "par_levels": par_levels,
             "recent_sessions": recent_sessions,
             "products": products,
