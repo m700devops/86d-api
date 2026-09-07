@@ -2387,9 +2387,11 @@ Thank you,
         }
 
 # ============== ORDER EMAIL SENDING (Resend) ==============
-# Requires RESEND_API_KEY on the server. Until a domain is verified in Resend,
-# ORDER_EMAIL_FROM must stay on the sandbox sender (onboarding@resend.dev),
-# which can only deliver to the Resend account owner's own address.
+# Requires RESEND_API_KEY on the server. ORDER_EMAIL_FROM is set on Render to
+# an address on the verified my86d.com domain — the fallback below is the
+# Resend sandbox sender, which only delivers to the Resend account owner's
+# own address, and exists purely so a missing env var degrades loudly in
+# testing rather than silently using an unverified domain.
 
 class OrderEmailItem(BaseModel):
     name: str
