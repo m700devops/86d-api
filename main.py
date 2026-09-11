@@ -1089,7 +1089,7 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         now = now_iso()
         # Fetch existing row so we can preserve unchanged fields
         cursor.execute(
-            "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels WHERE location_id = %s AND product_id = %s",
+            "SELECT par_quantity, full_quantity, current_stock, price, par_set_at FROM par_levels WHERE location_id = %s AND product_id = %s",
             (location_id, product_id)
         )
         existing = cursor.fetchone()
@@ -1106,18 +1106,22 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         new_full = data.full if data.full is not None else (float(existing["full_quantity"] or 0) if existing else 0.0)
         new_stock = data.current_stock if data.current_stock is not None else (float(existing["current_stock"] or 0) if existing else 0.0)
         new_price = data.price if data.price is not None else (float(existing["price"] or 0) if existing else 0.0)
+        # Stamped only when this request actually carried a par, so the column
+        # stays a record of deliberate choices rather than of row activity.
+        new_par_set_at = now if data.par is not None else (existing["par_set_at"] if existing else None)
 
         par_id = generate_id()
         cursor.execute("""
-            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, price, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, price, par_set_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(location_id, product_id) DO UPDATE SET
                 par_quantity = excluded.par_quantity,
                 full_quantity = excluded.full_quantity,
                 current_stock = excluded.current_stock,
                 price = excluded.price,
+                par_set_at = excluded.par_set_at,
                 updated_at = excluded.updated_at
-        """, (par_id, location_id, product_id, new_par, new_full, new_stock, new_price, now))
+        """, (par_id, location_id, product_id, new_par, new_full, new_stock, new_price, new_par_set_at, now))
         conn.commit()
 
         return {

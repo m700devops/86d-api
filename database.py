@@ -494,6 +494,33 @@ def init_db():
                 print(f"[db] migrated par_levels: added {col} {col_type}", flush=True)
         conn.commit()
 
+        # Migrate par_levels: par_set_at records when a human actually set a par, as
+        # opposed to a row that exists only because something else was written to it.
+        # Adding the column is also the one-shot gate for the backfill below, which
+        # has to run exactly once.
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'par_levels' AND column_name = 'par_set_at'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE par_levels ADD COLUMN par_set_at TEXT")
+            print("[db] migrated par_levels: added par_set_at TEXT", flush=True)
+
+            # Every par_quantity in this table so far was invented by the API, not
+            # chosen by anyone: until now the app had no way to send a par at all
+            # (it only ever PATCHed current_stock and price), and a row created by
+            # either of those writes defaulted to a par of 1. The client now reads
+            # par_quantity > 0 as "this bar set a par", so leaving those 1s in place
+            # would present a par nobody picked as deliberate — dropping the "Not
+            # set" warning and ordering the bottle back up to 1. Reset exactly the
+            # old default; any other number could only have come from an explicit set.
+            cursor.execute("UPDATE par_levels SET par_quantity = 0 WHERE par_quantity = 1")
+            print(
+                f"[db] migrated par_levels: cleared {cursor.rowcount} placeholder par(s) of 1",
+                flush=True,
+            )
+        conn.commit()
+
         # Migrate products: add source, created_by_user_id, deleted_at if absent
         products_migrations = [
             ("source", "TEXT DEFAULT 'manual'"),

@@ -48,7 +48,12 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   `par_quantity = 0` means "nobody has set a par yet" — the same convention price uses —
   so a PATCH without `par` never invents one (that also stops `generate_order_items`, which
   iterates par_levels rather than scans, from emitting a phantom order line for a bottle
-  nobody has parred)
+  nobody has parred). `par_levels.par_set_at` is stamped only when a request actually
+  carries a `par`, and only by THIS route — the older `POST /par-levels`, its bulk variant
+  and the sync route set pars without stamping it, so treat the column as informational and
+  keep using `par_quantity > 0` as the "this bar set a par" signal. Adding that column in
+  `init_db()` is also the one-shot gate for the backfill that cleared the placeholder pars
+  of 1 this endpoint used to create (see database.py)
 - GET/POST /locations/{id}/product-distributors — the other half of that memory: which
   distributor a bottle is ordered from at this bar, set once and applied to every future scan
 - POST /inventory/start, GET /inventory/{session_id}, POST /inventory/{session_id}/scan
