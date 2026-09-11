@@ -20,6 +20,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - auth.py — JWT access + refresh tokens
 - helpers.py — level classification, ID generation, variance calc, order generation
 - models.py — Pydantic request/response models
+- crm.py — internal sales CRM: `crm_leads` + `crm_counters` tables, a `/v1/crm` router, and
+  its own shared-key auth. Deliberately self-contained (own models, own auth, own tables) —
+  it shares a process and a database with the product API but is not part of the product.
+  Nothing in the inventory/scan/order paths reads from it. See the CRM section below
+- static/crm.html — the CRM UI, served at `/crm`. Single self-contained file, no build step;
+  replacing this file replaces the UI. Holds no credentials — the operator types the key and
+  it lives in their browser's localStorage
 - seed_data.py — default product catalog
 - test_level_classifier.py — unit tests for helpers.py level logic (run: pytest test_level_classifier.py -v)
 
@@ -69,6 +76,35 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 (There is no `/scans/pen-capture` or `/scans/batch` route — those were removed along with pen-based level
 capture. Don't reintroduce them or describe them as current.)
 
+## CRM (internal sales tool)
+- `GET /crm` — the UI. Unauthenticated on purpose (it's where the key gets entered), served
+  `noindex, nofollow` + `no-store`. 404s if `static/crm.html` is missing
+- All `/v1/crm/*` endpoints require an `X-CRM-Key` header matching the `CRM_API_KEY` env var,
+  compared with `secrets.compare_digest`. **An unset `CRM_API_KEY` makes every CRM endpoint
+  503, never open** — "no key configured" must never mean "no check"
+- Routes: `GET/POST /v1/crm/leads`, `PATCH/DELETE /v1/crm/leads/{id}`,
+  `POST /v1/crm/leads/{id}/email-sent`, `GET/PATCH /v1/crm/counters`
+- `crm_counters` is a single row pinned to `id = 1` by a CHECK constraint — the counters are
+  one global scoreboard and a second row would silently become a second truth
+- Daily counters reset to their `*_quota` columns on the first request of a new calendar day,
+  decided under `SELECT ... FOR UPDATE` so two morning requests can't both apply the reset.
+  The day is measured in `CRM_TIMEZONE` (default UTC — on Render that rolls over at 7pm US
+  Eastern, mid-shift, so set it to a real zone). The lifetime touch ticker and download count
+  are NOT touched by a daily reset
+- `PATCH /v1/crm/counters` takes both absolutes (`touch_ticker_remaining`) and deltas
+  (`touch_ticker_delta`). Prefer deltas: they apply relative to the stored value so two tabs
+  can't clobber each other, and they clamp at 0 rather than going negative
+- Lead status is validated by a Pydantic `Literal`, not a DB CHECK — pipeline stages change,
+  and a Literal is a deploy where a CHECK is a migration
+- `init_crm_tables()` runs from main.py's lifespan in its own try, so a CRM schema failure can
+  never stop the product API booting. **It logs `[crm] CRM_TABLES_READY tables=[...]` on
+  success and `[crm] CRM_TABLES_FAILED` on failure** — grep Render's deploy logs for
+  `CRM_TABLES` to confirm the schema landed
+- NOTE: the global CORS config (main.py ~line 110) allows neither the `PATCH` method nor the
+  `X-CRM-Key` header. That's fine while the page is served from `/crm` on this same origin
+  (same-origin requests skip CORS entirely), but hosting the CRM page on another domain and
+  calling this API cross-origin would fail on both counts
+
 ## Environment Variables Required
 Source of truth: the `_config_checks` startup list in main.py (~line 52) — it logs what's missing on boot.
 - DATABASE_URL — PostgreSQL connection string (required, app crashes without it)
@@ -79,6 +115,9 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - STRIPE_SECRET_KEY — checkout/billing endpoints 503 without it
 - STRIPE_PRICE_ID — checkout endpoint 503s without it, nobody can subscribe
 - STRIPE_WEBHOOK_SECRET — without it, payments don't activate subscriptions (customers pay and stay locked out)
+- CRM_API_KEY — shared key for `/v1/crm/*`; unset means every CRM endpoint 503s (the UI at
+  `/crm` still loads, it just can't do anything). Not used by the mobile app at all
+- CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC)
 - SENTRY_DSN — optional, error visibility only
 - CONFIDENCE_THRESHOLD, LEVEL_DEADBAND — optional tuning, see AI Vision Rules above
 

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Header, Request, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 import asyncio
@@ -23,6 +23,7 @@ from helpers import (
 )
 from models import *
 from seed_data import SEED_PRODUCTS
+from crm import crm_router, init_crm_tables
 import google.generativeai as genai
 import openai
 import os
@@ -71,6 +72,12 @@ async def lifespan(app: FastAPI):
         print("[lifespan] Database initialized successfully", flush=True)
     except Exception as e:
         print(f"[lifespan] Database init warning (may already exist): {e}", flush=True)
+    # CRM schema, in its own try so a failure here can never stop the product
+    # API from booting — the CRM is an internal sales tool sharing the process.
+    try:
+        await asyncio.to_thread(init_crm_tables)
+    except Exception as e:
+        print(f"[crm] CRM_TABLES_FAILED {e}", flush=True)
     # Pre-warm AI provider connections so the first scan is fast (best-effort)
     asyncio.create_task(_warm_providers())
     # Periodic trial-ending reminder emails (best-effort, runs for the life of the process)
@@ -3758,6 +3765,33 @@ def market_pulse():
 # ============== INCLUDE V1 ROUTER ==============
 
 app.include_router(v1_router)
+
+# ============== CRM (internal sales tool) ==============
+# Separate router with its own /v1/crm prefix and its own shared-key auth —
+# none of the JWT-authenticated product routes above apply to it.
+app.include_router(crm_router)
+
+CRM_PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "crm.html")
+
+
+@app.get("/crm", include_in_schema=False)
+async def crm_page():
+    """The CRM UI itself.
+
+    Unauthenticated on purpose: it's the surface where the operator enters the
+    key, so gating it on the key would be a chicken-and-egg. The page ships no
+    credentials — every /v1/crm/* call it makes carries a key the operator
+    typed, held in their browser's localStorage. noindex because a public URL
+    that lists prospects has no business in a search index.
+    """
+    if not os.path.exists(CRM_PAGE):
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "CRM page is not installed on this server",
+        })
+    return FileResponse(CRM_PAGE, media_type="text/html", headers={
+        "X-Robots-Tag": "noindex, nofollow",
+        "Cache-Control": "no-store",
+    })
 
 # ============== ERROR HANDLERS ==============
 
