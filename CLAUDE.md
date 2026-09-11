@@ -41,6 +41,16 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - GET/POST /products, GET /products/search, GET /products/barcode/{upc}
 - POST /products/{product_id}/merge — merges a duplicate product into a target (aliases, par_levels, distributors)
 - GET/POST /locations, GET/POST /locations/{id}/par-levels
+- PATCH /locations/{location_id}/products/{product_id} — upserts the `par_levels` row for
+  one bottle at one bar (full / current_stock / par / price), preserving whatever the body
+  doesn't mention. This is the per-bar memory behind the mobile product book: par and price
+  set once here, read back by `GET /locations/{id}/par-levels` on every later count.
+  `par_quantity = 0` means "nobody has set a par yet" — the same convention price uses —
+  so a PATCH without `par` never invents one (that also stops `generate_order_items`, which
+  iterates par_levels rather than scans, from emitting a phantom order line for a bottle
+  nobody has parred)
+- GET/POST /locations/{id}/product-distributors — the other half of that memory: which
+  distributor a bottle is ordered from at this bar, set once and applied to every future scan
 - POST /inventory/start, GET /inventory/{session_id}, POST /inventory/{session_id}/scan
 - POST /inventory/{session_id}/scan/bulk
 - POST /scans/analyze — the live AI vision route (OpenAI → Gemini fallback), see AI Vision Rules above

@@ -1094,20 +1094,15 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         )
         existing = cursor.fetchone()
 
-        # A price-only PATCH against a product this location has never counted is
-        # the Pricing screen filling in the price book, not somebody setting a par.
-        # generate_order_items iterates par_levels rather than scans, so defaulting
-        # that fresh row's par to 1 would emit a phantom "critical" order line for a
-        # bottle nobody ever scanned. Start it at 0 instead; a real count sets it later.
-        pricing_only_new_row = (
-            existing is None
-            and data.price is not None
-            and data.par is None
-            and data.full is None
-            and data.current_stock is None
-        )
-        default_par = 0.0 if pricing_only_new_row else 1.0
-        new_par = data.par if data.par is not None else (float(existing["par_quantity"]) if existing else default_par)
+        # par_quantity 0 means "nobody has set a par for this bottle yet" — the same
+        # convention price already uses, and the client relies on it to tell a real
+        # par from a placeholder when it pre-fills a new scan from the saved book.
+        # So a PATCH that doesn't carry `par` never invents one: a row created by a
+        # price write (Pricing screen) or a stock write (counting) starts at 0 and
+        # stays there until someone actually sets a par. That also keeps
+        # generate_order_items — which iterates par_levels, not scans — from emitting
+        # a phantom "critical" order line for a bottle nobody has parred.
+        new_par = data.par if data.par is not None else (float(existing["par_quantity"]) if existing else 0.0)
         new_full = data.full if data.full is not None else (float(existing["full_quantity"] or 0) if existing else 0.0)
         new_stock = data.current_stock if data.current_stock is not None else (float(existing["current_stock"] or 0) if existing else 0.0)
         new_price = data.price if data.price is not None else (float(existing["price"] or 0) if existing else 0.0)
