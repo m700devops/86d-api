@@ -2250,6 +2250,29 @@ def assign_product_distributor(location_id: str, assignment: LocationProductDist
         conn.commit()
         return {"success": True, "assignment_id": assignment_id}
 
+@v1_router.delete("/locations/{location_id}/product-distributors/{product_id}", response_model=dict)
+def unassign_product_distributor(location_id: str, product_id: str,
+                                 user_id: str = Depends(get_current_user)):
+    """Clear which distributor a product is ordered from at this location.
+
+    A hard delete, not a soft one: the row *is* the assignment, and the absence
+    of a row is exactly how the rest of the API reads "not assigned". Idempotent
+    — clearing an assignment that isn't there is a success, so a retry after a
+    dropped response doesn't 404.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+                       (location_id, user_id))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied"})
+        cursor.execute(
+            "DELETE FROM location_product_distributors WHERE location_id = %s AND product_id = %s",
+            (location_id, product_id)
+        )
+        conn.commit()
+        return {"success": True, "cleared": cursor.rowcount > 0}
+
 @v1_router.get("/locations/{location_id}/product-distributors", response_model=LocationProductDistributorListResponse)
 def list_product_distributors(location_id: str, user_id: str = Depends(get_current_user)):
     """List product-distributor assignments for a location"""

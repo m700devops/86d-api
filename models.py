@@ -193,7 +193,10 @@ class ProductStockUpdate(BaseModel):
     """PATCH /locations/{loc}/products/{prod} — update full, current_stock, par, and/or price."""
     full: Optional[float] = Field(default=None, ge=0, le=999.99)
     current_stock: Optional[float] = Field(default=None, ge=0, le=999.99)
-    par: Optional[float] = Field(default=None, gt=0)
+    # ge=0, not gt=0: 0 is how a par is cleared, the same way price uses 0 for
+    # "unset". Rejecting it made "remove this par" the one edit the API couldn't
+    # express.
+    par: Optional[float] = Field(default=None, ge=0)
     # Per-location bottle price (what THIS bar pays) — deliberately not on the
     # shared products table, where one bar's price would leak to every bar.
     price: Optional[float] = Field(default=None, ge=0)
