@@ -263,8 +263,55 @@ LEAD_WRITABLE = (
 )
 
 
+import re as _re
+
+def phone_digits(phone: Optional[str]) -> str:
+    """Bare digits, ready to paste into a dialer.
+
+    CloudTalk and every other dialer want a number, not a formatted string, so
+    "+1-615-742-9095" becomes "6157429095". A leading US country code is
+    dropped because 10 digits is what a US dialer expects; anything that isn't
+    an 11-digit US number is left at its full digit string rather than guessed at.
+    """
+    digits = _re.sub(r"\D", "", phone or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits
+
+
+# Zone names and the working day inside them. The whole call list is organised
+# around this: a zone entering its dinner rush is a zone to stop calling, and
+# the next one west is an hour behind and still fine.
+ZONE_LABELS = {-5: "Eastern", -6: "Central", -7: "Mountain", -8: "Pacific"}
+
+
+def zone_state(offset: Optional[int]) -> dict:
+    """What's happening in this timezone right now, and whether to call it."""
+    if offset is None:
+        return {"offset": None, "label": "Unknown", "local_time": "",
+                "state": "unknown", "headline": "No timezone on these",
+                "rank": 5, "callable": True}
+    local = datetime.now(timezone.utc) + timedelta(hours=offset)
+    hour = local.hour
+    label = ZONE_LABELS.get(offset, f"UTC{offset}")
+    if hour < 11:
+        state, headline, rank, ok = "closed", "Closed — nobody there yet", 3, False
+    elif hour < CALL_WINDOW_START:
+        state, headline, rank, ok = "opening", "Opening up — worth a try", 2, True
+    elif hour < CALL_WINDOW_END:
+        state, headline, rank, ok = "good", "CALL NOW — quiet before service", 0, True
+    elif hour < 21:
+        state, headline, rank, ok = "rush", "Dinner rush — skip for now", 4, False
+    else:
+        state, headline, rank, ok = "late", "Too late — they're slammed", 4, False
+    return {"offset": offset, "label": label, "local_time": local.strftime("%-I:%M %p"),
+            "state": state, "headline": headline, "rank": rank, "callable": ok}
+
+
 def _lead_row(row) -> dict:
-    return {k: row[k] for k in LEAD_COLUMNS}
+    lead = {k: row[k] for k in LEAD_COLUMNS}
+    lead["phone_digits"] = phone_digits(lead.get("phone"))
+    return lead
 
 
 def _blank_to_none(value):
@@ -359,9 +406,20 @@ def update_lead(lead_id: str, data: LeadUpdate, _: bool = Depends(require_crm_ke
 
 @crm_router.delete("/leads/{lead_id}", response_model=dict)
 def delete_lead(lead_id: str, _: bool = Depends(require_crm_key)):
-    """Hard delete — the CRM's rows are working notes, not records to preserve."""
+    """Hard delete — the CRM's rows are working notes, not records to preserve.
+
+    The candidate that produced this lead is retired at the same time. Without
+    that, the generator would cheerfully re-promote the same restaurant on a
+    later run and it would reappear on the call list — the exact duplicate call
+    deleting it was meant to prevent.
+    """
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE crm_lead_candidates SET status='rejected', "
+            "reject_reason='lead deleted by hand' WHERE promoted_lead_id = %s",
+            (lead_id,),
+        )
         cursor.execute("DELETE FROM crm_leads WHERE id = %s", (lead_id,))
         deleted = cursor.rowcount > 0
         conn.commit()
@@ -1150,3 +1208,243 @@ def export_csv(scope: str = "today", _: bool = Depends(require_crm_key)):
         iter([buf.getvalue()]), media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="86d-leads-{scope}-{today}.csv"'},
     )
+
+
+# ============== THE CALL LIST ==============
+#
+# One screen, one job. Everything sourced and not yet worked, grouped by
+# timezone, with the zone that's callable right now first.
+#
+# A lead leaves this list the moment it's been dealt with — a logged call, a
+# debrief, a status change, a delete. Nothing has to be tidied up by hand, and
+# the same restaurant can't be called twice because it simply isn't there any
+# more. The list shrinking IS the progress bar.
+
+@crm_router.get("/calllist", response_model=dict)
+def call_list(_: bool = Depends(require_crm_key)):
+    today = _today()
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Untouched and still 'new'. Any CRM update moves one of those two and
+        # the lead drops off.
+        cursor.execute("""
+            SELECT * FROM crm_leads
+             WHERE status = 'new' AND last_touch_at IS NULL
+               AND phone IS NOT NULL AND phone <> ''
+             ORDER BY created_at DESC
+        """)
+        rows = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT COUNT(*) AS n FROM crm_leads
+             WHERE SUBSTRING(COALESCE(last_touch_at, ''), 1, 10) = %s
+        """, (today,))
+        done_today = cursor.fetchone()["n"]
+
+    grouped: dict = {}
+    for row in rows:
+        lead = _lead_row(row)
+        offset = row.get("tz_offset_hours")
+        grouped.setdefault(offset, []).append(lead)
+
+    zones = []
+    for offset, leads in grouped.items():
+        zone = zone_state(offset)
+        zone["leads"] = leads
+        zone["count"] = len(leads)
+        zones.append(zone)
+    # Callable-now first, then the ones opening up, then the rest.
+    zones.sort(key=lambda z: (z["rank"], z["label"]))
+
+    callable_now = [z for z in zones if z["state"] == "good"]
+    if callable_now:
+        focus = (f"Call {callable_now[0]['label']} now — "
+                 f"{callable_now[0]['count']} waiting")
+    else:
+        soon = [z for z in zones if z["state"] in ("opening", "closed")]
+        focus = (f"Nothing in the sweet spot. {soon[0]['label']} is next."
+                 if soon else "Nothing to call right now.")
+
+    return {
+        "date": today,
+        "focus": focus,
+        "done_today": done_today,
+        "remaining": len(rows),
+        "zones": zones,
+    }
+
+
+# ============== AI DEBRIEF ==============
+#
+# After a call, type what happened in plain words and the model turns it into
+# the fields. The point is that nobody should have to remember which box the
+# follow-up date goes in, or re-type a contact's name into a form, while the
+# next call is already waiting.
+
+class Debrief(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    kind: Literal["call", "email", "fb"] = "call"
+
+
+DEBRIEF_SYSTEM = """You turn a salesperson's rough notes from a phone call into structured CRM fields.
+
+They sell 86'd, an iPhone app for bar inventory, to independent bars and restaurants.
+
+Return ONLY a JSON object with these keys (omit any you cannot determine — never guess):
+  "status": one of "new","contacted","warm","won","dead"
+  "contact": the name of the person they spoke to
+  "email": a corrected or newly learned email address
+  "phone": a corrected or newly learned phone number
+  "followup_in_days": integer number of days until the agreed follow-up
+  "summary": one clean sentence recording what happened
+
+Rules:
+- "not interested", "hung up", "don't call again", "no thanks" -> status "dead"
+- an agreed callback, a demo booked, real interest -> status "warm"
+- reached someone but no clear outcome -> status "contacted"
+- signed up, bought, installed -> status "won"
+- voicemail or gatekeeper with nobody reached -> status "contacted"
+- "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
+"""
+
+
+def _debrief_extract(text: str) -> dict:
+    """Ask the model for structured fields. Raises HTTPException when unusable.
+
+    Uses the same providers the scan path already uses — OpenAI first, Gemini
+    as the fallback — so this needs no new key and no new vendor.
+    """
+    import json as _json
+    openai_key = os.getenv("OPENAI_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+    if openai_key:
+        try:
+            import openai as _openai
+            client = _openai.OpenAI(api_key=openai_key, timeout=25.0)
+            resp = client.chat.completions.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+                response_format={"type": "json_object"},
+                messages=[{"role": "system", "content": DEBRIEF_SYSTEM},
+                          {"role": "user", "content": text}],
+                temperature=0,
+            )
+            return _json.loads(resp.choices[0].message.content)
+        except Exception as exc:
+            print(f"[crm] debrief via OpenAI failed: {exc}", flush=True)
+
+    if gemini_key:
+        try:
+            import google.generativeai as _genai
+            _genai.configure(api_key=gemini_key)
+            model = _genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
+            resp = model.generate_content(
+                f"{DEBRIEF_SYSTEM}\n\nNotes:\n{text}",
+                generation_config={"response_mime_type": "application/json",
+                                   "temperature": 0},
+            )
+            return _json.loads(resp.text)
+        except Exception as exc:
+            print(f"[crm] debrief via Gemini failed: {exc}", flush=True)
+
+    raise HTTPException(status_code=503, detail={
+        "error": "ai_unavailable",
+        "message": "Couldn't reach the AI to read those notes — type the fields in by hand.",
+    })
+
+
+@crm_router.post("/leads/{lead_id}/debrief", response_model=dict)
+def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)):
+    """Free-text notes in, updated lead out.
+
+    Everything it decides is echoed back in `applied` so a wrong reading is
+    visible immediately rather than silently rewriting the pipeline.
+    """
+    extracted = _debrief_extract(data.text)
+
+    status = extracted.get("status")
+    if status not in VALID_STATUSES:
+        status = None
+    followup = extracted.get("followup_in_days")
+    try:
+        followup = int(followup) if followup is not None else None
+        if followup is not None and not (0 <= followup <= 365):
+            followup = None
+    except (TypeError, ValueError):
+        followup = None
+
+    today = _today()
+    now = now_iso()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (lead_id,))
+        lead = cursor.fetchone()
+        if not lead:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "Lead not found"})
+
+        sets = ["updated_at = %s", "last_touch_at = %s"]
+        params: list = [now, now]
+        applied: dict = {}
+
+        if data.kind == "call":
+            sets.append("call_date = %s"); params.append(today); applied["call_date"] = today
+        elif data.kind == "email" and not lead["email_date"]:
+            sets.append("email_date = %s"); params.append(today); applied["email_date"] = today
+
+        if status:
+            sets.append("status = %s"); params.append(status); applied["status"] = status
+        for field in ("contact", "email", "phone"):
+            value = extracted.get(field)
+            if isinstance(value, str) and value.strip():
+                sets.append(f"{field} = %s"); params.append(value.strip())
+                applied[field] = value.strip()
+        if followup is not None:
+            when = (datetime.now(_reset_tz()) + timedelta(days=followup)).strftime("%Y-%m-%d")
+            sets.append("followup_date = %s"); params.append(when)
+            applied["followup_date"] = when
+
+        summary = extracted.get("summary") or data.text.strip()
+        note = f"[{today}] {data.kind}: {summary}"
+        sets.append("notes = COALESCE(notes || E'\\n', '') || %s"); params.append(note)
+        applied["note"] = note
+
+        params.append(lead_id)
+        cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
+        updated = cursor.fetchone()
+
+        counter_col = {"call": "daily_calls_remaining", "email": "daily_emails_remaining",
+                       "fb": "daily_fb_remaining"}[data.kind]
+        cursor.execute(f"""
+            UPDATE crm_counters
+               SET {counter_col} = GREATEST(0, {counter_col} - 1),
+                   touch_ticker_remaining = GREATEST(0, touch_ticker_remaining - 1),
+                   touch_ticker_last_action = %s, updated_at = %s
+             WHERE id = 1 RETURNING *
+        """, (data.kind, now))
+        counters = cursor.fetchone()
+        conn.commit()
+
+    return {"lead": _lead_row(updated), "applied": applied,
+            "counters": _counters_row(counters) if counters else None}
+
+
+class BulkDelete(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=200)
+
+
+@crm_router.post("/leads/bulk-delete", response_model=dict)
+def bulk_delete(data: BulkDelete, _: bool = Depends(require_crm_key)):
+    """Clear several leads at once — a whole zone, or a run of bad numbers."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE crm_lead_candidates SET status='rejected', "
+            "reject_reason='lead deleted by hand' WHERE promoted_lead_id = ANY(%s)",
+            (data.ids,),
+        )
+        cursor.execute("DELETE FROM crm_leads WHERE id = ANY(%s)", (data.ids,))
+        removed = cursor.rowcount
+        conn.commit()
+    return {"deleted": removed}

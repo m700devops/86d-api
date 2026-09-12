@@ -26,7 +26,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   Nothing in the inventory/scan/order paths reads from it. See the CRM section below
 - static/crm.html — the CRM UI, served at `/crm`. Single self-contained file, no build step;
   replacing this file replaces the UI. Holds no credentials — the operator types the key and
-  it lives in their browser's localStorage
+  it lives in their browser's localStorage. **Designed for an operator with ADHD**: one
+  headline stating the single next action, a shrinking list as the progress bar, zones that
+  can't be called folded away, and one primary button per row. Keep it that way — extra
+  choices on this screen are a cost, not a feature
+- static/icon.png, static/favicon.png — the app logo, copied from the mobile repo's assets and
+  served via the allowlisted `/crm/{asset}` route (NOT a directory mount — that would be one
+  traversal away from serving the repo). Re-copy from 86d-mobile/assets when rebranding
 - leadgen.py — the daily lead generator: harvest (OpenStreetMap/Overpass) → enrich (crawl
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
@@ -153,6 +159,27 @@ capture. Don't reintroduce them or describe them as current.)
 - Today's call list and the CSV both exclude `won`/`dead`: calling someone who asked not to
   be contacted is the one mistake this list must never cause
 
+## THE CALL LIST (the screen the operator actually lives in)
+- `GET /v1/crm/calllist` — every unworked lead, GROUPED BY TIMEZONE, zones ordered so the one
+  callable right now is first. Bars are shut mornings and in service from ~5pm local, so as
+  the afternoon rolls west Eastern goes "rush" while Central is still good, then Mountain,
+  then Pacific. Working west through the zones is the whole point of the grouping
+- A lead leaves this list the moment it is touched, debriefed, status-changed or deleted —
+  the filter is `status = 'new' AND last_touch_at IS NULL`. That is what makes it impossible
+  to call the same restaurant twice, and the shrinking list doubles as the progress bar
+- `phone_digits` is on every lead: bare digits, US country code stripped (`+1-615-742-9095`
+  → `6157429095`), for pasting into CloudTalk. One click on the page copies it
+- `DELETE /v1/crm/leads/{id}` and `POST /v1/crm/leads/bulk-delete` also RETIRE the
+  `crm_lead_candidates` row that produced the lead. Without that the generator re-promotes
+  the same restaurant on a later run and it reappears — the exact duplicate call that
+  deleting it was meant to prevent
+- `POST /v1/crm/leads/{id}/debrief` — free-text call notes in, structured fields out
+  (status, contact, email, phone, follow-up date, a dated note), applied in one transaction
+  along with the counters. Uses the SAME providers as the scan path (OpenAI then Gemini), so
+  no new key. Everything the model decided is echoed back in `applied` so a misreading is
+  visible immediately. With no provider key it 503s with "type the fields in by hand"
+  rather than failing obscurely
+
 ## Environment Variables Required
 Source of truth: the `_config_checks` startup list in main.py (~line 52) — it logs what's missing on boot.
 - DATABASE_URL — PostgreSQL connection string (required, app crashes without it)
@@ -168,7 +195,7 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).
   Also decides when the daily lead run fires
 - LEADGEN_DAILY_TARGET (default 25), LEADGEN_POOL_FLOOR (150), LEADGEN_ENRICH_WORKERS (8),
-  LEADGEN_RUN_HOUR (7, local) — optional lead generator tuning. No API key needed: the
+  LEADGEN_RUN_HOUR (18 = 6pm, local) — optional lead generator tuning. No API key needed: the
   generator uses OpenStreetMap, which has neither keys nor billing
 - SENTRY_DSN — optional, error visibility only
 - CONFIDENCE_THRESHOLD, LEVEL_DEADBAND — optional tuning, see AI Vision Rules above

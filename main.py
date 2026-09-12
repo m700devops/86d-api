@@ -2734,7 +2734,7 @@ async def _trial_reminder_loop():
 
 # ============== LEAD GENERATOR SCHEDULER ==============
 
-LEADGEN_RUN_HOUR = int(os.getenv("LEADGEN_RUN_HOUR", "7"))   # local hour, CRM_TIMEZONE
+LEADGEN_RUN_HOUR = int(os.getenv("LEADGEN_RUN_HOUR", "18"))  # 6pm local, CRM_TIMEZONE
 LEADGEN_CHECK_INTERVAL_SECONDS = 900                          # 15 min
 
 
@@ -3861,6 +3861,26 @@ async def crm_page():
         "X-Robots-Tag": "noindex, nofollow",
         "Cache-Control": "no-store",
     })
+
+
+@app.get("/crm/{asset:path}", include_in_schema=False)
+async def crm_asset(asset: str):
+    """The CRM page's own images — the app icon and favicon.
+
+    Restricted to an explicit allowlist rather than serving the directory: this
+    path sits next to the page, and a directory mount here would be one path
+    traversal away from handing out anything in the repo.
+    """
+    allowed = {"icon.png": "image/png", "favicon.png": "image/png"}
+    if asset not in allowed:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "No such asset"})
+    path = os.path.join(os.path.dirname(CRM_PAGE), asset)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "Asset missing on this server"})
+    return FileResponse(path, media_type=allowed[asset],
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 # ============== ERROR HANDLERS ==============
 

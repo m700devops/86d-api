@@ -4,602 +4,464 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>86'd — Sales CRM</title>
+<link rel="icon" href="/crm/favicon.png">
+<title>86'd — Sales</title>
 <style>
   :root {
-    --bg: #0F0F0F; --surface: #1A1A1A; --surface2: #222; --border: #2D2D2D;
-    --text: #F5F5F5; --text2: #A3A3A3; --text3: #737373;
-    --accent: #FF6B35; --accent2: #FFD700; --ok: #3DD68C; --warn: #FFB020; --err: #F0616D;
+    --bg:#0F0F0F; --surface:#161616; --surface2:#1E1E1E; --line:#2A2A2A; --line2:#383838;
+    --text:#F5F5F5; --text2:#A8A8A8; --text3:#6E6E6E;
+    --accent:#FF6B35; --go:#3DD68C; --stop:#F0616D; --wait:#FFB020;
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
-  h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.5px; }
-  .sub { color: var(--text2); margin: 0 0 24px; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-          padding: 16px; margin-bottom: 16px; }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  label { display: block; font-size: 10px; letter-spacing: 1.5px; color: var(--text3);
-          font-weight: 700; margin-bottom: 4px; }
-  input, select, textarea, button { font: inherit; }
-  input, select, textarea {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 8px; padding: 9px 10px; width: 100%; min-width: 0; }
-  textarea { resize: vertical; min-height: 60px; }
-  button { background: var(--surface2); color: var(--text); border: 1px solid var(--border);
-           border-radius: 8px; padding: 9px 14px; cursor: pointer; }
-  button:hover { border-color: var(--text3); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
-  button.danger { color: var(--err); }
-  button:disabled { opacity: .5; cursor: default; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-  table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; font-size: 10px; letter-spacing: 1.5px; color: var(--text3);
-       font-weight: 700; padding: 8px 8px; border-bottom: 1px solid var(--border); }
-  td { padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  tr:last-child td { border-bottom: 0; }
-  .tablewrap { overflow-x: auto; }
-  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px;
-          font-weight: 700; border: 1px solid var(--border); white-space: nowrap; }
-  .s-new      { color: var(--text2); }
-  .s-contacted{ color: #7AA2F7; border-color: #7AA2F755; }
-  .s-warm     { color: var(--warn); border-color: #FFB02055; }
-  .s-won      { color: var(--ok);   border-color: #3DD68C55; }
-  .s-dead     { color: var(--text3); }
-  .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
-  .stat .n { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
-  .stat .l { font-size: 10px; letter-spacing: 1.5px; color: var(--text3); font-weight: 700; margin-top: 2px; }
-  .muted { color: var(--text3); }
-  .err { color: var(--err); }
-  .hide { display: none !important; }
-  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
-           background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
-           padding: 10px 16px; opacity: 0; transition: opacity .2s; pointer-events: none; }
-  #toast.show { opacity: 1; }
-  .banner { background: #FFB0201A; border: 1px solid #FFB02055; color: var(--warn);
-            border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 16px; }
-  .banner.ok  { background:#3DD68C1A; border-color:#3DD68C55; color:var(--ok); }
-  .banner.err { background:#F0616D1A; border-color:#F0616D55; color:var(--err); }
-  .tab { border-radius: 999px; }
-  .tab.on { background: var(--accent); border-color: var(--accent); color:#fff; font-weight:700; }
-  .lead { border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px;
-          background: var(--bg); }
-  .lead h4 { margin:0 0 2px; font-size:15px; }
-  .lead .meta { color: var(--text2); font-size:12px; }
-  .lead .acts { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
-  .lead a.call { background: var(--ok); border-color: var(--ok); color:#06251a; font-weight:700;
-                 text-decoration:none; border-radius:8px; padding:9px 14px; display:inline-block; }
-  .lead a.mail { text-decoration:none; color:var(--text); border:1px solid var(--border);
-                 border-radius:8px; padding:9px 14px; display:inline-block; }
-  .win-good { color: var(--ok); }
-  .win-bad  { color: var(--text3); }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:1240px;margin:0 auto;padding:20px 16px 80px}
+
+  header{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+  header img{width:46px;height:46px;border-radius:10px}
+  header h1{font-size:20px;margin:0;letter-spacing:-0.4px}
+  header .sub{color:var(--text3);font-size:12px}
+
+  /* The one thing to do right now. Nothing else on the page competes with it. */
+  .focus{border-radius:14px;padding:18px 20px;margin-bottom:16px;
+         border:1px solid var(--line);background:var(--surface)}
+  .focus.go{border-color:#3DD68C66;background:#3DD68C14}
+  .focus.wait{border-color:#FFB02055;background:#FFB02010}
+  .focus h2{margin:0;font-size:22px;letter-spacing:-0.5px}
+  .focus.go h2{color:var(--go)}
+  .focus .prog{color:var(--text2);margin-top:6px;font-size:13px}
+
+  .zone{border:1px solid var(--line);border-radius:12px;margin-bottom:14px;overflow:hidden;
+        background:var(--surface)}
+  .zhead{display:flex;align-items:center;gap:12px;padding:12px 14px;cursor:pointer;
+         background:var(--surface2);border-bottom:1px solid var(--line)}
+  .zhead .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .d-good{background:var(--go)} .d-opening{background:var(--wait)}
+  .d-rush,.d-late{background:var(--stop)} .d-closed,.d-unknown{background:var(--text3)}
+  .zhead .name{font-weight:700;letter-spacing:0.3px}
+  .zhead .when{color:var(--text2);font-size:12px}
+  .zhead .tag{margin-left:auto;font-size:11px;font-weight:700;letter-spacing:0.4px;
+              padding:3px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--text2)}
+  .zhead .tag.go{color:var(--go);border-color:#3DD68C55;background:#3DD68C14}
+  .zhead .tag.stop{color:var(--stop);border-color:#F0616D44}
+
+  .sheetwrap{overflow-x:auto}
+  table.sheet{width:100%;border-collapse:collapse;font-size:13px}
+  table.sheet th{background:#121212;color:var(--text3);text-align:left;font-size:10px;
+        letter-spacing:1.2px;font-weight:700;padding:8px 10px;border-bottom:1px solid var(--line2);
+        border-right:1px solid var(--line);white-space:nowrap}
+  table.sheet td{padding:8px 10px;border-bottom:1px solid var(--line);
+        border-right:1px solid var(--line);vertical-align:middle}
+  table.sheet tr:nth-child(even) td{background:#131313}
+  table.sheet tr:hover td{background:#1C1C1C}
+  table.sheet td:last-child,table.sheet th:last-child{border-right:0}
+  .rownum{color:var(--text3);width:34px;text-align:right;font-variant-numeric:tabular-nums}
+  .nm{font-weight:600;white-space:nowrap;max-width:230px;overflow:hidden;text-overflow:ellipsis}
+  /* Digits only, monospace, one click to copy — it goes straight into CloudTalk. */
+  .digits{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;
+          letter-spacing:0.5px;cursor:pointer;background:#101010;border:1px solid var(--line2);
+          border-radius:6px;padding:4px 8px;display:inline-block;white-space:nowrap}
+  .digits:hover{border-color:var(--go);color:var(--go)}
+  .digits.copied{border-color:var(--go);color:var(--go);background:#3DD68C1A}
+  .em{color:var(--text2);max-width:220px;overflow:hidden;text-overflow:ellipsis;
+      white-space:nowrap;display:inline-block}
+  .acts{display:flex;gap:6px;white-space:nowrap}
+  button{font:inherit;background:var(--surface2);color:var(--text);border:1px solid var(--line2);
+         border-radius:7px;padding:6px 11px;cursor:pointer}
+  button:hover{border-color:var(--text3)}
+  button.go{background:var(--go);border-color:var(--go);color:#06251A;font-weight:700}
+  button.del{color:var(--stop);border-color:#F0616D33}
+  button:disabled{opacity:.5;cursor:default}
+  input,textarea,select{font:inherit;background:var(--bg);color:var(--text);
+         border:1px solid var(--line2);border-radius:8px;padding:9px 10px;width:100%}
+  textarea{resize:vertical;min-height:74px}
+
+  .drawer td{background:#101010 !important;padding:14px}
+  .drawer .hint{color:var(--text3);font-size:12px;margin:0 0 8px}
+  .drawer .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .applied{margin-top:10px;font-size:12px;color:var(--go)}
+
+  .muted{color:var(--text3)} .err{color:var(--stop)}
+  .hide{display:none !important}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+        padding:16px;margin-bottom:14px}
+  .tabs{display:flex;gap:8px;margin:0 0 16px;flex-wrap:wrap}
+  .tabs button{border-radius:999px}
+  .tabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+  .stat{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px}
+  .stat .n{font-size:21px;font-weight:700;letter-spacing:-0.5px}
+  .stat .l{font-size:10px;letter-spacing:1.2px;color:var(--text3);font-weight:700;margin-top:2px}
+  .banner{border-radius:9px;padding:10px 12px;font-size:13px;margin-bottom:12px;
+          background:#FFB0201A;border:1px solid #FFB02055;color:var(--wait)}
+  .banner.ok{background:#3DD68C14;border-color:#3DD68C55;color:var(--go)}
+  .banner.bad{background:#F0616D14;border-color:#F0616D55;color:var(--stop)}
+  #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#242424;
+         border:1px solid var(--line2);border-radius:9px;padding:11px 18px;opacity:0;
+         transition:opacity .18s;pointer-events:none;z-index:50;font-weight:600}
+  #toast.show{opacity:1}
+  @media (max-width:700px){ .em{display:none} }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-  <h1>86'd — Sales CRM</h1>
-  <p class="sub">Leads and activity, stored server-side in Postgres.</p>
-
-  <!-- ── Key gate ─────────────────────────────────────────────────────────── -->
-  <div id="gate" class="card">
-    <label for="key">CRM API KEY</label>
-    <div class="row">
-      <input id="key" type="password" placeholder="X-CRM-Key" style="flex:1" autocomplete="current-password">
-      <button class="primary" id="unlock">Unlock</button>
+  <header>
+    <img src="/crm/icon.png" alt="86'd">
+    <div>
+      <h1>86'd — Sales</h1>
+      <div class="sub">Call list, pipeline and lead engine</div>
     </div>
-    <p class="muted" style="margin:10px 0 0; font-size:12px">
-      Stored in this browser only (localStorage). It is never baked into this page's source.
-    </p>
+  </header>
+
+  <div id="gate" class="card">
+    <div class="muted" style="font-size:11px;letter-spacing:1px;font-weight:700">CRM KEY</div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <input id="key" type="password" placeholder="Paste your key" autocomplete="current-password">
+      <button class="go" id="unlock" style="white-space:nowrap">Unlock</button>
+    </div>
+    <p class="muted" style="margin:10px 0 0;font-size:12px">
+      Saved in this browser only. Never stored in this page.</p>
     <p id="gateErr" class="err hide" style="margin:8px 0 0"></p>
   </div>
 
-  <!-- ── App ──────────────────────────────────────────────────────────────── -->
   <div id="app" class="hide">
 
-    <div class="row" id="tabs" style="margin-bottom:16px">
-      <button data-tab="today"  class="tab">Today's calls</button>
-      <button data-tab="queue"  class="tab">Follow-ups</button>
-      <button data-tab="funnel" class="tab">Funnel</button>
-      <button data-tab="health" class="tab">Lead engine</button>
-      <button data-tab="all"    class="tab">All leads</button>
+    <div class="tabs" id="tabs">
+      <button data-tab="calls" class="on">Call list</button>
+      <button data-tab="followups">Follow-ups</button>
+      <button data-tab="numbers">Numbers</button>
+      <button data-tab="engine">Lead engine</button>
     </div>
 
-    <!-- ── Today's sourced call list ─────────────────────────────────────── -->
-    <section data-panel="today" class="hide">
+    <section data-panel="calls">
+      <div id="focus" class="focus"><h2>Loading…</h2></div>
+      <div id="zones"></div>
+    </section>
+
+    <section data-panel="followups" class="hide">
       <div class="card">
-        <div class="row" style="justify-content:space-between">
-          <strong>Today's leads <span class="muted" id="todayCount"></span></strong>
-          <a id="csvToday" class="muted" style="font-size:12px">Download CSV</a>
-        </div>
-        <p class="muted" style="margin:6px 0 0;font-size:12px">
-          Sourced overnight. Sorted so the bars whose local afternoon it is right now come first.
-        </p>
-        <div id="todayList" style="margin-top:12px"></div>
+        <strong>Overdue <span class="muted" id="fOverdueN"></span></strong>
+        <div id="fOverdue" style="margin-top:10px"></div>
+      </div>
+      <div class="card">
+        <strong>Due today <span class="muted" id="fTodayN"></span></strong>
+        <div id="fToday" style="margin-top:10px"></div>
       </div>
     </section>
 
-    <!-- ── Follow-up queue ───────────────────────────────────────────────── -->
-    <section data-panel="queue" class="hide">
-      <div class="card">
-        <strong>Overdue <span class="muted" id="qOverdueN"></span></strong>
-        <p class="muted" style="margin:4px 0 0;font-size:12px">
-          You said you'd call these back and the date has passed.
-        </p>
-        <div id="qOverdue" style="margin-top:10px"></div>
-      </div>
-      <div class="card">
-        <strong>Due today <span class="muted" id="qTodayN"></span></strong>
-        <div id="qToday" style="margin-top:10px"></div>
-      </div>
-      <div class="card">
-        <strong>Never called <span class="muted" id="qNeverN"></span></strong>
-        <div id="qNever" style="margin-top:10px"></div>
-      </div>
+    <section data-panel="numbers" class="hide">
+      <div class="card"><strong>Today</strong>
+        <div class="grid" style="margin-top:12px" id="nToday"></div></div>
+      <div class="card"><strong>Signups</strong>
+        <div class="grid" style="margin-top:12px" id="nUsers"></div></div>
+      <div class="card"><strong>Activation — signed up but never finished a count</strong>
+        <div class="grid" style="margin-top:12px" id="nAct"></div></div>
+      <div class="card"><strong>What outreach produced</strong>
+        <div class="grid" style="margin-top:12px" id="nChan"></div>
+        <div style="margin-top:12px"><button id="rematch">Re-run matching</button></div></div>
     </section>
 
-    <!-- ── Funnel ────────────────────────────────────────────────────────── -->
-    <section data-panel="funnel" class="hide">
+    <section data-panel="engine" class="hide">
       <div class="card">
-        <strong>Signups &amp; revenue</strong>
-        <div class="grid" style="margin-top:12px" id="funnelUsers"></div>
-      </div>
-      <div class="card">
-        <strong>Activation</strong>
-        <p class="muted" style="margin:4px 0 0;font-size:12px">
-          A bar that signs up and never finishes a first count never converts.
-        </p>
-        <div class="grid" style="margin-top:12px" id="funnelActivation"></div>
-      </div>
-      <div class="card">
-        <strong>What outreach produced</strong>
-        <p class="muted" style="margin:4px 0 0;font-size:12px">
-          Leads matched to real signups by email, domain or business name.
-        </p>
-        <div class="grid" style="margin-top:12px" id="funnelChannels"></div>
-        <div class="row" style="margin-top:12px">
-          <button id="rematch">Re-run matching</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- ── Lead engine health ────────────────────────────────────────────── -->
-    <section data-panel="health" class="hide">
-      <div class="card">
-        <div class="row" style="justify-content:space-between">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
           <strong>Lead engine</strong>
           <button id="runNow">Run now</button>
         </div>
-        <div id="healthBanner" style="margin-top:12px"></div>
-        <div class="grid" style="margin-top:12px" id="healthStats"></div>
-        <div class="tablewrap" style="margin-top:14px">
-          <table><thead><tr>
-            <th>Started</th><th>OK</th><th>Promoted</th><th>Enriched</th>
-            <th>Qualified</th><th>New</th><th>Errors</th>
-          </tr></thead><tbody id="runRows"></tbody></table>
-        </div>
+        <p class="muted" style="margin:6px 0 0;font-size:12px">
+          Sources 25 new leads every day at 6pm.</p>
+        <div id="engineBanner" style="margin-top:12px"></div>
+        <div class="grid" style="margin-top:12px" id="engineStats"></div>
       </div>
     </section>
 
-    <div data-panel="all" class="hide">
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <strong>Activity</strong>
-        <button id="lock">Lock</button>
-      </div>
-      <div class="grid" style="margin-top:12px">
-        <div class="stat"><div class="n" id="c_ticker">–</div><div class="l">TOUCHES LEFT</div></div>
-        <div class="stat"><div class="n" id="c_dl">–</div><div class="l">DOWNLOADS</div></div>
-        <div class="stat"><div class="n" id="c_calls">–</div><div class="l">CALLS TODAY</div></div>
-        <div class="stat"><div class="n" id="c_emails">–</div><div class="l">EMAILS TODAY</div></div>
-        <div class="stat"><div class="n" id="c_fb">–</div><div class="l">FB TODAY</div></div>
-      </div>
-      <div class="row" style="margin-top:12px">
-        <button data-touch="call">− Call</button>
-        <button data-touch="email">− Email</button>
-        <button data-touch="fb">− FB</button>
-        <button id="dlPlus">+ Download</button>
-        <button id="resetDaily">Reset daily</button>
-      </div>
-      <p class="muted" style="margin:10px 0 0; font-size:12px">
-        Last: <span id="c_last">—</span> · Daily reset date: <span id="c_reset">—</span>
-      </p>
-    </div>
-
-    <div class="card">
-      <strong>Add a lead</strong>
-      <div class="grid" style="margin-top:12px">
-        <div><label>NAME</label><input id="f_name" placeholder="Bar name"></div>
-        <div><label>LOCATION</label><input id="f_loc" placeholder="City"></div>
-        <div><label>CONTACT</label><input id="f_contact" placeholder="Person"></div>
-        <div><label>PHONE</label><input id="f_phone"></div>
-        <div><label>EMAIL</label><input id="f_email" type="email"></div>
-        <div><label>STATUS</label><select id="f_status">
-          <option>new</option><option>contacted</option><option>warm</option>
-          <option>won</option><option>dead</option></select></div>
-      </div>
-      <div style="margin-top:10px"><label>NOTES</label><textarea id="f_notes"></textarea></div>
-      <div class="row" style="margin-top:10px">
-        <button class="primary" id="addLead">Add lead</button>
-        <span id="addErr" class="err"></span>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <strong>Pipeline (<span id="leadCount">0</span>)</strong>
-        <select id="filter" style="width:auto">
-          <option value="">All statuses</option>
-          <option value="new">new</option><option value="contacted">contacted</option>
-          <option value="warm">warm</option><option value="won">won</option>
-          <option value="dead">dead</option>
-        </select>
-      </div>
-      <div class="tablewrap" style="margin-top:12px">
-        <table>
-          <thead><tr>
-            <th>Name</th><th>Status</th><th>Contact</th><th>Called</th>
-            <th>Emailed</th><th>Follow-up</th><th></th>
-          </tr></thead>
-          <tbody id="rows"></tbody>
-        </table>
-      </div>
-      <p id="empty" class="muted hide" style="margin:16px 0 0">No leads yet.</p>
-    </div>
-    </div>
-
   </div>
 </div>
-
 <div id="toast"></div>
 
 <script>
-/* This page is a working stand-in so /crm is live and every endpoint is
-   provably reachable. It holds no secrets: the operator types the key, it
-   lives in localStorage, and it rides on the X-CRM-Key header. */
-const KEY_STORE = '86d_crm_key';
-const $ = id => document.getElementById(id);
-let KEY = null;
-let leads = [];
+const KEY_STORE='86d_crm_key';
+const $=id=>document.getElementById(id);
+let KEY=null, TAB='calls';
 
-function toast(msg) {
-  const t = $('toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2200);
+function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');
+  clearTimeout(toast._t);toast._t=setTimeout(()=>t.classList.remove('show'),2000);}
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(path,opts={}){
+  const res=await fetch('/v1/crm'+path,{...opts,
+    headers:{'Content-Type':'application/json','X-CRM-Key':KEY,...(opts.headers||{})}});
+  if(res.status===401){lock('That key was rejected.');throw new Error('unauthorized');}
+  if(!res.ok){let m=res.statusText;try{const b=await res.json();m=b.message||b.detail?.message||m;}catch{}
+    throw new Error(m);}
+  return res.status===204?null:res.json();
 }
 
-async function api(path, opts = {}) {
-  const res = await fetch('/v1/crm' + path, {
-    ...opts,
-    headers: { 'Content-Type': 'application/json', 'X-CRM-Key': KEY, ...(opts.headers || {}) },
-  });
-  if (res.status === 401) { lock('That key was rejected.'); throw new Error('unauthorized'); }
-  if (!res.ok) {
-    let msg = res.statusText;
-    try { const b = await res.json(); msg = b.message || b.detail?.message || msg; } catch {}
-    throw new Error(msg);
-  }
-  return res.status === 204 ? null : res.json();
-}
+function lock(msg){KEY=null;try{localStorage.removeItem(KEY_STORE)}catch{}
+  $('app').classList.add('hide');$('gate').classList.remove('hide');
+  if(msg){$('gateErr').textContent=msg;$('gateErr').classList.remove('hide');}}
 
-/* ── gate ─────────────────────────────────────────────────────────────── */
-function lock(msg) {
-  KEY = null;
-  try { localStorage.removeItem(KEY_STORE); } catch {}
-  $('app').classList.add('hide'); $('gate').classList.remove('hide');
-  if (msg) { $('gateErr').textContent = msg; $('gateErr').classList.remove('hide'); }
-}
-
-async function unlock(candidate) {
-  KEY = candidate;
-  try {
-    await api('/counters');                      // cheapest call that proves the key
-    try { localStorage.setItem(KEY_STORE, candidate); } catch {}
-    $('gateErr').classList.add('hide');
-    $('gate').classList.add('hide'); $('app').classList.remove('hide');
-    await refresh();
-  } catch (e) {
-    if (e.message !== 'unauthorized') {
-      $('gateErr').textContent = e.message; $('gateErr').classList.remove('hide');
-    }
-    KEY = null;
+async function unlock(k){
+  KEY=k;
+  try{
+    await api('/counters');
+    try{localStorage.setItem(KEY_STORE,k)}catch{}
+    $('gateErr').classList.add('hide');$('gate').classList.add('hide');
+    $('app').classList.remove('hide');
+    await loadCalls();
+  }catch(e){
+    if(e.message!=='unauthorized'){$('gateErr').textContent=e.message;$('gateErr').classList.remove('hide');}
+    KEY=null;
   }
 }
+$('unlock').onclick=()=>unlock($('key').value.trim());
+$('key').onkeydown=e=>{if(e.key==='Enter')$('unlock').click()};
 
-$('unlock').onclick = () => unlock($('key').value.trim());
-$('key').onkeydown = e => { if (e.key === 'Enter') $('unlock').click(); };
-$('lock').onclick = () => lock(null);
-
-/* ── counters ─────────────────────────────────────────────────────────── */
-function paintCounters(c) {
-  $('c_ticker').textContent = c.touch_ticker_remaining;
-  $('c_dl').textContent     = c.downloads_confirmed;
-  $('c_calls').textContent  = c.daily_calls_remaining + ' / ' + c.daily_calls_quota;
-  $('c_emails').textContent = c.daily_emails_remaining + ' / ' + c.daily_emails_quota;
-  $('c_fb').textContent     = c.daily_fb_remaining + ' / ' + c.daily_fb_quota;
-  $('c_last').textContent   = c.touch_ticker_last_action || '—';
-  $('c_reset').textContent  = c.daily_reset_date || '—';
-}
-
-async function patchCounters(body) {
-  try { paintCounters((await api('/counters', { method: 'PATCH', body: JSON.stringify(body) })).counters); }
-  catch (e) { toast(e.message); }
-}
-
-document.querySelectorAll('[data-touch]').forEach(btn => {
-  btn.onclick = () => {
-    const kind = btn.dataset.touch;
-    const field = { call: 'daily_calls_delta', email: 'daily_emails_delta', fb: 'daily_fb_delta' }[kind];
-    /* One touch spends one from the lifetime ticker and one from today's
-       bucket. Both go as deltas so two tabs can't clobber each other. */
-    patchCounters({ [field]: -1, touch_ticker_delta: -1, touch_ticker_last_action: kind });
-  };
-});
-$('dlPlus').onclick    = () => patchCounters({ downloads_confirmed_delta: 1, touch_ticker_last_action: 'download' });
-$('resetDaily').onclick = () => patchCounters({ reset_daily: true });
-
-/* ── leads ────────────────────────────────────────────────────────────── */
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-function paintLeads() {
-  const tbody = $('rows');
-  tbody.innerHTML = leads.map(l => `
-    <tr data-id="${esc(l.id)}">
-      <td><strong>${esc(l.name)}</strong>${l.loc ? `<div class="muted">${esc(l.loc)}</div>` : ''}</td>
-      <td><span class="pill s-${esc(l.status)}">${esc(l.status)}</span></td>
-      <td>${esc(l.contact) || '<span class="muted">—</span>'}
-          ${l.phone ? `<div class="muted">${esc(l.phone)}</div>` : ''}
-          ${l.email ? `<div class="muted">${esc(l.email)}</div>` : ''}</td>
-      <td>${esc(l.call_date) || '<span class="muted">—</span>'}</td>
-      <td>${esc(l.email_date) || '<span class="muted">—</span>'}</td>
-      <td>${esc(l.followup_date) || '<span class="muted">—</span>'}</td>
-      <td style="white-space:nowrap">
-        <button data-act="email">Email sent</button>
-        <button data-act="advance">Advance</button>
-        <button data-act="del" class="danger">Delete</button>
-      </td>
-    </tr>`).join('');
-  $('leadCount').textContent = leads.length;
-  $('empty').classList.toggle('hide', leads.length > 0);
-}
-
-$('rows').onclick = async (e) => {
-  const btn = e.target.closest('button'); if (!btn) return;
-  const id = btn.closest('tr').dataset.id;
-  const lead = leads.find(l => l.id === id); if (!lead) return;
-  try {
-    if (btn.dataset.act === 'email') {
-      const r = await api(`/leads/${id}/email-sent`, { method: 'POST' });
-      toast(r.field_set ? `${r.field_set} set to ${r.date}` : 'Both email dates already set');
-    } else if (btn.dataset.act === 'advance') {
-      const order = ['new', 'contacted', 'warm', 'won'];
-      const next = order[Math.min(order.indexOf(lead.status) + 1, order.length - 1)];
-      await api(`/leads/${id}`, { method: 'PATCH', body: JSON.stringify({ status: next }) });
-    } else if (btn.dataset.act === 'del') {
-      if (!confirm(`Delete ${lead.name}? This cannot be undone.`)) return;
-      await api(`/leads/${id}`, { method: 'DELETE' });
-    }
-    await loadLeads();
-  } catch (err) { toast(err.message); }
+$('tabs').onclick=e=>{
+  const b=e.target.closest('button[data-tab]'); if(!b) return;
+  TAB=b.dataset.tab;
+  document.querySelectorAll('#tabs button').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
+  ({calls:loadCalls,followups:loadFollowups,numbers:loadNumbers,engine:loadEngine}[TAB])()
+    .catch(e=>toast(e.message));
 };
 
-$('addLead').onclick = async () => {
-  const name = $('f_name').value.trim();
-  if (!name) { $('addErr').textContent = 'Name is required.'; return; }
-  $('addErr').textContent = '';
-  try {
-    await api('/leads', { method: 'POST', body: JSON.stringify({
-      name, loc: $('f_loc').value, contact: $('f_contact').value,
-      phone: $('f_phone').value, email: $('f_email').value,
-      status: $('f_status').value, notes: $('f_notes').value,
-    })});
-    ['f_name','f_loc','f_contact','f_phone','f_email','f_notes'].forEach(i => $(i).value = '');
-    await loadLeads(); toast('Lead added');
-  } catch (e) { $('addErr').textContent = e.message; }
-};
+/* ── the call list ────────────────────────────────────────────────────────
+   Zones that can't be called right now start folded away, so the screen only
+   shows bars you could actually ring this minute. Worked leads vanish from
+   the list entirely, which is what stops the same place being called twice. */
+let collapsed = {};
 
-$('filter').onchange = loadLeads;
+async function loadCalls(){
+  const d=await api('/calllist');
+  const go = /^Call /.test(d.focus);
+  $('focus').className='focus '+(go?'go':'wait');
+  $('focus').innerHTML=`<h2>${esc(d.focus)}</h2>
+    <div class="prog">${d.done_today} done today · ${d.remaining} left in the list</div>`;
 
-async function loadLeads() {
-  const f = $('filter').value;
-  leads = (await api('/leads' + (f ? `?status=${encodeURIComponent(f)}` : ''))).leads;
-  paintLeads();
-}
+  if(!d.zones.length){
+    $('zones').innerHTML='<div class="card muted">Call list is empty. '
+      +'The engine adds 25 more at 6pm.</div>';
+    return;
+  }
 
-async function refresh() {
-  try {
-    paintCounters((await api('/counters')).counters);
-    showTab('today');       // the day's work, not a raw table
-  } catch (e) { toast(e.message); }
-}
-
-
-/* ── tabs ─────────────────────────────────────────────────────────────── */
-let TAB = 'today';
-function showTab(tab) {
-  TAB = tab;
-  document.querySelectorAll('#tabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
-  document.querySelectorAll('[data-panel]').forEach(p => p.classList.toggle('hide', p.dataset.panel !== tab));
-  const load = { today: loadToday, queue: loadQueue, funnel: loadFunnel,
-                 health: loadHealth, all: loadLeads }[tab];
-  if (load) load().catch(e => toast(e.message));
-}
-document.getElementById('tabs').onclick = e => {
-  const b = e.target.closest('.tab'); if (b) showTab(b.dataset.tab);
-};
-
-/* ── shared lead card ─────────────────────────────────────────────────── */
-const MAIL_SUBJECT = encodeURIComponent("Following up — 86'd bar inventory");
-function mailBody(l) {
-  return encodeURIComponent(
-`Hi${l.contact ? ' ' + l.contact : ''},
-
-Thanks for taking my call. As mentioned, 86'd is an iPhone app that lets you
-count your bar by pointing the camera at each bottle — it identifies it, you
-tap in the count, and it builds the order for each distributor and emails it.
-
-Most bars we talk to are counting on a clipboard or a spreadsheet and losing
-an evening a week to it.
-
-Happy to walk you through it whenever suits.`);
-}
-
-function leadCard(l, opts = {}) {
-  const w = l.call_window || {};
-  const windowLine = w.known
-    ? `<span class="${w.good_now ? 'win-good' : 'win-bad'}">${esc(w.local_time)} local · ${esc(w.hint)}</span>`
-    : '';
-  return `
-    <div class="lead" data-id="${esc(l.id)}">
-      <h4>${esc(l.name)} <span class="pill s-${esc(l.status)}">${esc(l.status)}</span></h4>
-      <div class="meta">
-        ${esc(l.loc) || ''}${l.loc && l.phone ? ' · ' : ''}${esc(l.phone) || ''}
-        ${l.email ? ' · ' + esc(l.email) : ''}
+  $('zones').innerHTML=d.zones.map(z=>{
+    const key='z'+z.offset;
+    if(collapsed[key]===undefined) collapsed[key] = !z.callable;
+    const shut=collapsed[key];
+    const tagCls=z.state==='good'?'go':(z.callable?'':'stop');
+    return `
+    <div class="zone">
+      <div class="zhead" data-zone="${key}">
+        <span class="dot d-${esc(z.state)}"></span>
+        <span class="name">${esc(z.label.toUpperCase())}</span>
+        <span class="when">${esc(z.local_time)} · ${esc(z.count)} leads</span>
+        <span class="tag ${tagCls}">${esc(z.headline)}</span>
       </div>
-      <div class="meta">${windowLine}${opts.showFollowup && l.followup_date ? ` · follow-up ${esc(l.followup_date)}` : ''}</div>
-      <div class="acts">
-        ${l.phone ? `<a class="call" href="tel:${esc((l.phone||'').replace(/[^+0-9]/g,''))}">Call</a>` : ''}
-        ${l.email ? `<a class="mail" href="mailto:${esc(l.email)}?subject=${MAIL_SUBJECT}&body=${mailBody(l)}">Email</a>` : ''}
-        <button data-t="answered">Answered</button>
-        <button data-t="voicemail">Voicemail</button>
-        <button data-t="callback">Call back</button>
-        <button data-t="not_interested" class="danger">Not interested</button>
+      <div class="sheetwrap ${shut?'hide':''}">
+        <table class="sheet">
+          <thead><tr>
+            <th></th><th>BAR</th><th>PHONE</th><th>EMAIL</th><th>CITY</th><th>ACTIONS</th>
+          </tr></thead>
+          <tbody>${z.leads.map((l,i)=>row(l,i+1)).join('')}</tbody>
+        </table>
       </div>
     </div>`;
+  }).join('');
 }
 
-/* One click logs the touch, moves the status, sets the follow-up and spends
-   the counter — the four things that used to be four separate actions, of
-   which only the counter ever got done. */
-async function onLeadAction(e) {
-  const btn = e.target.closest('button[data-t]'); if (!btn) return;
-  const id = btn.closest('.lead').dataset.id;
-  const outcome = btn.dataset.t;
-  const body = { kind: 'call', outcome };
-  if (outcome === 'callback') body.followup_in_days = 3;
-  if (outcome === 'voicemail') body.followup_in_days = 2;
-  try {
-    await api(`/leads/${id}/touch`, { method: 'POST', body: JSON.stringify(body) });
-    toast(outcome === 'callback' ? 'Logged — follow-up in 3 days' : 'Logged');
-    if (TAB === 'today') await loadToday(); else if (TAB === 'queue') await loadQueue();
-    await refreshCounters();
-  } catch (err) { toast(err.message); }
+function row(l,n){
+  return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}" data-contact="${esc(l.contact||'')}">
+    <td class="rownum">${n}</td>
+    <td class="nm" title="${esc(l.name)}">${esc(l.name)}</td>
+    <td><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span></td>
+    <td><span class="em" title="${esc(l.email||'')}">${esc(l.email||'')}</span></td>
+    <td class="muted">${esc(l.loc||'')}</td>
+    <td><div class="acts">
+      <button class="go" data-act="log">Log call</button>
+      <button data-act="mail">Email</button>
+      <button class="del" data-act="del">Delete</button>
+    </div></td>
+  </tr>`;
 }
-['todayList','qOverdue','qToday','qNever'].forEach(id => {
-  const el = $(id); if (el) el.onclick = onLeadAction;
+
+const MAIL_SUBJECT=encodeURIComponent("Following up — 86'd bar inventory");
+const mailBody=contact=>encodeURIComponent(
+`Hi${contact?' '+contact:''},
+
+Thanks for taking my call. 86'd is an iPhone app that counts your bar by
+pointing the camera at each bottle — it identifies it, you tap in the count,
+and it builds and emails the order to each distributor.
+
+Happy to walk you through it whenever suits.`);
+
+async function copyDigits(el){
+  const num=el.dataset.copy;
+  try{ await navigator.clipboard.writeText(num); }
+  catch{ const t=document.createElement('textarea');t.value=num;document.body.appendChild(t);
+         t.select();document.execCommand('copy');t.remove(); }
+  el.classList.add('copied'); setTimeout(()=>el.classList.remove('copied'),1200);
+  toast('Copied '+num);
+}
+
+$('zones').onclick=async e=>{
+  const zh=e.target.closest('.zhead');
+  if(zh){ collapsed[zh.dataset.zone]=!collapsed[zh.dataset.zone]; return loadCalls(); }
+
+  const dig=e.target.closest('.digits');
+  if(dig) return copyDigits(dig);
+
+  /* drawer buttons first — they sit inside the same container */
+  const dr=e.target.closest('.drawer');
+  if(dr) return drawerAction(dr,e);
+
+  const btn=e.target.closest('button[data-act]'); if(!btn) return;
+  const tr=btn.closest('tr'); const id=tr.dataset.id;
+
+  if(btn.dataset.act==='del'){
+    if(!confirm('Delete this lead? It will not come back.')) return;
+    try{ await api('/leads/'+id,{method:'DELETE'}); toast('Deleted'); await loadCalls(); }
+    catch(err){ toast(err.message); }
+    return;
+  }
+  if(btn.dataset.act==='mail'){
+    window.location.href=`mailto:${tr.dataset.email}?subject=${MAIL_SUBJECT}`
+      +`&body=${mailBody(tr.dataset.contact)}`;
+    return;
+  }
+  if(btn.dataset.act==='log'){
+    if(tr.nextElementSibling?.classList.contains('drawer')){
+      tr.nextElementSibling.remove(); return;
+    }
+    const d=document.createElement('tr');
+    d.className='drawer';
+    d.innerHTML=`<td colspan="6">
+      <p class="hint">What happened? Type it however it comes out — it gets sorted into the right fields for you.</p>
+      <textarea placeholder="spoke to Dave the GM, still counting on a clipboard, wants me to call back Tuesday, his email is dave@thebar.com"></textarea>
+      <div class="row">
+        <button class="go" data-save>Save &amp; next</button>
+        <button data-quick="Left a voicemail, no answer.">Voicemail</button>
+        <button data-quick="Not interested, asked not to be called again.">Not interested</button>
+        <button data-cancel>Cancel</button>
+      </div>
+      <div class="applied hide"></div>
+    </td>`;
+    tr.after(d);
+    d.querySelector('textarea').focus();
+  }
+};
+
+async function drawerAction(dr,e){
+  const tr=dr.previousElementSibling; const id=tr.dataset.id;
+  const ta=dr.querySelector('textarea');
+  if(e.target.closest('[data-cancel]')) return dr.remove();
+
+  const quick=e.target.closest('[data-quick]');
+  if(quick) ta.value=quick.dataset.quick;
+  if(!quick && !e.target.closest('[data-save]')) return;
+
+  const text=ta.value.trim();
+  if(!text) return toast('Type what happened first');
+  const save=dr.querySelector('[data-save]');
+  save.disabled=true; save.textContent='Saving…';
+  try{
+    const r=await api(`/leads/${id}/debrief`,
+      {method:'POST',body:JSON.stringify({text,kind:'call'})});
+    const bits=Object.entries(r.applied).filter(([k])=>k!=='note')
+      .map(([k,v])=>`${k.replace(/_/g,' ')}: ${v}`).join(' · ');
+    toast(bits?('Saved — '+bits):'Saved');
+    await loadCalls();
+  }catch(err){
+    save.disabled=false; save.textContent='Save & next';
+    const box=dr.querySelector('.applied');
+    box.className='applied err'; box.textContent=err.message;
+  }
+}
+
+/* ── follow-ups ───────────────────────────────────────────────────────── */
+function miniTable(list){
+  if(!list.length) return '<p class="muted">Nothing here.</p>';
+  return `<div class="sheetwrap"><table class="sheet">
+    <thead><tr><th></th><th>BAR</th><th>PHONE</th><th>DUE</th><th>ACTIONS</th></tr></thead>
+    <tbody>${list.map((l,i)=>`<tr data-id="${esc(l.id)}">
+      <td class="rownum">${i+1}</td>
+      <td class="nm">${esc(l.name)}</td>
+      <td><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span></td>
+      <td class="muted">${esc(l.followup_date||'')}</td>
+      <td><div class="acts"><button class="go" data-act="log">Log call</button>
+          <button class="del" data-act="del">Delete</button></div></td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+async function loadFollowups(){
+  const d=await api('/queue');
+  $('fOverdue').innerHTML=miniTable(d.overdue); $('fOverdueN').textContent=`(${d.counts.overdue})`;
+  $('fToday').innerHTML=miniTable(d.due_today); $('fTodayN').textContent=`(${d.counts.due_today})`;
+}
+['fOverdue','fToday'].forEach(id=>{
+  const el=$(id); if(!el) return;
+  el.onclick=async e=>{
+    const dig=e.target.closest('.digits'); if(dig) return copyDigits(dig);
+    const btn=e.target.closest('button[data-act]'); if(!btn) return;
+    const leadId=btn.closest('tr').dataset.id;
+    if(btn.dataset.act==='del'){
+      if(!confirm('Delete this lead?')) return;
+      try{await api('/leads/'+leadId,{method:'DELETE'});toast('Deleted');await loadFollowups();}
+      catch(err){toast(err.message)}
+      return;
+    }
+    const what=prompt('What happened on this call?');
+    if(!what) return;
+    try{ await api(`/leads/${leadId}/debrief`,{method:'POST',
+           body:JSON.stringify({text:what,kind:'call'})});
+         toast('Saved'); await loadFollowups(); }
+    catch(err){ toast(err.message); }
+  };
 });
 
-async function refreshCounters() {
-  try { paintCounters((await api('/counters')).counters); } catch {}
+/* ── numbers ──────────────────────────────────────────────────────────── */
+const tile=(n,l)=>`<div class="stat"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
+async function loadNumbers(){
+  const [f,c]=await Promise.all([api('/funnel'),api('/counters')]);
+  $('nToday').innerHTML=[tile(c.counters.daily_calls_remaining,'CALLS LEFT'),
+    tile(c.counters.daily_emails_remaining,'EMAILS LEFT'),
+    tile(c.counters.touch_ticker_remaining,'TOUCHES LEFT'),
+    tile(c.counters.downloads_confirmed,'DOWNLOADS')].join('');
+  $('nUsers').innerHTML=[tile(f.users.total,'SIGNUPS'),tile(f.users.paying,'PAYING'),
+    tile(f.users.trial_to_paid_pct+'%','TRIAL → PAID'),
+    tile(f.trials_ending['0-3_days'],'ENDING ≤3 DAYS')].join('');
+  $('nAct').innerHTML=[tile(f.activation.started_a_count,'STARTED A COUNT'),
+    tile(f.activation.completed_a_count,'FINISHED ONE'),
+    tile(f.activation.never_started_pct+'%','NEVER STARTED'),
+    tile(f.activation.started_but_never_finished,'STALLED')].join('');
+  $('nChan').innerHTML=[tile(f.pipeline.total,'LEADS'),
+    tile(f.pipeline.converted_to_signup,'BECAME SIGNUPS'),
+    tile(f.channels.called_win_pct+'%','CALL WIN RATE'),
+    tile(f.channels.emailed_win_pct+'%','EMAIL WIN RATE')].join('');
 }
-
-/* ── today ────────────────────────────────────────────────────────────── */
-async function loadToday() {
-  const d = await api('/leadgen/today');
-  $('todayCount').textContent = `(${d.count})`;
-  $('todayList').innerHTML = d.leads.length
-    ? d.leads.map(l => leadCard(l)).join('')
-    : '<p class="muted">Nothing sourced yet today. Check the Lead engine tab.</p>';
-  $('csvToday').href = '/v1/crm/leadgen/export.csv?scope=today';
-  $('csvToday').onclick = async (e) => {
-    // The key lives in a header, so a plain link can't fetch it.
-    e.preventDefault();
-    const res = await fetch('/v1/crm/leadgen/export.csv?scope=today', { headers: { 'X-CRM-Key': KEY } });
-    const blob = await res.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `86d-leads-${d.date}.csv`;
-    a.click(); URL.revokeObjectURL(a.href);
-  };
-}
-
-/* ── queue ────────────────────────────────────────────────────────────── */
-async function loadQueue() {
-  const d = await api('/queue');
-  const put = (elId, list, countId) => {
-    $(elId).innerHTML = list.length
-      ? list.map(l => leadCard(l, { showFollowup: true })).join('')
-      : '<p class="muted">Nothing here.</p>';
-    if (countId) $(countId).textContent = `(${list.length})`;
-  };
-  put('qOverdue', d.overdue, 'qOverdueN');
-  put('qToday', d.due_today, 'qTodayN');
-  put('qNever', d.never_called, 'qNeverN');
-}
-
-/* ── funnel ───────────────────────────────────────────────────────────── */
-const statTile = (n, l) => `<div class="stat"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
-
-async function loadFunnel() {
-  const d = await api('/funnel');
-  const u = d.users, a = d.activation, c = d.channels, t = d.trials_ending;
-  $('funnelUsers').innerHTML = [
-    statTile(u.total, 'SIGNUPS'),
-    statTile(u.paying, 'PAYING'),
-    statTile(u.trial_to_paid_pct + '%', 'TRIAL → PAID'),
-    statTile(t.expired, 'TRIALS EXPIRED'),
-    statTile(t['0-3_days'], 'ENDING ≤3 DAYS'),
-  ].join('');
-  $('funnelActivation').innerHTML = [
-    statTile(a.started_a_count, 'STARTED A COUNT'),
-    statTile(a.completed_a_count, 'FINISHED ONE'),
-    statTile(a.never_started_pct + '%', 'NEVER STARTED'),
-    statTile(a.started_but_never_finished, 'STALLED MID-COUNT'),
-  ].join('');
-  $('funnelChannels').innerHTML = [
-    statTile(d.pipeline.total, 'LEADS'),
-    statTile(d.pipeline.converted_to_signup, 'BECAME SIGNUPS'),
-    statTile(c.called_win_pct + '%', 'CALL WIN RATE'),
-    statTile(c.emailed_win_pct + '%', 'EMAIL WIN RATE'),
-  ].join('');
-}
-$('rematch').onclick = async () => {
-  try {
-    const r = await api('/attribution/rematch', { method: 'POST' });
-    toast(`Matched ${r.matched} lead(s)`); await loadFunnel();
-  } catch (e) { toast(e.message); }
+$('rematch').onclick=async()=>{
+  try{const r=await api('/attribution/rematch',{method:'POST'});
+      toast(`Matched ${r.matched}`); await loadNumbers();}catch(e){toast(e.message)}
 };
 
-/* ── lead engine health ───────────────────────────────────────────────── */
-async function loadHealth() {
-  const d = await api('/leadgen/health');
-  const cls = d.healthy ? 'ok' : (d.stale ? 'err' : '');
-  $('healthBanner').innerHTML =
-    `<div class="banner ${cls}">${d.healthy
-      ? 'Healthy — leads are being sourced daily.'
-      : esc(d.warnings.join(' '))}</div>`;
-  $('healthStats').innerHTML = [
-    statTile(d.pool.qualified, 'READY TO SEND'),
-    statTile(d.pool.days_of_runway, 'DAYS OF RUNWAY'),
-    statTile(d.pool.by_status?.new ?? 0, 'AWAITING CHECK'),
-    statTile(d.cities.unharvested, 'CITIES LEFT'),
-    statTile(d.hours_since_last_success ?? '—', 'HRS SINCE RUN'),
-  ].join('');
-  $('runRows').innerHTML = d.recent_runs.map(r => `
-    <tr>
-      <td>${esc((r.started_at||'').slice(0,16).replace('T',' '))}</td>
-      <td>${r.ok ? '<span class="win-good">yes</span>' : '<span class="err">no</span>'}</td>
-      <td>${r.promoted}</td><td>${r.enriched}</td><td>${r.qualified}</td>
-      <td>${r.candidates_found}</td><td>${r.errors}</td>
-    </tr>`).join('');
+/* ── lead engine ──────────────────────────────────────────────────────── */
+async function loadEngine(){
+  const d=await api('/leadgen/health');
+  $('engineBanner').innerHTML=`<div class="banner ${d.healthy?'ok':(d.stale?'bad':'')}">${
+    d.healthy?'Working — 25 new leads land at 6pm each day.':esc(d.warnings.join(' '))}</div>`;
+  $('engineStats').innerHTML=[tile(d.pool.qualified,'READY TO SEND'),
+    tile(d.pool.days_of_runway,'DAYS OF RUNWAY'),
+    tile(d.pool.by_status?.new??0,'AWAITING CHECK'),
+    tile(d.cities.unharvested,'CITIES LEFT')].join('');
 }
-$('runNow').onclick = async () => {
-  $('runNow').disabled = true; $('runNow').textContent = 'Running…';
-  try {
-    const r = await api('/leadgen/run', { method: 'POST' });
-    toast(`Promoted ${r.promoted}, enriched ${r.enriched}`);
-    await loadHealth();
-  } catch (e) { toast(e.message); }
-  finally { $('runNow').disabled = false; $('runNow').textContent = 'Run now'; }
+$('runNow').onclick=async()=>{
+  const b=$('runNow'); b.disabled=true; b.textContent='Running…';
+  try{const r=await api('/leadgen/run',{method:'POST'});
+      toast(`Added ${r.promoted} leads`); await loadEngine();}
+  catch(e){toast(e.message)}finally{b.disabled=false;b.textContent='Run now'}
 };
 
-/* Resume a stored key, but prove it still works before showing the app. */
-(function () {
-  let stored = null;
-  try { stored = localStorage.getItem(KEY_STORE); } catch {}
-  if (stored) unlock(stored); else lock(null);
-})();
+(function(){let k=null;try{k=localStorage.getItem(KEY_STORE)}catch{}
+  if(k) unlock(k); else lock(null);})();
 </script>
 </body>
 </html>
