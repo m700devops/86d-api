@@ -903,7 +903,8 @@ def _call_window(tz_offset: Optional[int], hours: Optional[str] = None) -> dict:
     w = venue_window(hours, local)
     return {"known": w["known"], "good_now": w["good_now"],
             "local_time": local.strftime("%H:%M"), "hint": w["headline"],
-            "window": w.get("window"), "state": w["state"]}
+            "window": w.get("window"), "windows": w.get("windows"),
+            "starts_in": w.get("starts_in"), "state": w["state"]}
 
 
 @crm_router.get("/queue", response_model=dict)
@@ -1406,8 +1407,14 @@ def call_list(_: bool = Depends(require_crm_key)):
                 zone.update({"headline": f"{ready} ready to call now", "state": "good",
                              "rank": 0, "callable": True})
             else:
-                soonest = min((l["call_window"].get("window") or "" for l in leads
-                               if l["call_window"].get("state") == "early"), default="")
+                # The soonest window, by minutes from now — not by string. A
+                # lexicographic min over "9:00pm-11:00pm" and "11:00am-11:45am"
+                # picks the 11am one as "first", which is both wrong and looks
+                # like a typo on the screen.
+                waits = [(l["call_window"].get("starts_in"), l["call_window"].get("window"))
+                         for l in leads if l["call_window"].get("state") == "early"
+                         and l["call_window"].get("starts_in") is not None]
+                soonest = min(waits)[1] if waits else ""
                 zone.update({"headline": (f"None open yet — first window {soonest}"
                                           if soonest else "Nothing ringable here right now"),
                              "callable": False})

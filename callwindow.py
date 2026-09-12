@@ -26,10 +26,15 @@ from typing import Optional
 DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
 DAY_INDEX = {d: i for i, d in enumerate(DAYS)}
 
-# Bars that open for lunch are busy at open; the useful gap is after it.
+# Bars that open for lunch get TWO windows, not one.
 LUNCH_OPEN_CUTOFF = 11 * 60 + 30     # 11:30
-LUNCH_WINDOW = (14 * 60, 16 * 60 + 30)   # 2:00pm - 4:30pm
-# Everyone else: the first couple of hours after the doors open.
+LUNCH_WINDOW = (14 * 60, 16 * 60 + 30)   # 2:00pm - 4:30pm, the post-lunch lull
+# The other one is the short gap between unlocking the doors and the first
+# customers arriving. A single 2-4:30 window meant that from 11am to 2pm every
+# lunch venue read "too early" — three hours in which the doors are open, the
+# manager is on the floor and nobody has ordered yet, reported as unreachable.
+PRE_RUSH_MINUTES = 45
+# Venues that don't do lunch: the first couple of hours after the doors open.
 POST_OPEN_MINUTES = 120
 
 _TIME_RE = re.compile(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})")
@@ -175,14 +180,15 @@ def call_window(hours: Optional[str], local_now: datetime) -> dict:
                 "headline": f"Closed today — try {nxt}" if nxt else "Closed today"}
 
     if open_min is None:
-        start, end = LUNCH_WINDOW           # no usable hours: generic afternoon
-        source = "generic"
+        windows = [(LUNCH_WINDOW[0], LUNCH_WINDOW[1], "generic")]
     elif open_min <= LUNCH_OPEN_CUTOFF:
-        start, end = LUNCH_WINDOW           # lunch trade: use the afternoon lull
-        source = "post-lunch lull"
+        # Two shots at a lunch venue: the quiet few minutes after they unlock,
+        # then the lull once the rush has cleared. The rush itself — roughly
+        # noon to two — is the only part that's genuinely a bad time.
+        windows = [(open_min, open_min + PRE_RUSH_MINUTES, "just opened, before the rush"),
+                   (LUNCH_WINDOW[0], LUNCH_WINDOW[1], "post-lunch lull")]
     else:
-        start, end = open_min, open_min + POST_OPEN_MINUTES
-        source = "just after they open"
+        windows = [(open_min, open_min + POST_OPEN_MINUTES, "just after they open")]
 
     def hhmm(mins: int) -> str:
         mins %= 24 * 60
@@ -191,20 +197,37 @@ def call_window(hours: Optional[str], local_now: datetime) -> dict:
         h12 = h % 12 or 12
         return f"{h12}:{m:02d}{suffix}"
 
-    window = f"{hhmm(start)}-{hhmm(end)}"
-    if start <= now_min < end:
-        return {"state": "good", "good_now": True, "window": window,
-                "known": schedule is not None,
-                "headline": f"CALL NOW — {source}"}
-    if now_min < start:
+    all_windows = [f"{hhmm(a)}-{hhmm(b)}" for a, b, _ in windows]
+    known = schedule is not None
+
+    # In one of them right now?
+    for start, end, source in windows:
+        if start <= now_min < end:
+            return {"state": "good", "good_now": True,
+                    "window": f"{hhmm(start)}-{hhmm(end)}", "windows": all_windows,
+                    "known": known, "headline": f"CALL NOW — {source}"}
+
+    # Otherwise the next one still to come today.
+    upcoming = [(a, b, src) for a, b, src in windows if now_min < a]
+    if upcoming:
+        start, end, _ = min(upcoming)
         wait = start - now_min
         pretty = f"{wait // 60}h {wait % 60}m" if wait >= 60 else f"{wait}m"
-        return {"state": "early", "good_now": False, "window": window,
-                "known": schedule is not None,
-                "headline": f"Too early — best at {hhmm(start)} (in {pretty})"}
-    return {"state": "late", "good_now": False, "window": window,
-            "known": schedule is not None,
-            "headline": f"Missed today's window ({window})"}
+        # Between two windows reads differently from before the first one:
+        # "too early" at half past noon is wrong and sounds like a bug. What's
+        # actually happening is the lunch rush.
+        missed_one = any(b <= now_min for _, b, _ in windows)
+        headline = (f"In the rush — try again at {hhmm(start)} (in {pretty})"
+                    if missed_one
+                    else f"Too early — best at {hhmm(start)} (in {pretty})")
+        return {"state": "early", "good_now": False, "starts_in": wait,
+                "window": f"{hhmm(start)}-{hhmm(end)}", "windows": all_windows,
+                "known": known, "headline": headline}
+
+    last = f"{hhmm(windows[-1][0])}-{hhmm(windows[-1][1])}"
+    return {"state": "late", "good_now": False, "window": last,
+            "windows": all_windows, "known": known,
+            "headline": f"Missed today's window ({', '.join(all_windows)})"}
 
 
 # ── Service band ────────────────────────────────────────────────────────────

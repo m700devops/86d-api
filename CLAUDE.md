@@ -236,10 +236,14 @@ capture. Don't reintroduce them or describe them as current.)
 - **Call timing is PER VENUE, from its own `opening_hours`, not a blanket window.** The old
   fixed 2-5pm was wrong for much of the list: real harvested data has bars opening at 4pm and
   nightclubs at 9pm, and a 2pm dial to either reaches an empty room. The heuristic in
-  callwindow.py: opens at/before 11:30 → ring 2:00-4:30pm (they're doing lunch at open; the
-  post-lunch lull is when the manager does paperwork and ordering); opens later → ring from
-  open to two hours after (staff setting up, manager on, nobody ordering drinks yet).
-  Unparseable or missing hours fall back to the generic afternoon — never worse than before
+  callwindow.py. A LUNCH venue (opens at/before 11:30) gets TWO windows: the 45 minutes after
+  it unlocks, before customers arrive, and the 2:00-4:30pm post-lunch lull. The single
+  2-4:30 window it started with made the lunch tab useless for its own purpose — from 11am
+  to 2pm every row read "too early", three hours in which the doors are open and nobody has
+  ordered yet. Between the two windows the headline says "In the rush", not "too early",
+  which at 12:30pm reads like a bug. A LATER-opening venue gets one window: open to two
+  hours after (staff setting up, manager on, nobody ordering drinks yet). Unparseable or
+  missing hours fall back to the generic afternoon — never worse than before
 - Venues `opening_hours` marks `closed` are dropped at harvest; venues shut TODAY are sorted
   to the bottom and labelled with the next day they open. Zone headlines are derived from how
   many rows are actually ringable, so a header can't say "nobody's there" above an open bar

@@ -53,9 +53,45 @@ def test_lunch_venue_is_called_in_the_afternoon_lull():
     w = call_window("Mo-Su 11:00-23:00", MON)
     assert w["good_now"] and w["state"] == "good"
     assert w["window"] == "2:00pm-4:30pm"
-    # At 10am the same venue is open but the manager is heading into service.
+    assert "lull" in w["headline"]
+
+
+def test_lunch_venue_is_also_callable_right_after_it_unlocks():
+    # The reason the lunch tab exists is to be worked during lunch hours. With
+    # only the 2-4:30 window, every row in it read "too early" from 11am to
+    # 2pm — three hours where the doors are open, the manager is on the floor
+    # and nobody has ordered yet, reported as unreachable.
+    w = call_window("Mo-Su 11:00-23:00", datetime(2026, 9, 14, 11, 10))
+    assert w["good_now"] and "before the rush" in w["headline"]
+    assert w["windows"] == ["11:00am-11:45am", "2:00pm-4:30pm"]
+
+
+def test_the_lunch_rush_itself_is_not_called():
+    # Half past noon is the one part of the middle of the day that really is
+    # a bad time — and it says so, rather than "too early", which at 12:30pm
+    # reads like a bug.
+    w = call_window("Mo-Su 11:00-23:00", datetime(2026, 9, 14, 12, 30))
+    assert not w["good_now"]
+    assert "In the rush" in w["headline"] and "2:00pm" in w["headline"]
+
+
+def test_before_opening_is_still_too_early():
     early = call_window("Mo-Su 11:00-23:00", MON_10AM)
     assert not early["good_now"] and early["state"] == "early"
+    assert "Too early" in early["headline"]
+
+
+def test_after_the_last_window_lists_both_missed_ones():
+    w = call_window("Mo-Su 11:00-23:00", datetime(2026, 9, 14, 17, 0))
+    assert w["state"] == "late" and not w["good_now"]
+    assert "11:00am-11:45am" in w["headline"] and "2:00pm-4:30pm" in w["headline"]
+
+
+def test_a_dinner_venue_gets_one_window_not_two():
+    # The pre-rush trick is a lunch-service thing. A nightclub opening at nine
+    # has no earlier moment to catch.
+    w = call_window("We-Sa 21:00-02:00", datetime(2026, 9, 16, 21, 30))
+    assert w["windows"] == ["9:00pm-11:00pm"]
 
 
 def test_late_opening_venue_is_called_just_after_it_opens():

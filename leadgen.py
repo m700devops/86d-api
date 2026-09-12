@@ -247,6 +247,13 @@ def _http(url: str, timeout: int = 20, data: Optional[str] = None,
         return "", 0
     out = proc.stdout or ""
     if "__STATUS__" not in out:
+        # curl never got an HTTP response at all. Without its stderr the log
+        # reads "-> 0", which is indistinguishable between DNS failure, a TLS
+        # problem, a timeout and a reset mid-transfer — and those want
+        # completely different fixes. Say which.
+        why = (proc.stderr or "").strip().replace("\n", " ")[:160]
+        print(f"[leadgen] no HTTP response from {url[:90]} "
+              f"(curl exit {proc.returncode}{': ' + why if why else ''})", flush=True)
         return out, 0
     body, _, status = out.rpartition("__STATUS__")
     try:
