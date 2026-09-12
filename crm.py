@@ -131,6 +131,14 @@ def init_crm_tables():
             ("last_outcome", "TEXT"),
             ("opening_hours", "TEXT"),              # raw OSM string, per-venue call timing
             ("opener", "TEXT"),                     # one true thing to open the call with
+            # What makes one lead worth calling before another.
+            ("lead_score", "INTEGER"),              # the generator's fit score
+            ("email_kind", "TEXT"),                 # personal | owner | role | unknown
+            ("manager_name", "TEXT"),               # only ever from the venue's own site
+            ("manager_role", "TEXT"),               # the title printed next to it
+            ("manager_source", "TEXT"),             # the page it was read off
+            ("manager_seen_at", "TEXT"),            # when — names go stale, see below
+            ("tz_name", "TEXT"),                    # IANA zone; the offset alone ignores DST
         ]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -138,6 +146,23 @@ def init_crm_tables():
             """, (col,))
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE crm_leads ADD COLUMN {col} {col_type}")
+
+        # Undo for a mis-logged call. The whole row as it was, written before a
+        # touch changes it, so putting it back is a restore rather than a guess
+        # at which fields to unwind.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_lead_undo (
+                id TEXT PRIMARY KEY,
+                lead_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                snapshot TEXT NOT NULL,
+                counters_spent INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                restored_at TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_undo_lead ON crm_lead_undo(lead_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_undo_created ON crm_lead_undo(created_at DESC)")
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_crm_leads_status ON crm_leads(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_crm_leads_followup ON crm_leads(followup_date)")
@@ -275,6 +300,8 @@ LEAD_COLUMNS = (
     "matched_user_id", "matched_at", "match_method", "tz_offset_hours",
     "source", "last_touch_at", "attempts", "last_outcome",
     "opening_hours", "opener",
+    "lead_score", "email_kind", "tz_name",
+    "manager_name", "manager_role", "manager_source", "manager_seen_at",
 )
 
 # How long to wait before the next dial, by attempt number. Spread across days
@@ -354,6 +381,34 @@ def _record_touch(cursor, lead, kind: str, outcome: Optional[str], attempt: int,
           local.hour, local.weekday(), now_iso()))
 
 
+# Columns the undo restores. Everything a touch can change, and nothing it
+# can't — id and created_at are identity, not state.
+UNDO_COLUMNS = (
+    "status", "contact", "phone", "email", "call_date", "email_date",
+    "followup_date", "notes", "last_touch_at", "attempts", "last_outcome",
+    "updated_at",
+)
+
+
+def _snapshot(cursor, lead, action: str, counters_spent: int = 1) -> str:
+    """Store the row as it is now, before a touch changes it.
+
+    Recorded as the whole row rather than a list of what to unwind: a touch
+    stamps a date, bumps a counter, moves the status, sets a follow-up and
+    appends a note, and each of those has a different "undo" depending on what
+    the row already held. A snapshot has one.
+    """
+    import json as _json
+    undo_id = generate_id()
+    cursor.execute("""
+        INSERT INTO crm_lead_undo (id, lead_id, action, snapshot, counters_spent, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, (undo_id, lead["id"], action,
+          _json.dumps({k: lead.get(k) for k in UNDO_COLUMNS}),
+          counters_spent, now_iso()))
+    return undo_id
+
+
 def _cadence(attempt: int, outcome: Optional[str]) -> tuple[Optional[int], Optional[str]]:
     """(days until the next try, status to force) for a call that didn't land.
 
@@ -375,6 +430,30 @@ def _lead_row(row) -> dict:
     # Surfaced rather than hidden: a lead whose number didn't validate should
     # look wrong on screen, not quietly get dialled.
     lead["phone_ok"] = bool(lead["phone_digits"])
+
+    # Why this lead is where it is in the list. Shown on the row so the order
+    # is legible rather than mysterious — a list that reorders itself for
+    # reasons you can't see is one you stop trusting.
+    reasons = []
+    if lead.get("manager_name"):
+        reasons.append(f"ask for {lead['manager_name']}")
+    if lead.get("email_kind") == "personal":
+        reasons.append("direct email")
+    elif lead.get("email_kind") == "owner":
+        reasons.append("owner inbox")
+    lead["why"] = " · ".join(reasons)
+
+    # A name read off a website ages. The row carries how old it is so the
+    # caller asks "is Dave still there?" rather than "can I speak to Dave?".
+    seen = lead.get("manager_seen_at")
+    lead["manager_age_days"] = None
+    if seen:
+        try:
+            when = datetime.fromisoformat(str(seen).replace("Z", "+00:00"))
+            lead["manager_age_days"] = max(
+                0, (datetime.now(timezone.utc) - when).days)
+        except ValueError:
+            pass
     return lead
 
 
@@ -888,7 +967,39 @@ CALL_WINDOW_START = 14   # 2pm local
 CALL_WINDOW_END = 17     # 5pm local
 
 
-def _call_window(tz_offset: Optional[int], hours: Optional[str] = None) -> dict:
+# Where the person doing the calling actually is. Iloilo is UTC+8, which puts
+# the whole US calling day in the middle of their night — US Eastern afternoon
+# is around 2-4am in the Philippines. That is not something to hide behind a
+# venue-local clock: every time this screen shows, it shows the operator's own
+# time too, so "call now" can be weighed against "it is 3am".
+OPERATOR_TZ = os.getenv("CRM_OPERATOR_TZ", "Asia/Manila")
+
+
+def _operator_tz():
+    try:
+        return ZoneInfo(OPERATOR_TZ)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.utc
+
+
+def _venue_now(tz_name: Optional[str], tz_offset: Optional[int]) -> datetime:
+    """Local time at the venue, preferring the IANA zone over the raw offset.
+
+    The offset is standard time. From March to November that is an hour behind
+    the actual local clock everywhere except Arizona, and an hour is the whole
+    width of the pre-open window — enough to call a bar while it's still locked
+    or miss it entirely.
+    """
+    if tz_name:
+        try:
+            return datetime.now(ZoneInfo(tz_name))
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return datetime.now(timezone.utc) + timedelta(hours=tz_offset or 0)
+
+
+def _call_window(tz_offset: Optional[int], hours: Optional[str] = None,
+                 tz_name: Optional[str] = None) -> dict:
     """When to ring THIS venue, from its own opening hours where we have them.
 
     The blanket 2-5pm this replaced was wrong for a large share of the list:
@@ -896,15 +1007,21 @@ def _call_window(tz_offset: Optional[int], hours: Optional[str] = None) -> dict:
     2pm dial to either reaches an empty room. See callwindow.py.
     """
     from callwindow import call_window as venue_window
-    if tz_offset is None:
+    if tz_offset is None and not tz_name:
         return {"known": False, "good_now": True, "local_time": None,
                 "hint": "", "window": None, "state": "unknown"}
-    local = datetime.now(timezone.utc) + timedelta(hours=tz_offset)
+    local = _venue_now(tz_name, tz_offset)
     w = venue_window(hours, local)
-    return {"known": w["known"], "good_now": w["good_now"],
-            "local_time": local.strftime("%H:%M"), "hint": w["headline"],
-            "window": w.get("window"), "windows": w.get("windows"),
-            "starts_in": w.get("starts_in"), "state": w["state"]}
+    out = {"known": w["known"], "good_now": w["good_now"],
+           "local_time": local.strftime("%H:%M"), "hint": w["headline"],
+           "window": w.get("window"), "windows": w.get("windows"),
+           "starts_in": w.get("starts_in"), "state": w["state"]}
+    # The same moment on the operator's clock. Without it, "best at 2:00pm"
+    # means nothing to somebody thirteen hours away deciding whether to stay up.
+    if w.get("starts_in") is not None:
+        when = datetime.now(_operator_tz()) + timedelta(minutes=w["starts_in"])
+        out["starts_at_yours"] = when.strftime("%-I:%M%p").lower()
+    return out
 
 
 @crm_router.get("/queue", response_model=dict)
@@ -1023,6 +1140,7 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
             sets.append("notes = COALESCE(notes || E'\\n', '') || %s")
             params.append(stamped)
 
+        undo_id = _snapshot(cursor, lead, f"log {data.kind}")
         _record_touch(cursor, lead, data.kind, data.outcome, attempt, lead.get("tz_offset_hours"))
         params.append(lead_id)
         cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
@@ -1044,8 +1162,115 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
         """, (data.kind, now))
         counters = cursor.fetchone()
         conn.commit()
-        return {"lead": _lead_row(updated),
+        return {"lead": _lead_row(updated), "undo_id": undo_id,
                 "counters": _counters_row(counters) if counters else None}
+
+
+# ============== UNDO ==============
+#
+# Logging a call takes a lead off the list, which is the point — it's what
+# makes it impossible to ring the same restaurant twice, and what makes the
+# shrinking list a progress bar. But it also means a misclick is destructive
+# and invisible: the row is simply gone, and nothing on the screen says where
+# it went. So every touch is reversible, and the reversal is exact.
+
+@crm_router.get("/undo", response_model=dict)
+def recent_touches(limit: int = 15, _: bool = Depends(require_crm_key)):
+    """What was just worked, newest first, each still putting-back-able.
+
+    Deliberately a list rather than only a toast: the moment someone notices
+    they logged the wrong row is often several calls later, and a five-second
+    undo that has already faded is not a safety net.
+    """
+    limit = max(1, min(limit, 100))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT u.id, u.lead_id, u.action, u.created_at, u.restored_at,
+                   l.name, l.loc, l.phone, l.status, l.last_outcome
+              FROM crm_lead_undo u
+              JOIN crm_leads l ON l.id = u.lead_id
+             WHERE u.restored_at IS NULL
+             ORDER BY u.created_at DESC
+             LIMIT %s
+        """, (limit,))
+        rows = [dict(r) for r in cursor.fetchall()]
+    for row in rows:
+        row["phone_digits"] = phone_digits(row.get("phone"))
+    return {"touches": rows, "count": len(rows)}
+
+
+@crm_router.post("/undo/{undo_id}", response_model=dict)
+def undo_touch(undo_id: str, _: bool = Depends(require_crm_key)):
+    """Put a lead back exactly as it was, and refund what the touch spent.
+
+    The counters are refunded because they are a record of calls actually
+    made. A call that didn't happen shouldn't show up in the day's numbers, or
+    the scoreboard stops meaning anything — which is the same reason `touch`
+    spends them in one transaction in the first place.
+    """
+    import json as _json
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM crm_lead_undo WHERE id = %s FOR UPDATE", (undo_id,))
+        undo = cursor.fetchone()
+        if not undo:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "Nothing to undo under that id"})
+        if undo["restored_at"]:
+            raise HTTPException(status_code=409, detail={
+                "error": "already_restored",
+                "message": "That one has already been put back"})
+
+        try:
+            snapshot = _json.loads(undo["snapshot"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=500, detail={
+                "error": "bad_snapshot",
+                "message": "That undo record is unreadable — edit the lead by hand"})
+
+        # Only columns we wrote, so a snapshot taken by an older build can't
+        # inject a column name into the SQL.
+        fields = [c for c in UNDO_COLUMNS if c in snapshot]
+        sets = ", ".join(f"{c} = %s" for c in fields)
+        params = [snapshot[c] for c in fields]
+        params.append(undo["lead_id"])
+        cursor.execute(
+            f"UPDATE crm_leads SET {sets} WHERE id = %s RETURNING *", params)
+        restored = cursor.fetchone()
+        if not restored:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "That lead has since been deleted"})
+
+        # The dial log is history, not state: the call was logged and then
+        # unlogged, and both of those happened. Marking it rather than deleting
+        # it keeps the connect-rate numbers honest about what was actually
+        # dialled — see /dialstats.
+        cursor.execute("""
+            UPDATE crm_touches SET outcome = 'undone', connected = FALSE
+             WHERE id = (SELECT id FROM crm_touches WHERE lead_id = %s
+                          ORDER BY at DESC LIMIT 1)
+        """, (undo["lead_id"],))
+
+        if undo["counters_spent"]:
+            kind = (undo["action"] or "").split()[-1]
+            counter_col = {"call": "daily_calls_remaining",
+                           "email": "daily_emails_remaining",
+                           "fb": "daily_fb_remaining"}.get(kind)
+            if counter_col:
+                cursor.execute(f"""
+                    UPDATE crm_counters
+                       SET {counter_col} = {counter_col} + %s,
+                           touch_ticker_remaining = touch_ticker_remaining + %s,
+                           updated_at = %s
+                     WHERE id = 1
+                """, (undo["counters_spent"], undo["counters_spent"], now_iso()))
+
+        cursor.execute("UPDATE crm_lead_undo SET restored_at = %s WHERE id = %s",
+                       (now_iso(), undo_id))
+        conn.commit()
+    return {"lead": _lead_row(restored), "restored": True}
 
 
 # ============== SUPPRESSION (do-not-call) ==============
@@ -1374,7 +1599,8 @@ def call_list(_: bool = Depends(require_crm_key)):
             continue
         usable += 1
         lead["call_window"] = _call_window(row.get("tz_offset_hours"),
-                                           row.get("opening_hours"))
+                                           row.get("opening_hours"),
+                                           row.get("tz_name"))
         lead["hours_known"] = bool(row.get("opening_hours"))
         service = service_of(row.get("opening_hours"))
         offset = row.get("tz_offset_hours")
@@ -1383,6 +1609,30 @@ def call_list(_: bool = Depends(require_crm_key)):
 
     rank = {"good": 0, "early": 1, "generic": 1, "late": 2,
             "shut_today": 3, "permanently_closed": 4}
+
+    def _call_order(lead: dict):
+        """Which of two leads to ring first.
+
+        Whether they're reachable right now comes first — the best lead in the
+        list is worth nothing while its doors are locked. After that it's how
+        far the call can get: a name to ask for beats a direct mailbox, which
+        beats a shared inbox, and the generator's fit score breaks the rest.
+        Fewest attempts stays ahead of score so an untried lead beats a fourth
+        swing at one that never answers.
+        """
+        # A shared info@ box is the worst of the four, below an address we
+        # couldn't classify — an unclassified one is usually the venue's own
+        # mailbox (oshaughnessyspub@gmail.com), which somebody there actually
+        # reads.
+        kind_rank = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
+        return (
+            rank.get(lead["call_window"].get("state"), 2),
+            0 if lead.get("manager_name") else 1,
+            kind_rank.get(lead.get("email_kind"), 2),
+            lead.get("attempts") or 0,
+            -(lead.get("lead_score") or 0),
+            lead["name"],
+        )
 
     def build_zones(by_zone: dict) -> list:
         # Every zone appears, empty or not. The sub-tabs have to be in the same
@@ -1393,7 +1643,7 @@ def call_list(_: bool = Depends(require_crm_key)):
         zones = []
         for offset, leads in by_zone.items():
             zone = zone_state(offset)
-            leads.sort(key=lambda l: (rank.get(l["call_window"].get("state"), 2), l["name"]))
+            leads.sort(key=_call_order)
             ready = sum(1 for l in leads if l["call_window"]["good_now"])
             zone.update({"leads": leads, "count": len(leads), "callable_now": ready,
                          "target": BUCKET_TARGET,
@@ -1461,6 +1711,96 @@ def call_list(_: bool = Depends(require_crm_key)):
     }
 
 
+@crm_router.get("/now", response_model=dict)
+def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
+    """One list: who to ring, right now, in order. No tabs, no decisions.
+
+    The service and timezone tabs are the right way to UNDERSTAND the list —
+    they say why a venue is reachable or isn't. They are the wrong way to WORK
+    it. Sitting down to call, the question isn't "which of eight tabs holds
+    somebody who's open"; it's "who do I dial first", and answering that by
+    clicking around eight tabs reading clocks is work the screen should have
+    already done.
+
+    So this flattens all eight cells into a single queue and sorts it by
+    whether each venue is in a calling window this minute — 30 minutes before
+    the doors open, and the 2-4pm lull — then by how far the call can get: a
+    name to ask for, then a direct mailbox, then fit.
+
+    It crosses timezones freely on purpose. At any given moment the Eastern
+    bars setting up and the Pacific ones in their lull are both good calls, and
+    which zone they're in doesn't matter once you know it's their quiet half
+    hour.
+    """
+    limit = max(1, min(limit, 200))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM crm_leads
+             WHERE status = 'new' AND last_touch_at IS NULL
+               AND phone IS NOT NULL AND phone <> ''
+        """)
+        rows = cursor.fetchall()
+        cursor.execute("""
+            SELECT COUNT(*) AS n FROM crm_leads
+             WHERE SUBSTRING(COALESCE(last_touch_at, ''), 1, 10) = %s
+        """, (_today(),))
+        done_today = cursor.fetchone()["n"]
+
+    ready, soon = [], []
+    for row in rows:
+        lead = _lead_row(row)
+        if not lead["phone_ok"]:
+            continue
+        window = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"),
+                              row.get("tz_name"))
+        lead["call_window"] = window
+        lead["zone"] = ZONE_LABELS.get(row.get("tz_offset_hours"), "—")
+        if window["good_now"]:
+            ready.append(lead)
+        elif window.get("state") == "early":
+            soon.append(lead)
+
+    def reach(lead):
+        kind_rank = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
+        return (0 if lead.get("manager_name") else 1,
+                kind_rank.get(lead.get("email_kind"), 2),
+                lead.get("attempts") or 0,
+                -(lead.get("lead_score") or 0),
+                lead["name"])
+
+    ready.sort(key=reach)
+    # The nearly-ready ones are ordered by the clock instead: the point of
+    # showing them is "this is what you're waiting for and how long".
+    soon.sort(key=lambda l: (l["call_window"].get("starts_in") or 9999, *reach(l)))
+
+    op_now = datetime.now(_operator_tz())
+    if ready:
+        head = ready[0]
+        headline = f"Call {head['name']} — {len(ready)} ready now"
+    elif soon:
+        wait = soon[0]["call_window"].get("starts_in") or 0
+        pretty = f"{wait // 60}h {wait % 60}m" if wait >= 60 else f"{wait} min"
+        headline = (f"Nobody's in a window yet — first one in {pretty}, "
+                    f"{soon[0]['call_window'].get('starts_at_yours', '')} your time")
+    else:
+        headline = "Nothing callable today. The list refills at 6pm."
+
+    return {
+        "headline": headline,
+        "ready": ready[:limit],
+        "soon": soon[:12],
+        "ready_count": len(ready),
+        "soon_count": len(soon),
+        "done_today": done_today,
+        "operator": {
+            "zone": OPERATOR_TZ,
+            "local_time": op_now.strftime("%-I:%M%p").lower(),
+            "date": op_now.strftime("%a %-d %b"),
+        },
+    }
+
+
 # ============== AI DEBRIEF ==============
 #
 # After a call, type what happened in plain words and the model turns it into
@@ -1495,49 +1835,80 @@ Rules:
 """
 
 
+# Claude, and only Claude. The scan path's OpenAI/Gemini pair used to serve
+# this too, on the reasoning that it needed no new key — but this is one short
+# text extraction per logged call, and running it on Haiku is materially
+# cheaper than running it on a frontier vision model. Called over the raw REST
+# API through httpx rather than the SDK, the same way main.py sends through
+# Resend: no new pinned dependency, nothing to keep in version lockstep.
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_VERSION = "2023-06-01"
+DEBRIEF_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+
+
 def _debrief_extract(text: str) -> dict:
-    """Ask the model for structured fields. Raises HTTPException when unusable.
-
-    Uses the same providers the scan path already uses — OpenAI first, Gemini
-    as the fallback — so this needs no new key and no new vendor.
-    """
+    """Ask the model for structured fields. Raises HTTPException when unusable."""
     import json as _json
-    openai_key = os.getenv("OPENAI_API_KEY")
-    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
-    if openai_key:
-        try:
-            import openai as _openai
-            client = _openai.OpenAI(api_key=openai_key, timeout=25.0)
-            resp = client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-                response_format={"type": "json_object"},
-                messages=[{"role": "system", "content": DEBRIEF_SYSTEM},
-                          {"role": "user", "content": text}],
-                temperature=0,
-            )
-            return _json.loads(resp.choices[0].message.content)
-        except Exception as exc:
-            print(f"[crm] debrief via OpenAI failed: {exc}", flush=True)
+    import httpx
 
-    if gemini_key:
-        try:
-            import google.generativeai as _genai
-            _genai.configure(api_key=gemini_key)
-            model = _genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
-            resp = model.generate_content(
-                f"{DEBRIEF_SYSTEM}\n\nNotes:\n{text}",
-                generation_config={"response_mime_type": "application/json",
-                                   "temperature": 0},
-            )
-            return _json.loads(resp.text)
-        except Exception as exc:
-            print(f"[crm] debrief via Gemini failed: {exc}", flush=True)
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_unavailable",
+            "message": ("No ANTHROPIC_API_KEY is set, so notes can't be read "
+                        "automatically — type the fields in by hand."),
+        })
 
-    raise HTTPException(status_code=503, detail={
-        "error": "ai_unavailable",
-        "message": "Couldn't reach the AI to read those notes — type the fields in by hand.",
-    })
+    try:
+        resp = httpx.post(
+            ANTHROPIC_URL,
+            headers={"x-api-key": key,
+                     "anthropic-version": ANTHROPIC_VERSION,
+                     "content-type": "application/json"},
+            json={
+                "model": DEBRIEF_MODEL,
+                "max_tokens": 400,
+                "temperature": 0,
+                "system": DEBRIEF_SYSTEM,
+                "messages": [
+                    {"role": "user", "content": text},
+                    # Prefilling the opening brace is what makes the reply JSON
+                    # without a tool definition: the model can only continue an
+                    # object it has already started.
+                    {"role": "assistant", "content": "{"},
+                ],
+            },
+            timeout=25.0,
+        )
+    except Exception as exc:
+        print(f"[crm] debrief request failed: {exc}", flush=True)
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_unavailable",
+            "message": "Couldn't reach the AI to read those notes — type the fields in by hand.",
+        })
+
+    if resp.status_code != 200:
+        # The body carries the real reason (bad key, rate limit, credit) and
+        # it's an internal tool, so say it rather than making it a guess.
+        detail = resp.text[:200]
+        print(f"[crm] debrief HTTP {resp.status_code}: {detail}", flush=True)
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_unavailable",
+            "message": (f"The AI returned {resp.status_code} — type the fields "
+                        "in by hand. ({detail})").format(detail=detail[:120]),
+        })
+
+    try:
+        body = resp.json()
+        chunks = [b.get("text", "") for b in body.get("content", []) if b.get("type") == "text"]
+        return _json.loads("{" + "".join(chunks))
+    except Exception as exc:
+        print(f"[crm] debrief returned unparseable JSON: {exc}", flush=True)
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_unreadable",
+            "message": "The AI's answer didn't parse — type the fields in by hand.",
+        })
 
 
 @crm_router.post("/leads/{lead_id}/debrief", response_model=dict)
@@ -1570,6 +1941,7 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
             raise HTTPException(status_code=404, detail={
                 "error": "not_found", "message": "Lead not found"})
 
+        undo_id = _snapshot(cursor, lead, f"debrief {data.kind}")
         attempt = (lead["attempts"] or 0) + 1 if data.kind == "call" else (lead["attempts"] or 0)
         sets = ["updated_at = %s", "last_touch_at = %s"]
         params: list = [now, now]
@@ -1643,7 +2015,7 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
         counters = cursor.fetchone()
         conn.commit()
 
-    return {"lead": _lead_row(updated), "applied": applied,
+    return {"lead": _lead_row(updated), "applied": applied, "undo_id": undo_id,
             "counters": _counters_row(counters) if counters else None}
 
 

@@ -41,6 +41,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   (service × timezone) cells the page, the API and the generator all have to agree on. One
   definition on purpose: three copies would drift and the tabs would stop matching what gets
   generated. See THE CALL LIST below for the heuristic
+- contacts.py — two things that reorder the call list, both read only from the venue's own
+  site: `find_manager()` (a name to ask for) and `email_kind()` (personal / owner / role /
+  unknown). A manager name is NEVER verified and cannot be — managers turn over constantly,
+  so a name is only taken when a ROLE WORD sits next to it, the page and date are stored
+  with it, and the UI says "Ask if X is still the GM" rather than "ask for X". Measured: 1
+  usable name in 22 reachable bar sites. Missing one costs nothing; inventing one costs the
+  call. See test_contacts.py
 - phones.py — strict NANP validation, fails closed. OSM phone tags are volunteer free text
   carrying extensions, two numbers in one field, international numbers and vanity spellings;
   anything this can't prove dialable returns None and is never promoted. It can promise the
@@ -51,10 +58,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   crm_leads each morning). See the LEAD GENERATOR section below
 - seed_data.py — default product catalog
 - test_level_classifier.py — unit tests for helpers.py level logic
-- test_phones.py, test_callwindow.py, test_timezones.py — the phone validator, the
-  call-window/service-band logic and timezone assignment, all pure. Run them:
-  `pytest test_level_classifier.py test_phones.py test_callwindow.py test_timezones.py -q`
-  (149 tests)
+- test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone
+  validator, call-window/service-band logic, timezone assignment, and manager/email
+  classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
+  test_callwindow.py test_timezones.py test_contacts.py -q` (199 tests)
 
 ## AI Vision Rules
 - `POST /v1/scans/analyze` (main.py:3590) tries OpenAI first, falls through to Gemini on timeout/error —
@@ -180,6 +187,24 @@ capture. Don't reintroduce them or describe them as current.)
   ~1.5 new cities per day; 58 US metros are seeded, more via `POST /v1/crm/leadgen/cities`
 - A lead is NEVER promoted without both a phone and an email, and never if it's suppressed,
   already in the pipeline, or already a customer
+- **The name+city duplicate check compares against `loc` ("City, ST"), not `city`.** It used
+  to pass the bare city, so `'portland' = 'portland, or'` never matched and the name half of
+  the check never fired once — only the email half did any work, and a venue whose published
+  address changed between harvests came straight back onto the list. That is the exact
+  duplicate call the check exists to prevent
+- **Scoring favours venues LIKELY TO STILL COUNT BY HAND.** `POS_STACK_HINTS` (Resy,
+  OpenTable, Tock, SevenRooms, Toast) is the strongest negative: a venue taking bookings
+  through a platform is running a stack that probably came with something claiming to do
+  inventory. `UPSCALE_HINTS` (tasting menu, sommelier) is a gentler one.
+  `NEIGHBOURHOOD_HINTS` (pool table, happy hour, dive, tavern) is the positive. None of them
+  EXCLUDE anything — a fine-dining room can still be on a clipboard and stays on the list;
+  they only decide order, which is what matters when fifty names are in front of you
+- A personal mailbox (`dave@divebar.com`) scores +4 and a named manager +5: both mean the
+  call has somewhere to land, and both are rare enough to be worth putting first
+- `TEMPLATE_EMAILS` / `MACHINE_LOCAL` block stock website placeholders (`your@email.com`,
+  `mymail@mailservice.com`) and script-generated addresses (`bank<uuid>@test.com`). All three
+  came out of real harvests. These matter more than they look: a placeholder reads as a
+  PERSONAL mailbox, so it sorted to the top of the call list and reached nobody
 - **The phone is validated twice: at harvest and again at promote** (`phones.normalize_us_phone`).
   The second check is not redundant — rows banked by an earlier build predate the validator,
   and promote is the last gate before a number reaches a dialer. `phone_digits` in crm.py
@@ -232,6 +257,28 @@ capture. Don't reintroduce them or describe them as current.)
 - Today's call list and the CSV both exclude `won`/`dead`: calling someone who asked not to
   be contacted is the one mistake this list must never cause
 
+## CALLING MODE — the "Ready to start calling" button
+- `GET /v1/crm/now` — ONE flat queue across all eight tabs, ordered by who is in a calling
+  window this minute, then by how far the call can get (a name to ask for, then a direct
+  mailbox, then fit score). The tabs are the right way to UNDERSTAND the list and the wrong
+  way to WORK it: sitting down to call, the only question is "who do I dial first", and
+  answering it by clicking eight tabs reading local clocks is work the screen should do
+- It crosses timezones freely on purpose — at any moment the Eastern bars setting up and the
+  Pacific ones in their lull are both good calls, and the zone stops mattering once you know
+  it's their quiet half hour
+- The page refreshes this every 60s while it's on screen. Windows open and shut on the clock,
+  so a list left sitting goes stale under you
+- **`CRM_OPERATOR_TZ` (default `Asia/Manila`) is where the caller is, and every screen shows
+  their clock.** The operator is in Iloilo, UTC+8, so the entire US calling day lands in the
+  middle of their night — US Eastern afternoon is roughly 2-4am there. "Best at 2:00pm"
+  means nothing to someone thirteen hours away deciding whether to stay up, so every
+  upcoming window is also printed in their own time (`starts_at_yours`)
+- **Venue-local time comes from an IANA zone (`tz_name`), not the raw offset.** The offset is
+  standard time, so from March to November it is an hour behind the real local clock
+  everywhere except Arizona — and an hour is the entire width of the pre-open window, enough
+  to ring a bar that is still locked. `us_tz_name()` in leadgen.py; `_reconcile_timezones()`
+  backfills it
+
 ## THE CALL LIST (the screen the operator actually lives in)
 - `GET /v1/crm/calllist` — every unworked lead, split BY SERVICE then BY TIMEZONE. Two levels
   because they answer two questions: the service tab answers "it's 11am, who is even open?"
@@ -248,8 +295,10 @@ capture. Don't reintroduce them or describe them as current.)
 - **Call timing is PER VENUE, from its own `opening_hours`, not a blanket window.** The old
   fixed 2-5pm was wrong for much of the list: real harvested data has bars opening at 4pm and
   nightclubs at 9pm, and a 2pm dial to either reaches an empty room. The heuristic in
-  callwindow.py. A LUNCH venue (opens at/before 11:30) gets TWO windows: the 45 minutes after
-  it unlocks, before customers arrive, and the 2:00-4:30pm post-lunch lull. The single
+  callwindow.py. Every window now STARTS 30 MINUTES BEFORE the doors open (`PRE_OPEN_MINUTES`)
+  — staff are in, taking deliveries, not yet serving anyone; it's the quietest half hour of a
+  venue's day. A LUNCH venue (opens at/before 11:30) gets TWO windows: open-30min to
+  open+45min, and the 2:00-4:00pm post-lunch lull. The single
   2-4:30 window it started with made the lunch tab useless for its own purpose — from 11am
   to 2pm every row read "too early", three hours in which the doors are open and nobody has
   ordered yet. Between the two windows the headline says "In the rush", not "too early",
@@ -272,6 +321,16 @@ capture. Don't reintroduce them or describe them as current.)
   against reality. Once a few hundred dials are logged, move the window to match the data
   rather than trusting the heuristic. It reports thin data honestly rather than dressing up
   noise
+- **Every touch is reversible.** `_snapshot()` stores the whole row before a touch changes
+  it, `GET /v1/crm/undo` lists what was just worked, `POST /v1/crm/undo/{id}` puts it back
+  exactly — status, attempts, notes, follow-up date — and refunds the counters, because a
+  call that didn't happen shouldn't show in the day's numbers. Stored as a whole-row snapshot
+  rather than a list of fields to unwind: a touch changes six things and each has a different
+  "undo" depending on what the row already held. The page shows both a 10-second Undo in the
+  toast and a persistent "just worked" bar, because noticing a misclick usually happens
+  several calls later
+- The undone dial stays in `crm_touches` marked `outcome='undone'` rather than being deleted —
+  it was dialled, and /dialstats should stay honest about that
 - A lead leaves this list the moment it is touched, debriefed, status-changed or deleted —
   the filter is `status = 'new' AND last_touch_at IS NULL`. That is what makes it impossible
   to call the same restaurant twice, and the shrinking list doubles as the progress bar
@@ -283,6 +342,16 @@ capture. Don't reintroduce them or describe them as current.)
   `crm_lead_candidates` row that produced the lead. Without that the generator re-promotes
   the same restaurant on a later run and it reappears — the exact duplicate call that
   deleting it was meant to prevent
+- **AI is Claude only, via the raw REST API through httpx** (`ANTHROPIC_API_KEY`,
+  `ANTHROPIC_MODEL` default `claude-haiku-4-5-20251001`). It used to share the scan path's
+  OpenAI→Gemini pair on the grounds that it needed no new key; this is one short text
+  extraction per logged call and Haiku is materially cheaper. No SDK, matching how main.py
+  talks to Resend. **The scan path in main.py is unchanged and still OpenAI→Gemini** — that
+  is the product's core feature, not the CRM's
+- The drawer's quick-outcome buttons (Voicemail / Manager out / Not interested) go straight
+  to `/touch` with a known outcome. They used to post a canned sentence through the model —
+  a paid round trip to be told what the button already said, which also meant the quick path
+  stopped working with no API key set. Only free text a human typed is worth a model
 - `POST /v1/crm/leads/{id}/debrief` — free-text call notes in, structured fields out
   (status, contact, email, phone, follow-up date, a dated note), applied in one transaction
   along with the counters. Uses the SAME providers as the scan path (OpenAI then Gemini), so
@@ -304,6 +373,12 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - STRIPE_WEBHOOK_SECRET — without it, payments don't activate subscriptions (customers pay and stay locked out)
 - CRM_API_KEY — shared key for `/v1/crm/*`; unset means every CRM endpoint 503s (the UI at
   `/crm` still loads, it just can't do anything). Not used by the mobile app at all
+- ANTHROPIC_API_KEY — the CRM's only AI call (`/debrief`, reading call notes into fields).
+  Without it that endpoint 503s with "type the fields in by hand" and everything else,
+  including the quick-outcome buttons, works normally. Not used by the mobile app
+- ANTHROPIC_MODEL — optional, default `claude-haiku-4-5-20251001`
+- CRM_OPERATOR_TZ — where the person making the calls is (default `Asia/Manila`). Decides the
+  "your time" clock and every upcoming-window time on the call screen
 - CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).
   Also decides when the daily lead run fires
 - LEADGEN_BUCKET_TARGET (default 50 — leads per service×timezone tab; total capacity is

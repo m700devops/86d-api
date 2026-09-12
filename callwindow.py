@@ -28,12 +28,17 @@ DAY_INDEX = {d: i for i, d in enumerate(DAYS)}
 
 # Bars that open for lunch get TWO windows, not one.
 LUNCH_OPEN_CUTOFF = 11 * 60 + 30     # 11:30
-LUNCH_WINDOW = (14 * 60, 16 * 60 + 30)   # 2:00pm - 4:30pm, the post-lunch lull
+LUNCH_WINDOW = (14 * 60, 16 * 60)        # 2:00pm - 4:00pm, the post-lunch lull
 # The other one is the short gap between unlocking the doors and the first
 # customers arriving. A single 2-4:30 window meant that from 11am to 2pm every
 # lunch venue read "too early" — three hours in which the doors are open, the
 # manager is on the floor and nobody has ordered yet, reported as unreachable.
 PRE_RUSH_MINUTES = 45
+# Staff are in before the doors open — setting up, taking deliveries, and not
+# yet serving anybody. It is the quietest half hour of a venue's day and the
+# one most likely to put a manager on the phone, so the window starts before
+# opening time rather than at it.
+PRE_OPEN_MINUTES = 30
 # Venues that don't do lunch: the first couple of hours after the doors open.
 POST_OPEN_MINUTES = 120
 
@@ -185,10 +190,12 @@ def call_window(hours: Optional[str], local_now: datetime) -> dict:
         # Two shots at a lunch venue: the quiet few minutes after they unlock,
         # then the lull once the rush has cleared. The rush itself — roughly
         # noon to two — is the only part that's genuinely a bad time.
-        windows = [(open_min, open_min + PRE_RUSH_MINUTES, "just opened, before the rush"),
+        windows = [(open_min - PRE_OPEN_MINUTES, open_min + PRE_RUSH_MINUTES,
+                    "setting up / just opened"),
                    (LUNCH_WINDOW[0], LUNCH_WINDOW[1], "post-lunch lull")]
     else:
-        windows = [(open_min, open_min + POST_OPEN_MINUTES, "just after they open")]
+        windows = [(open_min - PRE_OPEN_MINUTES, open_min + POST_OPEN_MINUTES,
+                    "setting up, before service")]
 
     def hhmm(mins: int) -> str:
         mins %= 24 * 60

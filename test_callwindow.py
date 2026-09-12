@@ -52,7 +52,7 @@ def test_shut_today_names_the_next_open_day():
 def test_lunch_venue_is_called_in_the_afternoon_lull():
     w = call_window("Mo-Su 11:00-23:00", MON)
     assert w["good_now"] and w["state"] == "good"
-    assert w["window"] == "2:00pm-4:30pm"
+    assert w["window"] == "2:00pm-4:00pm"
     assert "lull" in w["headline"]
 
 
@@ -62,8 +62,11 @@ def test_lunch_venue_is_also_callable_right_after_it_unlocks():
     # 2pm — three hours where the doors are open, the manager is on the floor
     # and nobody has ordered yet, reported as unreachable.
     w = call_window("Mo-Su 11:00-23:00", datetime(2026, 9, 14, 11, 10))
-    assert w["good_now"] and "before the rush" in w["headline"]
-    assert w["windows"] == ["11:00am-11:45am", "2:00pm-4:30pm"]
+    assert w["good_now"] and "setting up" in w["headline"]
+    # Starts half an hour BEFORE the doors open: staff are in, taking
+    # deliveries, not yet serving anyone.
+    assert w["windows"] == ["10:30am-11:45am", "2:00pm-4:00pm"]
+    assert call_window("Mo-Su 11:00-23:00", datetime(2026, 9, 14, 10, 40))["good_now"]
 
 
 def test_the_lunch_rush_itself_is_not_called():
@@ -84,14 +87,14 @@ def test_before_opening_is_still_too_early():
 def test_after_the_last_window_lists_both_missed_ones():
     w = call_window("Mo-Su 11:00-23:00", datetime(2026, 9, 14, 17, 0))
     assert w["state"] == "late" and not w["good_now"]
-    assert "11:00am-11:45am" in w["headline"] and "2:00pm-4:30pm" in w["headline"]
+    assert "10:30am-11:45am" in w["headline"] and "2:00pm-4:00pm" in w["headline"]
 
 
 def test_a_dinner_venue_gets_one_window_not_two():
     # The pre-rush trick is a lunch-service thing. A nightclub opening at nine
     # has no earlier moment to catch.
     w = call_window("We-Sa 21:00-02:00", datetime(2026, 9, 16, 21, 30))
-    assert w["windows"] == ["9:00pm-11:00pm"]
+    assert w["windows"] == ["8:30pm-11:00pm"]
 
 
 def test_late_opening_venue_is_called_just_after_it_opens():
@@ -99,14 +102,16 @@ def test_late_opening_venue_is_called_just_after_it_opens():
     # building — this is the case a fixed 2-5pm window got wrong every time.
     w = call_window("We-Sa 21:00-02:00", datetime(2026, 9, 16, 15, 0))
     assert not w["good_now"]
-    assert w["window"] == "9:00pm-11:00pm"
+    assert w["window"] == "8:30pm-11:00pm"
     assert call_window("We-Sa 21:00-02:00", datetime(2026, 9, 16, 21, 30))["good_now"]
+    # And half an hour before the doors, while they're setting up.
+    assert call_window("We-Sa 21:00-02:00", datetime(2026, 9, 16, 20, 40))["good_now"]
 
 
 def test_unknown_hours_fall_back_to_the_generic_window():
     w = call_window(None, MON)
     assert w["good_now"] and w["known"] is False
-    assert w["window"] == "2:00pm-4:30pm"
+    assert w["window"] == "2:00pm-4:00pm"
 
 
 def test_permanently_closed_is_never_callable():

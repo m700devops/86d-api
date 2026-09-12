@@ -41,6 +41,22 @@
      "who is even open at this hour?" then "who's in their window right now?"
      Both rows stay in a fixed order so the same tab is always in the same
      place — one thing to click, never a layout to re-read. */
+  /* The one button that starts a calling session. Deliberately the largest
+     thing on the screen after the headline — sitting down to call should be
+     one click, not a tour of eight tabs. */
+  .startbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+  .startbtn{font-size:16px;font-weight:800;letter-spacing:-0.2px;padding:14px 22px;
+            border-radius:13px;background:var(--go);border-color:var(--go);color:#06251A}
+  .startbtn:hover{filter:brightness(1.06)}
+  .startbtn.on{background:var(--surface2);border-color:var(--line2);color:var(--text);
+               font-size:13px;font-weight:700;padding:9px 15px}
+  .clock{color:var(--text2);font-size:13px;line-height:1.35}
+  .clock strong{color:var(--text);font-variant-numeric:tabular-nums}
+  .clock .zone{color:var(--text3);font-size:11px;display:block}
+  .soon{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 0;font-size:12px;
+        color:var(--text3)}
+  .soon span{border:1px solid var(--line);border-radius:999px;padding:3px 10px}
+
   .svc{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
   .svc button{text-align:left;padding:13px 15px;border-radius:12px;line-height:1.3}
   .svc button .t{font-weight:700;font-size:15px;display:block}
@@ -89,8 +105,26 @@
           border-radius:6px;padding:4px 8px;display:inline-block;white-space:nowrap}
   .digits:hover{border-color:var(--go);color:var(--go)}
   .digits.copied{border-color:var(--go);color:var(--go);background:#3DD68C1A}
+  .phcell{display:flex;align-items:center;gap:6px}
+  .copybtn{padding:4px 9px;font-size:11px;font-weight:700;letter-spacing:0.3px;
+           border-radius:6px;flex:none}
+  .copybtn.done{background:var(--go);border-color:var(--go);color:#06251A}
   .em{color:var(--text2);max-width:220px;overflow:hidden;text-overflow:ellipsis;
       white-space:nowrap;display:inline-block}
+  /* A name to ask for. Shown with how old it is, because a name off a website
+     is only ever "what their site said on that day". */
+  .ask{color:var(--go);font-size:11px;font-weight:700;margin-top:2px}
+  .ask .age{color:var(--text3);font-weight:400}
+  .why{display:inline-block;font-size:10px;font-weight:700;letter-spacing:0.4px;
+       padding:1px 6px;border-radius:5px;margin-left:6px;
+       color:var(--accent);border:1px solid #FF6B3555;background:#FF6B3514}
+  .undobar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+           background:var(--surface);border:1px solid var(--line);border-radius:10px;
+           padding:9px 12px;margin-bottom:12px;font-size:13px}
+  .undobar .who{color:var(--text2)}
+  #toast button{margin-left:12px;padding:4px 12px;font-size:12px;font-weight:700;
+                background:var(--go);border-color:var(--go);color:#06251A}
+  #toast.show{pointer-events:auto}
   .win-good{color:var(--go);font-weight:700}
   .win-bad{color:var(--text3)}
   .win-shut{color:var(--stop);font-size:11px}
@@ -171,6 +205,11 @@
 
     <section data-panel="calls">
       <div id="focus" class="focus"><h2>Loading…</h2></div>
+      <div class="startbar">
+        <button class="startbtn" id="startBtn">Ready to start calling</button>
+        <div class="clock" id="clock"></div>
+      </div>
+      <div id="undoBar"></div>
       <div class="svc" id="svcTabs"></div>
       <div class="zt" id="zoneTabs"></div>
       <div id="zones"></div>
@@ -239,8 +278,21 @@ const KEY_STORE='86d_crm_key';
 const $=id=>document.getElementById(id);
 let KEY=null, TAB='calls';
 
-function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');
-  clearTimeout(toast._t);toast._t=setTimeout(()=>t.classList.remove('show'),2000);}
+function toast(m,undoId){
+  const t=$('toast');
+  t.textContent=m;
+  if(undoId){
+    // Ten seconds, not two: noticing you clicked the wrong row takes longer
+    // than reading the message. The bar above the list is the real safety
+    // net; this is just the fastest path back.
+    const b=document.createElement('button');
+    b.textContent='Undo'; b.onclick=()=>{t.classList.remove('show');undoTouch(undoId);};
+    t.appendChild(b);
+  }
+  t.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t=setTimeout(()=>t.classList.remove('show'),undoId?10000:2000);
+}
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 async function api(path,opts={}){
@@ -317,8 +369,131 @@ function autoPick(d){
   ZONE=z?z.offset:-5;
 }
 
+/* Putting a lead back after a mis-logged call.
+
+   Logging takes the row off the list, which is exactly what stops the same
+   restaurant being rung twice — but it also makes a misclick destructive and
+   invisible. So the last few worked leads stay one click from coming back,
+   restored to precisely what they were: status, attempts, notes, follow-up
+   date, and the day's counters. */
+async function undoTouch(id){
+  try{
+    const r=await api('/undo/'+id,{method:'POST'});
+    toast('Put back: '+r.lead.name);
+    await loadCalls();
+  }catch(e){ toast(e.message); }
+}
+
+async function loadUndoBar(){
+  let d;
+  try{ d=await api('/undo?limit=5'); }catch{ return; }
+  const box=$('undoBar');
+  if(!d.touches.length){ box.innerHTML=''; return; }
+  const last=d.touches[0];
+  const more=d.touches.slice(1,4);
+  box.innerHTML=`<div class="undobar">
+    <span class="who">Just worked: <strong>${esc(last.name)}</strong>${
+      last.last_outcome?` · ${esc(last.last_outcome)}`:''}</span>
+    <button data-undo="${esc(last.id)}">Put back on the list</button>
+    ${more.map(t=>`<button data-undo="${esc(t.id)}" title="Put back on the list"
+        >${esc(t.name.length>22?t.name.slice(0,21)+'\u2026':t.name)}</button>`).join('')}
+  </div>`;
+}
+
+$('undoBar').onclick=e=>{
+  const b=e.target.closest('button[data-undo]'); if(!b) return;
+  undoTouch(b.dataset.undo);
+};
+
+/* ── calling mode ─────────────────────────────────────────────────────────
+   One button, one list, no decisions. The service and timezone tabs explain
+   the list; they are not a good way to work it. Sitting down to call, the
+   question is only ever "who do I dial first", and clicking through eight
+   tabs reading local clocks to answer it is work the screen should have done.
+
+   So this flattens every tab into one queue of venues that are in a calling
+   window THIS MINUTE — the half hour before their doors open, and the 2-4pm
+   lull — best-reachable first. Windows open and shut as the hour moves, so it
+   refreshes itself while it's on screen rather than going stale under you. */
+let CALLING=false, NOWDATA=null, nowTimer=null;
+try{ CALLING = localStorage.getItem('crmCalling')==='1'; }catch{}
+
+$('startBtn').onclick=()=>{
+  CALLING=!CALLING;
+  try{ localStorage.setItem('crmCalling', CALLING?'1':'0'); }catch{}
+  loadCalls();
+};
+
+function stopNowTimer(){ if(nowTimer){ clearInterval(nowTimer); nowTimer=null; } }
+
+async function loadNow(){
+  const d=await api('/now'); NOWDATA=d;
+  $('startBtn').textContent='Back to the tabs';
+  $('startBtn').classList.add('on');
+
+  // Their clock, always. The whole US calling day falls in the middle of the
+  // night in the Philippines, and a screen that only shows venue-local time
+  // hides that from the person who has to be awake for it.
+  $('clock').innerHTML=`<strong>${esc(d.operator.local_time)}</strong> where you are
+    <span class="zone">${esc(d.operator.date)} · ${esc(d.operator.zone.replace('_',' '))}</span>`;
+
+  const go=d.ready_count>0;
+  $('focus').className='focus '+(go?'go':'wait');
+  $('focus').innerHTML=`<h2>${esc(d.headline)}</h2>
+    <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
+      · ${d.soon_count} waiting on their window</div>`;
+
+  $('svcTabs').innerHTML=''; $('zoneTabs').innerHTML='';
+
+  if(!d.ready.length){
+    $('zones').innerHTML='<div class="card muted">Nothing is in a calling window '
+      +'this minute.</div>'+soonStrip(d);
+    return;
+  }
+  $('zones').innerHTML=`
+    <div class="zbar">
+      <span class="dot d-good"></span>
+      <span class="name">CALL NOW</span>
+      <span class="when">${d.ready_count} in their window · best first</span>
+      <span class="tag go">${esc(d.operator.local_time)} your time</span>
+    </div>
+    <div class="zone"><div class="sheetwrap">
+      <table class="sheet">
+        <thead><tr>
+          <th></th><th>BAR</th><th>PHONE</th><th>WHY NOW</th><th>TRY</th>
+          <th>EMAIL</th><th>WHERE</th><th>ACTIONS</th>
+        </tr></thead>
+        <tbody>${d.ready.map((l,i)=>row(l,i+1,true)).join('')}</tbody>
+      </table>
+    </div></div>` + soonStrip(d);
+}
+
+function soonStrip(d){
+  if(!d.soon.length) return '';
+  return '<div class="soon"><span>Next up:</span>'
+    + d.soon.slice(0,6).map(l=>{
+        const w=l.call_window||{};
+        const mins=w.starts_in||0;
+        const pretty=mins>=60?`${Math.floor(mins/60)}h ${mins%60}m`:`${mins}m`;
+        return `<span>${esc(l.name.length>24?l.name.slice(0,23)+'\u2026':l.name)}`
+             + ` — ${pretty}${w.starts_at_yours?` (${esc(w.starts_at_yours)} yours)`:''}</span>`;
+      }).join('') + '</div>';
+}
+
 async function loadCalls(){
+  if(CALLING){
+    await loadNow();
+    loadUndoBar();
+    // Windows open and close on the clock, so a list left sitting goes stale.
+    if(!nowTimer) nowTimer=setInterval(()=>{ if(CALLING&&TAB==='calls') loadNow(); }, 60000);
+    return;
+  }
+  stopNowTimer();
+  $('startBtn').textContent='Ready to start calling';
+  $('startBtn').classList.remove('on');
+  $('clock').innerHTML='';
   const d=await api('/calllist'); LAST=d;
+  loadUndoBar();
   const go = /^Call /.test(d.focus);
   $('focus').className='focus '+(go?'go':'wait');
   $('focus').innerHTML=`<h2>${esc(d.focus)}</h2>
@@ -400,7 +575,27 @@ $('zoneTabs').onclick=e=>{
   ZONE=parseInt(b.dataset.zone,10); PICKED=true; render();
 };
 
-function row(l,n){
+/* Why this row is where it is. The list reorders itself for reasons the
+   screen should state, or it just looks arbitrary. */
+function whyTag(l){
+  if(l.manager_name) return '<span class="why">NAME</span>';
+  if(l.email_kind==='personal') return '<span class="why">DIRECT</span>';
+  return '';
+}
+
+/* Never "ask for Dave" — always "is Dave still there?", with the date the
+   site said so. Managers move constantly; asking after somebody who left two
+   years ago is the thing that sounds bad on a cold call. */
+function ask(l){
+  if(!l.manager_name) return '';
+  const age = l.manager_age_days==null ? ''
+            : l.manager_age_days < 1 ? 'their site, today'
+            : `their site, ${l.manager_age_days}d ago`;
+  return `<div class="ask">Ask if ${esc(l.manager_name)} is still ${esc(l.manager_role||'there')}`
+       + (age?` <span class="age">— ${esc(age)}</span>`:'') + '</div>';
+}
+
+function row(l,n,calling){
   const w=l.call_window||{};
   // A closed venue says so rather than showing a bare dash.
   const shut = w.state==='shut_today' || w.state==='permanently_closed';
@@ -410,13 +605,21 @@ function row(l,n){
   const tries = l.attempts||0;
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}" data-contact="${esc(l.contact||'')}">
     <td class="rownum">${n}</td>
-    <td class="nm" title="${esc(w.hint||l.name)}">${esc(l.name)}
+    <td class="nm" title="${esc(w.hint||l.name)}">${esc(l.name)}${whyTag(l)}
+      ${ask(l)}
       ${l.opener?`<div class="opener">${esc(l.opener)}</div>`:''}</td>
-    <td><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span></td>
-    <td title="${esc(w.hint||'')}">${when}</td>
+    <td><div class="phcell">
+      <span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span>
+      <button class="copybtn" data-act="copy" data-copy="${esc(l.phone_digits)}">COPY</button>
+    </div></td>
+    <td title="${esc(w.hint||'')}">${calling
+      ? `<span class="win-good">${esc((w.hint||'').replace('CALL NOW — ',''))}</span>`
+        + `<div class="opener" style="color:var(--text3)">${esc(w.local_time||'')} there</div>`
+      : when}</td>
     <td>${tries?`<span class="tries">${tries}</span>`:'<span class="muted">—</span>'}</td>
     <td><span class="em" title="${esc(l.email||'')}">${esc(l.email||'')}</span></td>
-    <td class="muted">${esc(l.loc||'')}</td>
+    <td class="muted">${esc(l.loc||'')}${calling&&l.zone
+      ? `<div class="opener" style="color:var(--text3)">${esc(l.zone)}</div>`:''}</td>
     <td><div class="acts">
       <button class="go" data-act="log">Log call</button>
       <button data-act="mail">Email</button>
@@ -440,11 +643,16 @@ async function copyDigits(el){
   try{ await navigator.clipboard.writeText(num); }
   catch{ const t=document.createElement('textarea');t.value=num;document.body.appendChild(t);
          t.select();document.execCommand('copy');t.remove(); }
-  el.classList.add('copied'); setTimeout(()=>el.classList.remove('copied'),1200);
+  const cls=el.classList.contains('copybtn')?'done':'copied';
+  el.classList.add(cls); setTimeout(()=>el.classList.remove(cls),1200);
+  if(el.classList.contains('copybtn')) el.textContent='COPIED';
+  setTimeout(()=>{ if(el.classList.contains('copybtn')) el.textContent='COPY'; },1200);
   toast('Copied '+num);
 }
 
 $('zones').onclick=async e=>{
+  const cp=e.target.closest('[data-act="copy"]');
+  if(cp) return copyDigits(cp);
   const dig=e.target.closest('.digits');
   if(dig) return copyDigits(dig);
 
@@ -472,13 +680,14 @@ $('zones').onclick=async e=>{
     }
     const d=document.createElement('tr');
     d.className='drawer';
-    d.innerHTML=`<td colspan="6">
-      <p class="hint">What happened? Type it however it comes out — it gets sorted into the right fields for you.</p>
+    d.innerHTML=`<td colspan="8">
+      <p class="hint">Type what happened however it comes out and it gets sorted into the right fields — or just hit one of the buttons.</p>
       <textarea placeholder="spoke to Dave the GM, still counting on a clipboard, wants me to call back Tuesday, his email is dave@thebar.com"></textarea>
       <div class="row">
         <button class="go" data-save>Save &amp; next</button>
-        <button data-quick="Left a voicemail, no answer.">Voicemail</button>
-        <button data-quick="Not interested, asked not to be called again.">Not interested</button>
+        <button data-outcome="voicemail" data-note="Left a voicemail, no answer.">Voicemail</button>
+        <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
+        <button data-outcome="not_interested" data-note="Not interested, asked not to be called again.">Not interested</button>
         <button data-cancel>Cancel</button>
       </div>
       <div class="applied hide"></div>
@@ -493,12 +702,28 @@ async function drawerAction(dr,e){
   const ta=dr.querySelector('textarea');
   if(e.target.closest('[data-cancel]')) return dr.remove();
 
-  const quick=e.target.closest('[data-quick]');
-  if(quick) ta.value=quick.dataset.quick;
-  if(!quick && !e.target.closest('[data-save]')) return;
+  /* The three commonest outcomes go straight to /touch with a known outcome.
+     They used to post a canned sentence through the model, which is a paid
+     round trip to be told what the button already said — and it meant the
+     quick path stopped working entirely when no API key was set. Only free
+     text a human actually typed is worth a model. */
+  const quick=e.target.closest('[data-outcome]');
+  if(quick){
+    quick.disabled=true;
+    const typed=ta.value.trim();
+    try{
+      const r=await api(`/leads/${id}/touch`,{method:'POST',body:JSON.stringify({
+        kind:'call', outcome:quick.dataset.outcome,
+        note:typed||quick.dataset.note})});
+      toast(`${quick.textContent} logged — ${r.lead.name}`, r.undo_id);
+      await loadCalls();
+    }catch(err){ quick.disabled=false; toast(err.message); }
+    return;
+  }
+  if(!e.target.closest('[data-save]')) return;
 
   const text=ta.value.trim();
-  if(!text) return toast('Type what happened first');
+  if(!text) return toast('Type what happened, or use one of the buttons');
   const save=dr.querySelector('[data-save]');
   save.disabled=true; save.textContent='Saving…';
   try{
@@ -506,7 +731,7 @@ async function drawerAction(dr,e){
       {method:'POST',body:JSON.stringify({text,kind:'call'})});
     const bits=Object.entries(r.applied).filter(([k])=>k!=='note')
       .map(([k,v])=>`${k.replace(/_/g,' ')}: ${v}`).join(' · ');
-    toast(bits?('Saved — '+bits):'Saved');
+    toast(bits?('Saved — '+bits):'Saved', r.undo_id);
     await loadCalls();
   }catch(err){
     save.disabled=false; save.textContent='Save & next';
