@@ -1006,10 +1006,18 @@ def add_suppression(data: SuppressionCreate, _: bool = Depends(require_crm_key))
         """, (generate_id(), data.kind, data.value.strip(), data.reason, now_iso()))
         row = cursor.fetchone()
         # Retire anything already in the pipeline that this now covers.
-        if data.kind in ("email", "phone"):
-            cursor.execute(
-                f"UPDATE crm_leads SET status='dead', updated_at=%s WHERE LOWER({data.kind}) = LOWER(%s)",
-                (now_iso(), data.value.strip()))
+        # The column is chosen from a literal map rather than interpolated from
+        # data.kind. It was already safe — Pydantic pins kind to a Literal and
+        # the tuple check narrowed it further — but a column name reaching an
+        # f-string from a request body is one widened Literal away from being an
+        # injection, and there is no reason to depend on a guard here.
+        SUPPRESS_SQL = {
+            "email": "UPDATE crm_leads SET status='dead', updated_at=%s WHERE LOWER(email) = LOWER(%s)",
+            "phone": "UPDATE crm_leads SET status='dead', updated_at=%s WHERE LOWER(phone) = LOWER(%s)",
+        }
+        statement = SUPPRESS_SQL.get(data.kind)
+        if statement:
+            cursor.execute(statement, (now_iso(), data.value.strip()))
         conn.commit()
         return {"suppression": dict(row)}
 
@@ -1395,17 +1403,25 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
 
         if status:
             sets.append("status = %s"); params.append(status); applied["status"] = status
-        for field in ("contact", "email", "phone"):
+        # Length caps on model output: these columns are written straight from
+        # whatever the model returned, and a model is perfectly capable of
+        # handing back a paragraph where a name was asked for.
+        FIELD_LIMITS = {"contact": 200, "email": 320, "phone": 50}
+        for field, limit in FIELD_LIMITS.items():
             value = extracted.get(field)
             if isinstance(value, str) and value.strip():
-                sets.append(f"{field} = %s"); params.append(value.strip())
-                applied[field] = value.strip()
+                clean = value.strip()[:limit]
+                sets.append(f"{field} = %s"); params.append(clean)
+                applied[field] = clean
         if followup is not None:
             when = (datetime.now(_reset_tz()) + timedelta(days=followup)).strftime("%Y-%m-%d")
             sets.append("followup_date = %s"); params.append(when)
             applied["followup_date"] = when
 
-        summary = extracted.get("summary") or data.text.strip()
+        summary = extracted.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            summary = data.text.strip()
+        summary = summary.strip()[:2000]
         note = f"[{today}] {data.kind}: {summary}"
         sets.append("notes = COALESCE(notes || E'\\n', '') || %s"); params.append(note)
         applied["note"] = note

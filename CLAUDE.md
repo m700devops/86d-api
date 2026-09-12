@@ -139,6 +139,18 @@ capture. Don't reintroduce them or describe them as current.)
   ~1.5 new cities per day; 58 US metros are seeded, more via `POST /v1/crm/leadgen/cities`
 - A lead is NEVER promoted without both a phone and an email, and never if it's suppressed,
   already in the pipeline, or already a customer
+- **The crawler will not fetch a non-public URL.** `_is_public_http_url()` requires http(s)
+  and resolves the host, rejecting private/loopback/link-local/reserved addresses, and every
+  venue-supplied fetch passes `verify_public=True`. This matters because the `website` tag
+  comes from OpenStreetMap, which anyone can edit: without it, someone could point a bar's
+  website at `http://169.254.169.254/` and have this server fetch its own cloud metadata by
+  editing a map. DNS rebinding would still defeat it; pinning the resolved IP into the
+  request is more machinery than an internal tool warrants
+- `EMAIL_BLOCKLIST` rejects site-builder and platform domains (wix.com, squarespace, toasttab,
+  resy, yelp…) as well as role addresses. A real harvest returned `wixofday@wix.com` as a
+  Portland bar's contact — valid-looking, reaches Wix's marketing team, never the venue. A
+  lead nobody can reply to is worse than no lead: it still costs a call slot. Free mailboxes
+  (gmail etc.) are deliberately NOT blocked — for a small independent bar they're the norm
 - Log lines to grep on Render: `LEADGEN_TABLES_READY`, `LEADGEN_RUN`, `LEADGEN_TABLES_FAILED`
 
 ## CRM SALES TOOLING
@@ -178,7 +190,9 @@ capture. Don't reintroduce them or describe them as current.)
   along with the counters. Uses the SAME providers as the scan path (OpenAI then Gemini), so
   no new key. Everything the model decided is echoed back in `applied` so a misreading is
   visible immediately. With no provider key it 503s with "type the fields in by hand"
-  rather than failing obscurely
+  rather than failing obscurely. Model output is treated as untrusted: `status` is checked
+  against VALID_STATUSES, `followup_in_days` is range-checked, and the free-text fields are
+  length-capped before they reach a column
 
 ## Environment Variables Required
 Source of truth: the `_config_checks` startup list in main.py (~line 52) — it logs what's missing on boot.

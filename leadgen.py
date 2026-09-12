@@ -25,11 +25,14 @@ account, which removes the most boring failure point of all: an expired card
 silently stopping the pipeline.
 """
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -85,10 +88,24 @@ OBFUSCATED_RE = re.compile(
 )
 
 # Addresses that are never a bar owner: platform noise, tracking, stock images.
+#
+# The @domain entries matter as much as the rest. Site builders leave their own
+# addresses in template markup — a real harvest produced "wixofday@wix.com" as
+# the contact for a Portland bar, which is a perfectly valid-looking email that
+# reaches Wix's marketing team and never the venue. A lead nobody can reply to
+# is worse than no lead, because it still costs a call slot and a follow-up.
+PLATFORM_DOMAINS = (
+    r"wix\.com|wixpress\.com|squarespace\.com|weebly\.com|godaddy\.com|"
+    r"shopify\.com|cloudflare\.com|sentry\.io|wordpress\.com|bluehost\.com|"
+    r"hostgator\.com|networksolutions\.com|register\.com|domainsbyproxy\.com|"
+    r"squareup\.com|toasttab\.com|opentable\.com|resy\.com|yelp\.com|"
+    r"doordash\.com|grubhub\.com|ubereats\.com|facebook\.com|instagram\.com"
+)
 EMAIL_BLOCKLIST = re.compile(
     r"(sentry|wixpress|squarespace|godaddy|shopify|cloudflare|example\.(com|org)|"
     r"your(email|name)|email@|name@|user@|test@|no-?reply|donotreply|postmaster|"
-    r"abuse@|webmaster@|@sentry\.io|@2x|\.png|\.jpe?g|\.gif|\.svg|\.webp|\.css|\.js)",
+    r"abuse@|webmaster@|@2x|\.png|\.jpe?g|\.gif|\.svg|\.webp|\.css|\.js"
+    rf"|@(?:{PLATFORM_DOMAINS})$)",
     re.I,
 )
 
@@ -136,8 +153,54 @@ LIQUOR_HINTS = re.compile(
 # hard-stops on a timeout without any of them being able to hang a worker
 # thread, and it is already present everywhere this runs.
 
-def _http(url: str, timeout: int = 20, data: Optional[str] = None) -> tuple[str, int]:
-    """Returns (body, status). Never raises — a failed fetch is ('', 0)."""
+def _is_public_http_url(url: str) -> bool:
+    """Reject anything that isn't a plain http(s) URL resolving to a public IP.
+
+    This matters because the crawler follows a `website` tag out of
+    OpenStreetMap, which ANYONE can edit. Without this check, someone could
+    point a bar's website at http://169.254.169.254/ and have this server
+    fetch its own cloud metadata, or sweep Render's private network, simply by
+    editing a map. The pool is internal and the body is never returned to a
+    caller, but "our server will fetch any URL a stranger writes down" is not a
+    property worth having.
+
+    A determined attacker could still beat this with DNS rebinding — the name
+    resolves public here and private when curl resolves it again. Closing that
+    properly means pinning the resolved address into the request, which is more
+    machinery than an internal lead tool warrants; this stops the whole class of
+    casual abuse, which is the realistic threat.
+    """
+    try:
+        parts = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(parts.hostname, None)
+    except (socket.gaierror, UnicodeError):
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
+
+
+def _http(url: str, timeout: int = 20, data: Optional[str] = None,
+          verify_public: bool = False) -> tuple[str, int]:
+    """Returns (body, status). Never raises — a failed fetch is ('', 0).
+
+    `verify_public` is set for anything crawled from map data; the fixed
+    Overpass and Nominatim endpoints skip the extra DNS round trip.
+    """
+    if verify_public and not _is_public_http_url(url):
+        print(f"[leadgen] refusing non-public URL: {url[:120]}", flush=True)
+        return "", 0
     cmd = [
         "curl", "-sSL", "--compressed",
         "--max-time", str(timeout),
@@ -576,7 +639,7 @@ def enrich_candidate(cand: dict) -> dict:
     email_source = None
     fetched = 0
 
-    home, status = _http(website, timeout=PAGE_TIMEOUT)
+    home, status = _http(website, timeout=PAGE_TIMEOUT, verify_public=True)
     fetched += 1
     if status != 200 or not home:
         return {"status": "rejected", "reject_reason": f"site unreachable (HTTP {status})",
@@ -594,6 +657,10 @@ def enrich_candidate(cand: dict) -> dict:
             if href.startswith(("mailto:", "tel:", "#", "javascript:")):
                 continue
             full = urllib.parse.urljoin(website, href)
+            # http(s) only — urljoin will happily carry a file:// or data: href
+            # straight through from the page.
+            if not full.lower().startswith(("http://", "https://")):
+                continue
             # Stay on the venue's own site; an off-site link is a social
             # profile or a booking platform, not their contact page.
             if domain_of(full) != domain_of(website):
@@ -608,7 +675,7 @@ def enrich_candidate(cand: dict) -> dict:
         for url in candidates_urls:
             if fetched >= MAX_PAGES_PER_SITE:
                 break
-            body, status = _http(url, timeout=PAGE_TIMEOUT)
+            body, status = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
             fetched += 1
             if status != 200 or not body:
                 continue
