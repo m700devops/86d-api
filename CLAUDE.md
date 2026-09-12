@@ -24,7 +24,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   its own shared-key auth. Deliberately self-contained (own models, own auth, own tables) —
   it shares a process and a database with the product API but is not part of the product.
   Nothing in the inventory/scan/order paths reads from it. See the CRM section below
-- static/crm.html — the CRM UI, served at `/crm`. Single self-contained file, no build step;
+- static/crm.html — the CRM UI, served at `/crm`. **Three tabs only** — Call list, CRM,
+  Follow-ups — with Numbers and Lead engine behind a burger top right: those are looked at
+  occasionally and thought about once, and in the tab row they competed with the three things
+  a working day actually needs. The burger turns orange when the open page lives inside it. Single self-contained file, no build step;
   replacing this file replaces the UI. Holds no credentials — the operator types the key and
   it lives in their browser's localStorage. **Designed for an operator with ADHD**: one
   headline stating the single next action, a shrinking list as the progress bar, two rows of
@@ -48,6 +51,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   path order confirmations use — those stay on Resend in main.py, because mixing
   transactional mail with cold outreach on one reputation means a few spam complaints from
   strangers start bouncing customers' receipts
+- venue.py — what's true about a bar, for the thirty seconds before you dial: cuisine, size,
+  hours (a volume proxy), how long it's been open, address. Every fact is EXTRACTED from
+  either the harvested OSM tags or the venue's OWN site text, and **carries its source** —
+  `facts_to_lines()` reads the source off the fact rather than assuming it. A year from the
+  map is phrased "map lists it opening 2025", a year from their site "open since 1974",
+  because OSM's `start_date` is often a survey date and asserting it on a call is the moment
+  they decide you're reading a script. Covered by test_venue.py
 - contacts.py — what makes a contact worth having. `find_manager()` (a name to ask for),
   `email_kind()` (personal / owner / role / unknown), and `EMAIL_BLOCKLIST`. The blocklist
   lives here rather than in leadgen.py so it can be tested without a database — leadgen
@@ -69,7 +79,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
-  test_callwindow.py test_timezones.py test_contacts.py -q` (201 tests)
+  test_callwindow.py test_timezones.py test_contacts.py test_venue.py -q` (215 tests)
 
 ## AI Vision Rules
 - `POST /v1/scans/analyze` (main.py:3590) tries OpenAI first, falls through to Gemini on timeout/error —
@@ -370,6 +380,11 @@ capture. Don't reintroduce them or describe them as current.)
   against reality. Once a few hundred dials are logged, move the window to match the data
   rather than trusting the heuristic. It reports thin data honestly rather than dressing up
   noise
+- **`GET /leads/{id}/brief` is the pre-call sheet.** Facts from venue.py first, each labelled
+  with where it came from; then two or three talking points Claude writes FROM THOSE FACTS
+  ONLY, cached in `call_brief` so nobody waits on a model with a phone in their hand. A model
+  outage returns the facts alone rather than nothing — the facts are the part that had to be
+  true anyway
 - **Claude drafts the email on request.** `POST /v1/crm/leads/{id}/draft-email` takes a
   sentence of intent ("Ed wants more info, include a link to the app and my website") and
   returns a subject and body into the compose box. Send the CURRENT draft back with the next
