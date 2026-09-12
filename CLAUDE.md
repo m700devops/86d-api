@@ -41,9 +41,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   (service × timezone) cells the page, the API and the generator all have to agree on. One
   definition on purpose: three copies would drift and the tabs would stop matching what gets
   generated. See THE CALL LIST below for the heuristic
-- contacts.py — two things that reorder the call list, both read only from the venue's own
-  site: `find_manager()` (a name to ask for) and `email_kind()` (personal / owner / role /
-  unknown). A manager name is NEVER verified and cannot be — managers turn over constantly,
+- contacts.py — what makes a contact worth having. `find_manager()` (a name to ask for),
+  `email_kind()` (personal / owner / role / unknown), and `EMAIL_BLOCKLIST`. The blocklist
+  lives here rather than in leadgen.py so it can be tested without a database — leadgen
+  imports `database`, which raises at import time without `DATABASE_URL`. A manager name is NEVER verified and cannot be — managers turn over constantly,
   so a name is only taken when a ROLE WORD sits next to it, the page and date are stored
   with it, and the UI says "Ask if X is still the GM" rather than "ask for X". Measured: 1
   usable name in 22 reachable bar sites. Missing one costs nothing; inventing one costs the
@@ -61,7 +62,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
-  test_callwindow.py test_timezones.py test_contacts.py -q` (199 tests)
+  test_callwindow.py test_timezones.py test_contacts.py -q` (201 tests)
 
 ## AI Vision Rules
 - `POST /v1/scans/analyze` (main.py:3590) tries OpenAI first, falls through to Gemini on timeout/error —
@@ -201,10 +202,28 @@ capture. Don't reintroduce them or describe them as current.)
   they only decide order, which is what matters when fifty names are in front of you
 - A personal mailbox (`dave@divebar.com`) scores +4 and a named manager +5: both mean the
   call has somewhere to land, and both are rare enough to be worth putting first
-- `TEMPLATE_EMAILS` / `MACHINE_LOCAL` block stock website placeholders (`your@email.com`,
-  `mymail@mailservice.com`) and script-generated addresses (`bank<uuid>@test.com`). All three
-  came out of real harvests. These matter more than they look: a placeholder reads as a
-  PERSONAL mailbox, so it sorted to the top of the call list and reached nobody
+- **An email with no recorded `email_source` is never promoted, whatever it looks like.**
+  Every address this pipeline produces records the page it was read off; one that doesn't
+  was never crawled, so nothing can vouch for it. Fourteen rows in a test database carried a
+  `bank<uuid>@test.com` with a NULL source and a NULL `enriched_at` and still reached the top
+  of the call list, because "has an email" was the only test in the way. The blocklist
+  catches shapes we've seen; this catches the ones we haven't
+- **`extract_emails()` ignores `<script>`, `<style>` and HTML comments** (`_NON_CONTENT_RE`).
+  Addresses in there were written by a developer or a library, never the venue — a real bar's
+  homepage carries a jQuery message reading "Please use the format email@example.com", and
+  widget config is where machine-shaped addresses come from. `mailto:` hrefs are still read
+  from the raw HTML: that's an address a human deliberately published
+- `TEMPLATE_EMAILS` / `MACHINE_LOCAL` (in contacts.py) block stock website placeholders
+  (`your@email.com`, `mymail@mailservice.com`) and machine-generated addresses. These matter
+  more than they look: a placeholder reads as a PERSONAL mailbox, so it sorted to the TOP of
+  the call list and reached nobody
+- `_reconcile_bad_emails()` runs every boot beside `_reconcile_timezones()`. It strips
+  unsourced/blocklisted addresses from candidates (back to `status='new'` so the next run
+  re-crawls them) and from leads, and re-runs `email_kind()` on every lead so a row
+  classified by an older rule isn't sorted by a rule that no longer applies. **The lead is
+  kept, never deleted** — the venue and its validated phone number are real; only the address
+  goes. Leads with `source` other than `'leadgen'` are left alone entirely: a manually
+  entered address is the operator's own data
 - **The phone is validated twice: at harvest and again at promote** (`phones.normalize_us_phone`).
   The second check is not redundant — rows banked by an earlier build predate the validator,
   and promote is the last gate before a number reaches a dialer. `phone_digits` in crm.py

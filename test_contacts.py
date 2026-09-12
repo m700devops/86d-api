@@ -111,7 +111,7 @@ def test_email_kind(email, kind):
 # They matter more than they look: a template placeholder reads as a personal
 # mailbox, so it sorted to the TOP of the list and reached nobody at all.
 
-from leadgen import EMAIL_BLOCKLIST  # noqa: E402
+from contacts import EMAIL_BLOCKLIST  # noqa: E402
 
 
 @pytest.mark.parametrize("email", [
@@ -137,3 +137,39 @@ def test_junk_addresses_are_blocked(email):
 ])
 def test_real_addresses_survive(email):
     assert not EMAIL_BLOCKLIST.search(email)
+
+
+
+# ── What a crawler may read an address off ──────────────────────────────────
+
+def test_addresses_in_script_and_style_are_not_contacts():
+    """A live bug this caught: a jQuery validation message on a real bar's
+    homepage reads "Please use the format email@example.com", and the crawler
+    was pulling addresses straight out of raw HTML — script bodies included.
+    Anything in there was written by a developer or a library, never by the
+    venue, and is exactly where machine-shaped addresses come from."""
+    import os
+    os.environ.setdefault("DATABASE_URL", "postgresql://localhost/unused")
+    from leadgen import extract_emails
+
+    html = """
+      <a href="mailto:real@bar.com">Email us</a>
+      <script>
+        var msg = "use the format email@example.com";
+        track("a1b2c3d4-0000-1111-2222-333344445555@segment.io");
+      </script>
+      <style>/* theme@builder.com */</style>
+      <!-- old contact: designer@agency.com -->
+      <p>Bookings: events@bar.com</p>
+    """
+    got = extract_emails(html)
+    assert set(got) == {"real@bar.com", "events@bar.com"}
+
+
+def test_a_mailto_link_still_counts_even_though_it_is_markup():
+    import os
+    os.environ.setdefault("DATABASE_URL", "postgresql://localhost/unused")
+    from leadgen import extract_emails
+    # An address a human deliberately published, and often the only one on the
+    # page — losing it to the script filter would cost real leads.
+    assert extract_emails('<a href="mailto:gm@thebar.com">contact</a>') == ["gm@thebar.com"]
