@@ -388,9 +388,54 @@ def init_leadgen_tables():
             cursor.execute("SELECT COUNT(*) AS n FROM crm_leadgen_cities")
             city_count = cursor.fetchone()["n"]
 
+        moved = _reconcile_timezones(cursor)
+        conn.commit()
+
         print(f"[leadgen] LEADGEN_TABLES_READY cities={city_count} "
-              f"daily_target={DAILY_TARGET} max_active={MAX_ACTIVE} "
-              f"pool_floor={POOL_FLOOR}", flush=True)
+              f"bucket_target={BUCKET_TARGET} max_active={MAX_ACTIVE} "
+              f"daily_target={DAILY_TARGET} pool_floor={POOL_FLOOR}"
+              + (f" retimezoned={moved}" if moved else ""), flush=True)
+
+
+def _reconcile_timezones(cursor) -> int:
+    """Re-file any row whose stored zone disagrees with the current rule.
+
+    Idempotent and cheap, so it runs every boot rather than once. A one-shot
+    migration would fix today's rows and then be wrong again the next time a
+    boundary is corrected — and a lead in the wrong tab is called during its
+    dinner service, which is the mistake the tabs exist to prevent. Nothing
+    sets these by hand, so there is no operator edit to clobber.
+    """
+    moved = 0
+    cursor.execute("""
+        SELECT id, lat, lon, state, tz_offset_hours FROM crm_lead_candidates
+         WHERE lon IS NOT NULL
+    """)
+    for row in cursor.fetchall():
+        correct = us_tz_offset(row["lon"], row["state"], row["lat"])
+        if correct is not None and correct != row["tz_offset_hours"]:
+            cursor.execute(
+                "UPDATE crm_lead_candidates SET tz_offset_hours=%s WHERE id=%s",
+                (correct, row["id"]))
+            moved += 1
+
+    # crm_leads keeps no coordinates, only "City, ST" — enough for the state
+    # rule, which is the part that was wrong. A lead whose loc has no state
+    # code is left alone rather than guessed at.
+    cursor.execute("""
+        SELECT id, loc, tz_offset_hours FROM crm_leads
+         WHERE source = 'leadgen' AND loc IS NOT NULL AND loc <> ''
+    """)
+    for row in cursor.fetchall():
+        state = (row["loc"].rsplit(",", 1)[-1] or "").strip().upper()
+        if len(state) != 2 or state in _SPLIT_STATES or state in _LAT_SPLIT_STATES:
+            continue          # no state, or one that needs coordinates we lack
+        correct = _STATE_TZ.get(state)
+        if correct is not None and correct != row["tz_offset_hours"]:
+            cursor.execute("UPDATE crm_leads SET tz_offset_hours=%s WHERE id=%s",
+                           (correct, row["id"]))
+            moved += 1
+    return moved
 
 
 # A starting territory list: US metros with real bar density. Coordinates are
@@ -466,13 +511,74 @@ def domain_of(url: str) -> str:
     return m.group(1).lower().removeprefix("www.")
 
 
-def us_tz_offset(lon: Optional[float]) -> Optional[int]:
-    """Rough UTC offset from longitude, for the call-window hint.
+# Dominant timezone per US state. The Central/Mountain boundary is not a
+# meridian — it runs through west Texas, Kansas, Nebraska and the Dakotas — so
+# longitude alone cannot get Texas right. A plain -97.5 cutoff put AUSTIN
+# (-97.74), SAN ANTONIO (-98.49) and OKLAHOMA CITY (-97.51) in Mountain, all
+# three an hour wrong. That was survivable when the offset only tinted a hint;
+# now that the zones are tabs and the whole workflow is "work west as the rush
+# moves", an hour wrong is exactly the mistake the tabs exist to prevent.
+_STATE_TZ = {
+    # Eastern
+    "CT": -5, "DC": -5, "DE": -5, "GA": -5, "MA": -5, "MD": -5, "ME": -5,
+    "NC": -5, "NH": -5, "NJ": -5, "NY": -5, "OH": -5, "PA": -5, "RI": -5,
+    "SC": -5, "VA": -5, "VT": -5, "WV": -5,
+    # Central
+    "AL": -6, "AR": -6, "IA": -6, "IL": -6, "LA": -6, "MN": -6, "MO": -6,
+    "MS": -6, "OK": -6, "TX": -6, "WI": -6,
+    # Mountain
+    "AZ": -7, "CO": -7, "MT": -7, "NM": -7, "UT": -7, "WY": -7,
+    # Pacific
+    "CA": -8, "NV": -8, "WA": -8,
+}
+# States genuinely split by the line, where longitude decides which side.
+# (state, cutoff, west_of_cutoff, east_of_cutoff)
+_SPLIT_STATES = {
+    "TX": (-104.9, -7, -6),    # only El Paso and Hudspeth are Mountain
+    "FL": (-85.0, -6, -5),     # the panhandle west of the Apalachicola
+    "IN": (-86.7, -6, -5),     # the Gary and Evansville corners
+    "KY": (-86.0, -6, -5),     # Louisville and Lexington Eastern, Bowling Green Central
+    "TN": (-85.5, -6, -5),     # Nashville Central, Knoxville and Chattanooga Eastern
+    "MI": (-87.5, -6, -5),     # the four Central counties at the Wisconsin end of the UP
+    "KS": (-101.5, -7, -6),
+    "NE": (-101.5, -7, -6),
+    "ND": (-102.0, -7, -6),    # Bismarck is Central; the Mountain counties are the SW corner
+    "SD": (-100.5, -7, -6),
+    "OR": (-117.5, -8, -7),
+    "NV": (-114.1, -8, -7),
+}
+# Idaho is the one state the line crosses horizontally rather than vertically:
+# the northern panhandle is Pacific, everything from the Salmon River south —
+# Boise included — is Mountain. Splitting it by longitude puts Boise (-116.2)
+# in Pacific, an hour wrong for the state's largest city.
+_LAT_SPLIT_STATES = {
+    "ID": (45.5, -8, -7),      # (cutoff, north of it, south of it)
+}
 
-    Deliberately crude — this only decides whether to show "good time to call"
-    next to a phone number, and being an hour out never costs more than a
-    voicemail. Standard time; DST is not modelled.
+
+def us_tz_offset(lon: Optional[float], state: Optional[str] = None,
+                 lat: Optional[float] = None) -> Optional[int]:
+    """UTC offset for the call window, from the state where we know it.
+
+    Standard time; DST is not modelled, which is fine — it shifts every zone
+    together, so the ORDER the afternoon rolls west is unchanged and that
+    ordering is what the tabs are for.
     """
+    code = (state or "").strip().upper()[:2]
+    if code in _LAT_SPLIT_STATES and lat is not None:
+        cutoff, north, south = _LAT_SPLIT_STATES[code]
+        return north if lat > cutoff else south
+    if code in _SPLIT_STATES and lon is not None:
+        cutoff, west, east = _SPLIT_STATES[code]
+        return west if lon < cutoff else east
+    if code in _STATE_TZ:
+        return _STATE_TZ[code]
+    if code in _LAT_SPLIT_STATES:
+        return _LAT_SPLIT_STATES[code][2]      # no latitude: the bigger half
+
+    # No usable state: fall back to longitude. Still wrong for the split
+    # states, but every seeded city carries a state, so this is the path for
+    # anything added later without one.
     if lon is None:
         return None
     if lon > -82.5:
@@ -688,7 +794,7 @@ out center tags;
                 generate_id(), source_ref, name, city["name"], city.get("state"),
                 lat, lon, phone, website, tags.get("amenity"),
                 json.dumps(tags)[:8000], (tags.get("opening_hours") or "").strip() or None,
-                us_tz_offset(lon), now,
+                us_tz_offset(lon, city.get("state"), lat), now,
             ))
             inserted += cursor.rowcount
 
@@ -1076,7 +1182,8 @@ def _next_cities(limit: int) -> list[dict]:
         cities = [dict(r) for r in cursor.fetchall()]
 
     def rank(city: dict):
-        zone = us_tz_offset(city.get("lon"))
+        zone = us_tz_offset(city.get("lon"), city.get("state"),
+                            city.get("lat"))
         # Negated: biggest shortfall first. Never-harvested breaks the tie,
         # then oldest — so a short zone still rotates through its own cities
         # instead of re-harvesting one of them forever.

@@ -51,9 +51,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   crm_leads each morning). See the LEAD GENERATOR section below
 - seed_data.py — default product catalog
 - test_level_classifier.py — unit tests for helpers.py level logic
-- test_phones.py, test_callwindow.py — the phone validator and the call-window/service-band
-  logic, both pure. Run all three: `pytest test_level_classifier.py test_phones.py
-  test_callwindow.py -q`
+- test_phones.py, test_callwindow.py, test_timezones.py — the phone validator, the
+  call-window/service-band logic and timezone assignment, all pure. Run them:
+  `pytest test_level_classifier.py test_phones.py test_callwindow.py test_timezones.py -q`
+  (149 tests)
 
 ## AI Vision Rules
 - `POST /v1/scans/analyze` (main.py:3590) tries OpenAI first, falls through to Gemini on timeout/error —
@@ -206,8 +207,19 @@ capture. Don't reintroduce them or describe them as current.)
 - `GET /v1/crm/funnel` — signups, trials by days-remaining, trial→paid, **activation**
   (signed up but never finished a first count), pipeline and per-channel win rates
 - `GET /v1/crm/queue` — overdue follow-ups, due today, never called, each with a call-window
-  hint. Bars are shut mornings and slammed evenings; the window is 2-5pm local, derived
-  crudely from longitude (`us_tz_offset`), which is only ever used to label a phone number
+  hint, per venue (see THE CALL LIST)
+- **Timezone is decided by STATE, not longitude** (`us_tz_offset(lon, state, lat)`). The
+  Central/Mountain line runs through west Texas, Kansas, Nebraska and the Dakotas, so a
+  meridian cutoff cannot get Texas right: the old -97.5 rule put Austin, San Antonio and
+  Oklahoma City in Mountain, and Atlanta in Central — 52 real Atlanta bars filed an hour
+  early. `_SPLIT_STATES` handles the states the line genuinely crosses by longitude;
+  Idaho is in `_LAT_SPLIT_STATES` because its line runs east-west (Boise is Mountain,
+  the panhandle is Pacific). Covered by test_timezones.py
+- `_reconcile_timezones()` runs on EVERY boot from `init_leadgen_tables()` and re-files any
+  row whose stored zone disagrees with the current rule. Deliberately not a one-shot
+  migration: that would fix today's rows and be wrong again the next time a boundary is
+  corrected, and a lead in the wrong tab is called during its dinner service. Idempotent
+  and cheap; nothing sets these by hand so there is no operator edit to clobber
 - `POST /v1/crm/leads/{id}/touch` — one call that stamps the date, moves the status, sets the
   follow-up, appends a dated note and spends both counters IN ONE TRANSACTION. That
   atomicity is what stops the activity numbers drifting from the pipeline
