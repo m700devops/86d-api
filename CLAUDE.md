@@ -305,6 +305,23 @@ capture. Don't reintroduce them or describe them as current.)
   to ring a bar that is still locked. `us_tz_name()` in leadgen.py; `_reconcile_timezones()`
   backfills it
 
+## THE PIPELINE TAB (every lead, at every stage)
+- `GET /v1/crm/leads?status=&q=&limit=&offset=` — the whole book, searchable and paged, plus
+  `GET /v1/crm/leads/{id}` for the edit form. **This is the only screen that shows a lead
+  AFTER it has been worked.** The call list deliberately hides anything touched — that's what
+  stops the same bar being rung twice — and Follow-ups only shows what's due, so before this
+  tab existed a bar you spoke to on Tuesday and forgot to book a callback for was invisible.
+  That is how warm leads quietly die
+- `q` searches name, town, contact, email and phone. The phone match strips punctuation on
+  both sides, so "6157429095" finds "+1-615-742-9095"
+- Stage counts on the tabs are for the WHOLE pipeline, never for the current filter — a tab
+  that renumbers itself when you click it is unreadable
+- Eight columns, not ten: the contact's name sits under the bar's, and last-touch/next-due are
+  one column. At ten the action buttons fell off the right-hand edge, and the buttons are the
+  point of the screen
+- Edit, Log, Email and Delete all work inline here, sharing the same endpoints (and the same
+  undo) as the call list
+
 ## THE CALL LIST (the screen the operator actually lives in)
 - `GET /v1/crm/calllist` — every unworked lead, split BY SERVICE then BY TIMEZONE. Two levels
   because they answer two questions: the service tab answers "it's 11am, who is even open?"

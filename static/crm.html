@@ -65,6 +65,18 @@
   .svc button.on .t{color:var(--accent)}
   .svc button .n{float:right;font-weight:700;font-size:15px;color:var(--text2)}
 
+  .pipebar{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+  .pipebar input{flex:1;min-width:220px}
+  .pipebar button{flex:none;white-space:nowrap}
+  .st{display:inline-block;font-size:10px;font-weight:800;letter-spacing:0.5px;
+      padding:2px 8px;border-radius:5px;border:1px solid var(--line2);color:var(--text2)}
+  .st-new{color:var(--text2)}
+  .st-contacted{color:#7FB2FF;border-color:#7FB2FF44;background:#7FB2FF12}
+  .st-warm{color:var(--wait);border-color:#FFB02055;background:#FFB02012}
+  .st-won{color:var(--go);border-color:#3DD68C55;background:#3DD68C14}
+  .st-dead{color:var(--stop);border-color:#F0616D44;background:#F0616D10}
+  .pipefoot{display:flex;justify-content:space-between;align-items:center;gap:10px;
+            margin-top:12px;color:var(--text3);font-size:12px;flex-wrap:wrap}
   .zt{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
   .zt button{border-radius:999px;padding:7px 14px;font-size:13px;display:flex;
              align-items:center;gap:7px}
@@ -201,6 +213,7 @@
 
     <div class="tabs" id="tabs">
       <button data-tab="calls" class="on">Call list</button>
+      <button data-tab="pipeline">Pipeline</button>
       <button data-tab="followups">Follow-ups</button>
       <button data-tab="numbers">Numbers</button>
       <button data-tab="engine">Lead engine</button>
@@ -216,6 +229,15 @@
       <div class="svc" id="svcTabs"></div>
       <div class="zt" id="zoneTabs"></div>
       <div id="zones"></div>
+    </section>
+
+    <section data-panel="pipeline" class="hide">
+      <div class="pipebar">
+        <input id="pipeSearch" placeholder="Search a bar, town, contact, email or phone number…">
+        <button class="go" id="pipeAdd">Add a lead</button>
+      </div>
+      <div class="zt" id="pipeTabs"></div>
+      <div id="pipeBody"></div>
     </section>
 
     <section data-panel="followups" class="hide">
@@ -341,7 +363,8 @@ $('tabs').onclick=e=>{
   TAB=b.dataset.tab;
   document.querySelectorAll('#tabs button').forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
-  ({calls:loadCalls,followups:loadFollowups,numbers:loadNumbers,engine:loadEngine}[TAB])()
+  ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
+    numbers:loadNumbers,engine:loadEngine}[TAB])()
     .catch(e=>toast(e.message));
 };
 
@@ -801,6 +824,235 @@ async function drawerAction(dr,e){
     box.className='applied err'; box.textContent=err.message;
   }
 }
+
+/* ── the pipeline ─────────────────────────────────────────────────────────
+   Everything, at every stage. This is the only screen that shows a lead AFTER
+   it has been worked: the call list hides anything touched, which is what
+   stops the same bar being rung twice, and follow-ups only shows what's due.
+   Without this, a bar you spoke to on Tuesday and forgot to book a callback
+   for is invisible — which is how warm leads quietly die. */
+let PIPE={status:'',q:'',offset:0};
+let pipeTimer=null;
+
+const STATUSES=[['','Everything'],['new','Not called'],['contacted','Contacted'],
+                ['warm','Warm'],['won','Won'],['dead','Dead']];
+
+async function loadPipeline(){
+  const qs=new URLSearchParams();
+  if(PIPE.status) qs.set('status',PIPE.status);
+  if(PIPE.q) qs.set('q',PIPE.q);
+  qs.set('offset',PIPE.offset); qs.set('limit',100);
+  const d=await api('/leads?'+qs);
+
+  $('pipeTabs').innerHTML=STATUSES.map(([key,label])=>`
+    <button data-status="${esc(key)}" class="${key===PIPE.status?'on':''}">
+      ${esc(label)} <span class="c">${d.counts[key||'all']??0}</span>
+    </button>`).join('');
+
+  if(!d.leads.length){
+    $('pipeBody').innerHTML=`<div class="card muted">${
+      PIPE.q ? 'Nothing matches “'+esc(PIPE.q)+'”.'
+             : 'No leads at this stage yet.'}</div>`;
+    return;
+  }
+
+  $('pipeBody').innerHTML=`
+    <div class="zone"><div class="sheetwrap">
+      <table class="sheet">
+        <thead><tr>
+          <th></th><th>BAR</th><th>STAGE</th><th>PHONE</th>
+          <th>EMAIL</th><th>WHERE</th><th>ACTIVITY</th><th>ACTIONS</th>
+        </tr></thead>
+        <tbody>${d.leads.map((l,i)=>pipeRow(l,PIPE.offset+i+1)).join('')}</tbody>
+      </table>
+    </div></div>
+    <div class="pipefoot">
+      <span>Showing ${PIPE.offset+1}–${PIPE.offset+d.count} of ${d.matching}</span>
+      <span>
+        <button data-page="-1" ${PIPE.offset?'':'disabled'}>← Back</button>
+        <button data-page="1" ${PIPE.offset+d.count<d.matching?'':'disabled'}>More →</button>
+      </span>
+    </div>`;
+}
+
+function pipeRow(l,n){
+  // Ten columns pushed the buttons off the right-hand edge, and the buttons
+  // are the point of this screen. The contact's name belongs under the bar's
+  // anyway, and "last touched" and "next due" are one thought, not two.
+  const touch=(l.last_touch_at||'').slice(0,10);
+  const activity=[
+    touch ? touch : 'never called',
+    l.attempts ? `${l.attempts} tr${l.attempts>1?'ies':'y'}` : '',
+  ].filter(Boolean).join(' · ');
+  const sub=[l.contact && `Ask for ${l.contact}`,
+             l.manager_name && !l.contact &&
+               `Ask if ${l.manager_name} is still ${l.manager_role||'there'}`]
+            .filter(Boolean)[0];
+  return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}"
+              data-contact="${esc(l.contact||'')}">
+    <td class="rownum">${n}</td>
+    <td class="nm">${esc(l.name)}${sub?`<div class="ask">${esc(sub)}</div>`:''}</td>
+    <td><span class="st st-${esc(l.status)}">${esc(l.status.toUpperCase())}</span></td>
+    <td>${l.phone_digits
+      ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span>`
+        +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_digits)}">COPY</button></div>`
+      : '<span class="muted">—</span>'}</td>
+    <td><span class="em" title="${esc(l.email||'')}">${esc(l.email||'')}</span></td>
+    <td class="muted">${esc(l.loc||'')}</td>
+    <td class="muted">${esc(activity)}${l.followup_date
+      ? `<div class="opener" style="color:var(--wait)">next ${esc(l.followup_date)}</div>`:''}</td>
+    <td><div class="acts">
+      <button class="go" data-act="log">Log</button>
+      <button data-act="mail">Email</button>
+      <button data-act="edit">Edit</button>
+      <button class="del" data-act="del">✕</button>
+    </div></td>
+  </tr>`;
+}
+
+$('pipeTabs').onclick=e=>{
+  const b=e.target.closest('button[data-status]'); if(!b) return;
+  PIPE.status=b.dataset.status; PIPE.offset=0; loadPipeline().catch(x=>toast(x.message));
+};
+$('pipeSearch').oninput=e=>{
+  // Debounced: every keystroke is a query otherwise, and the table redrawing
+  // under your fingers is worse than waiting a moment for it.
+  clearTimeout(pipeTimer);
+  const v=e.target.value;
+  pipeTimer=setTimeout(()=>{ PIPE.q=v; PIPE.offset=0;
+    loadPipeline().catch(x=>toast(x.message)); }, 250);
+};
+
+$('pipeBody').onclick=async e=>{
+  const page=e.target.closest('button[data-page]');
+  if(page){ PIPE.offset=Math.max(0,PIPE.offset+(+page.dataset.page)*100);
+            return loadPipeline().catch(x=>toast(x.message)); }
+
+  const cp=e.target.closest('[data-act="copy"]'); if(cp) return copyDigits(cp);
+  const dig=e.target.closest('.digits'); if(dig) return copyDigits(dig);
+
+  const dr=e.target.closest('.drawer');
+  if(dr) return pipeDrawer(dr,e);
+
+  const btn=e.target.closest('button[data-act]'); if(!btn) return;
+  const tr=btn.closest('tr'); const id=tr.dataset.id;
+
+  if(btn.dataset.act==='del'){
+    if(!confirm('Delete this lead? It will not come back.')) return;
+    try{ await api('/leads/'+id,{method:'DELETE'}); toast('Deleted'); await loadPipeline(); }
+    catch(err){ toast(err.message); }
+    return;
+  }
+  if(tr.nextElementSibling?.classList.contains('drawer')){
+    tr.nextElementSibling.remove(); return;
+  }
+  const d=document.createElement('tr'); d.className='drawer';
+  if(btn.dataset.act==='edit'){
+    let l;
+    try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
+    d.dataset.mode='edit';
+    d.innerHTML=`<td colspan="8">
+      <div class="mailrow"><label>Stage</label>
+        <select data-f="status">${STATUSES.filter(x=>x[0]).map(([k,v])=>
+          `<option value="${k}" ${k===l.status?'selected':''}>${v}</option>`).join('')}</select></div>
+      <div class="mailrow"><label>Contact</label><input data-f="contact" value="${esc(l.contact||'')}"></div>
+      <div class="mailrow"><label>Phone</label><input data-f="phone" value="${esc(l.phone||'')}"></div>
+      <div class="mailrow"><label>Email</label><input data-f="email" value="${esc(l.email||'')}"></div>
+      <div class="mailrow"><label>Callback</label><input data-f="followup_date" placeholder="YYYY-MM-DD" value="${esc(l.followup_date||'')}"></div>
+      <p class="hint" style="margin:10px 0 4px">Notes</p>
+      <textarea data-f="notes" rows="5">${esc(l.notes||'')}</textarea>
+      <div class="row"><button class="go" data-save-lead>Save</button>
+        <button data-cancel>Cancel</button></div>
+      <div class="applied hide"></div></td>`;
+  } else if(btn.dataset.act==='log'){
+    d.dataset.mode='log';
+    d.innerHTML=`<td colspan="8">
+      <p class="hint">What happened? Type it however it comes out, or hit a button.</p>
+      <textarea rows="3" placeholder="spoke to Dave, wants a callback Tuesday"></textarea>
+      <div class="row">
+        <button class="go" data-save>Save</button>
+        <button data-outcome="voicemail" data-note="Left a voicemail, no answer.">Voicemail</button>
+        <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
+        <button data-outcome="not_interested" data-note="Not interested.">Not interested</button>
+        <button data-cancel>Cancel</button>
+      </div>
+      <div class="applied hide"></div></td>`;
+  } else if(btn.dataset.act==='mail'){
+    const addr=tr.dataset.email;
+    if(!addr) return toast('No email address on this one');
+    if(!MAIL.configured){
+      window.location.href=`mailto:${addr}?subject=${encodeURIComponent(MAIL_SUBJECT)}`
+        +`&body=${encodeURIComponent(mailBody(tr.dataset.contact))}`;
+      return;
+    }
+    d.className='drawer mailer'; d.dataset.mode='mail';
+    d.innerHTML=`<td colspan="8">
+      <p class="hint">Sending as <strong>${esc(MAIL.from||'')}</strong>. Edit anything before it goes.</p>
+      <div class="mailrow"><label>To</label><input data-to value="${esc(addr)}"></div>
+      <div class="mailrow"><label>Subject</label><input data-subject value="${esc(MAIL_SUBJECT)}"></div>
+      <textarea data-body rows="8">${esc(mailBody(tr.dataset.contact))}</textarea>
+      <div class="row"><button class="go" data-send>Send it</button>
+        <button data-cancel>Cancel</button></div>
+      <div class="applied hide"></div></td>`;
+  }
+  tr.after(d);
+};
+
+async function pipeDrawer(dr,e){
+  const tr=dr.previousElementSibling; const id=tr.dataset.id;
+  if(e.target.closest('[data-cancel]')) return dr.remove();
+  const fail=msg=>{ const b=dr.querySelector('.applied');
+                    b.className='applied err'; b.textContent=msg; };
+
+  if(dr.dataset.mode==='edit' && e.target.closest('[data-save-lead]')){
+    const body={};
+    dr.querySelectorAll('[data-f]').forEach(el=>body[el.dataset.f]=el.value);
+    try{ await api('/leads/'+id,{method:'PATCH',body:JSON.stringify(body)});
+         toast('Saved'); await loadPipeline(); }
+    catch(err){ fail(err.message); }
+    return;
+  }
+  if(dr.dataset.mode==='mail' && e.target.closest('[data-send]')){
+    const b=dr.querySelector('[data-send]'); b.disabled=true; b.textContent='Sending…';
+    try{
+      const r=await api(`/leads/${id}/send-email`,{method:'POST',body:JSON.stringify({
+        to:dr.querySelector('[data-to]').value.trim(),
+        subject:dr.querySelector('[data-subject]').value.trim(),
+        body:dr.querySelector('[data-body]').value})});
+      toast('Sent to '+r.sent.to, r.undo_id); await loadPipeline();
+    }catch(err){ b.disabled=false; b.textContent='Send it'; fail(err.message); }
+    return;
+  }
+  if(dr.dataset.mode==='log'){
+    const quick=e.target.closest('[data-outcome]');
+    const ta=dr.querySelector('textarea');
+    if(quick){
+      try{ const r=await api(`/leads/${id}/touch`,{method:'POST',body:JSON.stringify({
+             kind:'call', outcome:quick.dataset.outcome,
+             note:ta.value.trim()||quick.dataset.note})});
+           toast(`${quick.textContent} logged`, r.undo_id); await loadPipeline(); }
+      catch(err){ fail(err.message); }
+      return;
+    }
+    if(!e.target.closest('[data-save]')) return;
+    const text=ta.value.trim();
+    if(!text) return toast('Type what happened, or use a button');
+    try{ const r=await api(`/leads/${id}/debrief`,{method:'POST',
+           body:JSON.stringify({text,kind:'call'})});
+         toast('Saved', r.undo_id); await loadPipeline(); }
+    catch(err){ fail(err.message); }
+  }
+}
+
+$('pipeAdd').onclick=async()=>{
+  const name=prompt('Bar name?'); if(!name) return;
+  try{
+    await api('/leads',{method:'POST',body:JSON.stringify({name})});
+    toast('Added — fill the rest in with Edit');
+    PIPE.q=''; $('pipeSearch').value=''; PIPE.offset=0;
+    await loadPipeline();
+  }catch(e){ toast(e.message); }
+};
 
 /* ── follow-ups ───────────────────────────────────────────────────────── */
 function miniTable(list){

@@ -14,6 +14,7 @@ one person, it needs real auth rather than more keys.
 """
 
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
@@ -467,23 +468,86 @@ def _blank_to_none(value):
 # ============== LEADS ==============
 
 @crm_router.get("/leads", response_model=dict)
-def list_leads(status: Optional[str] = None, _: bool = Depends(require_crm_key)):
-    """Every lead, newest first. Optional ?status= filter."""
+def list_leads(status: Optional[str] = None, q: Optional[str] = None,
+               limit: int = 200, offset: int = 0,
+               _: bool = Depends(require_crm_key)):
+    """The whole pipeline: every lead, at every stage, searchable.
+
+    This is the one view that shows a lead AFTER it has been worked. The call
+    list deliberately hides anything touched — that's what stops the same bar
+    being rung twice — and follow-ups only show what's due. Without this, a
+    lead you spoke to on Tuesday and didn't set a follow-up for is invisible,
+    which is how warm leads quietly die.
+    """
     if status is not None and status not in VALID_STATUSES:
         raise HTTPException(status_code=422, detail={
             "error": "invalid_status",
             "message": f"status must be one of {', '.join(VALID_STATUSES)}",
         })
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    where, params = ["1=1"], []
+    if status:
+        where.append("status = %s"); params.append(status)
+    if q and q.strip():
+        # Name, town, contact, email or phone — whichever the operator happens
+        # to remember. Digits match the phone with its punctuation ignored, so
+        # searching "6157429095" finds "+1-615-742-9095".
+        term = f"%{q.strip().lower()}%"
+        digits = re.sub(r"\D", "", q)
+        clause = ("(LOWER(name) LIKE %s OR LOWER(COALESCE(loc,'')) LIKE %s "
+                  "OR LOWER(COALESCE(contact,'')) LIKE %s "
+                  "OR LOWER(COALESCE(email,'')) LIKE %s")
+        params += [term, term, term, term]
+        if digits:
+            clause += " OR REGEXP_REPLACE(COALESCE(phone,''), '[^0-9]', '', 'g') LIKE %s"
+            params.append(f"%{digits}%")
+        where.append(clause + ")")
+
+    sql_where = " AND ".join(where)
     with get_db() as conn:
         cursor = conn.cursor()
-        if status:
-            cursor.execute(
-                "SELECT * FROM crm_leads WHERE status = %s ORDER BY created_at DESC", (status,)
-            )
-        else:
-            cursor.execute("SELECT * FROM crm_leads ORDER BY created_at DESC")
+        cursor.execute(f"SELECT COUNT(*) AS n FROM crm_leads WHERE {sql_where}", params)
+        matching = cursor.fetchone()["n"]
+        cursor.execute(
+            f"""SELECT * FROM crm_leads WHERE {sql_where}
+                 ORDER BY COALESCE(last_touch_at, updated_at) DESC, created_at DESC
+                 LIMIT %s OFFSET %s""",
+            params + [limit, offset])
         leads = [_lead_row(row) for row in cursor.fetchall()]
-        return {"leads": leads, "count": len(leads)}
+
+        # Always the totals for the whole pipeline, not for the current filter:
+        # the counts are the tab labels, and a tab that renumbers itself when
+        # you click it is unreadable.
+        cursor.execute("SELECT status, COUNT(*) AS n FROM crm_leads GROUP BY status")
+        by_status = {r["status"]: r["n"] for r in cursor.fetchall()}
+        cursor.execute("SELECT COUNT(*) AS n FROM crm_leads")
+        everything = cursor.fetchone()["n"]
+
+    for lead in leads:
+        lead["window"] = _call_window(lead.get("tz_offset_hours"),
+                                      lead.get("opening_hours"), lead.get("tz_name"))
+    return {"leads": leads, "count": len(leads), "matching": matching,
+            "offset": offset, "limit": limit,
+            "counts": {**{k: by_status.get(k, 0) for k in VALID_STATUSES},
+                       "all": everything}}
+
+
+@crm_router.get("/leads/{lead_id}", response_model=dict)
+def get_lead(lead_id: str, _: bool = Depends(require_crm_key)):
+    """One lead, everything on it. What the edit form loads."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+        row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "Lead not found"})
+    lead = _lead_row(row)
+    lead["window"] = _call_window(row.get("tz_offset_hours"),
+                                  row.get("opening_hours"), row.get("tz_name"))
+    return {"lead": lead}
 
 
 @crm_router.post("/leads", response_model=dict, status_code=201)
