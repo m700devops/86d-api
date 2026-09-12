@@ -33,6 +33,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - static/icon.png, static/favicon.png — the app logo, copied from the mobile repo's assets and
   served via the allowlisted `/crm/{asset}` route (NOT a directory mount — that would be one
   traversal away from serving the repo). Re-copy from 86d-mobile/assets when rebranding
+- callwindow.py — parses OSM `opening_hours` and decides when to ring THIS venue. Pure
+  functions of (hours string, local now), so it's testable without a DB, network or clock.
+  See THE CALL LIST below for the heuristic
 - leadgen.py — the daily lead generator: harvest (OpenStreetMap/Overpass) → enrich (crawl
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
@@ -162,6 +165,11 @@ capture. Don't reintroduce them or describe them as current.)
   Portland bar's contact — valid-looking, reaches Wix's marketing team, never the venue. A
   lead nobody can reply to is worse than no lead: it still costs a call slot. Free mailboxes
   (gmail etc.) are deliberately NOT blocked — for a small independent bar they're the norm
+- The OSM `email`/`contact:email` tag is used before crawling — it's free, saves requests, and
+  candidates were being rejected for "no email" when the map had one all along
+- `opener` is one true thing about the venue pulled from its own site (a craft cocktail
+  programme, a big tap list, happy hour) so the first sentence of a call isn't a cold open.
+  Only ever taken from the venue's own pages, so it can't be wrong about them
 - Log lines to grep on Render: `LEADGEN_TABLES_READY`, `LEADGEN_RUN`, `LEADGEN_TABLES_FAILED`
 
 ## CRM SALES TOOLING
@@ -184,9 +192,31 @@ capture. Don't reintroduce them or describe them as current.)
 
 ## THE CALL LIST (the screen the operator actually lives in)
 - `GET /v1/crm/calllist` — every unworked lead, GROUPED BY TIMEZONE, zones ordered so the one
-  callable right now is first. Bars are shut mornings and in service from ~5pm local, so as
-  the afternoon rolls west Eastern goes "rush" while Central is still good, then Mountain,
-  then Pacific. Working west through the zones is the whole point of the grouping
+  callable right now is first. Working west through the zones as the afternoon rolls is the
+  point of the grouping.
+- **Call timing is PER VENUE, from its own `opening_hours`, not a blanket window.** The old
+  fixed 2-5pm was wrong for much of the list: real harvested data has bars opening at 4pm and
+  nightclubs at 9pm, and a 2pm dial to either reaches an empty room. The heuristic in
+  callwindow.py: opens at/before 11:30 → ring 2:00-4:30pm (they're doing lunch at open; the
+  post-lunch lull is when the manager does paperwork and ordering); opens later → ring from
+  open to two hours after (staff setting up, manager on, nobody ordering drinks yet).
+  Unparseable or missing hours fall back to the generic afternoon — never worse than before
+- Venues `opening_hours` marks `closed` are dropped at harvest; venues shut TODAY are sorted
+  to the bottom and labelled with the next day they open. Zone headlines are derived from how
+  many rows are actually ringable, so a header can't say "nobody's there" above an open bar
+- **Attempt cadence (`CADENCE_DAYS`, `MAX_ATTEMPTS`).** A call that reaches nobody
+  auto-schedules the next try at +1, +2, +4, +7, +14 days, then retires the lead as dead with
+  a note. Persistence is the biggest lever in cold calling and the easiest to lose: before
+  this, a voicemail only came back if the caller remembered to set a follow-up by hand, so
+  most leads died at attempt one. A connect always overrides the ladder — if a human says
+  "call me Tuesday", that wins
+- The call list orders by fewest attempts first: an untried lead beats a fourth swing at one
+  that never answers
+- `GET /v1/crm/dialstats` — connect rate by hour, weekday and attempt number, from the
+  `crm_touches` log. The windows above are a REASONED HEURISTIC; this is how it gets checked
+  against reality. Once a few hundred dials are logged, move the window to match the data
+  rather than trusting the heuristic. It reports thin data honestly rather than dressing up
+  noise
 - A lead leaves this list the moment it is touched, debriefed, status-changed or deleted —
   the filter is `status = 'new' AND last_touch_at IS NULL`. That is what makes it impossible
   to call the same restaurant twice, and the shrinking list doubles as the progress bar

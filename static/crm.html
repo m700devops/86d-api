@@ -65,6 +65,15 @@
   .digits.copied{border-color:var(--go);color:var(--go);background:#3DD68C1A}
   .em{color:var(--text2);max-width:220px;overflow:hidden;text-overflow:ellipsis;
       white-space:nowrap;display:inline-block}
+  .win-good{color:var(--go);font-weight:700}
+  .win-bad{color:var(--text3)}
+  .win-shut{color:var(--stop);font-size:11px}
+  /* One true thing about the venue, so the first sentence isn't a cold open. */
+  .opener{color:var(--wait);font-size:11px;font-weight:400;margin-top:2px;
+          max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tries{display:inline-block;min-width:20px;text-align:center;font-weight:700;
+         font-size:11px;color:var(--wait);border:1px solid #FFB02044;border-radius:5px;
+         padding:1px 5px}
   .acts{display:flex;gap:6px;white-space:nowrap}
   button{font:inherit;background:var(--surface2);color:var(--text);border:1px solid var(--line2);
          border-radius:7px;padding:6px 11px;cursor:pointer}
@@ -157,6 +166,17 @@
         <div class="grid" style="margin-top:12px" id="nUsers"></div></div>
       <div class="card"><strong>Activation — signed up but never finished a count</strong>
         <div class="grid" style="margin-top:12px" id="nAct"></div></div>
+      <div class="card"><strong>What's actually connecting</strong>
+        <p class="muted" style="margin:4px 0 0;font-size:12px" id="dialAdvice"></p>
+        <div class="tablewrap" style="margin-top:12px">
+          <table class="sheet"><thead><tr>
+            <th>HOUR (LOCAL)</th><th>DIALS</th><th>CONNECTED</th><th>RATE</th>
+          </tr></thead><tbody id="dialHours"></tbody></table></div>
+        <div class="tablewrap" style="margin-top:12px">
+          <table class="sheet"><thead><tr>
+            <th>ATTEMPT</th><th>DIALS</th><th>CONNECTED</th><th>RATE</th>
+          </tr></thead><tbody id="dialAttempts"></tbody></table></div>
+      </div>
       <div class="card"><strong>What outreach produced</strong>
         <div class="grid" style="margin-top:12px" id="nChan"></div>
         <div style="margin-top:12px"><button id="rematch">Re-run matching</button></div></div>
@@ -262,7 +282,8 @@ async function loadCalls(){
       <div class="sheetwrap ${shut?'hide':''}">
         <table class="sheet">
           <thead><tr>
-            <th></th><th>BAR</th><th>PHONE</th><th>EMAIL</th><th>CITY</th><th>ACTIONS</th>
+            <th></th><th>BAR</th><th>PHONE</th><th>WHEN</th><th>TRY</th>
+            <th>EMAIL</th><th>CITY</th><th>ACTIONS</th>
           </tr></thead>
           <tbody>${z.leads.map((l,i)=>row(l,i+1)).join('')}</tbody>
         </table>
@@ -272,10 +293,20 @@ async function loadCalls(){
 }
 
 function row(l,n){
+  const w=l.call_window||{};
+  // A closed venue says so rather than showing a bare dash.
+  const shut = w.state==='shut_today' || w.state==='permanently_closed';
+  const when = w.good_now ? `<span class="win-good">now</span>`
+             : shut      ? `<span class="win-shut">${esc(w.hint||'closed')}</span>`
+                         : `<span class="win-bad">${esc(w.window||'—')}</span>`;
+  const tries = l.attempts||0;
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}" data-contact="${esc(l.contact||'')}">
     <td class="rownum">${n}</td>
-    <td class="nm" title="${esc(l.name)}">${esc(l.name)}</td>
+    <td class="nm" title="${esc(w.hint||l.name)}">${esc(l.name)}
+      ${l.opener?`<div class="opener">${esc(l.opener)}</div>`:''}</td>
     <td><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span></td>
+    <td title="${esc(w.hint||'')}">${when}</td>
+    <td>${tries?`<span class="tries">${tries}</span>`:'<span class="muted">—</span>'}</td>
     <td><span class="em" title="${esc(l.email||'')}">${esc(l.email||'')}</span></td>
     <td class="muted">${esc(l.loc||'')}</td>
     <td><div class="acts">
@@ -383,11 +414,12 @@ async function drawerAction(dr,e){
 function miniTable(list){
   if(!list.length) return '<p class="muted">Nothing here.</p>';
   return `<div class="sheetwrap"><table class="sheet">
-    <thead><tr><th></th><th>BAR</th><th>PHONE</th><th>DUE</th><th>ACTIONS</th></tr></thead>
+    <thead><tr><th></th><th>BAR</th><th>PHONE</th><th>TRY</th><th>DUE</th><th>ACTIONS</th></tr></thead>
     <tbody>${list.map((l,i)=>`<tr data-id="${esc(l.id)}">
       <td class="rownum">${i+1}</td>
       <td class="nm">${esc(l.name)}</td>
       <td><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span></td>
+      <td>${l.attempts?`<span class="tries">${l.attempts}</span>`:'<span class="muted">—</span>'}</td>
       <td class="muted">${esc(l.followup_date||'')}</td>
       <td><div class="acts"><button class="go" data-act="log">Log call</button>
           <button class="del" data-act="del">Delete</button></div></td>
@@ -422,7 +454,17 @@ async function loadFollowups(){
 /* ── numbers ──────────────────────────────────────────────────────────── */
 const tile=(n,l)=>`<div class="stat"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
 async function loadNumbers(){
-  const [f,c]=await Promise.all([api('/funnel'),api('/counters')]);
+  const [f,c,ds]=await Promise.all([api('/funnel'),api('/counters'),api('/dialstats')]);
+  $('dialAdvice').textContent=ds.advice;
+  const maxH=Math.max(0,...ds.by_hour.map(h=>h.connect_pct));
+  const line=(label,r,hi)=>`<tr><td>${esc(label)}</td><td>${r.dials}</td><td>${r.connects}</td>
+    <td class="${hi?'win-good':''}">${r.connect_pct}%</td></tr>`;
+  $('dialHours').innerHTML=ds.by_hour.length
+    ? ds.by_hour.map(h=>line(h.hour+':00',h,h.connect_pct===maxH&&maxH>0)).join('')
+    : '<tr><td colspan="4" class="muted">No calls logged yet.</td></tr>';
+  $('dialAttempts').innerHTML=ds.by_attempt.length
+    ? ds.by_attempt.map(a=>line('Attempt '+a.attempt,a,false)).join('')
+    : '<tr><td colspan="4" class="muted">No calls logged yet.</td></tr>';
   $('nToday').innerHTML=[tile(c.counters.daily_calls_remaining,'CALLS LEFT'),
     tile(c.counters.daily_emails_remaining,'EMAILS LEFT'),
     tile(c.counters.touch_ticker_remaining,'TOUCHES LEFT'),

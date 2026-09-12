@@ -127,6 +127,10 @@ def init_crm_tables():
             ("tz_offset_hours", "INTEGER"),   # for the call-window hint
             ("source", "TEXT"),               # 'leadgen' | 'manual'
             ("last_touch_at", "TEXT"),
+            ("attempts", "INTEGER DEFAULT 0"),      # dials made, for the cadence
+            ("last_outcome", "TEXT"),
+            ("opening_hours", "TEXT"),              # raw OSM string, per-venue call timing
+            ("opener", "TEXT"),                     # one true thing to open the call with
         ]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -138,6 +142,24 @@ def init_crm_tables():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_crm_leads_status ON crm_leads(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_crm_leads_followup ON crm_leads(followup_date)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_crm_leads_created ON crm_leads(created_at)")
+
+        # Every dial, so "which hour actually connects" is answerable from real
+        # data instead of from my assumptions about when bars are quiet.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_touches (
+                id TEXT PRIMARY KEY,
+                lead_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                outcome TEXT,
+                connected BOOLEAN NOT NULL DEFAULT FALSE,
+                attempt INTEGER,
+                local_hour INTEGER,
+                weekday INTEGER,
+                at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_touches_at ON crm_touches(at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_touches_lead ON crm_touches(lead_id)")
 
         # Single row, pinned to id=1 by a CHECK — the counters are one global
         # scoreboard, and a second row would silently become a second truth.
@@ -251,8 +273,22 @@ LEAD_COLUMNS = (
     "call_date", "email_date", "followup_date", "notes",
     "created_at", "updated_at",
     "matched_user_id", "matched_at", "match_method", "tz_offset_hours",
-    "source", "last_touch_at",
+    "source", "last_touch_at", "attempts", "last_outcome",
+    "opening_hours", "opener",
 )
+
+# How long to wait before the next dial, by attempt number. Spread across days
+# so successive tries land on different shifts and different managers.
+#
+# This exists because persistence is the single biggest lever in cold calling
+# and the one most easily lost: before it, a voicemail only came back if the
+# caller remembered to set a follow-up by hand, so most leads died at attempt
+# one. Most connects happen somewhere around the third to sixth try.
+CADENCE_DAYS = [1, 2, 4, 7, 14]
+MAX_ATTEMPTS = len(CADENCE_DAYS) + 1     # after this many dials with no contact, stop
+
+# Outcomes that mean a human was actually reached.
+CONNECTED_OUTCOMES = {"answered", "gatekeeper", "callback", "not_interested"}
 
 # Columns a PATCH is allowed to write. `id`, `created_at` and `updated_at` are
 # not in here on purpose — an allowlist beats filtering a denylist when the
@@ -306,6 +342,33 @@ def zone_state(offset: Optional[int]) -> dict:
         state, headline, rank, ok = "late", "Too late — they're slammed", 4, False
     return {"offset": offset, "label": label, "local_time": local.strftime("%-I:%M %p"),
             "state": state, "headline": headline, "rank": rank, "callable": ok}
+
+
+def _record_touch(cursor, lead, kind: str, outcome: Optional[str], attempt: int,
+                  tz_offset: Optional[int]) -> None:
+    """Log one dial with the local hour, so connect rates can be read by hour."""
+    local = datetime.now(timezone.utc) + timedelta(hours=tz_offset or 0)
+    cursor.execute("""
+        INSERT INTO crm_touches (id, lead_id, kind, outcome, connected, attempt,
+                                 local_hour, weekday, at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (generate_id(), lead["id"], kind, outcome,
+          outcome in CONNECTED_OUTCOMES, attempt,
+          local.hour, local.weekday(), now_iso()))
+
+
+def _cadence(attempt: int, outcome: Optional[str]) -> tuple[Optional[int], Optional[str]]:
+    """(days until the next try, status to force) for a call that didn't land.
+
+    Only applies when nobody was reached. A connect always beats the schedule —
+    if a human said "call me Tuesday" that's what the follow-up should be, not
+    whatever the ladder says.
+    """
+    if outcome in ("answered", "callback", "not_interested"):
+        return None, None
+    if attempt >= MAX_ATTEMPTS:
+        return None, "dead"
+    return CADENCE_DAYS[min(attempt - 1, len(CADENCE_DAYS) - 1)], None
 
 
 def _lead_row(row) -> dict:
@@ -824,25 +887,22 @@ CALL_WINDOW_START = 14   # 2pm local
 CALL_WINDOW_END = 17     # 5pm local
 
 
-def _call_window(tz_offset: Optional[int]) -> dict:
-    """Is now a sane time to ring this venue?"""
+def _call_window(tz_offset: Optional[int], hours: Optional[str] = None) -> dict:
+    """When to ring THIS venue, from its own opening hours where we have them.
+
+    The blanket 2-5pm this replaced was wrong for a large share of the list:
+    real harvested data has bars opening at 4pm and nightclubs at 9pm, and a
+    2pm dial to either reaches an empty room. See callwindow.py.
+    """
+    from callwindow import call_window as venue_window
     if tz_offset is None:
-        return {"known": False, "good_now": True, "local_time": None, "hint": ""}
+        return {"known": False, "good_now": True, "local_time": None,
+                "hint": "", "window": None, "state": "unknown"}
     local = datetime.now(timezone.utc) + timedelta(hours=tz_offset)
-    hour = local.hour
-    good = CALL_WINDOW_START <= hour < CALL_WINDOW_END
-    if hour < 11:
-        hint = "too early — most bars aren't staffed yet"
-    elif hour < CALL_WINDOW_START:
-        hint = f"opens up around {CALL_WINDOW_START}:00 local"
-    elif good:
-        hint = "good time to call"
-    elif hour < 21:
-        hint = "service is starting — expect a brush-off"
-    else:
-        hint = "too late — they're busy"
-    return {"known": True, "good_now": good,
-            "local_time": local.strftime("%H:%M"), "hint": hint}
+    w = venue_window(hours, local)
+    return {"known": w["known"], "good_now": w["good_now"],
+            "local_time": local.strftime("%H:%M"), "hint": w["headline"],
+            "window": w.get("window"), "state": w["state"]}
 
 
 @crm_router.get("/queue", response_model=dict)
@@ -865,7 +925,7 @@ def call_queue(limit: int = 50, _: bool = Depends(require_crm_key)):
             out = []
             for row in cursor.fetchall():
                 lead = _lead_row(row)
-                lead["call_window"] = _call_window(row.get("tz_offset_hours"))
+                lead["call_window"] = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"))
                 out.append(lead)
             return out
 
@@ -918,19 +978,26 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
             raise HTTPException(status_code=404, detail={
                 "error": "not_found", "message": "Lead not found"})
 
+        attempt = (lead["attempts"] or 0) + 1 if data.kind == "call" else (lead["attempts"] or 0)
         sets = ["updated_at = %s", "last_touch_at = %s"]
         params: list = [now, now]
 
         if data.kind == "call":
             sets.append("call_date = %s"); params.append(today)
+            sets.append("attempts = %s"); params.append(attempt)
         elif data.kind == "email" and not lead["email_date"]:
             sets.append("email_date = %s"); params.append(today)
+        if data.outcome:
+            sets.append("last_outcome = %s"); params.append(data.outcome)
 
-        if data.followup_in_days is not None:
-            follow = (datetime.now(_reset_tz()) + timedelta(days=data.followup_in_days)).strftime("%Y-%m-%d")
+        # An explicit follow-up always wins; otherwise the ladder decides.
+        cadence_days, forced_status = _cadence(attempt, data.outcome) if data.kind == "call" else (None, None)
+        follow_days = data.followup_in_days if data.followup_in_days is not None else cadence_days
+        if follow_days is not None:
+            follow = (datetime.now(_reset_tz()) + timedelta(days=follow_days)).strftime("%Y-%m-%d")
             sets.append("followup_date = %s"); params.append(follow)
 
-        new_status = data.status
+        new_status = data.status or forced_status
         if new_status is None and data.outcome:
             # A call that reached a human has, at minimum, contacted them.
             new_status = {"not_interested": "dead", "callback": "warm",
@@ -941,14 +1008,20 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
         elif new_status and new_status in ("warm", "won", "dead"):
             sets.append("status = %s"); params.append(new_status)
 
-        if data.note:
+        note_text = data.note
+        if forced_status == "dead" and not note_text:
+            note_text = f"No contact after {attempt} attempts — retired by the cadence."
+        if note_text:
             stamped = f"[{today}] {data.kind}"
             if data.outcome:
                 stamped += f" · {data.outcome}"
-            stamped += f": {data.note}"
+            if data.kind == "call":
+                stamped += f" · attempt {attempt}"
+            stamped += f": {note_text}"
             sets.append("notes = COALESCE(notes || E'\\n', '') || %s")
             params.append(stamped)
 
+        _record_touch(cursor, lead, data.kind, data.outcome, attempt, lead.get("tz_offset_hours"))
         params.append(lead_id)
         cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
         updated = cursor.fetchone()
@@ -1043,7 +1116,7 @@ def leadgen_today(_: bool = Depends(require_crm_key)):
         leads = []
         for row in rows:
             lead = _lead_row(row)
-            lead["call_window"] = _call_window(row.get("tz_offset_hours"))
+            lead["call_window"] = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"))
             leads.append(lead)
         # Ring the ones whose local afternoon it is right now, first.
         leads.sort(key=lambda l: (not l["call_window"]["good_now"], l["name"]))
@@ -1219,7 +1292,7 @@ def export_csv(scope: str = "today", _: bool = Depends(require_crm_key)):
     writer.writerow(["Name", "Phone", "Email", "Location", "Status",
                      "Last called", "Follow-up", "Local time", "Notes"])
     for row in rows:
-        window = _call_window(row.get("tz_offset_hours"))
+        window = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"))
         writer.writerow([
             row["name"], row["phone"] or "", row["email"] or "", row["loc"] or "",
             row["status"], row["call_date"] or "", row["followup_date"] or "",
@@ -1250,11 +1323,14 @@ def call_list(_: bool = Depends(require_crm_key)):
 
         # Untouched and still 'new'. Any CRM update moves one of those two and
         # the lead drops off.
+        # Fewest attempts first, then best score: a lead nobody has tried is
+        # worth more than a fourth swing at one that never answers, and within
+        # that the better-fitting bar goes first.
         cursor.execute("""
             SELECT * FROM crm_leads
              WHERE status = 'new' AND last_touch_at IS NULL
                AND phone IS NOT NULL AND phone <> ''
-             ORDER BY created_at DESC
+             ORDER BY COALESCE(attempts, 0) ASC, created_at DESC
         """)
         rows = cursor.fetchall()
 
@@ -1267,22 +1343,48 @@ def call_list(_: bool = Depends(require_crm_key)):
     grouped: dict = {}
     for row in rows:
         lead = _lead_row(row)
+        # Per-venue, not per-zone: two bars in the same timezone can have
+        # completely different windows because one opens at 11 and one at 9pm.
+        lead["call_window"] = _call_window(row.get("tz_offset_hours"),
+                                          row.get("opening_hours"))
         offset = row.get("tz_offset_hours")
         grouped.setdefault(offset, []).append(lead)
 
     zones = []
     for offset, leads in grouped.items():
         zone = zone_state(offset)
+        # Callable right now first, then closed-today last — the venue's own
+        # hours decide, so a zone is never uniformly good or bad any more.
+        rank = {"good": 0, "early": 1, "generic": 1, "late": 2,
+                "shut_today": 3, "permanently_closed": 4}
+        leads.sort(key=lambda l: (rank.get(l["call_window"].get("state"), 2), l["name"]))
+        ready = sum(1 for l in leads if l["call_window"]["good_now"])
         zone["leads"] = leads
         zone["count"] = len(leads)
+        zone["callable_now"] = ready
+        # The zone headline has to agree with the rows under it. Now that each
+        # venue carries its own window, a blanket "nobody's there yet" can sit
+        # directly above a bar that opened an hour ago.
+        if ready:
+            zone["headline"] = f"{ready} ready to call now"
+            zone["state"] = "good"
+            zone["rank"] = 0
+            zone["callable"] = True
+        else:
+            soonest = min((l["call_window"].get("window") or "" for l in leads
+                           if l["call_window"].get("state") == "early"), default="")
+            zone["headline"] = (f"None open yet — first window {soonest}"
+                                if soonest else "Nothing ringable here right now")
+            zone["callable"] = False
         zones.append(zone)
     # Callable-now first, then the ones opening up, then the rest.
     zones.sort(key=lambda z: (z["rank"], z["label"]))
 
-    callable_now = [z for z in zones if z["state"] == "good"]
+    callable_now = [z for z in zones if z.get("callable_now")]
+    callable_now.sort(key=lambda z: -z["callable_now"])
     if callable_now:
         focus = (f"Call {callable_now[0]['label']} now — "
-                 f"{callable_now[0]['count']} waiting")
+                 f"{callable_now[0]['callable_now']} ready")
     else:
         soon = [z for z in zones if z["state"] in ("opening", "closed")]
         focus = (f"Nothing in the sweet spot. {soon[0]['label']} is next."
@@ -1406,17 +1508,33 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
             raise HTTPException(status_code=404, detail={
                 "error": "not_found", "message": "Lead not found"})
 
+        attempt = (lead["attempts"] or 0) + 1 if data.kind == "call" else (lead["attempts"] or 0)
         sets = ["updated_at = %s", "last_touch_at = %s"]
         params: list = [now, now]
         applied: dict = {}
 
         if data.kind == "call":
             sets.append("call_date = %s"); params.append(today); applied["call_date"] = today
+            sets.append("attempts = %s"); params.append(attempt)
+            applied["attempt"] = attempt
         elif data.kind == "email" and not lead["email_date"]:
             sets.append("email_date = %s"); params.append(today); applied["email_date"] = today
 
+        # The model reports what happened; the ladder decides when to try again
+        # if nobody was reached and it didn't name a date itself.
+        outcome_guess = None
+        if status == "dead":
+            outcome_guess = "not_interested"
+        elif status in ("warm", "won", "contacted"):
+            outcome_guess = "answered"
+        cadence_days, forced_status = _cadence(attempt, outcome_guess) if data.kind == "call" else (None, None)
+        if forced_status and not status:
+            status = forced_status
+            applied["status"] = status
+
         if status:
             sets.append("status = %s"); params.append(status); applied["status"] = status
+        sets.append("last_outcome = %s"); params.append(outcome_guess or "logged")
         # Length caps on model output: these columns are written straight from
         # whatever the model returned, and a model is perfectly capable of
         # handing back a paragraph where a name was asked for.
@@ -1427,19 +1545,26 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
                 clean = value.strip()[:limit]
                 sets.append(f"{field} = %s"); params.append(clean)
                 applied[field] = clean
-        if followup is not None:
-            when = (datetime.now(_reset_tz()) + timedelta(days=followup)).strftime("%Y-%m-%d")
+        follow_days = followup if followup is not None else cadence_days
+        if follow_days is not None:
+            when = (datetime.now(_reset_tz()) + timedelta(days=follow_days)).strftime("%Y-%m-%d")
             sets.append("followup_date = %s"); params.append(when)
             applied["followup_date"] = when
+            if followup is None:
+                applied["followup_set_by"] = f"cadence (attempt {attempt})"
 
         summary = extracted.get("summary")
         if not isinstance(summary, str) or not summary.strip():
             summary = data.text.strip()
         summary = summary.strip()[:2000]
-        note = f"[{today}] {data.kind}: {summary}"
+        stamp = f"[{today}] {data.kind}"
+        if data.kind == "call":
+            stamp += f" · attempt {attempt}"
+        note = f"{stamp}: {summary}"
         sets.append("notes = COALESCE(notes || E'\\n', '') || %s"); params.append(note)
         applied["note"] = note
 
+        _record_touch(cursor, lead, data.kind, outcome_guess, attempt, lead.get("tz_offset_hours"))
         params.append(lead_id)
         cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
         updated = cursor.fetchone()
@@ -1478,3 +1603,77 @@ def bulk_delete(data: BulkDelete, _: bool = Depends(require_crm_key)):
         removed = cursor.rowcount
         conn.commit()
     return {"deleted": removed}
+
+
+# ============== WHAT'S ACTUALLY WORKING ==============
+
+WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+@crm_router.get("/dialstats", response_model=dict)
+def dial_stats(_: bool = Depends(require_crm_key)):
+    """Connect rate by hour, by weekday, and by attempt number.
+
+    The call windows in this system are a heuristic I reasoned out about how
+    bars run. This is how that heuristic gets checked against reality: once
+    there are a few hundred dials logged, the numbers here say which hours and
+    days really connect for THIS list, and the window can be moved to match.
+    Until then it reports thin data honestly rather than dressing up noise.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT local_hour AS hour, COUNT(*) AS dials,
+                   COUNT(*) FILTER (WHERE connected) AS connects
+              FROM crm_touches WHERE kind = 'call' AND local_hour IS NOT NULL
+             GROUP BY local_hour ORDER BY local_hour
+        """)
+        by_hour = [{"hour": r["hour"], "dials": r["dials"], "connects": r["connects"],
+                    "connect_pct": round(100.0 * r["connects"] / r["dials"], 1) if r["dials"] else 0.0}
+                   for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT weekday, COUNT(*) AS dials,
+                   COUNT(*) FILTER (WHERE connected) AS connects
+              FROM crm_touches WHERE kind = 'call' AND weekday IS NOT NULL
+             GROUP BY weekday ORDER BY weekday
+        """)
+        by_day = [{"day": WEEKDAY_NAMES[r["weekday"]], "dials": r["dials"],
+                   "connects": r["connects"],
+                   "connect_pct": round(100.0 * r["connects"] / r["dials"], 1) if r["dials"] else 0.0}
+                  for r in cursor.fetchall()]
+
+        # The persistence question: does the Nth try still pay?
+        cursor.execute("""
+            SELECT attempt, COUNT(*) AS dials,
+                   COUNT(*) FILTER (WHERE connected) AS connects
+              FROM crm_touches WHERE kind = 'call' AND attempt IS NOT NULL
+             GROUP BY attempt ORDER BY attempt
+        """)
+        by_attempt = [{"attempt": r["attempt"], "dials": r["dials"], "connects": r["connects"],
+                       "connect_pct": round(100.0 * r["connects"] / r["dials"], 1) if r["dials"] else 0.0}
+                      for r in cursor.fetchall()]
+
+        cursor.execute("SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE connected) AS c "
+                       "FROM crm_touches WHERE kind = 'call'")
+        totals = cursor.fetchone()
+
+    dials = totals["n"] or 0
+    overall = round(100.0 * totals["c"] / dials, 1) if dials else 0.0
+
+    # A recommendation is only offered once there's enough to stand on.
+    best_hours = [h for h in by_hour if h["dials"] >= 20]
+    best_hours.sort(key=lambda h: -h["connect_pct"])
+    if dials < 100:
+        advice = (f"Only {dials} dials logged — too few to draw from. "
+                  "Come back after a couple of hundred.")
+    elif best_hours:
+        top = best_hours[0]
+        advice = (f"Best hour so far is {top['hour']}:00 local at {top['connect_pct']}% "
+                  f"across {top['dials']} dials, against {overall}% overall.")
+    else:
+        advice = f"{dials} dials at {overall}% overall; no single hour has 20 dials yet."
+
+    return {"total_dials": dials, "connect_pct": overall, "by_hour": by_hour,
+            "by_day": by_day, "by_attempt": by_attempt, "advice": advice}

@@ -266,6 +266,8 @@ def init_leadgen_tables():
                 reject_reason TEXT,
                 tz_offset_hours INTEGER,
                 raw_tags TEXT,
+                opening_hours TEXT,
+                opener TEXT,
                 discovered_at TEXT NOT NULL,
                 enriched_at TEXT,
                 promoted_at TEXT,
@@ -482,6 +484,31 @@ def extract_emails(html: str) -> list[str]:
     return sorted(found, key=rank)
 
 
+# Things worth mentioning in an opener, cheapest signal first.
+OPENER_SIGNALS = [
+    (re.compile(r"craft cocktail|cocktail program|mixolog", re.I), "craft cocktail program"),
+    (re.compile(r"\d{2,}\s*(taps|beers on tap|draft lines)", re.I), "a big tap list"),
+    (re.compile(r"whisk(e)?y (bar|list|selection)|bourbon (bar|list)", re.I), "a whiskey list"),
+    (re.compile(r"tequila|mezcal (bar|list)", re.I), "an agave list"),
+    (re.compile(r"wine (list|bar|cellar)", re.I), "a wine list"),
+    (re.compile(r"happy hour", re.I), "happy hour"),
+    (re.compile(r"live music|live band", re.I), "live music"),
+    (re.compile(r"private event|private hire|book(ing)? (the )?(space|room)", re.I), "private events"),
+]
+
+
+def opener_line(site_html: str, amenity: Optional[str]) -> Optional[str]:
+    """A short, true thing about this venue to open the call with.
+
+    Not a pitch — just something that shows the call isn't a random dial. Only
+    ever taken from the venue's own site, so it can't be wrong about them.
+    """
+    hits = [label for pattern, label in OPENER_SIGNALS if pattern.search(site_html or "")]
+    if not hits:
+        return None
+    return ", ".join(hits[:2])
+
+
 def score_candidate(tags: dict, email: Optional[str], site_html: str) -> int:
     """How well this fits a bar-inventory pitch. Higher is better."""
     score = 0
@@ -593,6 +620,11 @@ out center tags;
             name = (tags.get("name") or "").strip()
             if not name:
                 continue
+            # A venue marked permanently closed is not a prospect, and OSM
+            # says so plainly often enough to be worth checking before anything
+            # else costs a request.
+            if (tags.get("opening_hours") or "").strip().lower() in ("closed", "off"):
+                continue
             phone = (tags.get("phone") or tags.get("contact:phone") or "").strip()
             website = (tags.get("website") or tags.get("contact:website")
                        or tags.get("url") or "").strip()
@@ -610,13 +642,14 @@ out center tags;
             cursor.execute("""
                 INSERT INTO crm_lead_candidates
                     (id, source, source_ref, name, city, state, lat, lon, phone, website,
-                     amenity, raw_tags, tz_offset_hours, status, discovered_at)
-                VALUES (%s, 'osm', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', %s)
+                     amenity, raw_tags, opening_hours, tz_offset_hours, status, discovered_at)
+                VALUES (%s, 'osm', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', %s)
                 ON CONFLICT (source_ref) DO NOTHING
             """, (
                 generate_id(), source_ref, name, city["name"], city.get("state"),
                 lat, lon, phone, website, tags.get("amenity"),
-                json.dumps(tags)[:8000], us_tz_offset(lon), now,
+                json.dumps(tags)[:8000], (tags.get("opening_hours") or "").strip() or None,
+                us_tz_offset(lon), now,
             ))
             inserted += cursor.rowcount
 
@@ -652,16 +685,26 @@ def enrich_candidate(cand: dict) -> dict:
     email_source = None
     fetched = 0
 
+    # Free win first: the map entry itself sometimes carries a contact address.
+    try:
+        osm_tags = json.loads(cand.get("raw_tags") or "{}")
+    except json.JSONDecodeError:
+        osm_tags = {}
+    tagged = (osm_tags.get("email") or osm_tags.get("contact:email") or "").strip()
+    if tagged and not EMAIL_BLOCKLIST.search(tagged) and "@" in tagged:
+        email, email_source = tagged.lower(), "OpenStreetMap tag"
+
     home, status = _http(website, timeout=PAGE_TIMEOUT, verify_public=True)
     fetched += 1
     if status != 200 or not home:
         return {"status": "rejected", "reject_reason": f"site unreachable (HTTP {status})",
-                "email": None, "email_source": None, "score": 0}
+                "email": None, "email_source": None, "opener": None, "score": 0}
 
     html_seen += home[:200000]
-    emails = extract_emails(home)
-    if emails:
-        email, email_source = emails[0], website
+    if not email:
+        emails = extract_emails(home)
+        if emails:
+            email, email_source = emails[0], website
 
     if not email:
         import urllib.parse
@@ -707,16 +750,17 @@ def enrich_candidate(cand: dict) -> dict:
 
     if chain_reason:
         return {"status": "rejected", "reject_reason": chain_reason,
-                "email": None, "email_source": None, "score": 0}
+                "email": None, "email_source": None, "opener": None, "score": 0}
     if not email:
         return {"status": "rejected", "reject_reason": "no email found on site",
-                "email": None, "email_source": None, "score": 0}
+                "email": None, "email_source": None, "opener": None, "score": 0}
 
     return {
         "status": "qualified",
         "reject_reason": None,
         "email": email,
         "email_source": email_source,
+        "opener": opener_line(html_seen, cand.get("amenity")),
         "score": score_candidate(tags, email, html_seen),
     }
 
@@ -811,10 +855,12 @@ def promote_leads(limit: int = DAILY_TARGET) -> int:
             )
             cursor.execute("""
                 INSERT INTO crm_leads (id, name, loc, status, phone, email, notes,
-                                       source, tz_offset_hours, created_at, updated_at)
-                VALUES (%s, %s, %s, 'new', %s, %s, %s, 'leadgen', %s, %s, %s)
+                                       source, tz_offset_hours, opening_hours, opener,
+                                       created_at, updated_at)
+                VALUES (%s, %s, %s, 'new', %s, %s, %s, 'leadgen', %s, %s, %s, %s, %s)
             """, (lead_id, cand["name"], loc, cand["phone"], cand["email"], notes,
-                  cand.get("tz_offset_hours"), now, now))
+                  cand.get("tz_offset_hours"), cand.get("opening_hours"),
+                  cand.get("opener"), now, now))
             cursor.execute("""
                 UPDATE crm_lead_candidates
                    SET status='promoted', promoted_at=%s, promoted_lead_id=%s
@@ -994,10 +1040,11 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                         cursor.execute("""
                             UPDATE crm_lead_candidates
                                SET status=%s, reject_reason=%s, email=%s,
-                                   email_source=%s, score=%s, enriched_at=%s
+                                   email_source=%s, opener=%s, score=%s, enriched_at=%s
                              WHERE id=%s
                         """, (result["status"], result["reject_reason"], result["email"],
-                              result["email_source"], result["score"], now_iso(), cand["id"]))
+                              result["email_source"], result.get("opener"),
+                              result["score"], now_iso(), cand["id"]))
                         conn.commit()
                     except Exception:
                         # Almost always the unique-email index: another venue
