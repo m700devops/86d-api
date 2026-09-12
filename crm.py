@@ -1902,7 +1902,13 @@ def _debrief_extract(text: str) -> dict:
     try:
         body = resp.json()
         chunks = [b.get("text", "") for b in body.get("content", []) if b.get("type") == "text"]
-        return _json.loads("{" + "".join(chunks))
+        text = "{" + "".join(chunks)
+        # A prefilled reply usually ends cleanly at the closing brace, but a
+        # model can add a sentence after it. Cut at the last brace rather than
+        # failing the whole call over a trailing "Hope that helps!".
+        if not text.rstrip().endswith("}") and "}" in text:
+            text = text[:text.rindex("}") + 1]
+        return _json.loads(text)
     except Exception as exc:
         print(f"[crm] debrief returned unparseable JSON: {exc}", flush=True)
         raise HTTPException(status_code=503, detail={
