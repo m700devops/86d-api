@@ -42,8 +42,20 @@ from helpers import generate_id, now_iso
 # ── Tunables ────────────────────────────────────────────────────────────────
 
 DAILY_TARGET = int(os.getenv("LEADGEN_DAILY_TARGET", "25"))
-# Keep this many qualified leads banked. Below it, harvesting works harder.
-POOL_FLOOR = int(os.getenv("LEADGEN_POOL_FLOOR", "150"))
+
+# Hard ceiling on unworked leads sitting in the call list. The generator tops
+# the list up towards this and never past it, so working leads off is what
+# creates room for new ones.
+#
+# This is a usability limit before it's a resource one. A list that only ever
+# grows is a list you stop opening, and at 25/day a hundred is already four
+# days of calling visible at any moment.
+MAX_ACTIVE = int(os.getenv("LEADGEN_MAX_ACTIVE", "100"))
+
+# Qualified candidates kept banked behind the call list. Much smaller than it
+# used to be: with a capped list holding four days of work, the list is itself
+# the buffer, and a deep second bank would just be crawling nobody asked for.
+POOL_FLOOR = int(os.getenv("LEADGEN_POOL_FLOOR", "50"))
 USER_AGENT = "86d-leadgen/1.0 (+https://my86d.com; bar inventory software)"
 
 # Several mirrors because one of them is always having a bad day. Tried in
@@ -341,7 +353,8 @@ def init_leadgen_tables():
             city_count = cursor.fetchone()["n"]
 
         print(f"[leadgen] LEADGEN_TABLES_READY cities={city_count} "
-              f"daily_target={DAILY_TARGET} pool_floor={POOL_FLOOR}", flush=True)
+              f"daily_target={DAILY_TARGET} max_active={MAX_ACTIVE} "
+              f"pool_floor={POOL_FLOOR}", flush=True)
 
 
 # A starting territory list: US metros with real bar density. Coordinates are
@@ -815,6 +828,17 @@ def promote_leads(limit: int = DAILY_TARGET) -> int:
 
 # ── The daily job ───────────────────────────────────────────────────────────
 
+def active_lead_count() -> int:
+    """Unworked leads in the call list — the same filter the screen uses."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM crm_leads "
+            "WHERE status = 'new' AND last_touch_at IS NULL"
+        )
+        return cursor.fetchone()["n"]
+
+
 def pool_depth() -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
@@ -824,11 +848,22 @@ def pool_depth() -> dict:
         by_status = {r["status"]: r["n"] for r in cursor.fetchall()}
         cursor.execute("SELECT COUNT(*) AS n FROM crm_leadgen_cities WHERE enabled AND last_harvested_at IS NULL")
         fresh_cities = cursor.fetchone()["n"]
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM crm_leads "
+            "WHERE status = 'new' AND last_touch_at IS NULL"
+        )
+        active = cursor.fetchone()["n"]
     qualified = by_status.get("qualified", 0)
+    # Runway counts what's actually callable, not just what's banked — the
+    # capped list in front of you is the first few days of work.
     return {
         "by_status": by_status,
         "qualified": qualified,
-        "days_of_runway": round(qualified / DAILY_TARGET, 1) if DAILY_TARGET else 0,
+        "active_leads": active,
+        "max_active": MAX_ACTIVE,
+        "headroom": max(0, MAX_ACTIVE - active),
+        "at_capacity": active >= MAX_ACTIVE,
+        "days_of_runway": round((active + qualified) / DAILY_TARGET, 1) if DAILY_TARGET else 0,
         "unharvested_cities": fresh_cities,
     }
 
@@ -870,8 +905,35 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
         conn.commit()
 
     try:
-        # 1. Promote first, from what's already banked.
-        promoted = promote_leads(target)
+        # 0. How much room is there? Everything below is sized by this.
+        headroom = max(0, MAX_ACTIVE - active_lead_count())
+        detail["headroom_at_start"] = headroom
+
+        # Nothing to add and nothing worth banking: stop before touching the
+        # network at all. This is the whole point of the cap — when the list is
+        # full, the generator does no work rather than quietly piling up leads
+        # that will never be called.
+        if headroom == 0 and pool_depth()["qualified"] >= POOL_FLOOR:
+            detail["skipped"] = (
+                f"call list is full ({MAX_ACTIVE}/{MAX_ACTIVE}) and the bank is stocked — "
+                "no harvesting, no crawling, nothing promoted"
+            )
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE crm_leadgen_runs
+                       SET phase='done', ok=TRUE, finished_at=%s, detail=%s
+                     WHERE id=%s
+                """, (now_iso(), json.dumps({**detail, "pool": pool_depth()})[:8000], run_id))
+                conn.commit()
+            print(f"[leadgen] LEADGEN_RUN ok=True skipped=list_full "
+                  f"active={MAX_ACTIVE}/{MAX_ACTIVE}", flush=True)
+            return {"run_id": run_id, "ok": True, "promoted": 0, "enriched": 0,
+                    "qualified": 0, "candidates_found": 0, "cities_harvested": 0,
+                    "errors": 0, "detail": detail}
+
+        # 1. Promote first, from what's already banked — never past the cap.
+        promoted = promote_leads(min(target, headroom))
 
         # 2. Top the bank back up if it's getting shallow.
         depth = pool_depth()
@@ -954,10 +1016,13 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                 errors += 1
                 detail["errors"].append(f"enrich {cand.get('name')}: {exc}")
 
-        # 4. If the morning promote came up short and enriching just produced
-        #    fresh stock, top the day's list up rather than under-delivering.
+        # 4. If the first promote came up short and enriching just produced
+        #    fresh stock, top the list up rather than under-delivering — still
+        #    bounded by whatever room is left right now.
         if promoted < target:
-            promoted += promote_leads(target - promoted)
+            remaining_room = max(0, MAX_ACTIVE - active_lead_count())
+            if remaining_room:
+                promoted += promote_leads(min(target - promoted, remaining_room))
 
         ok = promoted > 0 or errors == 0
     except Exception as exc:
@@ -980,6 +1045,7 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
 
     print(f"[leadgen] LEADGEN_RUN ok={ok} promoted={promoted} enriched={enriched} "
           f"qualified={qualified} new_candidates={candidates} errors={errors} "
+          f"active={detail['pool']['active_leads']}/{MAX_ACTIVE} "
           f"runway_days={detail['pool']['days_of_runway']}", flush=True)
 
     return {

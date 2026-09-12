@@ -169,7 +169,8 @@
           <button id="runNow">Run now</button>
         </div>
         <p class="muted" style="margin:6px 0 0;font-size:12px">
-          Sources 25 new leads every day at 6pm.</p>
+          Adds up to 25 leads at 6pm daily, never taking the call list past 100.
+          When you work leads off, the spots refill.</p>
         <div id="engineBanner" style="margin-top:12px"></div>
         <div class="grid" style="margin-top:12px" id="engineStats"></div>
       </div>
@@ -446,11 +447,15 @@ $('rematch').onclick=async()=>{
 /* ── lead engine ──────────────────────────────────────────────────────── */
 async function loadEngine(){
   const d=await api('/leadgen/health');
-  $('engineBanner').innerHTML=`<div class="banner ${d.healthy?'ok':(d.stale?'bad':'')}">${
-    d.healthy?'Working — 25 new leads land at 6pm each day.':esc(d.warnings.join(' '))}</div>`;
-  $('engineStats').innerHTML=[tile(d.pool.qualified,'READY TO SEND'),
-    tile(d.pool.days_of_runway,'DAYS OF RUNWAY'),
-    tile(d.pool.by_status?.new??0,'AWAITING CHECK'),
+  /* A full list is the healthy resting state, so it reads as a plain note
+     rather than a warning — nothing is wrong when you have work waiting. */
+  const msg = d.warnings.length ? esc(d.warnings.join(' ')) : esc(d.note);
+  $('engineBanner').innerHTML=`<div class="banner ${d.warnings.length?(d.stale?'bad':''):'ok'}">${msg}</div>`;
+  $('engineStats').innerHTML=[
+    tile(`${d.pool.active_leads}/${d.pool.max_active}`,'CALL LIST'),
+    tile(d.pool.headroom,'SPOTS OPEN'),
+    tile(d.pool.qualified,'BANKED'),
+    tile(d.pool.days_of_runway,'DAYS OF WORK'),
     tile(d.cities.unharvested,'CITIES LEFT')].join('');
 }
 $('runNow').onclick=async()=>{

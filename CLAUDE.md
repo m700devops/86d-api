@@ -115,6 +115,17 @@ capture. Don't reintroduce them or describe them as current.)
   calling this API cross-origin would fail on both counts
 
 ## LEAD GENERATOR (leadgen.py)
+- **The call list is capped at `LEADGEN_MAX_ACTIVE` (100) unworked leads.** Each run tops it
+  up by at most `LEADGEN_DAILY_TARGET` (25) and never past the cap, so working leads off is
+  what creates room. When the list is full AND the bank is at floor, the run returns
+  immediately having made ZERO network calls — that's the point of the cap. When the list is
+  full but the bank is thin it still harvests, bounded by `LEADGEN_POOL_FLOOR` (50), so
+  freed spots refill the same day instead of waiting for tomorrow's crawl
+- Total leads that can exist at once: 100 callable + 50 pre-checked in reserve. Set
+  `LEADGEN_POOL_FLOOR=0` to drop the reserve entirely and only ever generate on demand
+- NOTE: none of this spends API credits — OpenStreetMap and Nominatim are free and keyless.
+  The cap exists because an ever-growing list is one nobody opens, and to stop pointless
+  crawling. The only paid call in the CRM is `/debrief`, once per call the operator logs
 - Four stages with a persistent pool between qualify and promote. The pool is the point:
   harvesting runs AHEAD of consumption, so an Overpass outage or a slow crawl costs nothing
   that morning — promote draws from the bank. `/v1/crm/leadgen/health` reports
@@ -208,7 +219,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   `/crm` still loads, it just can't do anything). Not used by the mobile app at all
 - CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).
   Also decides when the daily lead run fires
-- LEADGEN_DAILY_TARGET (default 25), LEADGEN_POOL_FLOOR (150), LEADGEN_ENRICH_WORKERS (8),
+- LEADGEN_DAILY_TARGET (default 25), LEADGEN_MAX_ACTIVE (100), LEADGEN_POOL_FLOOR (50),
+  LEADGEN_ENRICH_WORKERS (8),
   LEADGEN_RUN_HOUR (18 = 6pm, local) — optional lead generator tuning. No API key needed: the
   generator uses OpenStreetMap, which has neither keys nor billing
 - SENTRY_DSN — optional, error visibility only

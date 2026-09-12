@@ -1058,7 +1058,7 @@ def leadgen_health(_: bool = Depends(require_crm_key)):
     the daily list has quietly stopped, which is exactly the failure that would
     otherwise go unnoticed until a morning with nothing to call.
     """
-    from leadgen import pool_depth, DAILY_TARGET
+    from leadgen import pool_depth, DAILY_TARGET, MAX_ACTIVE
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM crm_leadgen_runs ORDER BY started_at DESC LIMIT 10")
@@ -1083,25 +1083,39 @@ def leadgen_health(_: bool = Depends(require_crm_key)):
 
     depth = pool_depth()
     warnings = []
-    if stale:
+    # A full list is a normal, healthy resting state, not a fault — so it is
+    # reported as a note and never as a warning, and it suppresses the
+    # "running low" warnings that would otherwise contradict it.
+    at_cap = depth["at_capacity"]
+    if stale and not at_cap:
         warnings.append("No successful run in the last 36 hours — the daily list has stopped.")
-    if depth["qualified"] < DAILY_TARGET:
-        warnings.append(
-            f"Pool has {depth['qualified']} qualified leads, under one day's target "
-            f"({DAILY_TARGET}) — tomorrow's list may come up short.")
-    elif depth["days_of_runway"] < 3:
-        warnings.append(f"Only {depth['days_of_runway']} days of leads banked.")
-    if cities["unharvested"] == 0:
-        warnings.append("Every city has been harvested at least once — add more territory.")
+    if not at_cap:
+        if depth["qualified"] < DAILY_TARGET and depth["headroom"] > DAILY_TARGET:
+            warnings.append(
+                f"Pool has {depth['qualified']} qualified leads, under one day's target "
+                f"({DAILY_TARGET}) — tomorrow's list may come up short.")
+        elif depth["days_of_runway"] < 3:
+            warnings.append(f"Only {depth['days_of_runway']} days of leads banked.")
+        if cities["unharvested"] == 0:
+            warnings.append("Every city has been harvested at least once — add more territory.")
     stuck = [r for r in runs if r["phase"] == "running"]
     if len(stuck) > 1:
         warnings.append(
             f"{len(stuck)} runs are still marked in-progress — the process was probably "
             "restarted mid-run. They're reconciled automatically on the next run.")
 
+    if at_cap:
+        note = (f"Call list is full at {depth['active_leads']}/{MAX_ACTIVE}. "
+                "Generation is paused until you work some off.")
+    else:
+        note = (f"{depth['headroom']} of {MAX_ACTIVE} spots open — "
+                f"up to {min(DAILY_TARGET, depth['headroom'])} will be added at the next run.")
+
     return {
-        "healthy": not stale and not warnings,
+        "healthy": (at_cap or not stale) and not warnings,
         "stale": stale,
+        "at_capacity": at_cap,
+        "note": note,
         "hours_since_last_success": hours_since,
         "pool": depth,
         "cities": {"total": cities["total"], "unharvested": cities["unharvested"]},
