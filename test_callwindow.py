@@ -24,6 +24,30 @@ def test_parses_the_common_shapes():
     assert set(parse_opening_hours("Sa-Mo 12:00-20:00")) == {5, 6, 0}
 
 
+def test_a_comma_can_separate_rules_as_well_as_time_spans():
+    """From a real harvested venue. The OSM spec separates rules with ";" and
+    uses "," to join time spans inside one rule — but contributors use commas
+    for both, and splitting on ";" alone read this whole string as a single
+    Monday-to-Thursday rule carrying four spans. The venue then had NO hours
+    for Friday, Saturday or Sunday, which for a bar means it was treated as
+    shut on its three best nights and dropped off the call list all weekend."""
+    schedule = parse_opening_hours(
+        "Mo-Th 11:00-24:00, Fr 11:00-26:00, Sa 10:00-26:00, Su 10:00-24:00")
+    assert schedule[0] == [(11 * 60, 24 * 60)]          # Monday
+    assert schedule[4] == [(11 * 60, 26 * 60)]          # Friday, closing at 2am
+    assert schedule[5] == [(10 * 60, 26 * 60)]          # Saturday
+    assert schedule[6] == [(10 * 60, 24 * 60)]          # Sunday
+    assert is_open_today(schedule, 5) is True
+
+
+def test_a_comma_between_two_shifts_still_joins_them():
+    # The other meaning of a comma, which must keep working: one rule, two
+    # spans, a lunch service and a dinner service on the same days.
+    schedule = parse_opening_hours("Mo-Fr 09:00-12:00,13:00-17:00")
+    assert schedule[0] == [(9 * 60, 12 * 60), (13 * 60, 17 * 60)]
+    assert schedule.get(5) is None
+
+
 def test_unparseable_and_closed_are_different_answers():
     # None means "we don't know, use the generic window"; {} means the venue
     # said it is shut, which is a reason to drop the lead. Collapsing the two

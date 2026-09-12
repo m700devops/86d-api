@@ -348,6 +348,12 @@ capture. Don't reintroduce them or describe them as current.)
   which at 12:30pm reads like a bug. A LATER-opening venue gets one window: open to two
   hours after (staff setting up, manager on, nobody ordering drinks yet). Unparseable or
   missing hours fall back to the generic afternoon — never worse than before
+- **`_split_rules()` splits on `;` AND on a comma that introduces a new day.** The OSM spec
+  separates rules with `;` and uses `,` to join time spans inside one rule, but contributors
+  use commas for both. `Mo-Th 11:00-24:00, Fr 11:00-26:00, Sa 10:00-26:00, Su 10:00-24:00`
+  parsed as a single Mon-Thu rule carrying four spans, leaving a real harvested bar with NO
+  hours for Friday, Saturday or Sunday — read as shut on its three best nights and dropped
+  off the call list all weekend
 - Venues `opening_hours` marks `closed` are dropped at harvest; venues shut TODAY are sorted
   to the bottom and labelled with the next day they open. Zone headlines are derived from how
   many rows are actually ringable, so a header can't say "nobody's there" above an open bar
@@ -378,6 +384,25 @@ capture. Don't reintroduce them or describe them as current.)
 - `_ask_claude()` is the one place that knows the Anthropic headers, the `{` prefill trick and
   what each failure should say; both the drafter and the call-notes reader go through it.
   `ANTHROPIC_BASE_URL` overrides the host, for a gateway or a local stand-in
+- **An approved email can be held for the venue's quiet hour.** `send_at` on
+  `POST /leads/{id}/send-email` queues it in `crm_scheduled_emails` instead of sending;
+  `_scheduled_email_loop` in main.py wakes every 60s and `run_due_emails()` sends what's due.
+  `GET /leads/{id}/send-slots` proposes times from the venue's OWN opening hours (the rush
+  that ruins a badly-timed email is theirs) and returns every one in BOTH clocks — the
+  operator is half a day away and "2pm Tuesday" tells them nothing about whether they'll be
+  awake for it
+- **Queueing does NOT stamp the lead.** The touch happens when the mail actually goes, so the
+  bar stays on the call list and stays callable — scheduling a note for Tuesday is no reason
+  to stop ringing them today. Only `queued_email_at` is set, for the badge
+- Each due row is claimed with a conditional `UPDATE ... FOR UPDATE SKIP LOCKED` before the
+  send, so two workers, or one worker and a Render restart mid-flight, cannot send the same
+  email twice. Sending twice is the failure that matters: the recipient sees it, and nothing
+  afterwards unsends it. One pending email per lead — queueing a second marks the first
+  `replaced`
+- A send that fails is left `failed` with the error, never retried in a loop: a bad address or
+  a rejected login will not fix itself. `GET /v1/crm/scheduled` surfaces pending AND failed,
+  and the page shows failures in red above the list — an email you believe went out and
+  didn't is a follow-up you wait on forever
 - **The Email button sends from the server, it is not a `mailto:` link.** `POST
   /v1/crm/leads/{id}/send-email` opens a compose box prefilled with the pitch, sends via
   mailer.py, then stamps `email_date`, moves the status off `new`, appends a dated note,

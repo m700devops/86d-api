@@ -140,6 +140,7 @@ def init_crm_tables():
             ("manager_source", "TEXT"),             # the page it was read off
             ("manager_seen_at", "TEXT"),            # when — names go stale, see below
             ("tz_name", "TEXT"),                    # IANA zone; the offset alone ignores DST
+            ("queued_email_at", "TEXT"),            # denormalised so every list can show it
         ]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -147,6 +148,29 @@ def init_crm_tables():
             """, (col,))
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE crm_leads ADD COLUMN {col} {col_type}")
+
+        # Mail waiting for a better hour. A separate table rather than a flag on
+        # the lead: a queued email has its own subject, body, recipient and
+        # failure state, and none of that belongs on a lead row.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_scheduled_emails (
+                id TEXT PRIMARY KEY,
+                lead_id TEXT NOT NULL,
+                to_addr TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                send_at TEXT NOT NULL,          -- UTC, ISO 8601
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                sent_at TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sched_due "
+                       "ON crm_scheduled_emails(status, send_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sched_lead "
+                       "ON crm_scheduled_emails(lead_id)")
 
         # Undo for a mis-logged call. The whole row as it was, written before a
         # touch changes it, so putting it back is a restore rather than a guess
@@ -301,7 +325,7 @@ LEAD_COLUMNS = (
     "matched_user_id", "matched_at", "match_method", "tz_offset_hours",
     "source", "last_touch_at", "attempts", "last_outcome",
     "opening_hours", "opener",
-    "lead_score", "email_kind", "tz_name",
+    "lead_score", "email_kind", "tz_name", "queued_email_at",
     "manager_name", "manager_role", "manager_source", "manager_seen_at",
 )
 
@@ -1324,6 +1348,88 @@ Rules, in order of importance:
 6. Plain text only: no HTML, no markdown, no asterisks for bold."""
 
 
+@crm_router.get("/leads/{lead_id}/send-slots", response_model=dict)
+def send_slots(lead_id: str, _: bool = Depends(require_crm_key)):
+    """Good times to land an email at this venue, in both clocks.
+
+    The rush that makes a badly-timed email useless is the VENUE's rush, so
+    every slot is worked out in the venue's local time — then shown in the
+    operator's as well, because they are half a day away and "2pm Tuesday"
+    tells them nothing about whether they'll be awake for it.
+
+    The windows are the same ones the call list uses. An email is gentler than
+    a phone call, but the reasoning holds: read it while setting up or in the
+    afternoon lull, not at half past seven with three tickets on the rail.
+    """
+    from callwindow import (LUNCH_WINDOW, PRE_OPEN_MINUTES, opens_at,
+                            parse_opening_hours, service_of)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+        row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "Lead not found"})
+
+    venue_now = _venue_now(row.get("tz_name"), row.get("tz_offset_hours"))
+    op_tz = _operator_tz()
+    schedule = parse_opening_hours(row.get("opening_hours"))
+    lunch = service_of(row.get("opening_hours")) == "lunch"
+
+    def at(day_offset: int, minutes: int) -> datetime:
+        base = (venue_now + timedelta(days=day_offset)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        return base + timedelta(minutes=minutes)
+
+    slots = []
+    seen = set()
+
+    def add(when: datetime, label: str, why: str):
+        # Never offer a time that has already gone by.
+        if when <= venue_now + timedelta(minutes=2):
+            return
+        key = when.isoformat(timespec="minutes")
+        if key in seen:
+            return
+        seen.add(key)
+        utc = when.astimezone(timezone.utc)
+        slots.append({
+            "send_at": utc.isoformat(),
+            "label": label,
+            "why": why,
+            "venue_time": when.strftime("%a %-I:%M%p").lower(),
+            "your_time": utc.astimezone(op_tz).strftime("%a %-I:%M%p").lower(),
+        })
+
+    # Today and the next few days, so "tomorrow morning" still works on a
+    # venue that's shut tomorrow.
+    for day in range(0, 5):
+        weekday = (venue_now + timedelta(days=day)).weekday()
+        if schedule is not None and not schedule.get(weekday):
+            continue                       # they're shut that day
+        open_min = opens_at(schedule, weekday)
+        when_word = "today" if day == 0 else (
+            "tomorrow" if day == 1 else (venue_now + timedelta(days=day)).strftime("%A"))
+        if open_min is not None:
+            add(at(day, max(0, open_min - PRE_OPEN_MINUTES)),
+                f"{when_word}, before they open",
+                "staff are in setting up and nobody has ordered yet")
+        if lunch or open_min is None:
+            add(at(day, LUNCH_WINDOW[0]), f"{when_word} afternoon",
+                "the lull after lunch, when the manager does the ordering")
+        if len(slots) >= 4:
+            break
+
+    return {
+        "slots": slots[:4],
+        "venue_now": venue_now.strftime("%a %-I:%M%p").lower(),
+        "your_now": datetime.now(op_tz).strftime("%a %-I:%M%p").lower(),
+        "venue_zone": row.get("tz_name") or "",
+        "your_zone": OPERATOR_TZ,
+    }
+
+
 class DraftRequest(BaseModel):
     brief: str = Field(min_length=1, max_length=2000)
     # Present on a revision: the draft on screen right now, which the model
@@ -1379,6 +1485,8 @@ class OutgoingEmail(BaseModel):
     subject: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=20000)
     to: Optional[str] = Field(default=None, max_length=320)
+    # UTC ISO 8601. Present means "hold it until then" rather than send now.
+    send_at: Optional[str] = Field(default=None, max_length=40)
 
 
 @crm_router.get("/mail/status", response_model=dict)
@@ -1419,6 +1527,9 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
             "error": "no_address",
             "message": f"No usable email address for {lead['name']}."})
 
+    if data.send_at:
+        return _queue_email(lead, to, data)
+
     try:
         sent = mailer.send(to, data.subject, data.body)
     except mailer.MailNotConfigured as exc:
@@ -1432,11 +1543,242 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
     now = now_iso()
     with get_db() as conn:
         cursor = conn.cursor()
+        undo_id = _record_email_sent(cursor, lead_id, to, data.subject, today, now)
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+        updated = cursor.fetchone()
+        cursor.execute("SELECT * FROM crm_counters WHERE id = 1")
+        counters = cursor.fetchone()
+        conn.commit()
+
+    return {"lead": _lead_row(updated), "undo_id": undo_id, "sent": sent,
+            "counters": _counters_row(counters) if counters else None}
+
+
+def _queue_email(lead, to: str, data) -> dict:
+    """Hold an approved email until the venue's quiet hour.
+
+    Nothing is stamped on the lead beyond the badge: the touch happens when
+    the mail actually goes, not when it was written. Until then the bar is
+    still on the call list and still callable, which is right — scheduling a
+    note for Tuesday is not a reason to stop ringing them today.
+    """
+    try:
+        when = datetime.fromisoformat(data.send_at.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=422, detail={
+            "error": "bad_time",
+            "message": "That send time isn't a date I can read."})
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    when = when.astimezone(timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    if when <= now:
+        raise HTTPException(status_code=422, detail={
+            "error": "bad_time", "message": "That time has already passed."})
+    if when > now + timedelta(days=90):
+        raise HTTPException(status_code=422, detail={
+            "error": "bad_time",
+            "message": "That's more than three months out — pick something sooner."})
+
+    queue_id = generate_id()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # One pending email per lead. Queueing a second replaces the first
+        # rather than silently sending the same bar two emails on a timer.
+        cursor.execute(
+            "UPDATE crm_scheduled_emails SET status = 'replaced' "
+            " WHERE lead_id = %s AND status = 'pending'", (lead["id"],))
+        replaced = cursor.rowcount
+        cursor.execute("""
+            INSERT INTO crm_scheduled_emails
+                (id, lead_id, to_addr, subject, body, send_at, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
+        """, (queue_id, lead["id"], to, data.subject.strip(), data.body,
+              when.isoformat(), now_iso()))
+        cursor.execute("UPDATE crm_leads SET queued_email_at = %s WHERE id = %s",
+                       (when.isoformat(), lead["id"]))
+        conn.commit()
+
+    op = when.astimezone(_operator_tz())
+    venue = when.astimezone(timezone.utc) + timedelta(
+        hours=lead.get("tz_offset_hours") or 0)
+    if lead.get("tz_name"):
+        try:
+            venue = when.astimezone(ZoneInfo(lead["tz_name"]))
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return {
+        "queued": True, "id": queue_id, "to": to, "replaced": replaced,
+        "send_at": when.isoformat(),
+        "venue_time": venue.strftime("%a %-I:%M%p").lower(),
+        "your_time": op.strftime("%a %-I:%M%p").lower(),
+    }
+
+
+@crm_router.get("/scheduled", response_model=dict)
+def list_scheduled(_: bool = Depends(require_crm_key)):
+    """Mail waiting to go, and anything that tried and failed.
+
+    Failures matter more than the pending list: an email that silently didn't
+    send is a follow-up you believe happened. They stay here until dismissed.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT q.*, l.name AS lead_name, l.loc, l.tz_name, l.tz_offset_hours
+              FROM crm_scheduled_emails q
+              JOIN crm_leads l ON l.id = q.lead_id
+             WHERE q.status IN ('pending', 'failed')
+             ORDER BY q.send_at ASC
+             LIMIT 100
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+
+    op_tz = _operator_tz()
+    out = []
+    for row in rows:
+        try:
+            when = datetime.fromisoformat(row["send_at"].replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        venue = when + timedelta(hours=row.get("tz_offset_hours") or 0)
+        if row.get("tz_name"):
+            try:
+                venue = when.astimezone(ZoneInfo(row["tz_name"]))
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
+        out.append({
+            "id": row["id"], "lead_id": row["lead_id"], "name": row["lead_name"],
+            "loc": row["loc"], "to": row["to_addr"], "subject": row["subject"],
+            "status": row["status"], "attempts": row["attempts"],
+            "error": row["last_error"],
+            "venue_time": venue.strftime("%a %-I:%M%p").lower(),
+            "your_time": when.astimezone(op_tz).strftime("%a %-I:%M%p").lower(),
+            "overdue": row["status"] == "pending" and when < datetime.now(timezone.utc),
+        })
+    return {"queued": [q for q in out if q["status"] == "pending"],
+            "failed": [q for q in out if q["status"] == "failed"],
+            "count": len(out)}
+
+
+@crm_router.delete("/scheduled/{queue_id}", response_model=dict)
+def cancel_scheduled(queue_id: str, _: bool = Depends(require_crm_key)):
+    """Call it back before it goes. Also how a failure is dismissed."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE crm_scheduled_emails SET status = 'cancelled' "
+            " WHERE id = %s AND status IN ('pending', 'failed') RETURNING lead_id",
+            (queue_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found",
+                "message": "Nothing pending under that id — it may have already gone."})
+        cursor.execute("""
+            UPDATE crm_leads SET queued_email_at = NULL
+             WHERE id = %s AND NOT EXISTS (
+                SELECT 1 FROM crm_scheduled_emails
+                 WHERE lead_id = %s AND status = 'pending')
+        """, (row["lead_id"], row["lead_id"]))
+        conn.commit()
+    return {"cancelled": True}
+
+
+def run_due_emails(limit: int = 20) -> dict:
+    """Send whatever is due. Called on a timer; safe to call at any moment.
+
+    Each row is claimed with a conditional UPDATE before the send, so two
+    workers — or one worker and a restart mid-flight — can't send the same
+    email twice. Sending twice is the failure that matters here: the recipient
+    sees it, and no amount of tidying up afterwards unsends it.
+    """
+    import mailer
+
+    now = datetime.now(timezone.utc).isoformat()
+    sent = failed = 0
+    while sent + failed < limit:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE crm_scheduled_emails
+                   SET status = 'sending', attempts = attempts + 1
+                 WHERE id = (
+                    SELECT id FROM crm_scheduled_emails
+                     WHERE status = 'pending' AND send_at <= %s
+                     ORDER BY send_at ASC
+                     LIMIT 1
+                     FOR UPDATE SKIP LOCKED)
+                RETURNING *
+            """, (now,))
+            job = cursor.fetchone()
+            conn.commit()
+        if not job:
+            break
+
+        try:
+            mailer.send(job["to_addr"], job["subject"], job["body"])
+        except Exception as exc:
+            failed += 1
+            # Left as 'failed' rather than retried forever: a bad address or a
+            # rejected login will not fix itself, and the operator needs to
+            # see it rather than have it quietly loop.
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE crm_scheduled_emails SET status = 'failed', last_error = %s "
+                    " WHERE id = %s", (str(exc)[:400], job["id"]))
+                # Take the "queued" badge off: nothing is queued any more, and
+                # a row still reading QUEUED next to an email that failed an
+                # hour ago is the page telling a comfortable lie. The red bar
+                # above the list is the honest signal.
+                cursor.execute("""
+                    UPDATE crm_leads SET queued_email_at = NULL
+                     WHERE id = %s AND NOT EXISTS (
+                        SELECT 1 FROM crm_scheduled_emails
+                         WHERE lead_id = %s AND status = 'pending')
+                """, (job["lead_id"], job["lead_id"]))
+                conn.commit()
+            print(f"[crm] scheduled email to {job['to_addr']} failed: {exc}", flush=True)
+            continue
+
+        sent += 1
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE crm_scheduled_emails SET status = 'sent', sent_at = %s "
+                " WHERE id = %s", (now_iso(), job["id"]))
+            try:
+                _record_email_sent(cursor, job["lead_id"], job["to_addr"],
+                                   job["subject"], _today(), now_iso())
+            except Exception as exc:
+                # The mail is already gone; a bookkeeping failure must not make
+                # it look unsent. Say so loudly and keep the 'sent' status.
+                print(f"[crm] sent {job['id']} but could not stamp the lead: {exc}",
+                      flush=True)
+            conn.commit()
+        print(f"[crm] scheduled email sent to {job['to_addr']}", flush=True)
+
+    if sent or failed:
+        print(f"[crm] SCHEDULED_EMAILS sent={sent} failed={failed}", flush=True)
+    return {"sent": sent, "failed": failed}
+
+
+def _record_email_sent(cursor, lead_id: str, to: str, subject: str,
+                       today: str, now: str) -> str:
+    """Everything that happens to a lead once mail has actually gone out.
+
+    Shared by the send-now path and the scheduled worker so a queued email
+    lands in the pipeline identically to one sent by hand — same stamp, same
+    note, same counter, same undo.
+    """
+    if True:
         cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (lead_id,))
         lead = cursor.fetchone()
         undo_id = _snapshot(cursor, lead, "log email")
 
-        note = f"[{today}] email to {to}: {data.subject.strip()}"
+        note = f"[{today}] email to {to}: {subject.strip()}"
         sets = ["updated_at = %s", "last_touch_at = %s", "email_date = %s",
                 "last_outcome = %s",
                 "notes = COALESCE(notes || E'\n', '') || %s"]
@@ -1452,10 +1794,10 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
 
         _record_touch(cursor, lead, "email", "emailed", lead["attempts"] or 0,
                       lead.get("tz_offset_hours"))
+        # Whatever was queued has now gone, so the badge comes off.
+        sets.append("queued_email_at = NULL")
         params.append(lead_id)
-        cursor.execute(
-            f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
-        updated = cursor.fetchone()
+        cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s", params)
 
         cursor.execute("""
             UPDATE crm_counters
@@ -1464,13 +1806,8 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
                    touch_ticker_last_action = 'email',
                    updated_at = %s
              WHERE id = 1
-            RETURNING *
         """, (now,))
-        counters = cursor.fetchone()
-        conn.commit()
-
-    return {"lead": _lead_row(updated), "undo_id": undo_id, "sent": sent,
-            "counters": _counters_row(counters) if counters else None}
+        return undo_id
 
 
 # ============== UNDO ==============

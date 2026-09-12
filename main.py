@@ -92,6 +92,7 @@ async def lifespan(app: FastAPI):
     # Daily lead sourcing. Best-effort like the reminder loop — a failure here
     # must never touch the product API.
     asyncio.create_task(_leadgen_daily_loop())
+    asyncio.create_task(_scheduled_email_loop())
     yield
 
 app = FastAPI(
@@ -2776,6 +2777,25 @@ def _leadgen_tick():
         rematch_attribution()
     except Exception as exc:
         print(f"[leadgen] attribution rematch failed: {exc}", flush=True)
+
+
+async def _scheduled_email_loop():
+    """Send queued emails when their hour comes round.
+
+    A minute's resolution, which is far finer than the thing it's timing: the
+    whole point is to land inside a quiet half-hour at a bar, not to hit a
+    particular second. Each pass claims its rows conditionally, so a Render
+    restart mid-send can at worst leave one row marked 'sending' rather than
+    mail anybody twice.
+    """
+    await asyncio.sleep(30)
+    while True:
+        try:
+            from crm import run_due_emails
+            await asyncio.to_thread(run_due_emails)
+        except Exception as e:
+            print(f"[crm] scheduled email loop error: {e}", flush=True)
+        await asyncio.sleep(60)
 
 
 async def _leadgen_daily_loop():

@@ -71,6 +71,24 @@ def _expand_days(spec: str) -> list[int]:
     return sorted(set(out))
 
 
+# A comma that introduces a new day specification, e.g. the ones in
+# "Mo-Th 11:00-24:00, Fr 11:00-26:00, Sa 10:00-26:00". The OSM spec says rules
+# are separated by ";" and a comma joins TIME spans inside one rule — but real
+# data uses commas for both, and splitting on ";" alone reads that whole string
+# as a single Monday-to-Thursday rule carrying four time spans. The venue then
+# has no hours at all for Friday, Saturday or Sunday, which for a bar is
+# "closed on its three best nights": dropped from the call list all weekend.
+_RULE_COMMA = re.compile(r",\s*(?=(?:Mo|Tu|We|Th|Fr|Sa|Su|PH)\b)", re.I)
+
+
+def _split_rules(text: str) -> list[str]:
+    """Rules, however this particular contributor separated them."""
+    out = []
+    for chunk in text.split(";"):
+        out.extend(_RULE_COMMA.split(chunk))
+    return out
+
+
 def parse_opening_hours(value: Optional[str]) -> Optional[dict]:
     """OSM opening_hours -> {day_index: [(open_min, close_min), ...]}.
 
@@ -97,7 +115,7 @@ def parse_opening_hours(value: Optional[str]) -> Optional[dict]:
     schedule: dict[int, list[tuple[int, int]]] = {}
     understood = False
 
-    for rule in text.split(";"):
+    for rule in _split_rules(text):
         rule = rule.strip()
         if not rule:
             continue

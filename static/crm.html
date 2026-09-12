@@ -175,6 +175,34 @@
   .aibox button{flex:none;background:var(--accent);border-color:var(--accent);
                 color:#fff;font-weight:700;align-self:stretch;white-space:nowrap}
   .aibox button:disabled{opacity:.6}
+
+  /* Scheduling. Deliberately below the message, not above it: you decide when
+     it lands once you know what it says. */
+  .whenbox{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+  .whenhead{font-size:12px;font-weight:700;letter-spacing:0.4px;text-transform:uppercase;
+            color:var(--text3);margin-bottom:9px}
+  .whenhead .muted{text-transform:none;letter-spacing:0;font-weight:400;margin-left:8px}
+  .slots{display:flex;gap:8px;flex-wrap:wrap}
+  .slot{display:flex;flex-direction:column;gap:2px;text-align:left;padding:8px 12px;
+        border-radius:9px;border:1px solid var(--line2);background:var(--surface2);
+        cursor:pointer;font:inherit;color:var(--text)}
+  .slot:hover{border-color:var(--accent)}
+  .slot.on{border-color:var(--accent);background:#FF6B351A}
+  .slot b{font-size:13px}
+  .slot span{font-size:11px;color:var(--text3);font-variant-numeric:tabular-nums}
+  .slot.custom{flex-direction:row;align-items:center;gap:8px;font-size:12px;
+               color:var(--text3);cursor:default}
+  .slot.custom input{width:auto;padding:5px 8px;font-size:12px}
+
+  .queuebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+            background:var(--surface);border:1px solid var(--line);border-radius:10px;
+            padding:9px 12px;margin-bottom:12px;font-size:13px}
+  .queuebar.bad{border-color:#F0616D55;background:#F0616D10}
+  .queuebar .qitem{color:var(--text2)}
+  .queuebar .qitem b{color:var(--text)}
+  .qchip{display:inline-block;font-size:10px;font-weight:700;letter-spacing:0.4px;
+         padding:1px 6px;border-radius:5px;margin-left:6px;
+         color:var(--wait);border:1px solid #FFB02055;background:#FFB02012}
   .applied{margin-top:10px;font-size:12px;color:var(--go)}
 
   .muted{color:var(--text3)} .err{color:var(--stop)}
@@ -237,6 +265,7 @@
         <button class="startbtn" id="startBtn">Ready to start calling</button>
         <div class="clock" id="clock"></div>
       </div>
+      <div id="queueBar"></div>
       <div id="undoBar"></div>
       <div class="svc" id="svcTabs"></div>
       <div class="zt" id="zoneTabs"></div>
@@ -431,6 +460,43 @@ async function undoTouch(id){
   }catch(e){ toast(e.message); }
 }
 
+/* Mail waiting on a better hour, and anything that tried and failed.
+
+   The failures are why this is on screen at all: an email you believe went out
+   and didn't is a follow-up you'll wait on forever. A queued one is just a
+   reminder that this bar already has something coming. */
+async function loadQueueBar(){
+  let d;
+  try{ d=await api('/scheduled'); }catch{ return; }
+  const box=$('queueBar');
+  if(!d.count){ box.innerHTML=''; return; }
+  const rows=[];
+  if(d.failed.length){
+    rows.push(`<div class="queuebar bad">
+      <span class="qitem"><b>${d.failed.length} email${d.failed.length>1?'s':''} didn't send.</b>
+        ${esc(d.failed[0].name)} — ${esc(d.failed[0].error||'no reason given')}</span>
+      ${d.failed.map(f=>`<button data-drop="${esc(f.id)}">Dismiss ${esc(f.name.slice(0,18))}</button>`).join('')}
+    </div>`);
+  }
+  if(d.queued.length){
+    const next=d.queued[0];
+    rows.push(`<div class="queuebar">
+      <span class="qitem"><b>${d.queued.length}</b> email${d.queued.length>1?'s':''} queued ·
+        next to <b>${esc(next.name)}</b> at ${esc(next.venue_time)} their time
+        (${esc(next.your_time)} yours)${next.overdue?' <span class="qchip">sending shortly</span>':''}</span>
+      <button data-drop="${esc(next.id)}">Call it back</button>
+    </div>`);
+  }
+  box.innerHTML=rows.join('');
+}
+
+$('queueBar').onclick=async e=>{
+  const b=e.target.closest('button[data-drop]'); if(!b) return;
+  try{ await api('/scheduled/'+b.dataset.drop,{method:'DELETE'});
+       toast('Cancelled'); await loadCalls(); }
+  catch(err){ toast(err.message); }
+};
+
 async function loadUndoBar(){
   let d;
   try{ d=await api('/undo?limit=5'); }catch{ return; }
@@ -485,16 +551,91 @@ function composeDrawer(addr, contact){
     </div>`:''}
     <div class="mailrow"><label>Subject</label><input data-subject value="${esc(MAIL_SUBJECT)}"></div>
     <textarea data-body rows="9">${esc(mailBody(contact))}</textarea>
+    <div class="whenbox">
+      <div class="whenhead">When should it land?
+        <span class="muted" data-clocks></span></div>
+      <div class="slots" data-slots><span class="muted">loading good times…</span></div>
+    </div>
     <div class="row">
-      <button class="go" data-send>Send it</button>
+      <button class="go" data-send>Send it now</button>
       <button data-cancel>Cancel</button>
     </div>
     <div class="applied hide"></div>
   </td>`;
 }
 
+/* Good hours to land at THIS venue, worked out from its own opening hours and
+   shown in both clocks — the rush that ruins a badly-timed email is theirs,
+   but you need to know when it goes in yours. */
+async function loadSlots(dr, id){
+  const box=dr.querySelector('[data-slots]');
+  if(!box) return;
+  try{
+    const d=await api(`/leads/${id}/send-slots`);
+    dr.querySelector('[data-clocks]').textContent =
+      `it's ${d.venue_now} there, ${d.your_now} for you`;
+    if(!d.slots.length){
+      box.innerHTML='<span class="muted">No good window in the next few days — '
+        +'send it now or pick a time below.</span>';
+    }else{
+      box.innerHTML=d.slots.map(sl=>`
+        <button class="slot" data-at="${esc(sl.send_at)}" title="${esc(sl.why)}">
+          <b>${esc(sl.label)}</b>
+          <span>${esc(sl.venue_time)} there · ${esc(sl.your_time)} yours</span>
+        </button>`).join('');
+    }
+    box.insertAdjacentHTML('beforeend',
+      `<label class="slot custom">Or pick one
+         <input type="datetime-local" data-custom></label>`);
+  }catch(e){
+    box.innerHTML='<span class="muted">Couldn\u2019t work out their hours — '
+      +'send it now, or pick a time.</span>'
+      +'<label class="slot custom">Pick one <input type="datetime-local" data-custom></label>';
+  }
+}
+
 /* Shared by the call list and the pipeline: ask for a draft, drop it into the
    fields, and switch the box over to revision wording. */
+/* Picking a time turns "Send it now" into "Schedule it". One button either
+   way — the decision is which time is selected, not which button to press. */
+function wireSlots(dr){
+  const box=dr.querySelector('[data-slots]');
+  if(!box) return;
+  box.addEventListener('click', e=>{
+    const b=e.target.closest('.slot[data-at]'); if(!b) return;
+    const already=b.classList.contains('on');
+    box.querySelectorAll('.slot').forEach(x=>x.classList.remove('on'));
+    const custom=box.querySelector('[data-custom]'); if(custom) custom.value='';
+    if(!already) b.classList.add('on');   // clicking the chosen one unpicks it
+    refreshSendLabel(dr);
+  });
+  box.addEventListener('change', e=>{
+    if(!e.target.matches('[data-custom]')) return;
+    box.querySelectorAll('.slot[data-at]').forEach(x=>x.classList.remove('on'));
+    refreshSendLabel(dr);
+  });
+}
+
+function chosenTime(dr){
+  const picked=dr.querySelector('.slot.on[data-at]');
+  if(picked) return picked.dataset.at;
+  const custom=dr.querySelector('[data-custom]');
+  if(custom && custom.value){
+    // datetime-local carries no zone: it means the time on THIS device's
+    // clock, which is the operator's. toISOString converts it to UTC, which
+    // is what the server stores.
+    const d=new Date(custom.value);
+    if(!isNaN(d)) return d.toISOString();
+  }
+  return null;
+}
+
+function refreshSendLabel(dr){
+  const btn=dr.querySelector('[data-send]');
+  if(!btn) return;
+  btn.textContent = chosenTime(dr) ? 'Schedule it' : 'Send it now';
+}
+
 async function runDraft(dr, id){
   const brief=dr.querySelector('[data-brief]');
   const btn=dr.querySelector('[data-draft]');
@@ -592,7 +733,7 @@ function soonStrip(d){
 async function loadCalls(){
   if(CALLING){
     await loadNow();
-    loadUndoBar();
+    loadUndoBar(); loadQueueBar();
     // Windows open and close on the clock, so a list left sitting goes stale.
     if(!nowTimer) nowTimer=setInterval(()=>{ if(CALLING&&TAB==='calls') loadNow(); }, 60000);
     return;
@@ -602,7 +743,7 @@ async function loadCalls(){
   $('startBtn').classList.remove('on');
   $('clock').innerHTML='';
   const d=await api('/calllist'); LAST=d;
-  loadUndoBar();
+  loadUndoBar(); loadQueueBar();
   const go = /^Call /.test(d.focus);
   $('focus').className='focus '+(go?'go':'wait');
   $('focus').innerHTML=`<h2>${esc(d.focus)}</h2>
@@ -692,6 +833,8 @@ $('zoneTabs').onclick=e=>{
 /* Why this row is where it is. The list reorders itself for reasons the
    screen should state, or it just looks arbitrary. */
 function whyTag(l){
+  if(l.queued_email_at) return '<span class="qchip">EMAIL QUEUED</span>'
+    + (l.manager_name?'<span class="why">NAME</span>':'');
   if(l.manager_name) return '<span class="why">NAME</span>';
   if(l.email_kind==='personal') return '<span class="why">DIRECT</span>';
   return '';
@@ -807,6 +950,7 @@ $('zones').onclick=async e=>{
     d.className='drawer mailer';
     d.innerHTML=composeDrawer(addr, tr.dataset.contact);
     tr.after(d);
+    wireSlots(d); loadSlots(d, id);
     return;
   }
   if(btn.dataset.act==='log'){
@@ -846,11 +990,14 @@ async function drawerAction(dr,e){
       const r=await api(`/leads/${id}/send-email`,{method:'POST',body:JSON.stringify({
         to:dr.querySelector('[data-to]').value.trim(),
         subject:dr.querySelector('[data-subject]').value.trim(),
-        body:dr.querySelector('[data-body]').value})});
-      toast('Sent to '+r.sent.to, r.undo_id);
+        body:dr.querySelector('[data-body]').value,
+        send_at:chosenTime(dr)})});
+      toast(r.queued
+        ? `Queued for ${r.venue_time} their time (${r.your_time} yours)`
+        : 'Sent to '+r.sent.to, r.undo_id);
       await loadCalls();
     }catch(err){
-      btn.disabled=false; btn.textContent='Send it';
+      btn.disabled=false; refreshSendLabel(dr);
       const box=dr.querySelector('.applied');
       box.className='applied err'; box.textContent=err.message;
     }
@@ -962,7 +1109,8 @@ function pipeRow(l,n){
               data-contact="${esc(l.contact||'')}">
     <td class="rownum">${n}</td>
     <td class="nm">${esc(l.name)}${sub?`<div class="ask">${esc(sub)}</div>`:''}</td>
-    <td><span class="st st-${esc(l.status)}">${esc(l.status.toUpperCase())}</span></td>
+    <td><span class="st st-${esc(l.status)}">${esc(l.status.toUpperCase())}</span>${
+      l.queued_email_at?'<span class="qchip">MAIL QUEUED</span>':''}</td>
     <td>${l.phone_digits
       ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span>`
         +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_digits)}">COPY</button></div>`
@@ -1057,6 +1205,7 @@ $('pipeBody').onclick=async e=>{
     }
     d.className='drawer mailer'; d.dataset.mode='mail';
     d.innerHTML=composeDrawer(addr, tr.dataset.contact);
+    setTimeout(()=>{ wireSlots(d); loadSlots(d, id); }, 0);
   }
   tr.after(d);
 };
@@ -1079,14 +1228,19 @@ async function pipeDrawer(dr,e){
     return runDraft(dr, id);
   }
   if(dr.dataset.mode==='mail' && e.target.closest('[data-send]')){
-    const b=dr.querySelector('[data-send]'); b.disabled=true; b.textContent='Sending…';
+    const b=dr.querySelector('[data-send]'); b.disabled=true;
+    b.textContent=chosenTime(dr)?'Scheduling…':'Sending…';
     try{
       const r=await api(`/leads/${id}/send-email`,{method:'POST',body:JSON.stringify({
         to:dr.querySelector('[data-to]').value.trim(),
         subject:dr.querySelector('[data-subject]').value.trim(),
-        body:dr.querySelector('[data-body]').value})});
-      toast('Sent to '+r.sent.to, r.undo_id); await loadPipeline();
-    }catch(err){ b.disabled=false; b.textContent='Send it'; fail(err.message); }
+        body:dr.querySelector('[data-body]').value,
+        send_at:chosenTime(dr)})});
+      toast(r.queued
+        ? `Queued for ${r.venue_time} their time (${r.your_time} yours)`
+        : 'Sent to '+r.sent.to, r.undo_id);
+      await loadPipeline();
+    }catch(err){ b.disabled=false; refreshSendLabel(dr); fail(err.message); }
     return;
   }
   if(dr.dataset.mode==='log'){
