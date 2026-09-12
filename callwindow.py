@@ -185,7 +185,9 @@ def call_window(hours: Optional[str], local_now: datetime) -> dict:
                 "headline": f"Closed today — try {nxt}" if nxt else "Closed today"}
 
     if open_min is None:
-        windows = [(LUNCH_WINDOW[0], LUNCH_WINDOW[1], "generic")]
+        # The reason shows on screen under a "why now" heading, so it has to
+        # say something. "generic" is an implementation detail, not an answer.
+        windows = [(LUNCH_WINDOW[0], LUNCH_WINDOW[1], "afternoon lull, no hours listed")]
     elif open_min <= LUNCH_OPEN_CUTOFF:
         # Two shots at a lunch venue: the quiet few minutes after they unlock,
         # then the lull once the rush has cleared. The rush itself — roughly

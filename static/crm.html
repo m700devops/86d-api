@@ -148,6 +148,9 @@
   .drawer td{background:#101010 !important;padding:14px}
   .drawer .hint{color:var(--text3);font-size:12px;margin:0 0 8px}
   .drawer .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .mailrow{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .mailrow label{width:56px;flex:none;color:var(--text3);font-size:11px;
+                 letter-spacing:0.6px;text-transform:uppercase;font-weight:700}
   .applied{margin-top:10px;font-size:12px;color:var(--go)}
 
   .muted{color:var(--text3)} .err{color:var(--stop)}
@@ -315,6 +318,9 @@ async function unlock(k){
     try{localStorage.setItem(KEY_STORE,k)}catch{}
     $('gateErr').classList.add('hide');$('gate').classList.add('hide');
     $('app').classList.remove('hide');
+    // After the key is accepted, not before — this is an authenticated call
+    // and at script-parse time there is no key to send.
+    await loadMailStatus();
     await loadCalls();
   }catch(e){
     if(e.message!=='unauthorized'){$('gateErr').textContent=e.message;$('gateErr').classList.remove('hide');}
@@ -628,15 +634,24 @@ function row(l,n,calling){
   </tr>`;
 }
 
-const MAIL_SUBJECT=encodeURIComponent("Following up — 86'd bar inventory");
-const mailBody=contact=>encodeURIComponent(
+const MAIL_SUBJECT = "Following up — 86'd bar inventory";
+const mailBody=(contact,venue)=>
 `Hi${contact?' '+contact:''},
 
 Thanks for taking my call. 86'd is an iPhone app that counts your bar by
 pointing the camera at each bottle — it identifies it, you tap in the count,
 and it builds and emails the order to each distributor.
 
-Happy to walk you through it whenever suits.`);
+Happy to walk you through it whenever suits.`;
+
+/* Whether the server can send for us. Decided once, on unlock: with a mailbox
+   configured the Email button opens a compose box and the send is recorded
+   against the lead; without one it falls back to the old mailto: hand-off,
+   which works but tells us nothing about what was actually sent. */
+let MAIL={configured:false,from:null};
+async function loadMailStatus(){
+  try{ MAIL=await api('/mail/status'); }catch{ MAIL={configured:false,from:null}; }
+}
 
 async function copyDigits(el){
   const num=el.dataset.copy;
@@ -670,8 +685,30 @@ $('zones').onclick=async e=>{
     return;
   }
   if(btn.dataset.act==='mail'){
-    window.location.href=`mailto:${tr.dataset.email}?subject=${MAIL_SUBJECT}`
-      +`&body=${mailBody(tr.dataset.contact)}`;
+    const addr=tr.dataset.email;
+    if(!addr) return toast('No email address on this one');
+    if(!MAIL.configured){
+      window.location.href=`mailto:${addr}?subject=${encodeURIComponent(MAIL_SUBJECT)}`
+        +`&body=${encodeURIComponent(mailBody(tr.dataset.contact))}`;
+      return;
+    }
+    if(tr.nextElementSibling?.classList.contains('drawer')){
+      tr.nextElementSibling.remove(); return;
+    }
+    const d=document.createElement('tr');
+    d.className='drawer mailer';
+    d.innerHTML=`<td colspan="8">
+      <p class="hint">Sending as <strong>${esc(MAIL.from||'')}</strong>. Edit anything before it goes.</p>
+      <div class="mailrow"><label>To</label><input data-to value="${esc(addr)}"></div>
+      <div class="mailrow"><label>Subject</label><input data-subject value="${esc(MAIL_SUBJECT)}"></div>
+      <textarea data-body rows="9">${esc(mailBody(tr.dataset.contact))}</textarea>
+      <div class="row">
+        <button class="go" data-send>Send it</button>
+        <button data-cancel>Cancel</button>
+      </div>
+      <div class="applied hide"></div>
+    </td>`;
+    tr.after(d);
     return;
   }
   if(btn.dataset.act==='log'){
@@ -701,6 +738,25 @@ async function drawerAction(dr,e){
   const tr=dr.previousElementSibling; const id=tr.dataset.id;
   const ta=dr.querySelector('textarea');
   if(e.target.closest('[data-cancel]')) return dr.remove();
+
+  if(dr.classList.contains('mailer')){
+    if(!e.target.closest('[data-send]')) return;
+    const btn=dr.querySelector('[data-send]');
+    btn.disabled=true; btn.textContent='Sending…';
+    try{
+      const r=await api(`/leads/${id}/send-email`,{method:'POST',body:JSON.stringify({
+        to:dr.querySelector('[data-to]').value.trim(),
+        subject:dr.querySelector('[data-subject]').value.trim(),
+        body:ta.value})});
+      toast('Sent to '+r.sent.to, r.undo_id);
+      await loadCalls();
+    }catch(err){
+      btn.disabled=false; btn.textContent='Send it';
+      const box=dr.querySelector('.applied');
+      box.className='applied err'; box.textContent=err.message;
+    }
+    return;
+  }
 
   /* The three commonest outcomes go straight to /touch with a known outcome.
      They used to post a canned sentence through the model, which is a paid
@@ -790,7 +846,7 @@ async function loadNumbers(){
   const line=(label,r,hi)=>`<tr><td>${esc(label)}</td><td>${r.dials}</td><td>${r.connects}</td>
     <td class="${hi?'win-good':''}">${r.connect_pct}%</td></tr>`;
   $('dialHours').innerHTML=ds.by_hour.length
-    ? ds.by_hour.map(h=>line(h.hour+':00',h,h.connect_pct===maxH&&maxH>0)).join('')
+    ? ds.by_hour.map(h=>line(h.hour_label||h.hour,h,h.connect_pct===maxH&&maxH>0)).join('')
     : '<tr><td colspan="4" class="muted">No calls logged yet.</td></tr>';
   $('dialAttempts').innerHTML=ds.by_attempt.length
     ? ds.by_attempt.map(a=>line('Attempt '+a.attempt,a,false)).join('')

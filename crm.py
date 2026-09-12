@@ -364,7 +364,7 @@ def zone_state(offset: Optional[int]) -> dict:
         state, headline, rank, ok = "rush", "Dinner rush — skip for now", 4, False
     else:
         state, headline, rank, ok = "late", "Too late — they're slammed", 4, False
-    return {"offset": offset, "label": label, "local_time": local.strftime("%-I:%M %p"),
+    return {"offset": offset, "label": label, "local_time": local.strftime("%-I:%M%p").lower(),
             "state": state, "headline": headline, "rank": rank, "callable": ok}
 
 
@@ -1013,7 +1013,9 @@ def _call_window(tz_offset: Optional[int], hours: Optional[str] = None,
     local = _venue_now(tz_name, tz_offset)
     w = venue_window(hours, local)
     out = {"known": w["known"], "good_now": w["good_now"],
-           "local_time": local.strftime("%H:%M"), "hint": w["headline"],
+           # 12-hour throughout. "13:45 there" is a small tax on every glance,
+           # and this screen is glanced at constantly.
+           "local_time": local.strftime("%-I:%M%p").lower(), "hint": w["headline"],
            "window": w.get("window"), "windows": w.get("windows"),
            "starts_in": w.get("starts_in"), "state": w["state"]}
     # The same moment on the operator's clock. Without it, "best at 2:00pm"
@@ -1164,6 +1166,110 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
         conn.commit()
         return {"lead": _lead_row(updated), "undo_id": undo_id,
                 "counters": _counters_row(counters) if counters else None}
+
+
+# ============== SENDING MAIL ==============
+#
+# The Email button used to be a mailto: link, which hands the job to whatever
+# mail client the browser happens to have registered and then loses track of
+# it: nothing comes back to say what was sent, or whether it was sent at all,
+# so the pipeline can't count it and the lead can't be marked. Sending from
+# the server over SMTP closes that loop — the message goes out from the real
+# mailbox, and the same transaction stamps the lead and spends the counter.
+
+class OutgoingEmail(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=20000)
+    to: Optional[str] = Field(default=None, max_length=320)
+
+
+@crm_router.get("/mail/status", response_model=dict)
+def mail_status(_: bool = Depends(require_crm_key)):
+    """Whether the server can send, so the page knows which button to show."""
+    import mailer
+    return {"configured": mailer.is_configured(), "from": mailer.sender(),
+            "host": mailer.HOST, "port": mailer.PORT}
+
+
+@crm_router.post("/leads/{lead_id}/send-email", response_model=dict)
+def send_lead_email(lead_id: str, data: OutgoingEmail,
+                    _: bool = Depends(require_crm_key)):
+    """Send from the real mailbox, then record it as a touch in one go.
+
+    The send happens BEFORE the database work on purpose. A message that went
+    out but wasn't recorded is a lead you might email twice; a database row
+    saying "sent" for a message that never left is a follow-up you will wait
+    for forever. The first is recoverable by looking at the sent folder. The
+    second isn't recoverable at all.
+    """
+    import mailer
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+        lead = cursor.fetchone()
+    if not lead:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "Lead not found"})
+
+    to = (data.to or lead["email"] or "").strip()
+    if not mailer.valid_address(to):
+        raise HTTPException(status_code=422, detail={
+            "error": "no_address",
+            "message": f"No usable email address for {lead['name']}."})
+
+    try:
+        sent = mailer.send(to, data.subject, data.body)
+    except mailer.MailNotConfigured as exc:
+        raise HTTPException(status_code=503, detail={
+            "error": "mail_not_configured", "message": str(exc)})
+    except mailer.MailFailed as exc:
+        raise HTTPException(status_code=502, detail={
+            "error": "mail_failed", "message": str(exc)})
+
+    today = _today()
+    now = now_iso()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (lead_id,))
+        lead = cursor.fetchone()
+        undo_id = _snapshot(cursor, lead, "log email")
+
+        note = f"[{today}] email to {to}: {data.subject.strip()}"
+        sets = ["updated_at = %s", "last_touch_at = %s", "email_date = %s",
+                "last_outcome = %s",
+                "notes = COALESCE(notes || E'\n', '') || %s"]
+        params: list = [now, now, today, "emailed", note]
+        # A lead we've now written to is no longer untouched, but emailing
+        # somebody is not the same as reaching them: the status only moves off
+        # 'new' so it leaves the call list, never to 'warm'.
+        if lead["status"] == "new":
+            sets.append("status = %s"); params.append("contacted")
+        # Learned a better address? Keep it.
+        if to.lower() != (lead["email"] or "").lower():
+            sets.append("email = %s"); params.append(to)
+
+        _record_touch(cursor, lead, "email", "emailed", lead["attempts"] or 0,
+                      lead.get("tz_offset_hours"))
+        params.append(lead_id)
+        cursor.execute(
+            f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
+        updated = cursor.fetchone()
+
+        cursor.execute("""
+            UPDATE crm_counters
+               SET daily_emails_remaining = GREATEST(0, daily_emails_remaining - 1),
+                   touch_ticker_remaining = GREATEST(0, touch_ticker_remaining - 1),
+                   touch_ticker_last_action = 'email',
+                   updated_at = %s
+             WHERE id = 1
+            RETURNING *
+        """, (now,))
+        counters = cursor.fetchone()
+        conn.commit()
+
+    return {"lead": _lead_row(updated), "undo_id": undo_id, "sent": sent,
+            "counters": _counters_row(counters) if counters else None}
 
 
 # ============== UNDO ==============
@@ -1684,7 +1790,7 @@ def call_list(_: bool = Depends(require_crm_key)):
 
     services = []
     for key, label, blurb in [
-        ("lunch", "Open for lunch", "Doors open by 11:30 — reachable late morning"),
+        ("lunch", "Open for lunch", "Doors open by 11:30am — reachable late morning"),
         ("dinner", "Dinner only", "Don't open until later, plus venues with no listed hours"),
     ]:
         zones = build_zones(buckets[key])
@@ -2104,13 +2210,21 @@ def dial_stats(_: bool = Depends(require_crm_key)):
 
     # A recommendation is only offered once there's enough to stand on.
     best_hours = [h for h in by_hour if h["dials"] >= 20]
+    def hour12(hour: int) -> str:
+        """14 -> '2pm'. Nobody reads a connect-rate table in 24-hour time."""
+        suffix = "am" if hour < 12 else "pm"
+        return f"{hour % 12 or 12}{suffix}"
+
+    for row in by_hour:
+        row["hour_label"] = hour12(row["hour"])
+
     best_hours.sort(key=lambda h: -h["connect_pct"])
     if dials < 100:
         advice = (f"Only {dials} dials logged — too few to draw from. "
                   "Come back after a couple of hundred.")
     elif best_hours:
         top = best_hours[0]
-        advice = (f"Best hour so far is {top['hour']}:00 local at {top['connect_pct']}% "
+        advice = (f"Best hour so far is {hour12(top['hour'])} local at {top['connect_pct']}% "
                   f"across {top['dials']} dials, against {overall}% overall.")
     else:
         advice = f"{dials} dials at {overall}% overall; no single hour has 20 dials yet."

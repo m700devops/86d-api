@@ -41,6 +41,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   (service × timezone) cells the page, the API and the generator all have to agree on. One
   definition on purpose: three copies would drift and the tabs would stop matching what gets
   generated. See THE CALL LIST below for the heuristic
+- mailer.py — sending from the real Spacemail mailbox over SMTP. **Spacemail has no API and
+  doesn't need one: it speaks SMTP**, which is what every mail client uses, so this is stdlib
+  `smtplib` only — no new dependency. `mail.spacemail.com:465` SSL (587 STARTTLS also works),
+  username is the FULL email address, password is the mailbox password. Deliberately NOT the
+  path order confirmations use — those stay on Resend in main.py, because mixing
+  transactional mail with cold outreach on one reputation means a few spam complaints from
+  strangers start bouncing customers' receipts
 - contacts.py — what makes a contact worth having. `find_manager()` (a name to ask for),
   `email_kind()` (personal / owner / role / unknown), and `EMAIL_BLOCKLIST`. The blocklist
   lives here rather than in leadgen.py so it can be tested without a database — leadgen
@@ -340,6 +347,23 @@ capture. Don't reintroduce them or describe them as current.)
   against reality. Once a few hundred dials are logged, move the window to match the data
   rather than trusting the heuristic. It reports thin data honestly rather than dressing up
   noise
+- **The Email button sends from the server, it is not a `mailto:` link.** `POST
+  /v1/crm/leads/{id}/send-email` opens a compose box prefilled with the pitch, sends via
+  mailer.py, then stamps `email_date`, moves the status off `new`, appends a dated note,
+  records the touch and spends the email counter — in one transaction, with undo. The old
+  mailto: handed the job to whatever client the browser had registered and heard nothing
+  back, so the pipeline couldn't count it. **The send happens BEFORE the database write**: a
+  message that went out unrecorded is recoverable by looking in the sent folder, a row
+  claiming "sent" for mail that never left is not
+- `GET /v1/crm/mail/status` tells the page whether a mailbox is configured. Without one the
+  button falls back to the old mailto: hand-off rather than breaking
+- Outgoing mail is PLAIN TEXT. A one-to-one note to a bar manager should look like a person
+  wrote it; an HTML template reads as a blast and filters accordingly. `Date` and
+  `Message-ID` are set explicitly — a message missing them is one of the cheapest spam
+  signals there is
+- **Everything on this screen is 12-hour.** Venue clocks, the operator's clock, call windows,
+  and the connect-rate-by-hour table (`hour_label`). "13:45 there" is a small tax on every
+  glance and this screen is glanced at constantly
 - **Every touch is reversible.** `_snapshot()` stores the whole row before a touch changes
   it, `GET /v1/crm/undo` lists what was just worked, `POST /v1/crm/undo/{id}` puts it back
   exactly — status, attempts, notes, follow-up date — and refunds the counters, because a
@@ -396,6 +420,10 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   Without it that endpoint 503s with "type the fields in by hand" and everything else,
   including the quick-outcome buttons, works normally. Not used by the mobile app
 - ANTHROPIC_MODEL — optional, default `claude-haiku-4-5-20251001`
+- SPACEMAIL_USER / SPACEMAIL_PASSWORD — the mailbox the Email button sends from
+  (`Stephan@my86d.com`). Unset means the button falls back to a `mailto:` link and nothing is
+  recorded. SPACEMAIL_HOST (default `mail.spacemail.com`), SPACEMAIL_PORT (465),
+  SPACEMAIL_FROM_NAME and SPACEMAIL_TIMEOUT are optional
 - CRM_OPERATOR_TZ — where the person making the calls is (default `Asia/Manila`). Decides the
   "your time" clock and every upcoming-window time on the call screen
 - CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).

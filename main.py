@@ -60,6 +60,7 @@ async def lifespan(app: FastAPI):
         ("STRIPE_PRICE_ID", bool(os.getenv("STRIPE_PRICE_ID")), "checkout endpoint will 503 — nobody can subscribe"),
         ("STRIPE_WEBHOOK_SECRET", bool(os.getenv("STRIPE_WEBHOOK_SECRET")), "payments won't activate subscriptions — customers pay and stay locked out"),
         ("ANTHROPIC_API_KEY", bool(os.getenv("ANTHROPIC_API_KEY")), "the CRM can't read call notes into fields — they get typed by hand (sales tool only, no effect on the app)"),
+        ("SPACEMAIL_USER / SPACEMAIL_PASSWORD", bool(os.getenv("SPACEMAIL_USER") and os.getenv("SPACEMAIL_PASSWORD")), "the CRM's Email button falls back to a mailto: link and sends nothing itself (sales tool only)"),
         ("SENTRY_DSN", bool(_sentry_dsn), "no error visibility (optional but recommended)"),
     ]
     missing = [(name, note) for name, ok, note in _config_checks if not ok]
