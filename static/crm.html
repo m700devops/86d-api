@@ -219,13 +219,19 @@
     </section>
 
     <section data-panel="followups" class="hide">
-      <div class="card">
-        <strong>Overdue <span class="muted" id="fOverdueN"></span></strong>
-        <div id="fOverdue" style="margin-top:10px"></div>
+      <div class="card hide" id="fEmpty">
+        <strong>No follow-ups due</strong>
+        <p class="muted" id="fEmptyNote" style="margin:8px 0 0;font-size:13px;line-height:1.5"></p>
       </div>
-      <div class="card">
-        <strong>Due today <span class="muted" id="fTodayN"></span></strong>
-        <div id="fToday" style="margin-top:10px"></div>
+      <div id="fCards">
+        <div class="card">
+          <strong>Overdue <span class="muted" id="fOverdueN"></span></strong>
+          <div id="fOverdue" style="margin-top:10px"></div>
+        </div>
+        <div class="card">
+          <strong>Due today <span class="muted" id="fTodayN"></span></strong>
+          <div id="fToday" style="margin-top:10px"></div>
+        </div>
       </div>
     </section>
 
@@ -813,8 +819,30 @@ function miniTable(list){
 }
 async function loadFollowups(){
   const d=await api('/queue');
-  $('fOverdue').innerHTML=miniTable(d.overdue); $('fOverdueN').textContent=`(${d.counts.overdue})`;
-  $('fToday').innerHTML=miniTable(d.due_today); $('fTodayN').textContent=`(${d.counts.due_today})`;
+  // "(50)" when 400 are overdue would be a comforting lie, so when the list is
+  // capped the header says so.
+  const label=(n,shown)=>shown<n?`(showing ${shown} of ${n})`:`(${n})`;
+  $('fOverdue').innerHTML=miniTable(d.overdue);
+  $('fOverdueN').textContent=label(d.counts.overdue, (d.shown||{}).overdue ?? d.overdue.length);
+  $('fToday').innerHTML=miniTable(d.due_today);
+  $('fTodayN').textContent=label(d.counts.due_today, (d.shown||{}).due_today ?? d.due_today.length);
+
+  /* Both empty is the normal state on day one, and two blank boxes reading
+     "Nothing here" twice is a screen that looks broken rather than finished.
+     Say what would put something here instead. */
+  const empty = !d.counts.overdue && !d.counts.due_today;
+  $('fEmpty').classList.toggle('hide', !empty);
+  $('fCards').classList.toggle('hide', empty);
+  if(empty){
+    $('fEmptyNote').innerHTML = d.counts.never_called
+      ? `Nothing is due. A follow-up lands here after you log a call that didn't
+         reach anyone — the ladder books the next try at +1, +2, +4, +7 then +14
+         days, so you never have to remember to chase.
+         <br><br><strong>${d.counts.never_called}</strong> leads have never been
+         called: those are on the Call list.`
+      : `Nothing is due, and there's nothing left to call. The engine refills the
+         list at 6pm.`;
+  }
 }
 ['fOverdue','fToday'].forEach(id=>{
   const el=$(id); if(!el) return;

@@ -1050,25 +1050,39 @@ def call_queue(limit: int = 50, _: bool = Depends(require_crm_key)):
                 out.append(lead)
             return out
 
-        overdue = fetch(
-            "followup_date IS NOT NULL AND followup_date < %s AND status NOT IN ('won','dead')",
-            (today,), "followup_date ASC")
-        due_today = fetch(
-            "followup_date = %s AND status NOT IN ('won','dead')",
-            (today,), "updated_at ASC")
-        never_called = fetch(
-            "call_date IS NULL AND status = 'new'", (), "created_at ASC")
+        def total(where: str, params: tuple) -> int:
+            """The real number, not how many fit in the page.
 
+            `len(rows)` after a LIMIT is not a count: with the cap at 50 an
+            operator with four hundred overdue follow-ups is told they have
+            fifty, which is the difference between a bad week and a crisis.
+            """
+            cursor.execute(f"SELECT COUNT(*) AS n FROM crm_leads WHERE {where}", params)
+            return cursor.fetchone()["n"]
+
+        OVERDUE_WHERE = ("followup_date IS NOT NULL AND followup_date < %s "
+                         "AND status NOT IN ('won','dead')")
+        TODAY_WHERE = "followup_date = %s AND status NOT IN ('won','dead')"
+        NEVER_WHERE = "call_date IS NULL AND status = 'new'"
+
+        overdue = fetch(OVERDUE_WHERE, (today,), "followup_date ASC")
+        due_today = fetch(TODAY_WHERE, (today,), "updated_at ASC")
+        never_called = fetch(NEVER_WHERE, (), "created_at ASC")
+
+        counts = {
+            "overdue": total(OVERDUE_WHERE, (today,)),
+            "due_today": total(TODAY_WHERE, (today,)),
+            "never_called": total(NEVER_WHERE, ()),
+        }
         return {
             "as_of": today,
             "overdue": overdue,
             "due_today": due_today,
             "never_called": never_called,
-            "counts": {
-                "overdue": len(overdue),
-                "due_today": len(due_today),
-                "never_called": len(never_called),
-            },
+            "counts": counts,
+            "shown": {"overdue": len(overdue), "due_today": len(due_today),
+                      "never_called": len(never_called)},
+            "limit": limit,
         }
 
 
