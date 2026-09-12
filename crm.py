@@ -1065,6 +1065,12 @@ CALL_WINDOW_END = 17     # 5pm local
 # time too, so "call now" can be weighed against "it is 3am".
 OPERATOR_TZ = os.getenv("CRM_OPERATOR_TZ", "Asia/Manila")
 
+# How late a scheduled email may go out before the point of scheduling it is
+# lost. Ninety minutes is roughly the width of the windows themselves: inside
+# that it still lands somewhere near the quiet hour, past it you are emailing
+# into service.
+STALE_AFTER_MINUTES = int(os.getenv("CRM_EMAIL_STALE_MINUTES", "90"))
+
 
 def _operator_tz():
     try:
@@ -1780,9 +1786,10 @@ def run_due_emails(limit: int = 20) -> dict:
     """
     import mailer
 
-    now = datetime.now(timezone.utc).isoformat()
-    sent = failed = 0
-    while sent + failed < limit:
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    sent = failed = skipped = 0
+    while sent + failed + skipped < limit:
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -1800,6 +1807,37 @@ def run_due_emails(limit: int = 20) -> dict:
             conn.commit()
         if not job:
             break
+
+        # How late is it? On Render's free tier this process sleeps after ~15
+        # minutes idle and only wakes on a request, so a 2pm send can surface
+        # at 6pm — landing "I know you're quiet right now" mail in the middle
+        # of service. That is the exact harm scheduling exists to prevent, so
+        # a badly-late email is held back and reported rather than fired.
+        try:
+            due = datetime.fromisoformat(job["send_at"].replace("Z", "+00:00"))
+            late_minutes = (now_dt - due).total_seconds() / 60
+        except ValueError:
+            late_minutes = 0
+        if late_minutes > STALE_AFTER_MINUTES:
+            skipped += 1
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE crm_scheduled_emails SET status = 'failed', last_error = %s
+                     WHERE id = %s
+                """, (f"Not sent: it came due {int(late_minutes)} minutes ago and the "
+                      f"window has passed. Reschedule it rather than landing "
+                      f"mid-service.", job["id"]))
+                cursor.execute("""
+                    UPDATE crm_leads SET queued_email_at = NULL
+                     WHERE id = %s AND NOT EXISTS (
+                        SELECT 1 FROM crm_scheduled_emails
+                         WHERE lead_id = %s AND status = 'pending')
+                """, (job["lead_id"], job["lead_id"]))
+                conn.commit()
+            print(f"[crm] held back a {int(late_minutes)}min-late email to "
+                  f"{job['to_addr']} — window gone", flush=True)
+            continue
 
         try:
             mailer.send(job["to_addr"], job["subject"], job["body"])
@@ -1844,9 +1882,10 @@ def run_due_emails(limit: int = 20) -> dict:
             conn.commit()
         print(f"[crm] scheduled email sent to {job['to_addr']}", flush=True)
 
-    if sent or failed:
-        print(f"[crm] SCHEDULED_EMAILS sent={sent} failed={failed}", flush=True)
-    return {"sent": sent, "failed": failed}
+    if sent or failed or skipped:
+        print(f"[crm] SCHEDULED_EMAILS sent={sent} failed={failed} "
+              f"window_missed={skipped}", flush=True)
+    return {"sent": sent, "failed": failed, "window_missed": skipped}
 
 
 def _record_email_sent(cursor, lead_id: str, to: str, subject: str,

@@ -200,6 +200,19 @@ capture. Don't reintroduce them or describe them as current.)
 - Enrichment runs in a thread pool (`LEADGEN_ENRICH_WORKERS`, default 8) and gives up on a
   site the moment its homepage doesn't load — a dead domain used to cost one request per
   guessed path. It prefers links the homepage actually points at over guessed URLs
+- **The harvest takes `restaurant` as well as `bar`/`pub`/`nightclub`.** It used to take the
+  three drink-led types only, which is a small slice of the places that pour: an independent
+  restaurant with a licence has a back bar to count exactly like a tavern does, and in OSM it
+  is `amenity=restaurant`. The cost is that most restaurants have no bar worth calling, so a
+  restaurant must SHOW a drinks programme on its own site (`LIQUOR_HINTS`, or a `bar=yes`
+  tag) before it can qualify. Harvesting is cheap; promoting is what matters
+- **`_seed_cities()` runs on EVERY boot**, not only into an empty table. It was gated on "no
+  cities yet", which meant adding metros to `SEED_CITIES_EXTRA` did nothing at all to a
+  database that already had the first batch — forty cities that would have silently never
+  arrived. The insert is `ON CONFLICT DO NOTHING`, so re-running is free
+- Territory is sized against consumption: at ~12 qualified leads per metro from bars alone,
+  58 cities was about a month of calling before the well ran dry, and running dry is silent.
+  87 cities plus restaurants is roughly four months
 - Measured yield: roughly 280 bars per metro → ~17% have both phone and website → ~30-50% of
   those have a findable email ≈ **15-20 qualified leads per city**. Sustaining 25/day needs
   ~1.5 new cities per day; 58 US metros are seeded, more via `POST /v1/crm/leadgen/cities`
@@ -409,6 +422,11 @@ capture. Don't reintroduce them or describe them as current.)
 - **Queueing does NOT stamp the lead.** The touch happens when the mail actually goes, so the
   bar stays on the call list and stays callable — scheduling a note for Tuesday is no reason
   to stop ringing them today. Only `queued_email_at` is set, for the badge
+- **An email that comes due more than `CRM_EMAIL_STALE_MINUTES` (90) late is NOT sent.** On
+  Render's free tier the process sleeps after ~15 minutes idle and only wakes on a request,
+  so a 2pm send can surface at 6pm — landing "I know you're quiet right now" mail in the
+  middle of service, which is the exact harm scheduling exists to prevent. It's marked failed
+  with an explanation and shown to the operator to reschedule
 - Each due row is claimed with a conditional `UPDATE ... FOR UPDATE SKIP LOCKED` before the
   send, so two workers, or one worker and a Render restart mid-flight, cannot send the same
   email twice. Sending twice is the failure that matters: the recipient sees it, and nothing

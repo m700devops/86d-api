@@ -378,13 +378,16 @@ def init_leadgen_tables():
 
         conn.commit()
 
+        # Seed on EVERY boot, not only into an empty table. The insert is
+        # ON CONFLICT DO NOTHING against a unique index on (name, state), so
+        # re-running is free — and gating it on "no cities yet" meant adding
+        # forty metros to the list did nothing whatsoever to a database that
+        # already had the first fifty-eight. Territory running out is a silent
+        # failure; territory that silently never arrives is worse.
+        _seed_cities(cursor)
+        conn.commit()
         cursor.execute("SELECT COUNT(*) AS n FROM crm_leadgen_cities")
         city_count = cursor.fetchone()["n"]
-        if city_count == 0:
-            _seed_cities(cursor)
-            conn.commit()
-            cursor.execute("SELECT COUNT(*) AS n FROM crm_leadgen_cities")
-            city_count = cursor.fetchone()["n"]
 
         moved = _reconcile_timezones(cursor)
         bad_cands, bad_leads = _reconcile_bad_emails(cursor)
@@ -565,6 +568,36 @@ def _reconcile_timezones(cursor) -> int:
 
 # A starting territory list: US metros with real bar density. Coordinates are
 # baked in so the first harvest doesn't depend on a geocoder being up.
+# Territory. Sized against consumption, not ambition: at roughly a dozen
+# qualified leads per metro from bars alone, the first 58 cities were about a
+# month of calling before the well ran dry — and running dry is silent, which
+# makes it the worst kind of failure. Widening the harvest to restaurants
+# multiplies each city; these add breadth on top, biased towards mid-size
+# metros with real independent bar scenes and away from the chain-heavy sunbelt
+# sprawl the qualifier would mostly reject anyway.
+SEED_CITIES_EXTRA = [
+    ("Madison", "WI", 43.0731, -89.4012), ("Ann Arbor", "MI", 42.2808, -83.7430),
+    ("Asheville", "NC", 35.5951, -82.5515), ("Savannah", "GA", 32.0809, -81.0912),
+    ("Charleston", "SC", 32.7765, -79.9311), ("Providence", "RI", 41.8240, -71.4128),
+    ("Burlington", "VT", 44.4759, -73.2121), ("Portsmouth", "NH", 43.0718, -70.7626),
+    ("Ithaca", "NY", 42.4440, -76.5019), ("Lancaster", "PA", 40.0379, -76.3055),
+    ("Roanoke", "VA", 37.2710, -79.9414), ("Knoxville", "TN", 35.9606, -83.9207),
+    ("Chattanooga", "TN", 35.0456, -85.3097), ("Birmingham", "AL", 33.5186, -86.8104),
+    ("Athens", "GA", 33.9519, -83.3576), ("Greenville", "SC", 34.8526, -82.3940),
+    ("Lexington", "KY", 38.0406, -84.5037), ("Dayton", "OH", 39.7589, -84.1916),
+    ("Grand Rapids", "MI", 42.9634, -85.6681), ("Fort Collins", "CO", 40.5853, -105.0844),
+    ("Boise", "ID", 43.6150, -116.2023), ("Missoula", "MT", 46.8721, -113.9940),
+    ("Bend", "OR", 44.0582, -121.3153), ("Spokane", "WA", 47.6588, -117.4260),
+    ("Bellingham", "WA", 48.7519, -122.4787), ("Eugene", "OR", 44.0521, -123.0868),
+    ("Santa Cruz", "CA", 36.9741, -122.0308), ("Santa Fe", "NM", 35.6870, -105.9378),
+    ("Flagstaff", "AZ", 35.1983, -111.6513), ("Boulder", "CO", 40.0150, -105.2705),
+    ("Iowa City", "IA", 41.6611, -91.5302), ("Omaha", "NE", 41.2565, -95.9345),
+    ("Sioux Falls", "SD", 43.5446, -96.7311), ("Duluth", "MN", 46.7867, -92.1005),
+    ("Traverse City", "MI", 44.7631, -85.6206), ("Bloomington", "IN", 39.1653, -86.5264),
+    ("Columbia", "MO", 38.9517, -92.3341), ("Fayetteville", "AR", 36.0626, -94.1574),
+    ("Wilmington", "NC", 34.2257, -77.9447), ("Frederick", "MD", 39.4143, -77.4105),
+]
+
 SEED_CITIES = [
     ("Austin", "TX", 30.2672, -97.7431), ("Nashville", "TN", 36.1627, -86.7816),
     ("Denver", "CO", 39.7392, -104.9903), ("Portland", "OR", 45.5152, -122.6784),
@@ -600,13 +633,15 @@ SEED_CITIES = [
 
 def _seed_cities(cursor):
     now = now_iso()
-    for name, state, lat, lon in SEED_CITIES:
+    for name, state, lat, lon in SEED_CITIES + SEED_CITIES_EXTRA:
         cursor.execute("""
             INSERT INTO crm_leadgen_cities (id, name, state, lat, lon, created_at)
             VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT DO NOTHING
         """, (generate_id(), name, state, lat, lon, now))
-    print(f"[leadgen] seeded {len(SEED_CITIES)} cities", flush=True)
+    added = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+    total = len(SEED_CITIES) + len(SEED_CITIES_EXTRA)
+    print(f"[leadgen] city list checked: {total} in the seed list", flush=True)
 
 
 # ── Classification helpers ──────────────────────────────────────────────────
@@ -850,6 +885,21 @@ NEIGHBOURHOOD_NAME = re.compile(
 )
 
 
+def _stack_signals(site_html: str) -> dict:
+    """What their own site says about the systems they already run."""
+    out = {}
+    if not site_html:
+        return out
+    if POS_STACK_HINTS.search(site_html):
+        which = POS_STACK_HINTS.search(site_html).group(0).split(".")[0]
+        out["runs_platform"] = {"value": which, "source": "their website"}
+    if UPSCALE_HINTS.search(site_html):
+        out["upscale"] = {"value": True, "source": "their website"}
+    if NEIGHBOURHOOD_HINTS.search(site_html):
+        out["neighbourhood"] = {"value": True, "source": "their website"}
+    return out
+
+
 def score_candidate(tags: dict, email: Optional[str], site_html: str,
                     manager: Optional[dict] = None) -> int:
     """How well this fits a bar-inventory pitch. Higher is better.
@@ -965,11 +1015,25 @@ def _overpass(query: str) -> Optional[dict]:
 
 def harvest_city(city: dict) -> tuple[int, int]:
     """Pull venues for one city into the pool. Returns (seen, inserted)."""
+    # Restaurants are in here deliberately, and they are most of the market.
+    #
+    # This used to take bar, pub and nightclub only, which is a small slice of
+    # the places that pour liquor: an independent restaurant with a licence has
+    # a back bar to count exactly like a tavern does, and in OSM it is tagged
+    # `amenity=restaurant`. Across a seeded metro that is several times the
+    # venue count — and the seeded territory was otherwise a month of calling
+    # before it ran dry.
+    #
+    # The cost of casting wider is that most restaurants have no bar worth
+    # counting. That is handled at qualify time, not here: a restaurant has to
+    # SHOW a drinks programme on its own site before it can be promoted (see
+    # enrich_candidate). Harvesting is cheap; promoting is what matters.
+    kinds = "bar|pub|nightclub|restaurant"
     query = f"""
-[out:json][timeout:60];
+[out:json][timeout:90];
 (
-  node["amenity"~"^(bar|pub|nightclub)$"](around:{int(city['radius_m'])},{city['lat']},{city['lon']});
-  way["amenity"~"^(bar|pub|nightclub)$"](around:{int(city['radius_m'])},{city['lat']},{city['lon']});
+  node["amenity"~"^({kinds})$"](around:{int(city['radius_m'])},{city['lat']},{city['lon']});
+  way["amenity"~"^({kinds})$"](around:{int(city['radius_m'])},{city['lat']},{city['lon']});
 );
 out center tags;
 """
@@ -1164,6 +1228,21 @@ def enrich_candidate(cand: dict) -> dict:
                 "manager_name": None, "manager_role": None,
                 "manager_source": None, "manager_seen_at": None,
                 "venue_facts": None, "opener": None, "score": 0}
+    # A bar is a bar. A restaurant has to show a drinks programme — a cocktail
+    # list, a full bar, taps, something — before it is worth a call. Without
+    # this the wider harvest would fill the list with sandwich shops.
+    amenity = (cand.get("amenity") or "").lower()
+    if amenity == "restaurant":
+        drinks = bool(html_seen and LIQUOR_HINTS.search(html_seen))
+        tagged_bar = tags.get("bar") == "yes" or tags.get("drink:cocktail") == "yes"
+        if not (drinks or tagged_bar):
+            return {"status": "rejected",
+                    "reject_reason": "restaurant with no sign of a bar programme",
+                    "email": None, "email_source": None, "email_kind": None,
+                    "manager_name": None, "manager_role": None,
+                    "manager_source": None, "manager_seen_at": None,
+                    "venue_facts": None, "opener": None, "score": 0}
+
     if not email:
         return {"status": "rejected", "reject_reason": "no email found on site",
                 "email": None, "email_source": None, "email_kind": None,
@@ -1182,8 +1261,13 @@ def enrich_candidate(cand: dict) -> dict:
         "manager_source": manager["source"] if manager else None,
         "manager_seen_at": now_iso() if manager else None,
         "opener": opener_line(html_seen, cand.get("amenity")),
-        "venue_facts": venue_facts.dumps(
-            venue_facts.extract_facts(tags, html_seen, cand.get("opening_hours"))),
+        "venue_facts": venue_facts.dumps(dict(
+            venue_facts.extract_facts(tags, html_seen, cand.get("opening_hours")),
+            # The same signals scoring uses, kept rather than thrown away: they
+            # change how the call OPENS, not just where the lead sorts. Walking
+            # into "what are you using now?" without knowing their site runs
+            # Toast is how you get told something you could have read.
+            **_stack_signals(html_seen))),
         "score": score_candidate(tags, email, html_seen, manager),
     }
 

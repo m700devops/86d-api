@@ -1203,7 +1203,14 @@ async function loadPipeline(){
   if(PIPE.q) qs.set('q',PIPE.q);
   qs.set('offset',PIPE.offset); qs.set('limit',statuses.length>1?400:100);
   const d=await api('/leads?'+qs);
-  if(statuses.length>1) d.leads=d.leads.filter(l=>statuses.includes(l.status));
+  if(statuses.length>1){
+    d.leads=d.leads.filter(l=>statuses.includes(l.status));
+    // The server counted before this filter ran, so its totals describe a
+    // different list than the one on screen. Saying "showing 1-318 of 318"
+    // over seven rows is the page contradicting itself.
+    d.count=d.leads.length;
+    d.matching=statuses.reduce((n,x)=>n+(d.counts[x]??0),0);
+  }
 
   const tally=key=>{
     const st=STAGES.find(x=>x[0]===key);
@@ -1232,7 +1239,9 @@ async function loadPipeline(){
       </table>
     </div></div>
     <div class="pipefoot">
-      <span>Showing ${PIPE.offset+1}–${PIPE.offset+d.count} of ${d.matching}</span>
+      <span>${d.count===d.matching
+        ? `${d.matching} lead${d.matching===1?'':'s'}`
+        : `Showing ${PIPE.offset+1}–${PIPE.offset+d.count} of ${d.matching}`}</span>
       <span>
         <button data-page="-1" ${PIPE.offset?'':'disabled'}>← Back</button>
         <button data-page="1" ${PIPE.offset+d.count<d.matching?'':'disabled'}>More →</button>

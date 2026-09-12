@@ -218,6 +218,15 @@ def facts_to_lines(facts: dict) -> list:
         if value:
             line(label, source)
 
+    # The thing most worth knowing before you open your mouth.
+    platform, plat_src = get("runs_platform")
+    if platform:
+        line(f"their site runs {platform} — ask what it does for inventory", plat_src)
+    if get("upscale")[0]:
+        line("white-tablecloth signals on the site", get("upscale")[1])
+    if get("neighbourhood")[0]:
+        line("neighbourhood room (pool, happy hour, taps)", get("neighbourhood")[1])
+
     operator, op_src = get("operator")
     if operator:
         line(f"operated by {operator}", op_src)
