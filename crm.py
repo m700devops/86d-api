@@ -13,6 +13,7 @@ anyone holding the key can read and write every lead. If this ever grows past
 one person, it needs real auth rather than more keys.
 """
 
+import json
 import os
 import re
 import secrets
@@ -141,6 +142,8 @@ def init_crm_tables():
             ("manager_seen_at", "TEXT"),            # when — names go stale, see below
             ("tz_name", "TEXT"),                    # IANA zone; the offset alone ignores DST
             ("queued_email_at", "TEXT"),            # denormalised so every list can show it
+            ("venue_facts", "TEXT"),                # attributable facts for the call
+            ("call_brief", "TEXT"),                 # the talking points written from them
         ]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -325,7 +328,7 @@ LEAD_COLUMNS = (
     "matched_user_id", "matched_at", "match_method", "tz_offset_hours",
     "source", "last_touch_at", "attempts", "last_outcome",
     "opening_hours", "opener",
-    "lead_score", "email_kind", "tz_name", "queued_email_at",
+    "lead_score", "email_kind", "tz_name", "queued_email_at", "venue_facts",
     "manager_name", "manager_role", "manager_source", "manager_seen_at",
 )
 
@@ -1346,6 +1349,87 @@ Rules, in order of importance:
 5. Do what the salesperson asked for in their instruction. If they say include
    the website, include it. If they say keep it short, cut it further.
 6. Plain text only: no HTML, no markdown, no asterisks for bold."""
+
+
+BRIEF_SYSTEM = """You write two or three short notes for a salesperson about to phone a bar.
+
+They sell 86'd, an iPhone app that counts bar inventory by camera and builds the distributor order.
+
+You will be given a list of FACTS about the venue. Every fact says where it came from.
+
+Return ONLY a JSON object: {"points": ["...", "..."]}
+
+Rules:
+1. Use ONLY the facts given. Invent nothing — no cuisine, no size, no age, no
+   owner, no claim of any kind that is not in the list. If the facts are thin,
+   return fewer points. Two good notes beat four padded ones.
+2. Each point is one short line a person can glance at mid-dial. No preamble.
+3. Say what a fact MEANS for this pitch, not just the fact again. "Open 7 days
+   until 2am" on its own is already on the screen; "that's a lot of pours to
+   count by hand on a Sunday night" is the note worth having.
+4. Where a fact came from their website, you may say so ("their site says").
+   Where it came from a map, do not state it as certain — make it a question
+   worth asking.
+5. No greeting, no sign-off, no exclamation marks, no sales language."""
+
+
+@crm_router.get("/leads/{lead_id}/brief", response_model=dict)
+def lead_brief(lead_id: str, refresh: bool = False,
+               _: bool = Depends(require_crm_key)):
+    """What's worth knowing about this venue before the phone rings.
+
+    The facts are extracted, never generated, and each carries its source — a
+    brief that asserts something wrong is the moment the person on the other
+    end decides you're reading a script. The talking points on top are written
+    only from those facts, and cached, because they don't change between
+    dials and nobody should wait on a model with a phone in their hand.
+    """
+    import venue
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+        row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "Lead not found"})
+
+    facts = venue.loads(row.get("venue_facts"))
+    lines = venue.facts_to_lines(facts)
+
+    cached = row.get("call_brief")
+    if cached and not refresh:
+        try:
+            points = json.loads(cached)
+        except (TypeError, ValueError):
+            points = []
+        return {"facts": lines, "points": points, "cached": True}
+
+    if not lines or not os.getenv("ANTHROPIC_API_KEY"):
+        # Facts alone are still worth showing — they're the part that had to
+        # be true anyway.
+        return {"facts": lines, "points": [], "cached": False}
+
+    described = "\n".join(f"- {l['text']} (from {l['source']})" for l in lines)
+    where = row.get("loc") or ""
+    try:
+        out = _ask_claude(
+            BRIEF_SYSTEM,
+            f"Venue: {row['name']}" + (f", {where}" if where else "")
+            + f"\n\nFacts:\n{described}",
+            max_tokens=350)
+        points = [str(p).strip()[:220] for p in (out.get("points") or [])][:3]
+    except HTTPException:
+        # A model that's down must not take the facts down with it.
+        return {"facts": lines, "points": [], "cached": False}
+
+    if points:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE crm_leads SET call_brief = %s WHERE id = %s",
+                           (json.dumps(points)[:4000], lead_id))
+            conn.commit()
+    return {"facts": lines, "points": points, "cached": False}
 
 
 @crm_router.get("/leads/{lead_id}/send-slots", response_model=dict)

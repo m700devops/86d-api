@@ -39,6 +39,7 @@ from typing import Optional
 from database import get_db
 from helpers import generate_id, now_iso
 from callwindow import ZONE_OFFSETS, SERVICES, bucket_of, all_buckets
+import venue as venue_facts
 from contacts import email_kind, find_manager
 from phones import normalize_us_phone, is_toll_free
 
@@ -294,6 +295,7 @@ def init_leadgen_tables():
         # on an existing database while working fine on a fresh one.
         for col, col_type in [("opening_hours", "TEXT"), ("opener", "TEXT"),
                               ("email_kind", "TEXT"), ("tz_name", "TEXT"),
+                              ("venue_facts", "TEXT"),
                               ("manager_name", "TEXT"), ("manager_role", "TEXT"),
                               ("manager_source", "TEXT"), ("manager_seen_at", "TEXT")]:
             cursor.execute("""
@@ -386,6 +388,9 @@ def init_leadgen_tables():
 
         moved = _reconcile_timezones(cursor)
         bad_cands, bad_leads = _reconcile_bad_emails(cursor)
+        briefed = _backfill_venue_facts(cursor)
+        if briefed:
+            print(f"[leadgen] built call facts for {briefed} existing leads", flush=True)
         if bad_cands or bad_leads:
             print(f"[leadgen] cleared unusable emails: {bad_cands} candidates, "
                   f"{bad_leads} leads", flush=True)
@@ -395,6 +400,43 @@ def init_leadgen_tables():
               f"bucket_target={BUCKET_TARGET} max_active={MAX_ACTIVE} "
               f"daily_target={DAILY_TARGET} pool_floor={POOL_FLOOR}"
               + (f" retimezoned={moved}" if moved else ""), flush=True)
+
+
+def _backfill_venue_facts(cursor) -> int:
+    """Give leads harvested before the extractor existed their facts anyway.
+
+    The map tags were stored at harvest time, so cuisine, hours, address, age
+    and size can all be recovered without re-crawling anything. Site-derived
+    facts (taps, seats, "since 1974") can't — those need the page, and the
+    next enrichment pass will add them.
+    """
+    cursor.execute("""
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'crm_leads' AND column_name = 'venue_facts'
+    """)
+    if not cursor.fetchone():
+        return 0
+
+    cursor.execute("""
+        SELECT l.id, c.raw_tags, l.opening_hours
+          FROM crm_leads l
+          JOIN crm_lead_candidates c ON c.promoted_lead_id = l.id
+         WHERE l.venue_facts IS NULL AND c.raw_tags IS NOT NULL
+         LIMIT 2000
+    """)
+    filled = 0
+    for row in cursor.fetchall():
+        try:
+            tags = json.loads(row["raw_tags"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        blob = venue_facts.dumps(
+            venue_facts.extract_facts(tags, "", row["opening_hours"]))
+        if blob:
+            cursor.execute("UPDATE crm_leads SET venue_facts = %s WHERE id = %s",
+                           (blob, row["id"]))
+            filled += 1
+    return filled
 
 
 def _reconcile_bad_emails(cursor) -> tuple[int, int]:
@@ -1039,7 +1081,7 @@ def enrich_candidate(cand: dict) -> dict:
                 "email": None, "email_source": None, "email_kind": None,
                 "manager_name": None, "manager_role": None,
                 "manager_source": None, "manager_seen_at": None,
-                "opener": None, "score": 0}
+                "venue_facts": None, "opener": None, "score": 0}
 
     html_seen += home[:200000]
     pages.append((website, home))
@@ -1121,13 +1163,13 @@ def enrich_candidate(cand: dict) -> dict:
                 "email": None, "email_source": None, "email_kind": None,
                 "manager_name": None, "manager_role": None,
                 "manager_source": None, "manager_seen_at": None,
-                "opener": None, "score": 0}
+                "venue_facts": None, "opener": None, "score": 0}
     if not email:
         return {"status": "rejected", "reject_reason": "no email found on site",
                 "email": None, "email_source": None, "email_kind": None,
                 "manager_name": None, "manager_role": None,
                 "manager_source": None, "manager_seen_at": None,
-                "opener": None, "score": 0}
+                "venue_facts": None, "opener": None, "score": 0}
 
     return {
         "status": "qualified",
@@ -1140,6 +1182,8 @@ def enrich_candidate(cand: dict) -> dict:
         "manager_source": manager["source"] if manager else None,
         "manager_seen_at": now_iso() if manager else None,
         "opener": opener_line(html_seen, cand.get("amenity")),
+        "venue_facts": venue_facts.dumps(
+            venue_facts.extract_facts(tags, html_seen, cand.get("opening_hours"))),
         "score": score_candidate(tags, email, html_seen, manager),
     }
 
@@ -1170,6 +1214,13 @@ def _is_suppressed(cursor, name: str, email: str, phone: str, website: str) -> O
 
 
 # ── Stage 4: promote ────────────────────────────────────────────────────────
+
+def _cand_tags(cand: dict) -> dict:
+    try:
+        return json.loads(cand.get("raw_tags") or "{}")
+    except (TypeError, ValueError):
+        return {}
+
 
 def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
     """Promote a single candidate, or reject it and return None.
@@ -1273,17 +1324,23 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
         INSERT INTO crm_leads (id, name, loc, status, phone, email, notes,
                                source, tz_offset_hours, opening_hours, opener,
                                lead_score, email_kind, manager_name, manager_role,
-                               manager_source, manager_seen_at, tz_name,
+                               manager_source, manager_seen_at, tz_name, venue_facts,
                                created_at, updated_at)
         VALUES (%s, %s, %s, 'new', %s, %s, %s, 'leadgen', %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (lead_id, cand["name"], loc, cand["phone"], cand["email"], notes,
           cand.get("tz_offset_hours"), cand.get("opening_hours"),
           cand.get("opener"), cand.get("score"),
           cand.get("email_kind") or email_kind(cand.get("email")),
           cand.get("manager_name"), cand.get("manager_role"),
           cand.get("manager_source"), cand.get("manager_seen_at"),
-          cand.get("tz_name"), now, now))
+          cand.get("tz_name"),
+          # Falls back to the map tags alone when the row predates the
+          # extractor — address, hours and cuisine are still worth having.
+          cand.get("venue_facts") or venue_facts.dumps(
+              venue_facts.extract_facts(_cand_tags(cand), "",
+                                        cand.get("opening_hours"))),
+          now, now))
     cursor.execute("""
         UPDATE crm_lead_candidates
            SET status='promoted', promoted_at=%s, promoted_lead_id=%s
@@ -1615,13 +1672,14 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                                    email_source=%s, email_kind=%s, opener=%s,
                                    manager_name=%s, manager_role=%s,
                                    manager_source=%s, manager_seen_at=%s,
-                                   score=%s, enriched_at=%s
+                                   venue_facts=%s, score=%s, enriched_at=%s
                              WHERE id=%s
                         """, (result["status"], result["reject_reason"], result["email"],
                               result["email_source"], result.get("email_kind"),
                               result.get("opener"), result.get("manager_name"),
                               result.get("manager_role"), result.get("manager_source"),
                               result.get("manager_seen_at"),
+                              result.get("venue_facts"),
                               result["score"], now_iso(), cand["id"]))
                         conn.commit()
                     except Exception:

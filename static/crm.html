@@ -30,8 +30,25 @@
   .focus h2{margin:0;font-size:22px;letter-spacing:-0.5px}
   .focus.go h2{color:var(--go)}
   .focus .prog{color:var(--text2);margin-top:10px;font-size:13px}
-  .focus .digits{font-size:19px;padding:7px 12px;letter-spacing:1px}
-  .askinline{color:var(--go);font-size:12px;font-weight:600}
+  .focustop{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+  .focustop h2{flex:0 1 auto}
+  .focus .digits{font-size:20px;padding:8px 13px;letter-spacing:1px}
+  .askinline{color:var(--go);font-size:13px;font-weight:600;margin-top:8px}
+
+  /* What to know before it rings. Facts first, each with where it came from,
+     because a brief that asserts something wrong is the moment they decide
+     you're reading off a list. */
+  .brief{margin-top:12px}
+  .brief .pts{display:flex;flex-direction:column;gap:5px;margin-bottom:9px}
+  .brief .pt{font-size:14px;color:var(--text);line-height:1.45;
+             padding-left:14px;position:relative}
+  .brief .pt::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;
+                     border-radius:50%;background:var(--accent)}
+  .brief .fx{display:flex;gap:7px;flex-wrap:wrap}
+  .brief .fx span{font-size:11px;color:var(--text2);background:var(--surface2);
+                  border:1px solid var(--line);border-radius:999px;padding:3px 9px}
+  .brief .fx span i{color:var(--text3);font-style:normal;font-size:10px}
+  .brief .none{font-size:12px;color:var(--text3)}
 
   .dot{width:9px;height:9px;border-radius:50%;flex:none}
   .d-good{background:var(--go)} .d-opening{background:var(--wait)}
@@ -77,6 +94,9 @@
   .st-warm{color:var(--wait);border-color:#FFB02055;background:#FFB02012}
   .st-won{color:var(--go);border-color:#3DD68C55;background:#3DD68C14}
   .st-dead{color:var(--stop);border-color:#F0616D44;background:#F0616D10}
+  /* Everything that used to be its own column, stacked under the name. */
+  .sub{color:var(--text3);font-size:12px;margin-top:3px;font-weight:400;
+       max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .pipefoot{display:flex;justify-content:space-between;align-items:center;gap:10px;
             margin-top:12px;color:var(--text3);font-size:12px;flex-wrap:wrap}
   .zt{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
@@ -209,6 +229,29 @@
   .hide{display:none !important}
   .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
         padding:16px;margin-bottom:14px}
+  .tabrow{display:flex;align-items:flex-start;gap:12px;margin:0 0 16px}
+  .tabrow .tabs{margin:0;flex:1}
+  .menuwrap{position:relative;flex:none}
+  #burger{display:flex;flex-direction:column;justify-content:center;gap:4px;
+          width:42px;height:38px;padding:0;align-items:center;border-radius:10px}
+  #burger span{display:block;width:17px;height:2px;background:var(--text2);border-radius:2px;
+               transition:.18s}
+  #burger:hover span{background:var(--text)}
+  #burger.active{border-color:var(--accent)}
+  #burger.active span{background:var(--accent)}
+  #burger.open span:nth-child(1){transform:translateY(6px) rotate(45deg)}
+  #burger.open span:nth-child(2){opacity:0}
+  #burger.open span:nth-child(3){transform:translateY(-6px) rotate(-45deg)}
+  .menu{position:absolute;right:0;top:46px;z-index:40;min-width:250px;
+        background:var(--surface);border:1px solid var(--line2);border-radius:12px;
+        padding:6px;box-shadow:0 12px 34px rgba(0,0,0,.5);
+        display:flex;flex-direction:column;gap:2px}
+  .menu button{text-align:left;border:0;background:transparent;border-radius:8px;
+               padding:10px 12px;font-weight:600;width:100%}
+  .menu button:hover{background:var(--surface2)}
+  .menu button.on{color:var(--accent)}
+  .menu button em{display:block;font-style:normal;font-weight:400;font-size:11.5px;
+                  color:var(--text3);margin-top:2px}
   .tabs{display:flex;gap:8px;margin:0 0 16px;flex-wrap:wrap}
   .tabs button{border-radius:999px}
   .tabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
@@ -234,7 +277,7 @@
     <img src="/crm/icon.png" alt="86'd">
     <div>
       <h1>86'd — Sales</h1>
-      <div class="sub">Call list, pipeline and lead engine</div>
+      <div class="sub">Who to call, and what to say</div>
     </div>
   </header>
 
@@ -251,12 +294,28 @@
 
   <div id="app" class="hide">
 
-    <div class="tabs" id="tabs">
-      <button data-tab="calls" class="on">Call list</button>
-      <button data-tab="pipeline">Pipeline</button>
-      <button data-tab="followups">Follow-ups</button>
-      <button data-tab="numbers">Numbers</button>
-      <button data-tab="engine">Lead engine</button>
+    <!-- Three tabs, because three is what a working day actually needs: who to
+         call, who you've spoken to, who owes you a callback. The numbers and
+         the generator are things you look at occasionally and think about
+         once — they live behind the menu so they stop competing for attention
+         with the job in front of you. -->
+    <div class="tabrow">
+      <div class="tabs" id="tabs">
+        <button data-tab="calls" class="on">Call list</button>
+        <button data-tab="pipeline">CRM</button>
+        <button data-tab="followups">Follow-ups</button>
+      </div>
+      <div class="menuwrap">
+        <button id="burger" aria-label="More" aria-expanded="false" aria-haspopup="true">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="menu hide" id="menu" role="menu">
+          <button data-tab="numbers" role="menuitem">Numbers
+            <em>funnel, connect rates, what's working</em></button>
+          <button data-tab="engine" role="menuitem">Lead engine
+            <em>where tomorrow's leads come from</em></button>
+        </div>
+      </div>
     </div>
 
     <section data-panel="calls">
@@ -399,14 +458,45 @@ async function unlock(k){
 $('unlock').onclick=()=>unlock($('key').value.trim());
 $('key').onkeydown=e=>{if(e.key==='Enter')$('unlock').click()};
 
-$('tabs').onclick=e=>{
-  const b=e.target.closest('button[data-tab]'); if(!b) return;
+function closeMenu(){
+  $('menu').classList.add('hide');
+  $('burger').classList.remove('open');
+  $('burger').setAttribute('aria-expanded','false');
+}
+$('burger').onclick=e=>{
+  e.stopPropagation();
+  const shut=$('menu').classList.toggle('hide');
+  $('burger').classList.toggle('open',!shut);
+  $('burger').setAttribute('aria-expanded', String(!shut));
+};
+// Anywhere else, or Escape, puts it away.
+document.addEventListener('click', e=>{
+  if(!e.target.closest('.menuwrap')) closeMenu();
+});
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeMenu(); });
+
+function switchTab(b){
   TAB=b.dataset.tab;
-  document.querySelectorAll('#tabs button').forEach(x=>x.classList.toggle('on',x===b));
+  // The burger goes orange when what you're looking at lives inside it —
+  // otherwise a page behind a closed menu has nothing on screen saying so.
+  const inMenu=!!b.closest('#menu');
+  $('burger').classList.toggle('active', inMenu);
+  document.querySelectorAll('#tabs button, #menu button')
+    .forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
     numbers:loadNumbers,engine:loadEngine}[TAB])()
     .catch(e=>toast(e.message));
+}
+
+$('tabs').onclick=e=>{
+  const b=e.target.closest('button[data-tab]'); if(!b) return;
+  switchTab(b);
+};
+$('menu').onclick=e=>{
+  const b=e.target.closest('button[data-tab]'); if(!b) return;
+  closeMenu();
+  switchTab(b);
 };
 
 /* ── the call list ────────────────────────────────────────────────────────
@@ -496,6 +586,35 @@ $('queueBar').onclick=async e=>{
        toast('Cancelled'); await loadCalls(); }
   catch(err){ toast(err.message); }
 };
+
+/* The pre-call brief. Facts are extracted and attributable; the notes on top
+   are written only from them. Cached server-side, so opening the page doesn't
+   wait on a model. */
+const BRIEFS={};
+async function loadBrief(leadId, into){
+  const box=into||$('brief');
+  if(!box) return;
+  if(BRIEFS[leadId]) return renderBrief(box, BRIEFS[leadId]);
+  box.innerHTML='<div class="none">reading up on them…</div>';
+  try{
+    const d=await api(`/leads/${leadId}/brief`);
+    BRIEFS[leadId]=d;
+    renderBrief(box, d);
+  }catch{ box.innerHTML=''; }
+}
+
+function renderBrief(box, d){
+  if(!d.facts.length && !d.points.length){
+    box.innerHTML='<div class="none">Nothing on file about this one — '
+      +'the map entry is bare and their site gave nothing up.</div>';
+    return;
+  }
+  box.innerHTML=
+    (d.points.length?`<div class="pts">${d.points.map(p=>
+      `<div class="pt">${esc(p)}</div>`).join('')}</div>`:'')
+    +`<div class="fx">${d.facts.map(f=>
+      `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`;
+}
 
 async function loadUndoBar(){
   let d;
@@ -684,14 +803,22 @@ async function loadNow(){
   $('focus').className='focus '+(go?'go':'wait');
   // The number you are about to dial belongs next to the name of the place you
   // are about to dial, not eight rows down in a table you have to find it in.
-  $('focus').innerHTML=`<h2>${esc(d.headline)}</h2>
-    ${next&&next.phone_digits?`<div class="phcell" style="margin-top:12px">
-      <span class="digits" data-copy="${esc(next.phone_digits)}">${esc(next.phone_digits)}</span>
-      <button class="copybtn" data-act="copy" data-copy="${esc(next.phone_digits)}">COPY</button>
-      ${next.manager_name?`<span class="askinline">ask if ${esc(next.manager_name)} is still ${esc(next.manager_role||'there')}</span>`:''}
-    </div>`:''}
+  // Name and number on one line — they're one thought, and the number is the
+  // thing the hand is reaching for. Everything that helps the conversation
+  // sits under them.
+  $('focus').innerHTML=`<div class="focustop">
+      <h2>${esc(d.headline)}</h2>
+      ${next&&next.phone_digits?`<div class="phcell">
+        <span class="digits" data-copy="${esc(next.phone_digits)}">${esc(next.phone_digits)}</span>
+        <button class="copybtn" data-act="copy" data-copy="${esc(next.phone_digits)}">COPY</button>
+      </div>`:''}
+    </div>
+    ${next&&next.manager_name?`<div class="askinline">Ask if ${esc(next.manager_name)}
+      is still ${esc(next.manager_role||'there')}</div>`:''}
+    <div id="brief" class="brief"></div>
     <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
       · ${d.soon_count} waiting on their window</div>`;
+  if(next) loadBrief(next.id);
 
   $('svcTabs').innerHTML=''; $('zoneTabs').innerHTML='';
 
@@ -1048,22 +1175,44 @@ async function drawerAction(dr,e){
    stops the same bar being rung twice, and follow-ups only shows what's due.
    Without this, a bar you spoke to on Tuesday and forgot to book a callback
    for is invisible — which is how warm leads quietly die. */
-let PIPE={status:'',q:'',offset:0};
+// Opens on the people you've actually spoken to, not on 312 cold names.
+let PIPE={stage:'working',q:'',offset:0};
 let pipeTimer=null;
 
+/* Six stage chips was five too many to scan mid-thought. The list really
+   answers three questions — who's live, who hasn't been called, who's done —
+   so those are the chips, with the raw stages folded underneath. */
+const STAGES=[
+  ['working','In play',       'contacted,warm', 'people you have actually spoken to'],
+  ['new',    'Not called yet','new',            'still on the call list'],
+  ['won',    'Won',           'won',            'signed up'],
+  ['dead',   'Dead',          'dead',           'do not call again'],
+  ['',       'Everything',    '',               'every lead, any stage'],
+];
+// The edit form still writes one real status at a time.
 const STATUSES=[['','Everything'],['new','Not called'],['contacted','Contacted'],
                 ['warm','Warm'],['won','Won'],['dead','Dead']];
 
 async function loadPipeline(){
+  const stage=STAGES.find(x=>x[0]===PIPE.stage)||STAGES[0];
+  const statuses=stage[2]?stage[2].split(','):[];
   const qs=new URLSearchParams();
-  if(PIPE.status) qs.set('status',PIPE.status);
+  // "In play" spans two stages, so it's fetched wide and narrowed here rather
+  // than making someone click two chips to see one idea.
+  if(statuses.length===1) qs.set('status',statuses[0]);
   if(PIPE.q) qs.set('q',PIPE.q);
-  qs.set('offset',PIPE.offset); qs.set('limit',100);
+  qs.set('offset',PIPE.offset); qs.set('limit',statuses.length>1?400:100);
   const d=await api('/leads?'+qs);
+  if(statuses.length>1) d.leads=d.leads.filter(l=>statuses.includes(l.status));
 
-  $('pipeTabs').innerHTML=STATUSES.map(([key,label])=>`
-    <button data-status="${esc(key)}" class="${key===PIPE.status?'on':''}">
-      ${esc(label)} <span class="c">${d.counts[key||'all']??0}</span>
+  const tally=key=>{
+    const st=STAGES.find(x=>x[0]===key);
+    if(!st||!st[2]) return d.counts.all??0;
+    return st[2].split(',').reduce((n,x)=>n+(d.counts[x]??0),0);
+  };
+  $('pipeTabs').innerHTML=STAGES.map(([key,label,,why])=>`
+    <button data-status="${esc(key)}" class="${key===PIPE.stage?'on':''}" title="${esc(why)}">
+      ${esc(label)} <span class="c">${tally(key)}</span>
     </button>`).join('');
 
   if(!d.leads.length){
@@ -1077,8 +1226,7 @@ async function loadPipeline(){
     <div class="zone"><div class="sheetwrap">
       <table class="sheet">
         <thead><tr>
-          <th></th><th>BAR</th><th>STAGE</th><th>PHONE</th>
-          <th>EMAIL</th><th>WHERE</th><th>ACTIVITY</th><th>ACTIONS</th>
+          <th></th><th>BAR</th><th>STAGE</th><th>PHONE</th><th>WHERE THINGS STAND</th><th></th>
         </tr></thead>
         <tbody>${d.leads.map((l,i)=>pipeRow(l,PIPE.offset+i+1)).join('')}</tbody>
       </table>
@@ -1093,44 +1241,46 @@ async function loadPipeline(){
 }
 
 function pipeRow(l,n){
-  // Ten columns pushed the buttons off the right-hand edge, and the buttons
-  // are the point of this screen. The contact's name belongs under the bar's
-  // anyway, and "last touched" and "next due" are one thought, not two.
+  /* Two lines per row instead of eight columns. Everything that was a column
+     of its own — email, town, who to ask for — is still here, just stacked
+     under the name where it reads as one thing about one bar rather than
+     eight separate things to track across. */
   const touch=(l.last_touch_at||'').slice(0,10);
-  const activity=[
-    touch ? touch : 'never called',
-    l.attempts ? `${l.attempts} tr${l.attempts>1?'ies':'y'}` : '',
-  ].filter(Boolean).join(' · ');
-  const sub=[l.contact && `Ask for ${l.contact}`,
-             l.manager_name && !l.contact &&
-               `Ask if ${l.manager_name} is still ${l.manager_role||'there'}`]
-            .filter(Boolean)[0];
+  const who=l.contact ? `ask for ${l.contact}`
+          : (l.manager_name ? `ask if ${l.manager_name} is still ${l.manager_role||'there'}` : '');
+  const sub=[who, l.email, l.loc].filter(Boolean).join(' · ');
+
+  // The one thing that matters per row: what happens next, or that nothing is.
+  let stands, tone='muted';
+  if(l.followup_date){ stands=`call back ${l.followup_date}`; tone='win-good'; }
+  else if(l.queued_email_at){ stands='email queued'; tone='muted'; }
+  else if(touch){ stands=`last touched ${touch}`; tone='muted'; }
+  else { stands='never contacted'; tone='muted'; }
+  const tries=l.attempts?` · ${l.attempts} tr${l.attempts>1?'ies':'y'}`:'';
+
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}"
               data-contact="${esc(l.contact||'')}">
     <td class="rownum">${n}</td>
-    <td class="nm">${esc(l.name)}${sub?`<div class="ask">${esc(sub)}</div>`:''}</td>
-    <td><span class="st st-${esc(l.status)}">${esc(l.status.toUpperCase())}</span>${
-      l.queued_email_at?'<span class="qchip">MAIL QUEUED</span>':''}</td>
+    <td class="nm">${esc(l.name)}
+      ${sub?`<div class="sub">${esc(sub)}</div>`:''}</td>
+    <td><span class="st st-${esc(l.status)}">${esc(l.status.toUpperCase())}</span></td>
     <td>${l.phone_digits
       ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span>`
         +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_digits)}">COPY</button></div>`
-      : '<span class="muted">—</span>'}</td>
-    <td><span class="em" title="${esc(l.email||'')}">${esc(l.email||'')}</span></td>
-    <td class="muted">${esc(l.loc||'')}</td>
-    <td class="muted">${esc(activity)}${l.followup_date
-      ? `<div class="opener" style="color:var(--wait)">next ${esc(l.followup_date)}</div>`:''}</td>
+      : '<span class="muted">no number</span>'}</td>
+    <td><span class="${tone}">${esc(stands)}</span><span class="muted">${esc(tries)}</span></td>
     <td><div class="acts">
       <button class="go" data-act="log">Log</button>
       <button data-act="mail">Email</button>
       <button data-act="edit">Edit</button>
-      <button class="del" data-act="del">✕</button>
+      <button class="del" data-act="del" title="Delete">✕</button>
     </div></td>
   </tr>`;
 }
 
 $('pipeTabs').onclick=e=>{
   const b=e.target.closest('button[data-status]'); if(!b) return;
-  PIPE.status=b.dataset.status; PIPE.offset=0; loadPipeline().catch(x=>toast(x.message));
+  PIPE.stage=b.dataset.status; PIPE.offset=0; loadPipeline().catch(x=>toast(x.message));
 };
 $('pipeSearch').oninput=e=>{
   // Debounced: every keystroke is a query otherwise, and the table redrawing
@@ -1169,7 +1319,7 @@ $('pipeBody').onclick=async e=>{
     let l;
     try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
     d.dataset.mode='edit';
-    d.innerHTML=`<td colspan="8">
+    d.innerHTML=`<td colspan="6">
       <div class="mailrow"><label>Stage</label>
         <select data-f="status">${STATUSES.filter(x=>x[0]).map(([k,v])=>
           `<option value="${k}" ${k===l.status?'selected':''}>${v}</option>`).join('')}</select></div>
@@ -1184,7 +1334,7 @@ $('pipeBody').onclick=async e=>{
       <div class="applied hide"></div></td>`;
   } else if(btn.dataset.act==='log'){
     d.dataset.mode='log';
-    d.innerHTML=`<td colspan="8">
+    d.innerHTML=`<td colspan="6">
       <p class="hint">What happened? Type it however it comes out, or hit a button.</p>
       <textarea rows="3" placeholder="spoke to Dave, wants a callback Tuesday"></textarea>
       <div class="row">
