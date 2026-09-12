@@ -299,20 +299,17 @@ LEAD_WRITABLE = (
 )
 
 
-import re as _re
+from phones import normalize_us_phone, format_us_phone
+
 
 def phone_digits(phone: Optional[str]) -> str:
-    """Bare digits, ready to paste into a dialer.
+    """Ten bare digits for the dialer, or "" when the number can't be trusted.
 
-    CloudTalk and every other dialer want a number, not a formatted string, so
-    "+1-615-742-9095" becomes "6157429095". A leading US country code is
-    dropped because 10 digits is what a US dialer expects; anything that isn't
-    an 11-digit US number is left at its full digit string rather than guessed at.
+    Deliberately returns nothing rather than a best guess: an empty cell is a
+    visible problem, whereas a plausible-looking wrong number gets dialled.
+    See phones.py for what is rejected and why.
     """
-    digits = _re.sub(r"\D", "", phone or "")
-    if len(digits) == 11 and digits.startswith("1"):
-        digits = digits[1:]
-    return digits
+    return normalize_us_phone(phone) or ""
 
 
 # Zone names and the working day inside them. The whole call list is organised
@@ -374,6 +371,10 @@ def _cadence(attempt: int, outcome: Optional[str]) -> tuple[Optional[int], Optio
 def _lead_row(row) -> dict:
     lead = {k: row[k] for k in LEAD_COLUMNS}
     lead["phone_digits"] = phone_digits(lead.get("phone"))
+    lead["phone_pretty"] = format_us_phone(lead["phone_digits"])
+    # Surfaced rather than hidden: a lead whose number didn't validate should
+    # look wrong on screen, not quietly get dialled.
+    lead["phone_ok"] = bool(lead["phone_digits"])
     return lead
 
 
@@ -1131,7 +1132,7 @@ def leadgen_health(_: bool = Depends(require_crm_key)):
     the daily list has quietly stopped, which is exactly the failure that would
     otherwise go unnoticed until a morning with nothing to call.
     """
-    from leadgen import pool_depth, DAILY_TARGET, MAX_ACTIVE
+    from leadgen import pool_depth, DAILY_TARGET, MAX_ACTIVE, BUCKET_TARGET
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM crm_leadgen_runs ORDER BY started_at DESC LIMIT 10")
@@ -1177,12 +1178,26 @@ def leadgen_health(_: bool = Depends(require_crm_key)):
             f"{len(stuck)} runs are still marked in-progress — the process was probably "
             "restarted mid-run. They're reconciled automatically on the next run.")
 
+    # Thin tabs are the failure the operator actually feels — a full-looking
+    # total with an empty Eastern lunch tab is a morning with nothing to call —
+    # so they get their own warning rather than hiding inside the total.
+    thin = [b for b in depth["buckets"] if b["count"] < BUCKET_TARGET // 2]
+    if thin and not at_cap:
+        worst = ", ".join(f"{b['service']} {ZONE_LABELS.get(b['zone'], b['zone'])} "
+                          f"({b['count']})" for b in sorted(thin, key=lambda b: b["count"])[:3])
+        warnings.append(
+            f"Some tabs are nearly empty: {worst}. The generator fills the "
+            "emptiest first, but it needs territory in those zones.")
+
     if at_cap:
-        note = (f"Call list is full at {depth['active_leads']}/{MAX_ACTIVE}. "
-                "Generation is paused until you work some off.")
+        note = (f"Every tab is full — {BUCKET_TARGET} leads in each of "
+                f"{len(depth['buckets'])} service/timezone combinations "
+                f"({depth['active_leads']} total). Generation is paused until "
+                "you work some off.")
     else:
-        note = (f"{depth['headroom']} of {MAX_ACTIVE} spots open — "
-                f"up to {min(DAILY_TARGET, depth['headroom'])} will be added at the next run.")
+        note = (f"{depth['headroom']} spots open across "
+                f"{len(depth['buckets'])} tabs (target {BUCKET_TARGET} each) — "
+                "the emptiest get filled first at the next run.")
 
     return {
         "healthy": (at_cap or not stale) and not warnings,
@@ -1317,15 +1332,24 @@ def export_csv(scope: str = "today", _: bool = Depends(require_crm_key)):
 
 @crm_router.get("/calllist", response_model=dict)
 def call_list(_: bool = Depends(require_crm_key)):
+    """Every unworked lead, split by service then by timezone.
+
+    Two levels because they answer two different questions. The service split
+    answers "it's 11am, who is even open?" — a bar that doesn't unlock until
+    four is unreachable now and belongs behind a different tab. The timezone
+    split answers "who's in their window right now?", and as the afternoon
+    rolls west it moves through Eastern, Central, Mountain, Pacific.
+
+    Venues with no hours in OpenStreetMap sit under dinner rather than lunch.
+    Filing them under lunch would send late-morning calls to bars that don't
+    open until four; under dinner they get the generic afternoon window, which
+    is where they'd have been called anyway.
+    """
+    from callwindow import service_of, ZONE_OFFSETS
+    from leadgen import BUCKET_TARGET
     today = _today()
     with get_db() as conn:
         cursor = conn.cursor()
-
-        # Untouched and still 'new'. Any CRM update moves one of those two and
-        # the lead drops off.
-        # Fewest attempts first, then best score: a lead nobody has tried is
-        # worth more than a fourth swing at one that never answers, and within
-        # that the better-fitting bar goes first.
         cursor.execute("""
             SELECT * FROM crm_leads
              WHERE status = 'new' AND last_touch_at IS NULL
@@ -1340,62 +1364,93 @@ def call_list(_: bool = Depends(require_crm_key)):
         """, (today,))
         done_today = cursor.fetchone()["n"]
 
-    grouped: dict = {}
+    buckets: dict = {"lunch": {}, "dinner": {}}
+    usable = 0
     for row in rows:
         lead = _lead_row(row)
-        # Per-venue, not per-zone: two bars in the same timezone can have
-        # completely different windows because one opens at 11 and one at 9pm.
+        # A number that didn't validate is never offered for dialling.
+        if not lead["phone_ok"]:
+            continue
+        usable += 1
         lead["call_window"] = _call_window(row.get("tz_offset_hours"),
-                                          row.get("opening_hours"))
+                                           row.get("opening_hours"))
+        lead["hours_known"] = bool(row.get("opening_hours"))
+        service = service_of(row.get("opening_hours"))
         offset = row.get("tz_offset_hours")
-        grouped.setdefault(offset, []).append(lead)
+        buckets[service].setdefault(offset if offset in ZONE_OFFSETS else None,
+                                    []).append(lead)
 
-    zones = []
-    for offset, leads in grouped.items():
-        zone = zone_state(offset)
-        # Callable right now first, then closed-today last — the venue's own
-        # hours decide, so a zone is never uniformly good or bad any more.
-        rank = {"good": 0, "early": 1, "generic": 1, "late": 2,
-                "shut_today": 3, "permanently_closed": 4}
-        leads.sort(key=lambda l: (rank.get(l["call_window"].get("state"), 2), l["name"]))
-        ready = sum(1 for l in leads if l["call_window"]["good_now"])
-        zone["leads"] = leads
-        zone["count"] = len(leads)
-        zone["callable_now"] = ready
-        # The zone headline has to agree with the rows under it. Now that each
-        # venue carries its own window, a blanket "nobody's there yet" can sit
-        # directly above a bar that opened an hour ago.
-        if ready:
-            zone["headline"] = f"{ready} ready to call now"
-            zone["state"] = "good"
-            zone["rank"] = 0
-            zone["callable"] = True
-        else:
-            soonest = min((l["call_window"].get("window") or "" for l in leads
-                           if l["call_window"].get("state") == "early"), default="")
-            zone["headline"] = (f"None open yet — first window {soonest}"
-                                if soonest else "Nothing ringable here right now")
-            zone["callable"] = False
-        zones.append(zone)
-    # Callable-now first, then the ones opening up, then the rest.
-    zones.sort(key=lambda z: (z["rank"], z["label"]))
+    rank = {"good": 0, "early": 1, "generic": 1, "late": 2,
+            "shut_today": 3, "permanently_closed": 4}
 
-    callable_now = [z for z in zones if z.get("callable_now")]
-    callable_now.sort(key=lambda z: -z["callable_now"])
-    if callable_now:
-        focus = (f"Call {callable_now[0]['label']} now — "
-                 f"{callable_now[0]['callable_now']} ready")
+    def build_zones(by_zone: dict) -> list:
+        # Every zone appears, empty or not. The sub-tabs have to be in the same
+        # place every time — a row of tabs that reshuffles itself as leads are
+        # worked off is a row you have to re-read before every click.
+        for offset in ZONE_OFFSETS:
+            by_zone.setdefault(offset, [])
+        zones = []
+        for offset, leads in by_zone.items():
+            zone = zone_state(offset)
+            leads.sort(key=lambda l: (rank.get(l["call_window"].get("state"), 2), l["name"]))
+            ready = sum(1 for l in leads if l["call_window"]["good_now"])
+            zone.update({"leads": leads, "count": len(leads), "callable_now": ready,
+                         "target": BUCKET_TARGET,
+                         "short_by": max(0, BUCKET_TARGET - len(leads))})
+            if not leads:
+                zone.update({"headline": "Empty — the generator refills this first",
+                             "callable": False, "rank": 6})
+                zones.append(zone)
+                continue
+            if ready:
+                zone.update({"headline": f"{ready} ready to call now", "state": "good",
+                             "rank": 0, "callable": True})
+            else:
+                soonest = min((l["call_window"].get("window") or "" for l in leads
+                               if l["call_window"].get("state") == "early"), default="")
+                zone.update({"headline": (f"None open yet — first window {soonest}"
+                                          if soonest else "Nothing ringable here right now"),
+                             "callable": False})
+            zones.append(zone)
+        # Fixed east-to-west order, never re-sorted by how good each one looks
+        # right now. Two reasons: the tabs stay where the hand expects them,
+        # and east-to-west IS the order the afternoon moves — Eastern hits its
+        # window first, then Central, and by the time Eastern is in the dinner
+        # rush Pacific is just opening. The "call this one" marker moves; the
+        # tabs don't.
+        order = {off: i for i, off in enumerate(ZONE_OFFSETS)}
+        zones.sort(key=lambda z: order.get(z["offset"], 99))
+        best = max(zones, key=lambda z: z["callable_now"], default=None)
+        for zone in zones:
+            zone["recommended"] = bool(best and zone is best and zone["callable_now"])
+        return zones
+
+    services = []
+    for key, label, blurb in [
+        ("lunch", "Open for lunch", "Doors open by 11:30 — reachable late morning"),
+        ("dinner", "Dinner only", "Don't open until later, plus venues with no listed hours"),
+    ]:
+        zones = build_zones(buckets[key])
+        services.append({
+            "key": key, "label": label, "blurb": blurb, "zones": zones,
+            "count": sum(z["count"] for z in zones),
+            "callable_now": sum(z["callable_now"] for z in zones),
+        })
+
+    ready = [(svc, z) for svc in services for z in svc["zones"] if z["callable_now"]]
+    ready.sort(key=lambda sz: -sz[1]["callable_now"])
+    if ready:
+        svc, zone = ready[0]
+        focus = (f"Call {zone['label']} now — {zone['callable_now']} ready "
+                 f"({svc['label'].lower()})")
     else:
-        soon = [z for z in zones if z["state"] in ("opening", "closed")]
-        focus = (f"Nothing in the sweet spot. {soon[0]['label']} is next."
-                 if soon else "Nothing to call right now.")
+        focus = "Nothing in a calling window right now."
 
     return {
-        "date": today,
-        "focus": focus,
-        "done_today": done_today,
-        "remaining": len(rows),
-        "zones": zones,
+        "date": today, "focus": focus, "done_today": done_today,
+        "remaining": usable, "services": services,
+        # Kept so anything still reading the old shape doesn't break.
+        "zones": services[0]["zones"] + services[1]["zones"],
     }
 
 

@@ -205,3 +205,58 @@ def call_window(hours: Optional[str], local_now: datetime) -> dict:
     return {"state": "late", "good_now": False, "window": window,
             "known": schedule is not None,
             "headline": f"Missed today's window ({window})"}
+
+
+# ── Service band ────────────────────────────────────────────────────────────
+
+def service_band(hours: Optional[str]) -> str:
+    """'lunch' | 'dinner' | 'unknown' — which shift this venue is reachable on.
+
+    Lunch means the doors open by 11:30 somewhere in the week, so ringing
+    before noon can reach a human. Dinner means they don't open until later,
+    and a late-morning call reaches nobody.
+
+    'unknown' is kept separate rather than guessed at: roughly half of venues
+    have no hours in OpenStreetMap, and filing them under lunch would send
+    late-morning calls to bars that don't unlock until four.
+    """
+    schedule = parse_opening_hours(hours)
+    if not schedule:
+        return "unknown"
+    opens = [opens_at(schedule, d) for d in range(7)]
+    opens = [o for o in opens if o is not None]
+    if not opens:
+        return "unknown"
+    return "lunch" if min(opens) <= LUNCH_OPEN_CUTOFF else "dinner"
+
+
+# ── Buckets: the (service × timezone) cells the call list is divided into ───
+#
+# The operator picks a service tab, then a timezone sub-tab, and expects a full
+# screen of names underneath. That pair is the unit the generator has to fill,
+# so it lives here — one definition shared by the page, the API and the
+# generator, rather than three that can drift apart.
+
+ZONE_OFFSETS = [-5, -6, -7, -8]          # Eastern, Central, Mountain, Pacific
+SERVICES = ["lunch", "dinner"]
+
+
+def service_of(hours: Optional[str]) -> str:
+    """Which tab a venue belongs under: 'lunch' or 'dinner'.
+
+    Unknown hours go to dinner. Roughly half of OSM venues list none, and the
+    dinner tab's generic afternoon window is where they'd be called anyway —
+    whereas putting them under lunch would send 11am calls to bars that don't
+    unlock until four, which is the exact mistake the tabs exist to prevent.
+    """
+    return "lunch" if service_band(hours) == "lunch" else "dinner"
+
+
+def bucket_of(tz_offset: Optional[int], hours: Optional[str]) -> tuple[str, Optional[int]]:
+    """(service, zone offset) for one venue. Zone is None when longitude was missing."""
+    zone = tz_offset if tz_offset in ZONE_OFFSETS else None
+    return service_of(hours), zone
+
+
+def all_buckets() -> list[tuple[str, int]]:
+    return [(s, z) for s in SERVICES for z in ZONE_OFFSETS]

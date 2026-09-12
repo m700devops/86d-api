@@ -38,23 +38,36 @@ from typing import Optional
 
 from database import get_db
 from helpers import generate_id, now_iso
+from callwindow import ZONE_OFFSETS, SERVICES, bucket_of, all_buckets
+from phones import normalize_us_phone, is_toll_free
 
 # ── Tunables ────────────────────────────────────────────────────────────────
 
 DAILY_TARGET = int(os.getenv("LEADGEN_DAILY_TARGET", "25"))
 
-# Hard ceiling on unworked leads sitting in the call list. The generator tops
-# the list up towards this and never past it, so working leads off is what
-# creates room for new ones.
+# The call list is divided into cells: one per (service × timezone), i.e.
+# lunch/dinner crossed with Eastern/Central/Mountain/Pacific. Eight of them.
 #
-# This is a usability limit before it's a resource one. A list that only ever
-# grows is a list you stop opening, and at 25/day a hundred is already four
-# days of calling visible at any moment.
-MAX_ACTIVE = int(os.getenv("LEADGEN_MAX_ACTIVE", "100"))
+# This number is the ceiling on unworked leads IN EACH CELL, not across the
+# list. That distinction is the whole design: a single global cap of 100 spread
+# over eight cells averages twelve per tab, so clicking "lunch → Eastern" shows
+# a nearly empty screen and there is nothing to call. The cap exists so no ONE
+# screen is overwhelming, and the per-screen number is what actually controls
+# that.
+#
+# 50 a cell means about two days of calling visible in whichever tab is open,
+# and up to 400 banked across all eight — of which the operator ever sees one
+# cell at a time.
+BUCKET_TARGET = int(os.getenv("LEADGEN_BUCKET_TARGET", "50"))
 
-# Qualified candidates kept banked behind the call list. Much smaller than it
-# used to be: with a capped list holding four days of work, the list is itself
-# the buffer, and a deep second bank would just be crawling nobody asked for.
+# Derived, for reporting and for the "is the whole thing full?" shortcut.
+# Deliberately not an independent knob: a global number that disagreed with the
+# per-cell one would starve some tabs to fill others.
+MAX_ACTIVE = BUCKET_TARGET * len(SERVICES) * len(ZONE_OFFSETS)
+
+# Qualified candidates kept banked behind the call list. Much smaller than the
+# list itself: with eight capped cells holding days of work, the list is its own
+# buffer and a deep second bank would just be crawling nobody asked for.
 POOL_FLOOR = int(os.getenv("LEADGEN_POOL_FLOOR", "50"))
 USER_AGENT = "86d-leadgen/1.0 (+https://my86d.com; bar inventory software)"
 
@@ -274,6 +287,20 @@ def init_leadgen_tables():
                 promoted_lead_id TEXT
             )
         """)
+        # Columns added after the table first shipped. CREATE TABLE IF NOT
+        # EXISTS silently skips them on any database that already has the
+        # table, so they need the same information_schema gate the rest of the
+        # app uses — this is exactly the bug that made opening_hours invisible
+        # on an existing database while working fine on a fresh one.
+        for col, col_type in [("opening_hours", "TEXT"), ("opener", "TEXT")]:
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'crm_lead_candidates' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE crm_lead_candidates ADD COLUMN {col} {col_type}")
+                print(f"[leadgen] migrated crm_lead_candidates: added {col}", flush=True)
+
         for idx, col in [
             ("idx_cand_status", "status"),
             ("idx_cand_score", "score"),
@@ -625,7 +652,12 @@ out center tags;
             # else costs a request.
             if (tags.get("opening_hours") or "").strip().lower() in ("closed", "off"):
                 continue
-            phone = (tags.get("phone") or tags.get("contact:phone") or "").strip()
+            raw_phone = (tags.get("phone") or tags.get("contact:phone") or "").strip()
+            # Validated at the door. An unusable number can never reach the call
+            # list, because dialling a stranger costs more than dropping a lead.
+            phone = normalize_us_phone(raw_phone)
+            if phone and is_toll_free(phone):
+                continue   # toll-free on an independent bar is a platform line
             website = (tags.get("website") or tags.get("contact:website")
                        or tags.get("url") or "").strip()
             # No phone or no website means it can never satisfy the brief, so
@@ -792,81 +824,169 @@ def _is_suppressed(cursor, name: str, email: str, phone: str, website: str) -> O
 
 # ── Stage 4: promote ────────────────────────────────────────────────────────
 
+def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
+    """Promote a single candidate, or reject it and return None.
+
+    Split out of the loop so the bucket filler can walk past a candidate that
+    turns out to be suppressed or a duplicate and try the next one in the same
+    cell, instead of leaving that cell short.
+    """
+    # Re-checked even though harvest validates: rows banked by an older build
+    # predate the validator, and this is the last gate before a number reaches
+    # a dialer.
+    clean_phone = normalize_us_phone(cand["phone"])
+    if not clean_phone or is_toll_free(clean_phone):
+        cursor.execute(
+            "UPDATE crm_lead_candidates SET status='rejected', "
+            "reject_reason='phone not a dialable US number' WHERE id=%s",
+            (cand["id"],))
+        return None
+    cand = {**cand, "phone": clean_phone}
+
+    reason = _is_suppressed(cursor, cand["name"], cand["email"],
+                            cand["phone"], cand["website"])
+    if reason:
+        cursor.execute(
+            "UPDATE crm_lead_candidates SET status='rejected', reject_reason=%s WHERE id=%s",
+            (reason, cand["id"]),
+        )
+        return None
+
+    # Already in the pipeline under this email or name? Never pitch the same
+    # bar twice.
+    cursor.execute(
+        "SELECT id FROM crm_leads WHERE LOWER(email) = LOWER(%s) "
+        "OR (LOWER(name) = LOWER(%s) AND LOWER(COALESCE(loc,'')) = LOWER(%s))",
+        (cand["email"], cand["name"], cand["city"] or ""),
+    )
+    if cursor.fetchone():
+        cursor.execute(
+            "UPDATE crm_lead_candidates SET status='rejected', "
+            "reject_reason='already in pipeline' WHERE id=%s", (cand["id"],)
+        )
+        return None
+
+    # Already a customer? Pitching an existing user is the worst call you can
+    # make.
+    cursor.execute(
+        "SELECT id FROM users WHERE LOWER(email) = LOWER(%s) AND deleted_at IS NULL",
+        (cand["email"],),
+    )
+    if cursor.fetchone():
+        cursor.execute(
+            "UPDATE crm_lead_candidates SET status='rejected', "
+            "reject_reason='already a customer' WHERE id=%s", (cand["id"],)
+        )
+        return None
+
+    lead_id = generate_id()
+    loc = ", ".join(x for x in [cand["city"], cand["state"]] if x)
+    notes = (
+        f"Auto-sourced {now[:10]} · {cand['amenity'] or 'bar'} · score {cand['score']}\n"
+        f"{cand['website']}\n"
+        f"Email found on: {cand['email_source'] or 'site'}"
+    )
+    cursor.execute("""
+        INSERT INTO crm_leads (id, name, loc, status, phone, email, notes,
+                               source, tz_offset_hours, opening_hours, opener,
+                               created_at, updated_at)
+        VALUES (%s, %s, %s, 'new', %s, %s, %s, 'leadgen', %s, %s, %s, %s, %s)
+    """, (lead_id, cand["name"], loc, cand["phone"], cand["email"], notes,
+          cand.get("tz_offset_hours"), cand.get("opening_hours"),
+          cand.get("opener"), now, now))
+    cursor.execute("""
+        UPDATE crm_lead_candidates
+           SET status='promoted', promoted_at=%s, promoted_lead_id=%s
+         WHERE id=%s
+    """, (now, lead_id, cand["id"]))
+    return lead_id
+
+
+def bucket_counts(cursor=None) -> dict:
+    """Unworked leads per (service, zone), every cell present even at zero.
+
+    Same filter the call list uses, so what this counts is exactly what the
+    operator would see under that tab.
+    """
+    def _count(cur) -> dict:
+        cur.execute("""
+            SELECT tz_offset_hours, opening_hours FROM crm_leads
+             WHERE status = 'new' AND last_touch_at IS NULL
+        """)
+        counts = {b: 0 for b in all_buckets()}
+        for row in cur.fetchall():
+            bucket = bucket_of(row["tz_offset_hours"], row["opening_hours"])
+            if bucket in counts:
+                counts[bucket] += 1
+        return counts
+
+    if cursor is not None:
+        return _count(cursor)
+    with get_db() as conn:
+        return _count(conn.cursor())
+
+
+def bucket_deficits(cursor=None) -> dict:
+    """How many more leads each cell needs to reach BUCKET_TARGET."""
+    return {b: max(0, BUCKET_TARGET - n) for b, n in bucket_counts(cursor).items()}
+
+
 def promote_leads(limit: int = DAILY_TARGET) -> int:
-    """Move the best qualified candidates into crm_leads. Returns how many."""
+    """Move the best qualified candidates into crm_leads. Returns how many.
+
+    Promotion is per-cell, not first-come. Sorting the whole bank by score and
+    taking the top N fills whichever cells the harvest happened to favour and
+    starves the rest — the measured Pacific/Eastern split was 131 to 12, so a
+    score-ordered promote would have handed the operator a full Pacific tab and
+    an empty Eastern one. Instead the emptiest cell is always served first, so
+    the cells converge rather than diverge.
+
+    Score still decides WHO gets promoted within a cell; it just no longer
+    decides which cells get filled.
+    """
     promoted = 0
     now = now_iso()
     with get_db() as conn:
         cursor = conn.cursor()
+        deficits = bucket_deficits(cursor)
+        if not any(deficits.values()):
+            return 0
+
         cursor.execute("""
             SELECT * FROM crm_lead_candidates
              WHERE status = 'qualified'
              ORDER BY score DESC, discovered_at ASC
-             LIMIT %s
-        """, (limit * 3,))   # over-fetch: some will be filtered below
-        rows = cursor.fetchall()
+        """)
+        # Bank the candidates by the cell they would land in. Best-first within
+        # each cell, preserved from the query order.
+        by_bucket: dict = {b: [] for b in all_buckets()}
+        zoneless: list = []
+        for cand in cursor.fetchall():
+            bucket = bucket_of(cand["tz_offset_hours"], cand.get("opening_hours"))
+            if bucket in by_bucket:
+                by_bucket[bucket].append(dict(cand))
+            else:
+                # No longitude, so no zone, so no sub-tab to file it under.
+                # Held back rather than dropped: it still gets promoted once
+                # every real cell is full, and shows under "Unknown".
+                zoneless.append(dict(cand))
 
-        for cand in rows:
-            if promoted >= limit:
+        while promoted < limit:
+            # Emptiest cell with something left in the bank.
+            candidates_left = [b for b in by_bucket if deficits[b] > 0 and by_bucket[b]]
+            if not candidates_left:
                 break
+            bucket = max(candidates_left, key=lambda b: deficits[b])
+            cand = by_bucket[bucket].pop(0)
+            if _promote_one(cursor, cand, now):
+                promoted += 1
+                deficits[bucket] -= 1
 
-            reason = _is_suppressed(cursor, cand["name"], cand["email"],
-                                    cand["phone"], cand["website"])
-            if reason:
-                cursor.execute(
-                    "UPDATE crm_lead_candidates SET status='rejected', reject_reason=%s WHERE id=%s",
-                    (reason, cand["id"]),
-                )
-                continue
-
-            # Already in the pipeline under this email or name? Never pitch the
-            # same bar twice.
-            cursor.execute(
-                "SELECT id FROM crm_leads WHERE LOWER(email) = LOWER(%s) "
-                "OR (LOWER(name) = LOWER(%s) AND LOWER(COALESCE(loc,'')) = LOWER(%s))",
-                (cand["email"], cand["name"], cand["city"] or ""),
-            )
-            if cursor.fetchone():
-                cursor.execute(
-                    "UPDATE crm_lead_candidates SET status='rejected', "
-                    "reject_reason='already in pipeline' WHERE id=%s", (cand["id"],)
-                )
-                continue
-
-            # Already a customer? Pitching an existing user is the worst call
-            # you can make.
-            cursor.execute(
-                "SELECT id FROM users WHERE LOWER(email) = LOWER(%s) AND deleted_at IS NULL",
-                (cand["email"],),
-            )
-            if cursor.fetchone():
-                cursor.execute(
-                    "UPDATE crm_lead_candidates SET status='rejected', "
-                    "reject_reason='already a customer' WHERE id=%s", (cand["id"],)
-                )
-                continue
-
-            lead_id = generate_id()
-            loc = ", ".join(x for x in [cand["city"], cand["state"]] if x)
-            notes = (
-                f"Auto-sourced {now[:10]} · {cand['amenity'] or 'bar'} · score {cand['score']}\n"
-                f"{cand['website']}\n"
-                f"Email found on: {cand['email_source'] or 'site'}"
-            )
-            cursor.execute("""
-                INSERT INTO crm_leads (id, name, loc, status, phone, email, notes,
-                                       source, tz_offset_hours, opening_hours, opener,
-                                       created_at, updated_at)
-                VALUES (%s, %s, %s, 'new', %s, %s, %s, 'leadgen', %s, %s, %s, %s, %s)
-            """, (lead_id, cand["name"], loc, cand["phone"], cand["email"], notes,
-                  cand.get("tz_offset_hours"), cand.get("opening_hours"),
-                  cand.get("opener"), now, now))
-            cursor.execute("""
-                UPDATE crm_lead_candidates
-                   SET status='promoted', promoted_at=%s, promoted_lead_id=%s
-                 WHERE id=%s
-            """, (now, lead_id, cand["id"]))
-            promoted += 1
+        # Only once the real cells are served: leads with no timezone can't be
+        # worked zone by zone, so they must never displace one that can.
+        while promoted < limit and zoneless:
+            if _promote_one(cursor, zoneless.pop(0), now):
+                promoted += 1
 
         conn.commit()
     return promoted
@@ -900,18 +1020,65 @@ def pool_depth() -> dict:
         )
         active = cursor.fetchone()["n"]
     qualified = by_status.get("qualified", 0)
-    # Runway counts what's actually callable, not just what's banked — the
-    # capped list in front of you is the first few days of work.
+    counts = bucket_counts()
+    deficits = {b: max(0, BUCKET_TARGET - n) for b, n in counts.items()}
+    headroom = sum(deficits.values())
+    # A global "leads: 312" says nothing about whether the tab the operator is
+    # about to open has anything in it. The thin cells are the number that
+    # matters, so they get named.
+    thin = sorted((b for b in counts if counts[b] < BUCKET_TARGET),
+                  key=lambda b: counts[b])
     return {
         "by_status": by_status,
         "qualified": qualified,
         "active_leads": active,
+        "bucket_target": BUCKET_TARGET,
+        "buckets": [{"service": b[0], "zone": b[1], "count": counts[b],
+                     "short_by": deficits[b]} for b in all_buckets()],
+        "thinnest": [{"service": b[0], "zone": b[1], "count": counts[b]}
+                     for b in thin[:3]],
         "max_active": MAX_ACTIVE,
-        "headroom": max(0, MAX_ACTIVE - active),
-        "at_capacity": active >= MAX_ACTIVE,
+        "headroom": headroom,
+        "at_capacity": headroom == 0,
         "days_of_runway": round((active + qualified) / DAILY_TARGET, 1) if DAILY_TARGET else 0,
         "unharvested_cities": fresh_cities,
     }
+
+
+def _next_cities(limit: int) -> list[dict]:
+    """Which cities to harvest next — the ones feeding the emptiest tabs.
+
+    Round-robin by longitude was never the rule, and plain oldest-first isn't
+    either: the seed list is ordered roughly by population, which put most of
+    the Eastern metros at the back. One measured run had Pacific sitting on 131
+    qualified leads while Eastern had 12, because 15 of 16 Eastern cities had
+    never been touched. Sorting by the zone's shortfall first fixes that
+    without anyone having to notice it happened.
+    """
+    per_zone: dict = {}
+    for (_service, zone), short in bucket_deficits().items():
+        per_zone[zone] = per_zone.get(zone, 0) + short
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM crm_leadgen_cities
+             WHERE enabled
+             ORDER BY last_harvested_at ASC NULLS FIRST
+        """)
+        cities = [dict(r) for r in cursor.fetchall()]
+
+    def rank(city: dict):
+        zone = us_tz_offset(city.get("lon"))
+        # Negated: biggest shortfall first. Never-harvested breaks the tie,
+        # then oldest — so a short zone still rotates through its own cities
+        # instead of re-harvesting one of them forever.
+        return (-per_zone.get(zone, 0),
+                city.get("last_harvested_at") is not None,
+                city.get("last_harvested_at") or "")
+
+    cities.sort(key=rank)
+    return cities[:limit]
 
 
 def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
@@ -951,9 +1118,14 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
         conn.commit()
 
     try:
-        # 0. How much room is there? Everything below is sized by this.
-        headroom = max(0, MAX_ACTIVE - active_lead_count())
+        # 0. How much room is there, cell by cell? Everything below is sized
+        #    by this. Summed only for the "is it all full?" test — the shape
+        #    matters more than the total, because a run that promotes 25 leads
+        #    into an already-full Pacific tab has delivered nothing.
+        deficits = bucket_deficits()
+        headroom = sum(deficits.values())
         detail["headroom_at_start"] = headroom
+        detail["short_cells"] = {f"{s_}/{z}": d for (s_, z), d in deficits.items() if d}
 
         # Nothing to add and nothing worth banking: stop before touching the
         # network at all. This is the whole point of the cap — when the list is
@@ -961,7 +1133,8 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
         # that will never be called.
         if headroom == 0 and pool_depth()["qualified"] >= POOL_FLOOR:
             detail["skipped"] = (
-                f"call list is full ({MAX_ACTIVE}/{MAX_ACTIVE}) and the bank is stocked — "
+                f"every tab is full ({BUCKET_TARGET} in each of "
+                f"{len(all_buckets())} cells) and the bank is stocked — "
                 "no harvesting, no crawling, nothing promoted"
             )
             with get_db() as conn:
@@ -972,27 +1145,35 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                      WHERE id=%s
                 """, (now_iso(), json.dumps({**detail, "pool": pool_depth()})[:8000], run_id))
                 conn.commit()
-            print(f"[leadgen] LEADGEN_RUN ok=True skipped=list_full "
-                  f"active={MAX_ACTIVE}/{MAX_ACTIVE}", flush=True)
+            print(f"[leadgen] LEADGEN_RUN ok=True skipped=all_tabs_full "
+                  f"active={MAX_ACTIVE}/{MAX_ACTIVE} "
+                  f"per_cell={BUCKET_TARGET}", flush=True)
             return {"run_id": run_id, "ok": True, "promoted": 0, "enriched": 0,
                     "qualified": 0, "candidates_found": 0, "cities_harvested": 0,
                     "errors": 0, "detail": detail}
 
-        # 1. Promote first, from what's already banked — never past the cap.
-        promoted = promote_leads(min(target, headroom))
+        # 1. Promote first, from what's already banked.
+        #
+        #    Sized by the holes, not by the daily target. `target` is a pace,
+        #    not a ceiling: on a cold start eight empty cells need 400 leads
+        #    and metering that out 25 a day would leave the tabs unusable for a
+        #    fortnight. In steady state the two coincide anyway — the cap means
+        #    only as many leads can land as were called off the list.
+        promoted = promote_leads(headroom)
 
-        # 2. Top the bank back up if it's getting shallow.
+        # 2. Top the bank back up if it's getting shallow, or if what's banked
+        #    can't reach the cells that are actually short. A bank of 200
+        #    Pacific candidates is a deep bank and an empty Eastern tab.
         depth = pool_depth()
-        if depth["qualified"] < POOL_FLOOR:
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT * FROM crm_leadgen_cities
-                     WHERE enabled
-                     ORDER BY last_harvested_at ASC NULLS FIRST
-                     LIMIT %s
-                """, (max_cities,))
-                cities = [dict(r) for r in cursor.fetchall()]
+        remaining_deficit = sum(bucket_deficits().values())
+        if depth["qualified"] < POOL_FLOOR or remaining_deficit > depth["qualified"]:
+            # A metro yields roughly 15-20 qualified leads. Filling eight
+            # empty cells needs several of them, so a cold start harvests wide
+            # and a topped-up list harvests one or two. Capped so a single run
+            # can't sit on Overpass all evening.
+            wanted = max(max_cities, -(-remaining_deficit // 17))
+            cities = _next_cities(min(wanted, 12))
+            detail["harvest_order"] = [c["name"] for c in cities]
 
             for city in cities:
                 try:
@@ -1066,10 +1247,9 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
         # 4. If the first promote came up short and enriching just produced
         #    fresh stock, top the list up rather than under-delivering — still
         #    bounded by whatever room is left right now.
-        if promoted < target:
-            remaining_room = max(0, MAX_ACTIVE - active_lead_count())
-            if remaining_room:
-                promoted += promote_leads(min(target - promoted, remaining_room))
+        remaining_room = sum(bucket_deficits().values())
+        if remaining_room:
+            promoted += promote_leads(remaining_room)
 
         ok = promoted > 0 or errors == 0
     except Exception as exc:
@@ -1093,6 +1273,7 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
     print(f"[leadgen] LEADGEN_RUN ok={ok} promoted={promoted} enriched={enriched} "
           f"qualified={qualified} new_candidates={candidates} errors={errors} "
           f"active={detail['pool']['active_leads']}/{MAX_ACTIVE} "
+          f"thinnest={detail['pool']['thinnest']} "
           f"runway_days={detail['pool']['days_of_runway']}", flush=True)
 
     return {

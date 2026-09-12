@@ -27,20 +27,33 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - static/crm.html — the CRM UI, served at `/crm`. Single self-contained file, no build step;
   replacing this file replaces the UI. Holds no credentials — the operator types the key and
   it lives in their browser's localStorage. **Designed for an operator with ADHD**: one
-  headline stating the single next action, a shrinking list as the progress bar, zones that
-  can't be called folded away, and one primary button per row. Keep it that way — extra
-  choices on this screen are a cost, not a feature
+  headline stating the single next action, a shrinking list as the progress bar, two rows of
+  tabs (service, then timezone) with exactly ONE table on screen at a time, and one primary
+  button per row. The zone accordion it replaced meant four headers and four open/shut states
+  to hold in your head; tabs mean one list and a fixed place for every tab. Keep it that way —
+  extra choices on this screen are a cost, not a feature
 - static/icon.png, static/favicon.png — the app logo, copied from the mobile repo's assets and
   served via the allowlisted `/crm/{asset}` route (NOT a directory mount — that would be one
   traversal away from serving the repo). Re-copy from 86d-mobile/assets when rebranding
 - callwindow.py — parses OSM `opening_hours` and decides when to ring THIS venue. Pure
   functions of (hours string, local now), so it's testable without a DB, network or clock.
-  See THE CALL LIST below for the heuristic
+  Also owns the BUCKET definition — `service_of()`, `bucket_of()`, `all_buckets()` — the
+  (service × timezone) cells the page, the API and the generator all have to agree on. One
+  definition on purpose: three copies would drift and the tabs would stop matching what gets
+  generated. See THE CALL LIST below for the heuristic
+- phones.py — strict NANP validation, fails closed. OSM phone tags are volunteer free text
+  carrying extensions, two numbers in one field, international numbers and vanity spellings;
+  anything this can't prove dialable returns None and is never promoted. It can promise the
+  digits are a structurally valid US number, NOT that the line still belongs to that venue —
+  nothing short of dialling proves that
 - leadgen.py — the daily lead generator: harvest (OpenStreetMap/Overpass) → enrich (crawl
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
 - seed_data.py — default product catalog
-- test_level_classifier.py — unit tests for helpers.py level logic (run: pytest test_level_classifier.py -v)
+- test_level_classifier.py — unit tests for helpers.py level logic
+- test_phones.py, test_callwindow.py — the phone validator and the call-window/service-band
+  logic, both pure. Run all three: `pytest test_level_classifier.py test_phones.py
+  test_callwindow.py -q`
 
 ## AI Vision Rules
 - `POST /v1/scans/analyze` (main.py:3590) tries OpenAI first, falls through to Gemini on timeout/error —
@@ -118,14 +131,27 @@ capture. Don't reintroduce them or describe them as current.)
   calling this API cross-origin would fail on both counts
 
 ## LEAD GENERATOR (leadgen.py)
-- **The call list is capped at `LEADGEN_MAX_ACTIVE` (100) unworked leads.** Each run tops it
-  up by at most `LEADGEN_DAILY_TARGET` (25) and never past the cap, so working leads off is
-  what creates room. When the list is full AND the bank is at floor, the run returns
-  immediately having made ZERO network calls — that's the point of the cap. When the list is
-  full but the bank is thin it still harvests, bounded by `LEADGEN_POOL_FLOOR` (50), so
-  freed spots refill the same day instead of waiting for tomorrow's crawl
-- Total leads that can exist at once: 100 callable + 50 pre-checked in reserve. Set
-  `LEADGEN_POOL_FLOOR=0` to drop the reserve entirely and only ever generate on demand
+- **The cap is PER TAB, not global: `LEADGEN_BUCKET_TARGET` (50) unworked leads in each of
+  the 8 (service × timezone) cells.** It used to be a single `LEADGEN_MAX_ACTIVE` of 100, and
+  that number cannot survive the tabs: 100 spread over 8 cells averages 12, so opening
+  "lunch → Eastern" showed a nearly empty screen. `MAX_ACTIVE` still exists but is DERIVED
+  (`BUCKET_TARGET × 2 services × 4 zones` = 400) and is not an independent knob — a global
+  number disagreeing with the per-cell one would starve some tabs to fill others
+- **Promotion is per-cell, emptiest first** (`promote_leads` → `bucket_deficits`). Score still
+  decides WHO gets promoted within a cell; it no longer decides which cells get filled. Taking
+  the global top-N by score was measured filling Pacific to 131 while Eastern sat at 12
+- **City selection follows the same deficit** (`_next_cities`). The seed list is ordered
+  roughly by population, which put most Eastern metros at the back; sorting by the zone's
+  shortfall first is what actually feeds a thin tab. Never-harvested breaks the tie, then
+  oldest, so a short zone rotates through its own cities instead of re-harvesting one forever
+- `DAILY_TARGET` (25) is now a PACE, not a ceiling. A run promotes up to the total shortfall:
+  metering a cold start of 400 out at 25/day would leave the tabs unusable for a fortnight. In
+  steady state the two coincide anyway, because the per-cell cap means only as many leads can
+  land as were called off the list
+- When every cell is full AND the bank is at floor, the run returns immediately having made
+  ZERO network calls. It still harvests when the bank is thin OR when what's banked can't
+  reach the cells that are actually short — a deep bank of Pacific candidates is still an
+  empty Eastern tab
 - NOTE: none of this spends API credits — OpenStreetMap and Nominatim are free and keyless.
   The cap exists because an ever-growing list is one nobody opens, and to stop pointless
   crawling. The only paid call in the CRM is `/debrief`, once per call the operator logs
@@ -153,6 +179,10 @@ capture. Don't reintroduce them or describe them as current.)
   ~1.5 new cities per day; 58 US metros are seeded, more via `POST /v1/crm/leadgen/cities`
 - A lead is NEVER promoted without both a phone and an email, and never if it's suppressed,
   already in the pipeline, or already a customer
+- **The phone is validated twice: at harvest and again at promote** (`phones.normalize_us_phone`).
+  The second check is not redundant — rows banked by an earlier build predate the validator,
+  and promote is the last gate before a number reaches a dialer. `phone_digits` in crm.py
+  returns `""` rather than a guess, so an unvalidated number can't reach the copy button
 - **The crawler will not fetch a non-public URL.** `_is_public_http_url()` requires http(s)
   and resolves the host, rejecting private/loopback/link-local/reserved addresses, and every
   venue-supplied fetch passes `verify_public=True`. This matters because the `website` tag
@@ -191,9 +221,18 @@ capture. Don't reintroduce them or describe them as current.)
   be contacted is the one mistake this list must never cause
 
 ## THE CALL LIST (the screen the operator actually lives in)
-- `GET /v1/crm/calllist` — every unworked lead, GROUPED BY TIMEZONE, zones ordered so the one
-  callable right now is first. Working west through the zones as the afternoon rolls is the
-  point of the grouping.
+- `GET /v1/crm/calllist` — every unworked lead, split BY SERVICE then BY TIMEZONE. Two levels
+  because they answer two questions: the service tab answers "it's 11am, who is even open?"
+  (a bar that doesn't unlock until four is unreachable now and belongs behind another tab),
+  the zone sub-tab answers "who's in their window right now?"
+- **Zones are returned in fixed east-to-west order and every zone is always present, empty or
+  not.** Never re-sorted by how good each looks right now: the tabs stay where the hand
+  expects them, and east-to-west IS the order the afternoon moves. The `recommended` flag
+  moves instead. Venues with no hours in OSM sit under DINNER — filing them under lunch would
+  send late-morning calls to bars that don't open until four
+- Clicking an empty zone tab SHOWS that it's empty rather than bouncing you to a full one;
+  only an auto-selected zone gets skipped past. Landing somewhere else after a deliberate
+  click is the more disorienting of the two
 - **Call timing is PER VENUE, from its own `opening_hours`, not a blanket window.** The old
   fixed 2-5pm was wrong for much of the list: real harvested data has bars opening at 4pm and
   nightclubs at 9pm, and a 2pm dial to either reaches an empty room. The heuristic in
@@ -221,7 +260,9 @@ capture. Don't reintroduce them or describe them as current.)
   the filter is `status = 'new' AND last_touch_at IS NULL`. That is what makes it impossible
   to call the same restaurant twice, and the shrinking list doubles as the progress bar
 - `phone_digits` is on every lead: bare digits, US country code stripped (`+1-615-742-9095`
-  → `6157429095`), for pasting into CloudTalk. One click on the page copies it
+  → `6157429095`), for pasting into CloudTalk. One click on the page copies it. A lead whose
+  phone doesn't validate is dropped from the call list entirely rather than shown with a
+  dead number — see phones.py
 - `DELETE /v1/crm/leads/{id}` and `POST /v1/crm/leads/bulk-delete` also RETIRE the
   `crm_lead_candidates` row that produced the lead. Without that the generator re-promotes
   the same restaurant on a later run and it reappears — the exact duplicate call that
@@ -249,7 +290,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   `/crm` still loads, it just can't do anything). Not used by the mobile app at all
 - CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).
   Also decides when the daily lead run fires
-- LEADGEN_DAILY_TARGET (default 25), LEADGEN_MAX_ACTIVE (100), LEADGEN_POOL_FLOOR (50),
+- LEADGEN_BUCKET_TARGET (default 50 — leads per service×timezone tab; total capacity is
+  8× this), LEADGEN_DAILY_TARGET (25, a pace not a ceiling), LEADGEN_POOL_FLOOR (50),
   LEADGEN_ENRICH_WORKERS (8),
   LEADGEN_RUN_HOUR (18 = 6pm, local) — optional lead generator tuning. No API key needed: the
   generator uses OpenStreetMap, which has neither keys nor billing

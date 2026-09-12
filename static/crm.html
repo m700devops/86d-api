@@ -31,21 +31,47 @@
   .focus.go h2{color:var(--go)}
   .focus .prog{color:var(--text2);margin-top:6px;font-size:13px}
 
-  .zone{border:1px solid var(--line);border-radius:12px;margin-bottom:14px;overflow:hidden;
-        background:var(--surface)}
-  .zhead{display:flex;align-items:center;gap:12px;padding:12px 14px;cursor:pointer;
-         background:var(--surface2);border-bottom:1px solid var(--line)}
-  .zhead .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none}
   .d-good{background:var(--go)} .d-opening{background:var(--wait)}
   .d-rush,.d-late{background:var(--stop)} .d-closed,.d-unknown{background:var(--text3)}
-  .zhead .name{font-weight:700;letter-spacing:0.3px}
-  .zhead .when{color:var(--text2);font-size:12px}
-  .zhead .tag{margin-left:auto;font-size:11px;font-weight:700;letter-spacing:0.4px;
-              padding:3px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--text2)}
-  .zhead .tag.go{color:var(--go);border-color:#3DD68C55;background:#3DD68C14}
-  .zhead .tag.stop{color:var(--stop);border-color:#F0616D44}
+  .zbar .name{font-weight:700;letter-spacing:0.3px}
+  .zbar .when{color:var(--text2);font-size:12px}
 
-  .sheetwrap{overflow-x:auto}
+  /* Service tabs, then timezone sub-tabs under them. Two questions in order:
+     "who is even open at this hour?" then "who's in their window right now?"
+     Both rows stay in a fixed order so the same tab is always in the same
+     place — one thing to click, never a layout to re-read. */
+  .svc{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+  .svc button{text-align:left;padding:13px 15px;border-radius:12px;line-height:1.3}
+  .svc button .t{font-weight:700;font-size:15px;display:block}
+  .svc button .s{font-size:11px;color:var(--text3);display:block;margin-top:3px}
+  .svc button.on{border-color:var(--accent);background:#FF6B351A}
+  .svc button.on .t{color:var(--accent)}
+  .svc button .n{float:right;font-weight:700;font-size:15px;color:var(--text2)}
+
+  .zt{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+  .zt button{border-radius:999px;padding:7px 14px;font-size:13px;display:flex;
+             align-items:center;gap:7px}
+  .zt button.on{background:var(--surface2);border-color:var(--accent);color:var(--text);
+                font-weight:700}
+  .zt button .c{font-variant-numeric:tabular-nums;color:var(--text3);font-weight:600}
+  .zt button.on .c{color:var(--text2)}
+  .zt button .dot{width:8px;height:8px;border-radius:50%;flex:none}
+  .zt button.rec{border-color:var(--go)}
+  .zt button.rec .c{color:var(--go)}
+
+  .zbar{display:flex;align-items:center;gap:10px;padding:11px 14px;
+        background:var(--surface2);border:1px solid var(--line);
+        border-radius:12px 12px 0 0;border-bottom:0}
+  .zbar .tag{margin-left:auto;font-size:11px;font-weight:700;letter-spacing:0.4px;
+             padding:3px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--text2)}
+  .zbar .tag.go{color:var(--go);border-color:#3DD68C55;background:#3DD68C14}
+  .zbar .tag.stop{color:var(--stop);border-color:#F0616D44}
+  .zone{border:1px solid var(--line);border-radius:0 0 12px 12px;overflow:hidden;
+        background:var(--surface)}
+  @media (max-width:560px){ .svc{grid-template-columns:1fr} }
+
+  .sheetwrap,.tablewrap{overflow-x:auto}
   table.sheet{width:100%;border-collapse:collapse;font-size:13px}
   table.sheet th{background:#121212;color:var(--text3);text-align:left;font-size:10px;
         letter-spacing:1.2px;font-weight:700;padding:8px 10px;border-bottom:1px solid var(--line2);
@@ -145,6 +171,8 @@
 
     <section data-panel="calls">
       <div id="focus" class="focus"><h2>Loading…</h2></div>
+      <div class="svc" id="svcTabs"></div>
+      <div class="zt" id="zoneTabs"></div>
       <div id="zones"></div>
     </section>
 
@@ -189,10 +217,16 @@
           <button id="runNow">Run now</button>
         </div>
         <p class="muted" style="margin:6px 0 0;font-size:12px">
-          Adds up to 25 leads at 6pm daily, never taking the call list past 100.
-          When you work leads off, the spots refill.</p>
+          Runs at 6pm daily and keeps every tab topped up to 50 leads — eight
+          tabs, so up to 400 in the bank, but you only ever see one tab at a
+          time. The emptiest tab is always filled first. Work leads off and the
+          spots refill.</p>
         <div id="engineBanner" style="margin-top:12px"></div>
         <div class="grid" style="margin-top:12px" id="engineStats"></div>
+        <div class="tablewrap" style="margin-top:14px">
+          <table class="sheet"><thead><tr>
+            <th>TAB</th><th>EASTERN</th><th>CENTRAL</th><th>MOUNTAIN</th><th>PACIFIC</th>
+          </tr></thead><tbody id="engineBuckets"></tbody></table></div>
       </div>
     </section>
 
@@ -248,49 +282,123 @@ $('tabs').onclick=e=>{
 };
 
 /* ── the call list ────────────────────────────────────────────────────────
-   Zones that can't be called right now start folded away, so the screen only
-   shows bars you could actually ring this minute. Worked leads vanish from
-   the list entirely, which is what stops the same place being called twice. */
-let collapsed = {};
+   Two rows of tabs, then one table. Service first ("who is even open at this
+   hour?"), timezone second ("who's in their window right now?").
+
+   Only one table is ever on screen. The version this replaced stacked every
+   zone as a collapsible accordion, which meant four headers, four states to
+   remember, and a page that moved under you as leads were worked off. Tabs
+   put exactly one list in front of you and keep every tab in a fixed place.
+
+   Worked leads vanish from the list entirely, which is what stops the same
+   place being called twice, and what makes the shrinking count a progress bar
+   rather than a score. */
+let SVC=null, ZONE=null, LAST=null;
+/* Set only by a click on a zone tab, cleared once honoured. */
+let PICKED=false;
+
+try{ const p=JSON.parse(localStorage.getItem('crmTab')||'null');
+     if(p){ SVC=p.svc; ZONE=p.zone; } }catch{}
+
+function remember(){ try{ localStorage.setItem('crmTab',
+  JSON.stringify({svc:SVC,zone:ZONE})); }catch{} }
+
+/* Where to land when nothing has been picked yet: whichever tab actually has
+   bars ringable this minute, so opening the page is never a decision. */
+function autoPick(d){
+  let best=null;
+  d.services.forEach(sv=>sv.zones.forEach(z=>{
+    if(z.callable_now && (!best || z.callable_now>best.z.callable_now)) best={sv,z};
+  }));
+  if(best){ SVC=best.sv.key; ZONE=best.z.offset; return; }
+  const fullest=d.services.slice().sort((a,b)=>b.count-a.count)[0];
+  SVC=fullest?fullest.key:'lunch';
+  const z=(fullest?fullest.zones:[]).slice().sort((a,b)=>b.count-a.count)[0];
+  ZONE=z?z.offset:-5;
+}
 
 async function loadCalls(){
-  const d=await api('/calllist');
+  const d=await api('/calllist'); LAST=d;
   const go = /^Call /.test(d.focus);
   $('focus').className='focus '+(go?'go':'wait');
   $('focus').innerHTML=`<h2>${esc(d.focus)}</h2>
     <div class="prog">${d.done_today} done today · ${d.remaining} left in the list</div>`;
 
-  if(!d.zones.length){
+  if(!d.services.some(sv=>sv.count)){
+    $('svcTabs').innerHTML=''; $('zoneTabs').innerHTML='';
     $('zones').innerHTML='<div class="card muted">Call list is empty. '
-      +'The engine adds 25 more at 6pm.</div>';
+      +'The engine refills it at 6pm, emptiest tab first.</div>';
     return;
   }
-
-  $('zones').innerHTML=d.zones.map(z=>{
-    const key='z'+z.offset;
-    if(collapsed[key]===undefined) collapsed[key] = !z.callable;
-    const shut=collapsed[key];
-    const tagCls=z.state==='good'?'go':(z.callable?'':'stop');
-    return `
-    <div class="zone">
-      <div class="zhead" data-zone="${key}">
-        <span class="dot d-${esc(z.state)}"></span>
-        <span class="name">${esc(z.label.toUpperCase())}</span>
-        <span class="when">${esc(z.local_time)} · ${esc(z.count)} leads</span>
-        <span class="tag ${tagCls}">${esc(z.headline)}</span>
-      </div>
-      <div class="sheetwrap ${shut?'hide':''}">
-        <table class="sheet">
-          <thead><tr>
-            <th></th><th>BAR</th><th>PHONE</th><th>WHEN</th><th>TRY</th>
-            <th>EMAIL</th><th>CITY</th><th>ACTIONS</th>
-          </tr></thead>
-          <tbody>${z.leads.map((l,i)=>row(l,i+1)).join('')}</tbody>
-        </table>
-      </div>
-    </div>`;
-  }).join('');
+  if(SVC===null || !d.services.some(sv=>sv.key===SVC)) autoPick(d);
+  render();
 }
+
+function render(){
+  const d=LAST; if(!d) return;
+  const svc=d.services.find(sv=>sv.key===SVC)||d.services[0];
+  SVC=svc.key;
+
+  $('svcTabs').innerHTML=d.services.map(sv=>`
+    <button data-svc="${esc(sv.key)}" class="${sv.key===SVC?'on':''}">
+      <span class="n">${sv.count}</span>
+      <span class="t">${esc(sv.label)}</span>
+      <span class="s">${esc(sv.blurb)}</span>
+    </button>`).join('');
+
+  let zone=svc.zones.find(z=>z.offset===ZONE);
+  /* An empty zone nobody asked for gets skipped past — switching service tabs
+     shouldn't drop you on a blank screen. A zone you CLICKED is never skipped,
+     even when it's empty: silently landing somewhere else after a deliberate
+     click is the more disorienting of the two, and the empty state says what
+     the generator is doing about it. */
+  if(!zone || (!zone.count && !PICKED)){
+    const alt=svc.zones.find(z=>z.callable_now) ||
+              svc.zones.slice().sort((a,b)=>b.count-a.count)[0];
+    if(alt && alt.count) zone=alt;
+  }
+  zone=zone||svc.zones[0]; ZONE=zone.offset; PICKED=false; remember();
+
+  $('zoneTabs').innerHTML=svc.zones.map(z=>`
+    <button data-zone="${z.offset}"
+            class="${z.offset===ZONE?'on':''} ${z.recommended?'rec':''}">
+      <span class="dot d-${esc(z.state)}"></span>${esc(z.label)}
+      <span class="c">${z.count}</span>
+    </button>`).join('');
+
+  const tagCls=zone.state==='good'?'go':(zone.callable?'':'stop');
+  if(!zone.count){
+    $('zones').innerHTML='<div class="card muted">Nothing in '
+      +esc(zone.label)+' under this tab yet — the generator fills the '
+      +'emptiest tabs first.</div>';
+    return;
+  }
+  $('zones').innerHTML=`
+    <div class="zbar">
+      <span class="dot d-${esc(zone.state)}"></span>
+      <span class="name">${esc(zone.label.toUpperCase())}</span>
+      <span class="when">${esc(zone.local_time)} · ${esc(zone.count)} leads</span>
+      <span class="tag ${tagCls}">${esc(zone.headline)}</span>
+    </div>
+    <div class="zone"><div class="sheetwrap">
+      <table class="sheet">
+        <thead><tr>
+          <th></th><th>BAR</th><th>PHONE</th><th>WHEN</th><th>TRY</th>
+          <th>EMAIL</th><th>CITY</th><th>ACTIONS</th>
+        </tr></thead>
+        <tbody>${zone.leads.map((l,i)=>row(l,i+1)).join('')}</tbody>
+      </table>
+    </div></div>`;
+}
+
+$('svcTabs').onclick=e=>{
+  const b=e.target.closest('button[data-svc]'); if(!b) return;
+  SVC=b.dataset.svc; render();
+};
+$('zoneTabs').onclick=e=>{
+  const b=e.target.closest('button[data-zone]'); if(!b) return;
+  ZONE=parseInt(b.dataset.zone,10); PICKED=true; render();
+};
 
 function row(l,n){
   const w=l.call_window||{};
@@ -337,9 +445,6 @@ async function copyDigits(el){
 }
 
 $('zones').onclick=async e=>{
-  const zh=e.target.closest('.zhead');
-  if(zh){ collapsed[zh.dataset.zone]=!collapsed[zh.dataset.zone]; return loadCalls(); }
-
   const dig=e.target.closest('.digits');
   if(dig) return copyDigits(dig);
 
@@ -499,6 +604,23 @@ async function loadEngine(){
     tile(d.pool.qualified,'BANKED'),
     tile(d.pool.days_of_runway,'DAYS OF WORK'),
     tile(d.cities.unharvested,'CITIES LEFT')].join('');
+
+  /* Which tabs are actually stocked. The totals above can look healthy while
+     the tab you're about to open is empty, and that's the only number that
+     decides whether there's anything to call. */
+  const zones=[-5,-6,-7,-8];
+  const cell=b=>{
+    const full=b.count>=d.pool.bucket_target;
+    const col=full?'var(--go)':(b.count>=d.pool.bucket_target/2?'var(--wait)':'var(--stop)');
+    return `<td style="color:${col};font-weight:700">${b.count}`
+         + (full?'':` <span class="muted" style="font-weight:400">/${d.pool.bucket_target}</span>`)
+         + '</td>';
+  };
+  $('engineBuckets').innerHTML=[['lunch','Open for lunch'],['dinner','Dinner only']]
+    .map(([key,label])=>`<tr><td>${label}</td>`
+      + zones.map(z=>cell(d.pool.buckets.find(b=>b.service===key&&b.zone===z)
+                          ||{count:0})).join('')
+      + '</tr>').join('');
 }
 $('runNow').onclick=async()=>{
   const b=$('runNow'); b.disabled=true; b.textContent='Running…';
