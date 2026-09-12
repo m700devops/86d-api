@@ -24,6 +24,7 @@ from helpers import (
 from models import *
 from seed_data import SEED_PRODUCTS
 from crm import crm_router, init_crm_tables
+from leadgen import init_leadgen_tables
 import google.generativeai as genai
 import openai
 import os
@@ -78,10 +79,17 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(init_crm_tables)
     except Exception as e:
         print(f"[crm] CRM_TABLES_FAILED {e}", flush=True)
+    try:
+        await asyncio.to_thread(init_leadgen_tables)
+    except Exception as e:
+        print(f"[leadgen] LEADGEN_TABLES_FAILED {e}", flush=True)
     # Pre-warm AI provider connections so the first scan is fast (best-effort)
     asyncio.create_task(_warm_providers())
     # Periodic trial-ending reminder emails (best-effort, runs for the life of the process)
     asyncio.create_task(_trial_reminder_loop())
+    # Daily lead sourcing. Best-effort like the reminder loop — a failure here
+    # must never touch the product API.
+    asyncio.create_task(_leadgen_daily_loop())
     yield
 
 app = FastAPI(
@@ -2722,6 +2730,67 @@ async def _trial_reminder_loop():
         except Exception as e:
             print(f"[trial_reminder] loop error: {e}", flush=True)
         await asyncio.sleep(TRIAL_REMINDER_CHECK_INTERVAL_SECONDS)
+
+
+# ============== LEAD GENERATOR SCHEDULER ==============
+
+LEADGEN_RUN_HOUR = int(os.getenv("LEADGEN_RUN_HOUR", "7"))   # local hour, CRM_TIMEZONE
+LEADGEN_CHECK_INTERVAL_SECONDS = 900                          # 15 min
+
+
+def _leadgen_should_run_now() -> bool:
+    """True once per day, at or after the configured local hour.
+
+    Checks the run log rather than keeping state in memory, so a restart — which
+    on Render's free tier happens whenever the service spins down — can't cause
+    a second run or skip the day entirely.
+    """
+    from crm import _reset_tz
+    from database import get_db as _get_db
+
+    local_now = datetime.now(_reset_tz())
+    if local_now.hour < LEADGEN_RUN_HOUR:
+        return False
+    today = local_now.strftime("%Y-%m-%d")
+
+    with _get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM crm_leadgen_runs "
+            "WHERE ok = TRUE AND SUBSTRING(started_at, 1, 10) >= %s",
+            (today,)
+        )
+        return cursor.fetchone()["n"] == 0
+
+
+def _leadgen_tick():
+    from leadgen import run_daily
+    if not _leadgen_should_run_now():
+        return
+    run_daily()
+    # Attribution is cheap and wants to be fresh for the morning numbers.
+    try:
+        from crm import rematch_attribution
+        rematch_attribution()
+    except Exception as exc:
+        print(f"[leadgen] attribution rematch failed: {exc}", flush=True)
+
+
+async def _leadgen_daily_loop():
+    """Wakes every 15 minutes and runs the pipeline once a day.
+
+    A polling loop rather than a cron: this process has no scheduler, and
+    Render restarts it freely. Whether today's run already happened is a
+    database question, so a restart at any hour resolves correctly.
+    """
+    # Let the app finish booting before the first check.
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await asyncio.to_thread(_leadgen_tick)
+        except Exception as e:
+            print(f"[leadgen] loop error: {e}", flush=True)
+        await asyncio.sleep(LEADGEN_CHECK_INTERVAL_SECONDS)
 
 
 @v1_router.post("/billing/create-checkout-session")

@@ -118,7 +118,25 @@ def init_crm_tables():
                 updated_at TEXT NOT NULL
             )
         """)
+        # Attribution + call-routing columns. Gated individually so this is
+        # safe on a database that already has the base table.
+        for col, col_type in [
+            ("matched_user_id", "TEXT"),      # the signup this lead became
+            ("matched_at", "TEXT"),
+            ("match_method", "TEXT"),         # email | domain | name
+            ("tz_offset_hours", "INTEGER"),   # for the call-window hint
+            ("source", "TEXT"),               # 'leadgen' | 'manual'
+            ("last_touch_at", "TEXT"),
+        ]:
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'crm_leads' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE crm_leads ADD COLUMN {col} {col_type}")
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_crm_leads_status ON crm_leads(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_crm_leads_followup ON crm_leads(followup_date)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_crm_leads_created ON crm_leads(created_at)")
 
         # Single row, pinned to id=1 by a CHECK — the counters are one global
@@ -232,6 +250,8 @@ LEAD_COLUMNS = (
     "id", "name", "loc", "status", "contact", "phone", "email",
     "call_date", "email_date", "followup_date", "notes",
     "created_at", "updated_at",
+    "matched_user_id", "matched_at", "match_method", "tz_offset_hours",
+    "source", "last_touch_at",
 )
 
 # Columns a PATCH is allowed to write. `id`, `created_at` and `updated_at` are
@@ -525,3 +545,608 @@ def update_counters(data: CountersUpdate, _: bool = Depends(require_crm_key)):
         updated = cursor.fetchone()
         conn.commit()
         return {"counters": _counters_row(updated)}
+
+
+# ============== ATTRIBUTION ==============
+#
+# The gap this closes: the counters measured effort (touches, calls, emails)
+# and the only outcome was a hand-typed download count, while the product
+# database knew exactly who signed up and who paid. Nothing joined the two, so
+# "did the bar I called in March become a customer?" had no answer.
+#
+# Matching is deliberately conservative and records HOW it matched, because a
+# wrong attribution is worse than none — it would send the next 5,000 touches
+# at the wrong city.
+
+def _norm(text: Optional[str]) -> str:
+    import re as _re
+    return _re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _email_domain(email: Optional[str]) -> str:
+    if not email or "@" not in email:
+        return ""
+    domain = email.split("@")[-1].lower().strip()
+    # A shared mailbox provider says nothing about which business this is.
+    if domain in {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+                  "aol.com", "icloud.com", "me.com", "live.com", "msn.com",
+                  "comcast.net", "verizon.net", "att.net"}:
+        return ""
+    return domain
+
+
+def rematch_attribution() -> dict:
+    """Join crm_leads to users. Safe to re-run; only fills in blanks."""
+    matched = {"email": 0, "domain": 0, "name": 0}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, email, business_name, created_at FROM users WHERE deleted_at IS NULL"
+        )
+        users = [dict(r) for r in cursor.fetchall()]
+
+        by_email = {(u["email"] or "").lower(): u for u in users if u["email"]}
+        by_domain: dict = {}
+        for u in users:
+            d = _email_domain(u["email"])
+            if d:
+                by_domain.setdefault(d, []).append(u)
+        by_name: dict = {}
+        for u in users:
+            n = _norm(u.get("business_name"))
+            if len(n) >= 4:            # "bar" would match half the world
+                by_name.setdefault(n, []).append(u)
+
+        cursor.execute("SELECT * FROM crm_leads WHERE matched_user_id IS NULL")
+        leads = [dict(r) for r in cursor.fetchall()]
+
+        for lead in leads:
+            user = None
+            method = None
+
+            hit = by_email.get((lead.get("email") or "").lower())
+            if hit:
+                user, method = hit, "email"
+
+            if not user:
+                d = _email_domain(lead.get("email"))
+                # Only when the domain identifies exactly one account — two
+                # accounts on one domain can't be told apart from here.
+                if d and len(by_domain.get(d, [])) == 1:
+                    user, method = by_domain[d][0], "domain"
+
+            if not user:
+                n = _norm(lead.get("name"))
+                if len(n) >= 4 and len(by_name.get(n, [])) == 1:
+                    user, method = by_name[n][0], "name"
+
+            if user:
+                matched[method] += 1
+                cursor.execute("""
+                    UPDATE crm_leads
+                       SET matched_user_id=%s, matched_at=%s, match_method=%s, updated_at=%s
+                     WHERE id=%s
+                """, (user["id"], now_iso(), method, now_iso(), lead["id"]))
+
+        conn.commit()
+    total = sum(matched.values())
+    return {"matched": total, "by_method": matched}
+
+
+@crm_router.post("/attribution/rematch", response_model=dict)
+def attribution_rematch(_: bool = Depends(require_crm_key)):
+    return rematch_attribution()
+
+
+# ============== FUNNEL ==============
+
+@crm_router.get("/funnel", response_model=dict)
+def funnel(_: bool = Depends(require_crm_key)):
+    """Signups, trials, conversion, activation and what outreach produced.
+
+    Everything here is computed from data already being collected; none of it
+    required new tracking. Activation is the number worth staring at: a bar
+    that signs up and never finishes a first count never converts, and nothing
+    surfaced that before.
+    """
+    today = _today()
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT subscription_status AS status, COUNT(*) AS n
+              FROM users WHERE deleted_at IS NULL GROUP BY subscription_status
+        """)
+        by_status = {r["status"] or "unknown": r["n"] for r in cursor.fetchall()}
+        total_users = sum(by_status.values())
+
+        cursor.execute("""
+            SELECT SUBSTRING(created_at, 1, 10) AS day, COUNT(*) AS n
+              FROM users
+             WHERE deleted_at IS NULL AND created_at >= %s
+             GROUP BY 1 ORDER BY 1
+        """, ((datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d"),))
+        signups_30d = [{"day": r["day"], "count": r["n"]} for r in cursor.fetchall()]
+
+        # Trials, bucketed by how long is left — the save-motion worklist.
+        cursor.execute("""
+            SELECT trial_ends_at FROM users
+             WHERE deleted_at IS NULL AND subscription_status = 'trial'
+               AND trial_ends_at IS NOT NULL
+        """)
+        buckets = {"expired": 0, "0-3_days": 0, "4-7_days": 0, "8plus_days": 0}
+        for row in cursor.fetchall():
+            try:
+                ends = datetime.fromisoformat(row["trial_ends_at"].replace("Z", "+00:00"))
+                days = (ends - datetime.now(timezone.utc)).days
+            except (ValueError, AttributeError):
+                continue
+            if days < 0:
+                buckets["expired"] += 1
+            elif days <= 3:
+                buckets["0-3_days"] += 1
+            elif days <= 7:
+                buckets["4-7_days"] += 1
+            else:
+                buckets["8plus_days"] += 1
+
+        paying = sum(n for s, n in by_status.items() if s in ("active", "past_due"))
+        ever_trialed = total_users
+        conversion = round(100.0 * paying / ever_trialed, 1) if ever_trialed else 0.0
+
+        # Activation: signed up, but did they ever finish a count or send an order?
+        cursor.execute("""
+            SELECT COUNT(DISTINCT u.id) AS n
+              FROM users u
+              JOIN inventory_sessions s ON s.user_id = u.id AND s.status = 'completed'
+             WHERE u.deleted_at IS NULL
+        """)
+        completed_count = cursor.fetchone()["n"]
+        cursor.execute("""
+            SELECT COUNT(DISTINCT u.id) AS n
+              FROM users u JOIN inventory_sessions s ON s.user_id = u.id
+             WHERE u.deleted_at IS NULL
+        """)
+        started_count = cursor.fetchone()["n"]
+
+        # Pipeline side.
+        cursor.execute("SELECT status, COUNT(*) AS n FROM crm_leads GROUP BY status")
+        leads_by_status = {r["status"]: r["n"] for r in cursor.fetchall()}
+        cursor.execute("SELECT COUNT(*) AS n FROM crm_leads WHERE matched_user_id IS NOT NULL")
+        leads_converted = cursor.fetchone()["n"]
+        cursor.execute("""
+            SELECT
+              COUNT(*) FILTER (WHERE call_date IS NOT NULL) AS called,
+              COUNT(*) FILTER (WHERE email_date IS NOT NULL) AS emailed,
+              COUNT(*) FILTER (WHERE call_date IS NOT NULL AND matched_user_id IS NOT NULL) AS called_won,
+              COUNT(*) FILTER (WHERE email_date IS NOT NULL AND matched_user_id IS NOT NULL) AS emailed_won
+              FROM crm_leads
+        """)
+        ch = cursor.fetchone()
+
+        def rate(won, total):
+            return round(100.0 * won / total, 1) if total else 0.0
+
+        return {
+            "as_of": today,
+            "users": {
+                "total": total_users,
+                "by_status": by_status,
+                "paying": paying,
+                "trial_to_paid_pct": conversion,
+            },
+            "signups_30d": signups_30d,
+            "trials_ending": buckets,
+            "activation": {
+                "signed_up": total_users,
+                "started_a_count": started_count,
+                "completed_a_count": completed_count,
+                "never_started_pct": rate(total_users - started_count, total_users),
+                "started_but_never_finished": max(0, started_count - completed_count),
+            },
+            "pipeline": {
+                "by_status": leads_by_status,
+                "total": sum(leads_by_status.values()),
+                "converted_to_signup": leads_converted,
+            },
+            "channels": {
+                "called": ch["called"], "called_won": ch["called_won"],
+                "called_win_pct": rate(ch["called_won"], ch["called"]),
+                "emailed": ch["emailed"], "emailed_won": ch["emailed_won"],
+                "emailed_win_pct": rate(ch["emailed_won"], ch["emailed"]),
+            },
+        }
+
+
+# ============== TODAY'S CALL QUEUE ==============
+
+# Bars are shut in the morning and slammed at night. Early afternoon is when
+# somebody who can make a decision is there and not busy.
+CALL_WINDOW_START = 14   # 2pm local
+CALL_WINDOW_END = 17     # 5pm local
+
+
+def _call_window(tz_offset: Optional[int]) -> dict:
+    """Is now a sane time to ring this venue?"""
+    if tz_offset is None:
+        return {"known": False, "good_now": True, "local_time": None, "hint": ""}
+    local = datetime.now(timezone.utc) + timedelta(hours=tz_offset)
+    hour = local.hour
+    good = CALL_WINDOW_START <= hour < CALL_WINDOW_END
+    if hour < 11:
+        hint = "too early — most bars aren't staffed yet"
+    elif hour < CALL_WINDOW_START:
+        hint = f"opens up around {CALL_WINDOW_START}:00 local"
+    elif good:
+        hint = "good time to call"
+    elif hour < 21:
+        hint = "service is starting — expect a brush-off"
+    else:
+        hint = "too late — they're busy"
+    return {"known": True, "good_now": good,
+            "local_time": local.strftime("%H:%M"), "hint": hint}
+
+
+@crm_router.get("/queue", response_model=dict)
+def call_queue(limit: int = 50, _: bool = Depends(require_crm_key)):
+    """The work for today, in the order it should be worked.
+
+    Overdue follow-ups come first: a warm lead you said you'd call back and
+    didn't is the most expensive thing in the pipeline, and nothing surfaced
+    `followup_date` before this.
+    """
+    today = _today()
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        def fetch(where: str, params: tuple, order: str):
+            cursor.execute(
+                f"SELECT * FROM crm_leads WHERE {where} ORDER BY {order} LIMIT %s",
+                params + (limit,),
+            )
+            out = []
+            for row in cursor.fetchall():
+                lead = _lead_row(row)
+                lead["call_window"] = _call_window(row.get("tz_offset_hours"))
+                out.append(lead)
+            return out
+
+        overdue = fetch(
+            "followup_date IS NOT NULL AND followup_date < %s AND status NOT IN ('won','dead')",
+            (today,), "followup_date ASC")
+        due_today = fetch(
+            "followup_date = %s AND status NOT IN ('won','dead')",
+            (today,), "updated_at ASC")
+        never_called = fetch(
+            "call_date IS NULL AND status = 'new'", (), "created_at ASC")
+
+        return {
+            "as_of": today,
+            "overdue": overdue,
+            "due_today": due_today,
+            "never_called": never_called,
+            "counts": {
+                "overdue": len(overdue),
+                "due_today": len(due_today),
+                "never_called": len(never_called),
+            },
+        }
+
+
+class TouchLogged(BaseModel):
+    kind: Literal["call", "email", "fb"]
+    outcome: Optional[Literal["answered", "voicemail", "gatekeeper", "not_interested", "callback"]] = None
+    followup_in_days: Optional[int] = Field(default=None, ge=0, le=365)
+    note: Optional[str] = Field(default=None, max_length=2000)
+    status: Optional[LeadStatus] = None
+
+
+@crm_router.post("/leads/{lead_id}/touch", response_model=dict)
+def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key)):
+    """One call that does everything logging a touch should do.
+
+    Before this, working a lead meant four separate actions — stamp the date,
+    move the status, set a follow-up, decrement the counter — and the counter
+    was the only one anybody remembered. Doing it in one transaction is what
+    keeps the activity numbers honest against the pipeline.
+    """
+    today = _today()
+    now = now_iso()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (lead_id,))
+        lead = cursor.fetchone()
+        if not lead:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "Lead not found"})
+
+        sets = ["updated_at = %s", "last_touch_at = %s"]
+        params: list = [now, now]
+
+        if data.kind == "call":
+            sets.append("call_date = %s"); params.append(today)
+        elif data.kind == "email" and not lead["email_date"]:
+            sets.append("email_date = %s"); params.append(today)
+
+        if data.followup_in_days is not None:
+            follow = (datetime.now(_reset_tz()) + timedelta(days=data.followup_in_days)).strftime("%Y-%m-%d")
+            sets.append("followup_date = %s"); params.append(follow)
+
+        new_status = data.status
+        if new_status is None and data.outcome:
+            # A call that reached a human has, at minimum, contacted them.
+            new_status = {"not_interested": "dead", "callback": "warm",
+                          "answered": "contacted", "voicemail": "contacted",
+                          "gatekeeper": "contacted"}.get(data.outcome)
+        if new_status and lead["status"] == "new":
+            sets.append("status = %s"); params.append(new_status)
+        elif new_status and new_status in ("warm", "won", "dead"):
+            sets.append("status = %s"); params.append(new_status)
+
+        if data.note:
+            stamped = f"[{today}] {data.kind}"
+            if data.outcome:
+                stamped += f" · {data.outcome}"
+            stamped += f": {data.note}"
+            sets.append("notes = COALESCE(notes || E'\\n', '') || %s")
+            params.append(stamped)
+
+        params.append(lead_id)
+        cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
+        updated = cursor.fetchone()
+
+        # Same transaction as the lead update: the scoreboard and the pipeline
+        # can't drift apart if they move together.
+        counter_col = {"call": "daily_calls_remaining",
+                       "email": "daily_emails_remaining",
+                       "fb": "daily_fb_remaining"}[data.kind]
+        cursor.execute(f"""
+            UPDATE crm_counters
+               SET {counter_col} = GREATEST(0, {counter_col} - 1),
+                   touch_ticker_remaining = GREATEST(0, touch_ticker_remaining - 1),
+                   touch_ticker_last_action = %s,
+                   updated_at = %s
+             WHERE id = 1
+            RETURNING *
+        """, (data.kind, now))
+        counters = cursor.fetchone()
+        conn.commit()
+        return {"lead": _lead_row(updated),
+                "counters": _counters_row(counters) if counters else None}
+
+
+# ============== SUPPRESSION (do-not-call) ==============
+
+class SuppressionCreate(BaseModel):
+    kind: Literal["email", "phone", "domain", "name"]
+    value: str = Field(min_length=1, max_length=320)
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+@crm_router.get("/suppressions", response_model=dict)
+def list_suppressions(_: bool = Depends(require_crm_key)):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_suppressions ORDER BY created_at DESC")
+        return {"suppressions": [dict(r) for r in cursor.fetchall()]}
+
+
+@crm_router.post("/suppressions", response_model=dict, status_code=201)
+def add_suppression(data: SuppressionCreate, _: bool = Depends(require_crm_key)):
+    """Never contact this again — a do-not-call, a competitor, a bad fit.
+
+    Checked at promote time, so a suppressed venue can never re-enter the
+    pipeline through the lead generator either.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO crm_suppressions (id, kind, value, reason, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (kind, LOWER(value)) DO UPDATE SET reason = EXCLUDED.reason
+            RETURNING *
+        """, (generate_id(), data.kind, data.value.strip(), data.reason, now_iso()))
+        row = cursor.fetchone()
+        # Retire anything already in the pipeline that this now covers.
+        if data.kind in ("email", "phone"):
+            cursor.execute(
+                f"UPDATE crm_leads SET status='dead', updated_at=%s WHERE LOWER({data.kind}) = LOWER(%s)",
+                (now_iso(), data.value.strip()))
+        conn.commit()
+        return {"suppression": dict(row)}
+
+
+# ============== LEAD GENERATOR ==============
+
+@crm_router.get("/leadgen/today", response_model=dict)
+def leadgen_today(_: bool = Depends(require_crm_key)):
+    """Today's sourced leads, ordered for dialling."""
+    today = _today()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # won/dead excluded: a lead suppressed or closed since this morning
+        # must not still be sitting in the call list. Calling someone who asked
+        # not to be contacted is the one mistake this list must never cause.
+        cursor.execute("""
+            SELECT * FROM crm_leads
+             WHERE source = 'leadgen' AND SUBSTRING(created_at, 1, 10) = %s
+               AND status NOT IN ('won', 'dead')
+             ORDER BY created_at ASC
+        """, (today,))
+        rows = cursor.fetchall()
+        leads = []
+        for row in rows:
+            lead = _lead_row(row)
+            lead["call_window"] = _call_window(row.get("tz_offset_hours"))
+            leads.append(lead)
+        # Ring the ones whose local afternoon it is right now, first.
+        leads.sort(key=lambda l: (not l["call_window"]["good_now"], l["name"]))
+        return {"date": today, "count": len(leads), "leads": leads}
+
+
+@crm_router.get("/leadgen/health", response_model=dict)
+def leadgen_health(_: bool = Depends(require_crm_key)):
+    """Is the generator actually working? Built to make silence impossible.
+
+    `stale` is the field that matters: no successful run in over 36 hours means
+    the daily list has quietly stopped, which is exactly the failure that would
+    otherwise go unnoticed until a morning with nothing to call.
+    """
+    from leadgen import pool_depth, DAILY_TARGET
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leadgen_runs ORDER BY started_at DESC LIMIT 10")
+        runs = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("""
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE enabled AND last_harvested_at IS NULL) AS unharvested
+              FROM crm_leadgen_cities
+        """)
+        cities = cursor.fetchone()
+
+    last_ok = next((r for r in runs if r["ok"]), None)
+    stale = True
+    hours_since = None
+    if last_ok and last_ok.get("finished_at"):
+        try:
+            when = datetime.fromisoformat(last_ok["finished_at"].replace("Z", "+00:00"))
+            hours_since = round((datetime.now(timezone.utc) - when).total_seconds() / 3600, 1)
+            stale = hours_since > 36
+        except ValueError:
+            pass
+
+    depth = pool_depth()
+    warnings = []
+    if stale:
+        warnings.append("No successful run in the last 36 hours — the daily list has stopped.")
+    if depth["qualified"] < DAILY_TARGET:
+        warnings.append(
+            f"Pool has {depth['qualified']} qualified leads, under one day's target "
+            f"({DAILY_TARGET}) — tomorrow's list may come up short.")
+    elif depth["days_of_runway"] < 3:
+        warnings.append(f"Only {depth['days_of_runway']} days of leads banked.")
+    if cities["unharvested"] == 0:
+        warnings.append("Every city has been harvested at least once — add more territory.")
+    stuck = [r for r in runs if r["phase"] == "running"]
+    if len(stuck) > 1:
+        warnings.append(
+            f"{len(stuck)} runs are still marked in-progress — the process was probably "
+            "restarted mid-run. They're reconciled automatically on the next run.")
+
+    return {
+        "healthy": not stale and not warnings,
+        "stale": stale,
+        "hours_since_last_success": hours_since,
+        "pool": depth,
+        "cities": {"total": cities["total"], "unharvested": cities["unharvested"]},
+        "warnings": warnings,
+        "recent_runs": runs,
+    }
+
+
+@crm_router.post("/leadgen/run", response_model=dict)
+def leadgen_run(target: Optional[int] = None, max_cities: int = 4,
+                max_enrich: int = 120, _: bool = Depends(require_crm_key)):
+    """Run the pipeline now. Same path the daily scheduler takes."""
+    from leadgen import run_daily, DAILY_TARGET
+    return run_daily(target=target or DAILY_TARGET, max_cities=max_cities,
+                     max_enrich=max_enrich)
+
+
+class CityCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    state: Optional[str] = Field(default=None, max_length=40)
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    radius_m: int = Field(default=12000, ge=1000, le=50000)
+
+
+@crm_router.get("/leadgen/cities", response_model=dict)
+def list_cities(_: bool = Depends(require_crm_key)):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM crm_leadgen_cities
+             ORDER BY last_harvested_at ASC NULLS FIRST, name ASC
+        """)
+        return {"cities": [dict(r) for r in cursor.fetchall()]}
+
+
+@crm_router.post("/leadgen/cities", response_model=dict, status_code=201)
+def add_city(data: CityCreate, _: bool = Depends(require_crm_key)):
+    """Add territory. Geocodes the name when coordinates aren't supplied."""
+    from leadgen import geocode_city
+    lat, lon = data.lat, data.lon
+    if lat is None or lon is None:
+        located = geocode_city(data.name, data.state)
+        if not located:
+            raise HTTPException(status_code=422, detail={
+                "error": "geocode_failed",
+                "message": f"Couldn't locate {data.name}. Pass lat/lon explicitly.",
+            })
+        lat, lon = located
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO crm_leadgen_cities (id, name, state, lat, lon, radius_m, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (LOWER(name), LOWER(COALESCE(state, ''))) DO NOTHING
+            RETURNING *
+        """, (generate_id(), data.name.strip(), data.state, lat, lon,
+              data.radius_m, now_iso()))
+        row = cursor.fetchone()
+        conn.commit()
+        if not row:
+            raise HTTPException(status_code=409, detail={
+                "error": "already_exists", "message": "That city is already on the list"})
+        return {"city": dict(row)}
+
+
+@crm_router.get("/leadgen/export.csv")
+def export_csv(scope: str = "today", _: bool = Depends(require_crm_key)):
+    """Today's list as CSV, for a dialer or a spreadsheet.
+
+    Deliberately a plain download rather than an integration: every auto-dialer
+    takes a CSV, and a file can't break when someone changes dialer.
+    """
+    import csv, io
+    from fastapi.responses import StreamingResponse
+
+    today = _today()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if scope == "today":
+            cursor.execute("""
+                SELECT * FROM crm_leads
+                 WHERE source='leadgen' AND SUBSTRING(created_at,1,10)=%s
+                   AND status NOT IN ('won', 'dead')
+                 ORDER BY created_at
+            """, (today,))
+        elif scope == "queue":
+            cursor.execute("""
+                SELECT * FROM crm_leads
+                 WHERE status NOT IN ('won','dead')
+                   AND (followup_date <= %s OR call_date IS NULL)
+                 ORDER BY followup_date ASC NULLS LAST
+            """, (today,))
+        else:
+            cursor.execute("SELECT * FROM crm_leads ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Name", "Phone", "Email", "Location", "Status",
+                     "Last called", "Follow-up", "Local time", "Notes"])
+    for row in rows:
+        window = _call_window(row.get("tz_offset_hours"))
+        writer.writerow([
+            row["name"], row["phone"] or "", row["email"] or "", row["loc"] or "",
+            row["status"], row["call_date"] or "", row["followup_date"] or "",
+            window.get("local_time") or "", (row["notes"] or "").replace("\n", " | "),
+        ])
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="86d-leads-{scope}-{today}.csv"'},
+    )

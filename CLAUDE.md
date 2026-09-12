@@ -27,6 +27,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - static/crm.html — the CRM UI, served at `/crm`. Single self-contained file, no build step;
   replacing this file replaces the UI. Holds no credentials — the operator types the key and
   it lives in their browser's localStorage
+- leadgen.py — the daily lead generator: harvest (OpenStreetMap/Overpass) → enrich (crawl
+  the venue's site for an email) → qualify (drop chains, score) → promote (top N into
+  crm_leads each morning). See the LEAD GENERATOR section below
 - seed_data.py — default product catalog
 - test_level_classifier.py — unit tests for helpers.py level logic (run: pytest test_level_classifier.py -v)
 
@@ -105,6 +108,51 @@ capture. Don't reintroduce them or describe them as current.)
   (same-origin requests skip CORS entirely), but hosting the CRM page on another domain and
   calling this API cross-origin would fail on both counts
 
+## LEAD GENERATOR (leadgen.py)
+- Four stages with a persistent pool between qualify and promote. The pool is the point:
+  harvesting runs AHEAD of consumption, so an Overpass outage or a slow crawl costs nothing
+  that morning — promote draws from the bank. `/v1/crm/leadgen/health` reports
+  `days_of_runway`
+- Data source is **OpenStreetMap (ODbL)**, not Google Places or Yelp. Those two forbid
+  storing place content beyond a short cache window, which is exactly what a persistent
+  lead pool does; OSM is legal to keep. It also needs no API key and no billing account
+- **Every Overpass mirror in `OVERPASS_MIRRORS` must carry the full planet.**
+  `overpass.osm.ch` was removed because it is a European regional mirror: a US query gets
+  HTTP 200 and an empty element list, a confident "there are no bars in Austin". That is
+  worse than an outage because it looks like success. `_overpass()` therefore treats a
+  zero-element response as a miss and tries the next mirror
+- A total harvest failure RAISES rather than returning (0, 0) — a silent zero would mark the
+  city harvested and look identical to a city with no bars
+- Runs interrupted mid-flight (Render free tier spins down constantly) are reconciled to
+  `phase='abandoned'` on the next run; the health endpoint warns when several are stuck
+- Enrichment runs in a thread pool (`LEADGEN_ENRICH_WORKERS`, default 8) and gives up on a
+  site the moment its homepage doesn't load — a dead domain used to cost one request per
+  guessed path. It prefers links the homepage actually points at over guessed URLs
+- Measured yield: roughly 280 bars per metro → ~17% have both phone and website → ~30-50% of
+  those have a findable email ≈ **15-20 qualified leads per city**. Sustaining 25/day needs
+  ~1.5 new cities per day; 58 US metros are seeded, more via `POST /v1/crm/leadgen/cities`
+- A lead is NEVER promoted without both a phone and an email, and never if it's suppressed,
+  already in the pipeline, or already a customer
+- Log lines to grep on Render: `LEADGEN_TABLES_READY`, `LEADGEN_RUN`, `LEADGEN_TABLES_FAILED`
+
+## CRM SALES TOOLING
+- `GET /v1/crm/funnel` — signups, trials by days-remaining, trial→paid, **activation**
+  (signed up but never finished a first count), pipeline and per-channel win rates
+- `GET /v1/crm/queue` — overdue follow-ups, due today, never called, each with a call-window
+  hint. Bars are shut mornings and slammed evenings; the window is 2-5pm local, derived
+  crudely from longitude (`us_tz_offset`), which is only ever used to label a phone number
+- `POST /v1/crm/leads/{id}/touch` — one call that stamps the date, moves the status, sets the
+  follow-up, appends a dated note and spends both counters IN ONE TRANSACTION. That
+  atomicity is what stops the activity numbers drifting from the pipeline
+- `POST /v1/crm/attribution/rematch` — joins crm_leads to users by email, then unique email
+  domain, then unique normalized business_name, recording WHICH method matched. Conservative
+  on purpose: a wrong attribution points the next 5,000 touches at the wrong city
+- `GET/POST /v1/crm/suppressions` — do-not-call. Checked at promote time, so a suppressed
+  venue can never re-enter the pipeline through the generator either
+- `GET /v1/crm/leadgen/export.csv?scope=today|queue|all` — for an auto-dialer
+- Today's call list and the CSV both exclude `won`/`dead`: calling someone who asked not to
+  be contacted is the one mistake this list must never cause
+
 ## Environment Variables Required
 Source of truth: the `_config_checks` startup list in main.py (~line 52) — it logs what's missing on boot.
 - DATABASE_URL — PostgreSQL connection string (required, app crashes without it)
@@ -117,7 +165,11 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - STRIPE_WEBHOOK_SECRET — without it, payments don't activate subscriptions (customers pay and stay locked out)
 - CRM_API_KEY — shared key for `/v1/crm/*`; unset means every CRM endpoint 503s (the UI at
   `/crm` still loads, it just can't do anything). Not used by the mobile app at all
-- CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC)
+- CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).
+  Also decides when the daily lead run fires
+- LEADGEN_DAILY_TARGET (default 25), LEADGEN_POOL_FLOOR (150), LEADGEN_ENRICH_WORKERS (8),
+  LEADGEN_RUN_HOUR (7, local) — optional lead generator tuning. No API key needed: the
+  generator uses OpenStreetMap, which has neither keys nor billing
 - SENTRY_DSN — optional, error visibility only
 - CONFIDENCE_THRESHOLD, LEVEL_DEADBAND — optional tuning, see AI Vision Rules above
 
