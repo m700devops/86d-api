@@ -29,7 +29,9 @@
   .focus.wait{border-color:#FFB02055;background:#FFB02010}
   .focus h2{margin:0;font-size:22px;letter-spacing:-0.5px}
   .focus.go h2{color:var(--go)}
-  .focus .prog{color:var(--text2);margin-top:6px;font-size:13px}
+  .focus .prog{color:var(--text2);margin-top:10px;font-size:13px}
+  .focus .digits{font-size:19px;padding:7px 12px;letter-spacing:1px}
+  .askinline{color:var(--go);font-size:12px;font-weight:600}
 
   .dot{width:9px;height:9px;border-radius:50%;flex:none}
   .d-good{background:var(--go)} .d-opening{background:var(--wait)}
@@ -125,7 +127,8 @@
       white-space:nowrap;display:inline-block}
   /* A name to ask for. Shown with how old it is, because a name off a website
      is only ever "what their site said on that day". */
-  .ask{color:var(--go);font-size:11px;font-weight:700;margin-top:2px}
+  .ask{color:var(--go);font-size:11px;font-weight:700;margin-top:2px;
+       max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .ask .age{color:var(--text3);font-weight:400}
   .why{display:inline-block;font-size:10px;font-weight:700;letter-spacing:0.4px;
        padding:1px 6px;border-radius:5px;margin-left:6px;
@@ -163,6 +166,15 @@
   .mailrow{display:flex;align-items:center;gap:10px;margin-bottom:8px}
   .mailrow label{width:56px;flex:none;color:var(--text3);font-size:11px;
                  letter-spacing:0.6px;text-transform:uppercase;font-weight:700}
+  /* The drafting box. Set apart from the fields it writes into, so it reads as
+     the thing you talk to rather than another field to fill in. */
+  .aibox{display:flex;gap:9px;align-items:flex-start;margin:0 0 10px;
+         padding:10px;border:1px solid var(--line2);border-radius:9px;
+         background:#FF6B350D}
+  .aibox textarea{min-height:0;flex:1;resize:vertical}
+  .aibox button{flex:none;background:var(--accent);border-color:var(--accent);
+                color:#fff;font-weight:700;align-self:stretch;white-space:nowrap}
+  .aibox button:disabled{opacity:.6}
   .applied{margin-top:10px;font-size:12px;color:var(--go)}
 
   .muted{color:var(--text3)} .err{color:var(--stop)}
@@ -459,6 +471,60 @@ $('startBtn').onclick=()=>{
   loadCalls();
 };
 
+/* The compose box. Say what the email needs to say and Claude writes it; say
+   what's wrong with it and Claude changes that bit rather than starting over.
+   Either way the draft lands in the same two fields you can edit by hand, and
+   nothing sends until you press Send. */
+function composeDrawer(addr, contact){
+  return `<td colspan="8">
+    <p class="hint">Sending as <strong>${esc(MAIL.from||'')}</strong>. Nothing goes until you press Send.</p>
+    <div class="mailrow"><label>To</label><input data-to value="${esc(addr)}"></div>
+    ${MAIL.ai?`<div class="aibox">
+      <textarea data-brief rows="2" placeholder="What should this say? e.g. Ed the manager wants more information about the app — include a link to it and my website, and what the company does"></textarea>
+      <button data-draft>Draft it</button>
+    </div>`:''}
+    <div class="mailrow"><label>Subject</label><input data-subject value="${esc(MAIL_SUBJECT)}"></div>
+    <textarea data-body rows="9">${esc(mailBody(contact))}</textarea>
+    <div class="row">
+      <button class="go" data-send>Send it</button>
+      <button data-cancel>Cancel</button>
+    </div>
+    <div class="applied hide"></div>
+  </td>`;
+}
+
+/* Shared by the call list and the pipeline: ask for a draft, drop it into the
+   fields, and switch the box over to revision wording. */
+async function runDraft(dr, id){
+  const brief=dr.querySelector('[data-brief]');
+  const btn=dr.querySelector('[data-draft]');
+  const subject=dr.querySelector('[data-subject]');
+  const body=dr.querySelector('[data-body]');
+  const box=dr.querySelector('.applied');
+  const ask=brief.value.trim();
+  if(!ask) return toast('Say what the email should cover first');
+
+  btn.disabled=true; btn.textContent='Writing…';
+  box.className='applied hide';
+  try{
+    const payload={brief:ask};
+    // Once there's a draft on screen, send it along so a tweak edits THIS
+    // email instead of writing a new one and losing the good parts.
+    if(dr.dataset.drafted){ payload.subject=subject.value; payload.body=body.value; }
+    const r=await api(`/leads/${id}/draft-email`,
+      {method:'POST',body:JSON.stringify(payload)});
+    subject.value=r.subject; body.value=r.body;
+    dr.dataset.drafted='1';
+    brief.value='';
+    brief.placeholder='Not right? Say what to change — "shorter", "mention the free trial", "he asked about price"';
+    btn.textContent='Redraft';
+    box.className='applied'; box.textContent='Drafted. Edit it yourself or ask for a change, then Send.';
+  }catch(err){
+    box.className='applied err'; box.textContent=err.message;
+    btn.textContent=dr.dataset.drafted?'Redraft':'Draft it';
+  }finally{ btn.disabled=false; }
+}
+
 function stopNowTimer(){ if(nowTimer){ clearInterval(nowTimer); nowTimer=null; } }
 
 async function loadNow(){
@@ -473,8 +539,16 @@ async function loadNow(){
     <span class="zone">${esc(d.operator.date)} · ${esc(d.operator.zone.replace('_',' '))}</span>`;
 
   const go=d.ready_count>0;
+  const next=d.ready[0];
   $('focus').className='focus '+(go?'go':'wait');
+  // The number you are about to dial belongs next to the name of the place you
+  // are about to dial, not eight rows down in a table you have to find it in.
   $('focus').innerHTML=`<h2>${esc(d.headline)}</h2>
+    ${next&&next.phone_digits?`<div class="phcell" style="margin-top:12px">
+      <span class="digits" data-copy="${esc(next.phone_digits)}">${esc(next.phone_digits)}</span>
+      <button class="copybtn" data-act="copy" data-copy="${esc(next.phone_digits)}">COPY</button>
+      ${next.manager_name?`<span class="askinline">ask if ${esc(next.manager_name)} is still ${esc(next.manager_role||'there')}</span>`:''}
+    </div>`:''}
     <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
       · ${d.soon_count} waiting on their window</div>`;
 
@@ -601,6 +675,11 @@ function render(){
     </div></div>`;
 }
 
+$('focus').onclick=e=>{
+  const cp=e.target.closest('[data-act="copy"]')||e.target.closest('.digits');
+  if(cp) copyDigits(cp);
+};
+
 $('svcTabs').onclick=e=>{
   const b=e.target.closest('button[data-svc]'); if(!b) return;
   SVC=b.dataset.svc; render();
@@ -726,17 +805,7 @@ $('zones').onclick=async e=>{
     }
     const d=document.createElement('tr');
     d.className='drawer mailer';
-    d.innerHTML=`<td colspan="8">
-      <p class="hint">Sending as <strong>${esc(MAIL.from||'')}</strong>. Edit anything before it goes.</p>
-      <div class="mailrow"><label>To</label><input data-to value="${esc(addr)}"></div>
-      <div class="mailrow"><label>Subject</label><input data-subject value="${esc(MAIL_SUBJECT)}"></div>
-      <textarea data-body rows="9">${esc(mailBody(tr.dataset.contact))}</textarea>
-      <div class="row">
-        <button class="go" data-send>Send it</button>
-        <button data-cancel>Cancel</button>
-      </div>
-      <div class="applied hide"></div>
-    </td>`;
+    d.innerHTML=composeDrawer(addr, tr.dataset.contact);
     tr.after(d);
     return;
   }
@@ -769,6 +838,7 @@ async function drawerAction(dr,e){
   if(e.target.closest('[data-cancel]')) return dr.remove();
 
   if(dr.classList.contains('mailer')){
+    if(e.target.closest('[data-draft]')) return runDraft(dr, id);
     if(!e.target.closest('[data-send]')) return;
     const btn=dr.querySelector('[data-send]');
     btn.disabled=true; btn.textContent='Sending…';
@@ -776,7 +846,7 @@ async function drawerAction(dr,e){
       const r=await api(`/leads/${id}/send-email`,{method:'POST',body:JSON.stringify({
         to:dr.querySelector('[data-to]').value.trim(),
         subject:dr.querySelector('[data-subject]').value.trim(),
-        body:ta.value})});
+        body:dr.querySelector('[data-body]').value})});
       toast('Sent to '+r.sent.to, r.undo_id);
       await loadCalls();
     }catch(err){
@@ -986,14 +1056,7 @@ $('pipeBody').onclick=async e=>{
       return;
     }
     d.className='drawer mailer'; d.dataset.mode='mail';
-    d.innerHTML=`<td colspan="8">
-      <p class="hint">Sending as <strong>${esc(MAIL.from||'')}</strong>. Edit anything before it goes.</p>
-      <div class="mailrow"><label>To</label><input data-to value="${esc(addr)}"></div>
-      <div class="mailrow"><label>Subject</label><input data-subject value="${esc(MAIL_SUBJECT)}"></div>
-      <textarea data-body rows="8">${esc(mailBody(tr.dataset.contact))}</textarea>
-      <div class="row"><button class="go" data-send>Send it</button>
-        <button data-cancel>Cancel</button></div>
-      <div class="applied hide"></div></td>`;
+    d.innerHTML=composeDrawer(addr, tr.dataset.contact);
   }
   tr.after(d);
 };
@@ -1011,6 +1074,9 @@ async function pipeDrawer(dr,e){
          toast('Saved'); await loadPipeline(); }
     catch(err){ fail(err.message); }
     return;
+  }
+  if(dr.dataset.mode==='mail' && e.target.closest('[data-draft]')){
+    return runDraft(dr, id);
   }
   if(dr.dataset.mode==='mail' && e.target.closest('[data-send]')){
     const b=dr.querySelector('[data-send]'); b.disabled=true; b.textContent='Sending…';

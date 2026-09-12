@@ -1255,6 +1255,126 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
 # the server over SMTP closes that loop — the message goes out from the real
 # mailbox, and the same transaction stamps the lead and spends the counter.
 
+# What the model is allowed to say about the product. Everything here is
+# either a fact from the repo or an env var the operator sets — the model gets
+# no licence to invent a feature, a price, a statistic or, above all, a URL.
+# A cold email with a made-up link is worse than no email.
+COMPANY_NAME = os.getenv("COMPANY_NAME", "86'd")
+COMPANY_WEBSITE = os.getenv("COMPANY_WEBSITE", "https://my86d.com")
+COMPANY_APP_URL = os.getenv("COMPANY_APP_URL", "")
+COMPANY_BLURB = os.getenv("COMPANY_BLURB", "").strip()
+
+DEFAULT_BLURB = (
+    "86'd is an iPhone app that counts a bar's inventory by camera. You point "
+    "the phone at a bottle, it identifies the bottle, you tap in the count on a "
+    "number pad, and at the end it builds the order for each distributor and "
+    "emails it to them. Par levels, prices and which distributor supplies each "
+    "bottle are set once per bottle and remembered, so a re-count only asks for "
+    "the number. It keeps order history and spend by distributor. It is a "
+    "subscription, billed monthly, with a free trial."
+)
+
+
+def _draft_system(lead, sender_name: str) -> str:
+    """The brief the drafting model works from. Facts only."""
+    facts = [f"Product: {COMPANY_NAME}", COMPANY_BLURB or DEFAULT_BLURB]
+    links = []
+    if COMPANY_WEBSITE:
+        links.append(f"Website: {COMPANY_WEBSITE}")
+    if COMPANY_APP_URL:
+        links.append(f"App Store listing: {COMPANY_APP_URL}")
+    facts.append("\n".join(links) if links
+                 else "NO LINKS ARE AVAILABLE. Do not include any URL.")
+
+    about = [f"The recipient is {lead['name']}"]
+    if lead.get("loc"):
+        about.append(f"in {lead['loc']}")
+    who = lead.get("contact") or lead.get("manager_name")
+    if who:
+        role = lead.get("manager_role") or "the manager"
+        about.append(f"— the contact there is {who} ({role})")
+    if lead.get("opener"):
+        about.append(f". Something true about the venue, from their own website: "
+                     f"{lead['opener']}")
+
+    return f"""You write a single short sales email for a salesperson to send from their own mailbox.
+
+{chr(10).join(facts)}
+
+{' '.join(about)}.
+
+The sender is {sender_name}. Sign off as them.
+
+Return ONLY a JSON object: {{"subject": "...", "body": "..."}}
+
+Rules, in order of importance:
+1. NEVER invent a fact. No URL that is not listed above, no price, no
+   percentage, no customer count, no feature that is not described above. If
+   the salesperson asks for a link you have not been given, leave it out and
+   say nothing about it.
+2. Write it as one person emailing another. Plain text, no marketing voice, no
+   "I hope this email finds you well", no bullet-point feature lists, no
+   exclamation marks.
+3. Short. Four sentences or so in the body. A bar manager reads this on their
+   phone between deliveries.
+4. The subject line is specific and lowercase-ish, like a person typed it —
+   not a headline and not in Title Case.
+5. Do what the salesperson asked for in their instruction. If they say include
+   the website, include it. If they say keep it short, cut it further.
+6. Plain text only: no HTML, no markdown, no asterisks for bold."""
+
+
+class DraftRequest(BaseModel):
+    brief: str = Field(min_length=1, max_length=2000)
+    # Present on a revision: the draft on screen right now, which the model
+    # edits rather than replacing from scratch.
+    subject: Optional[str] = Field(default=None, max_length=200)
+    body: Optional[str] = Field(default=None, max_length=20000)
+
+
+@crm_router.post("/leads/{lead_id}/draft-email", response_model=dict)
+def draft_lead_email(lead_id: str, data: DraftRequest,
+                     _: bool = Depends(require_crm_key)):
+    """Turn a sentence of intent into a subject and a body.
+
+    Called twice in a typical send: once to write the thing, then again with
+    the current draft attached to change it ("shorter", "mention the free
+    trial", "he asked about price"). The revision path carries the draft so a
+    tweak edits what is on screen instead of starting over and losing the bit
+    that was already right.
+    """
+    import mailer
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+        row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "Lead not found"})
+    lead = _lead_row(row)
+
+    sender_name = (os.getenv("SPACEMAIL_FROM_NAME")
+                   or (mailer.sender() or "").split("@")[0] or "me")
+    system = _draft_system(lead, sender_name)
+
+    if data.subject or data.body:
+        ask = (f"Here is the current draft.\n\nSubject: {data.subject or ''}\n\n"
+               f"{data.body or ''}\n\n---\n\nChange it as follows, keeping "
+               f"everything else as it is: {data.brief}")
+    else:
+        ask = f"Write the email. What it needs to say: {data.brief}"
+
+    out = _ask_claude(system, ask, max_tokens=900)
+    subject = str(out.get("subject") or "").strip()[:200]
+    body = str(out.get("body") or "").strip()[:20000]
+    if not subject or not body:
+        raise HTTPException(status_code=502, detail={
+            "error": "draft_incomplete",
+            "message": "The draft came back empty — try saying it a different way."})
+    return {"subject": subject, "body": body}
+
+
 class OutgoingEmail(BaseModel):
     subject: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=20000)
@@ -1266,7 +1386,10 @@ def mail_status(_: bool = Depends(require_crm_key)):
     """Whether the server can send, so the page knows which button to show."""
     import mailer
     return {"configured": mailer.is_configured(), "from": mailer.sender(),
-            "host": mailer.HOST, "port": mailer.PORT}
+            "host": mailer.HOST, "port": mailer.PORT,
+            # The page hides the "draft it for me" box rather than offering a
+            # button that can only fail.
+            "ai": bool(os.getenv("ANTHROPIC_API_KEY"))}
 
 
 @crm_router.post("/leads/{lead_id}/send-email", response_model=dict)
@@ -2025,13 +2148,20 @@ Rules:
 # cheaper than running it on a frontier vision model. Called over the raw REST
 # API through httpx rather than the SDK, the same way main.py sends through
 # Resend: no new pinned dependency, nothing to keep in version lockstep.
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+# Overridable so the call can be pointed at a gateway, a proxy, or a local
+# stand-in when testing without spending real tokens.
+ANTHROPIC_URL = (os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+                 + "/v1/messages")
 ANTHROPIC_VERSION = "2023-06-01"
 DEBRIEF_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 
-def _debrief_extract(text: str) -> dict:
-    """Ask the model for structured fields. Raises HTTPException when unusable."""
+def _ask_claude(system: str, user: str, max_tokens: int = 400) -> dict:
+    """One JSON answer from Claude. Raises HTTPException when unusable.
+
+    Shared by the call-notes reader and the email drafter — one place that
+    knows the headers, the prefill trick and what each failure should say.
+    """
     import json as _json
 
     import httpx
@@ -2040,8 +2170,8 @@ def _debrief_extract(text: str) -> dict:
     if not key:
         raise HTTPException(status_code=503, detail={
             "error": "ai_unavailable",
-            "message": ("No ANTHROPIC_API_KEY is set, so notes can't be read "
-                        "automatically — type the fields in by hand."),
+            "message": ("No ANTHROPIC_API_KEY is set, so this can't be done "
+                        "automatically — write it by hand."),
         })
 
     try:
@@ -2052,35 +2182,34 @@ def _debrief_extract(text: str) -> dict:
                      "content-type": "application/json"},
             json={
                 "model": DEBRIEF_MODEL,
-                "max_tokens": 400,
+                "max_tokens": max_tokens,
                 "temperature": 0,
-                "system": DEBRIEF_SYSTEM,
+                "system": system,
                 "messages": [
-                    {"role": "user", "content": text},
+                    {"role": "user", "content": user},
                     # Prefilling the opening brace is what makes the reply JSON
                     # without a tool definition: the model can only continue an
                     # object it has already started.
                     {"role": "assistant", "content": "{"},
                 ],
             },
-            timeout=25.0,
+            timeout=40.0,
         )
     except Exception as exc:
-        print(f"[crm] debrief request failed: {exc}", flush=True)
+        print(f"[crm] Claude request failed: {exc}", flush=True)
         raise HTTPException(status_code=503, detail={
             "error": "ai_unavailable",
-            "message": "Couldn't reach the AI to read those notes — type the fields in by hand.",
+            "message": "Couldn't reach the AI — write it by hand.",
         })
 
     if resp.status_code != 200:
         # The body carries the real reason (bad key, rate limit, credit) and
         # it's an internal tool, so say it rather than making it a guess.
-        detail = resp.text[:200]
-        print(f"[crm] debrief HTTP {resp.status_code}: {detail}", flush=True)
+        detail = resp.text[:160]
+        print(f"[crm] Claude HTTP {resp.status_code}: {detail}", flush=True)
         raise HTTPException(status_code=503, detail={
             "error": "ai_unavailable",
-            "message": (f"The AI returned {resp.status_code} — type the fields "
-                        "in by hand. ({detail})").format(detail=detail[:120]),
+            "message": f"The AI returned {resp.status_code} — {detail}",
         })
 
     try:
@@ -2093,12 +2222,19 @@ def _debrief_extract(text: str) -> dict:
         if not text.rstrip().endswith("}") and "}" in text:
             text = text[:text.rindex("}") + 1]
         return _json.loads(text)
+    except HTTPException:
+        raise
     except Exception as exc:
-        print(f"[crm] debrief returned unparseable JSON: {exc}", flush=True)
+        print(f"[crm] Claude returned unparseable JSON: {exc}", flush=True)
         raise HTTPException(status_code=503, detail={
             "error": "ai_unreadable",
-            "message": "The AI's answer didn't parse — type the fields in by hand.",
+            "message": "The AI's answer didn't parse — write it by hand.",
         })
+
+
+def _debrief_extract(text: str) -> dict:
+    """Ask the model for structured fields from a salesperson's rough notes."""
+    return _ask_claude(DEBRIEF_SYSTEM, text, max_tokens=400)
 
 
 @crm_router.post("/leads/{lead_id}/debrief", response_model=dict)

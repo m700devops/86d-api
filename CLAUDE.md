@@ -364,6 +364,20 @@ capture. Don't reintroduce them or describe them as current.)
   against reality. Once a few hundred dials are logged, move the window to match the data
   rather than trusting the heuristic. It reports thin data honestly rather than dressing up
   noise
+- **Claude drafts the email on request.** `POST /v1/crm/leads/{id}/draft-email` takes a
+  sentence of intent ("Ed wants more info, include a link to the app and my website") and
+  returns a subject and body into the compose box. Send the CURRENT draft back with the next
+  brief and it edits that draft instead of writing a new one — a tweak like "shorter" must
+  not lose the part that was already right. The operator can still type over any of it, and
+  nothing sends until Send is pressed
+- **The drafting prompt is facts-only** (`_draft_system`). It is handed the product
+  description, the venue, the contact and the links from `COMPANY_WEBSITE` / `COMPANY_APP_URL`,
+  and told in the first rule never to invent a URL, price, percentage, customer count or
+  feature — with an explicit "NO LINKS ARE AVAILABLE, do not include any URL" when neither
+  env var is set. A cold email carrying a made-up link is worse than no email
+- `_ask_claude()` is the one place that knows the Anthropic headers, the `{` prefill trick and
+  what each failure should say; both the drafter and the call-notes reader go through it.
+  `ANTHROPIC_BASE_URL` overrides the host, for a gateway or a local stand-in
 - **The Email button sends from the server, it is not a `mailto:` link.** `POST
   /v1/crm/leads/{id}/send-email` opens a compose box prefilled with the pitch, sends via
   mailer.py, then stamps `email_date`, moves the status off `new`, appends a dated note,
@@ -437,6 +451,9 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   Without it that endpoint 503s with "type the fields in by hand" and everything else,
   including the quick-outcome buttons, works normally. Not used by the mobile app
 - ANTHROPIC_MODEL — optional, default `claude-haiku-4-5-20251001`
+- COMPANY_WEBSITE (default `https://my86d.com`), COMPANY_APP_URL (default empty),
+  COMPANY_NAME, COMPANY_BLURB — the only facts the email drafter may state. An unset
+  COMPANY_APP_URL means no App Store link appears, never an invented one
 - SPACEMAIL_USER / SPACEMAIL_PASSWORD — the mailbox the Email button sends from
   (`Stephan@my86d.com`). Unset means the button falls back to a `mailto:` link and nothing is
   recorded. SPACEMAIL_HOST (default `mail.spacemail.com`), SPACEMAIL_PORT (465),
