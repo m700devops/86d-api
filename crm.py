@@ -186,9 +186,21 @@ def init_crm_tables():
                 snapshot TEXT NOT NULL,
                 counters_spent INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
-                restored_at TEXT
+                restored_at TEXT,
+                touch_id TEXT
             )
         """)
+        # Which touch this undo reverses. Nullable: rows written before this
+        # column existed have no pairing to record, and the undo path falls back
+        # for those rather than refusing to run.
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'crm_lead_undo' AND column_name = 'touch_id'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE crm_lead_undo ADD COLUMN touch_id TEXT")
+            print("[crm] migrated crm_lead_undo: added touch_id TEXT", flush=True)
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_undo_lead ON crm_lead_undo(lead_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_undo_created ON crm_lead_undo(created_at DESC)")
 
@@ -397,16 +409,34 @@ def zone_state(offset: Optional[int]) -> dict:
 
 
 def _record_touch(cursor, lead, kind: str, outcome: Optional[str], attempt: int,
-                  tz_offset: Optional[int]) -> None:
-    """Log one dial with the local hour, so connect rates can be read by hour."""
+                  tz_offset: Optional[int]) -> str:
+    """Log one dial with the local hour, so connect rates can be read by hour.
+
+    Returns the touch id so the undo record can point at THIS touch — see
+    `_attach_touch`.
+    """
     local = datetime.now(timezone.utc) + timedelta(hours=tz_offset or 0)
+    touch_id = generate_id()
     cursor.execute("""
         INSERT INTO crm_touches (id, lead_id, kind, outcome, connected, attempt,
                                  local_hour, weekday, at)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (generate_id(), lead["id"], kind, outcome,
+    """, (touch_id, lead["id"], kind, outcome,
           outcome in CONNECTED_OUTCOMES, attempt,
           local.hour, local.weekday(), now_iso()))
+    return touch_id
+
+
+def _attach_touch(cursor, undo_id: str, touch_id: str) -> None:
+    """Bind an undo record to the touch it reverses.
+
+    The snapshot is taken before the touch is logged, so the pairing can only be
+    made afterwards. Without it the undo had to guess, and guessed "the newest
+    touch on this lead" — so undoing a call that was followed by an email marked
+    the EMAIL undone and left the call in the connect rates.
+    """
+    cursor.execute("UPDATE crm_lead_undo SET touch_id = %s WHERE id = %s",
+                   (touch_id, undo_id))
 
 
 # Columns the undo restores. Everything a touch can change, and nothing it
@@ -1254,13 +1284,19 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
             params.append(stamped)
 
         undo_id = _snapshot(cursor, lead, f"log {data.kind}")
-        _record_touch(cursor, lead, data.kind, data.outcome, attempt, lead.get("tz_offset_hours"))
+        _attach_touch(cursor, undo_id, _record_touch(
+            cursor, lead, data.kind, data.outcome, attempt, lead.get("tz_offset_hours")))
         params.append(lead_id)
         cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
         updated = cursor.fetchone()
 
         # Same transaction as the lead update: the scoreboard and the pipeline
         # can't drift apart if they move together.
+        # Roll the day over first. Without this, a touch made after the CRM-local
+        # midnight but before anyone opens the counters spends YESTERDAY's
+        # remaining count, and the next counters read resets to quota and erases
+        # it — the day's activity numbers then under-report the work done.
+        _load_counters_locked(cursor)
         counter_col = {"call": "daily_calls_remaining",
                        "email": "daily_emails_remaining",
                        "fb": "daily_fb_remaining"}[data.kind]
@@ -1915,13 +1951,17 @@ def _record_email_sent(cursor, lead_id: str, to: str, subject: str,
         if to.lower() != (lead["email"] or "").lower():
             sets.append("email = %s"); params.append(to)
 
-        _record_touch(cursor, lead, "email", "emailed", lead["attempts"] or 0,
-                      lead.get("tz_offset_hours"))
+        _attach_touch(cursor, undo_id, _record_touch(
+            cursor, lead, "email", "emailed", lead["attempts"] or 0,
+            lead.get("tz_offset_hours")))
         # Whatever was queued has now gone, so the badge comes off.
         sets.append("queued_email_at = NULL")
         params.append(lead_id)
         cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s", params)
 
+        # Same rollover as /touch above — and it matters more here, because a
+        # scheduled send fires on its own with nobody watching the screen.
+        _load_counters_locked(cursor)
         cursor.execute("""
             UPDATE crm_counters
                SET daily_emails_remaining = GREATEST(0, daily_emails_remaining - 1),
@@ -2014,11 +2054,19 @@ def undo_touch(undo_id: str, _: bool = Depends(require_crm_key)):
         # unlogged, and both of those happened. Marking it rather than deleting
         # it keeps the connect-rate numbers honest about what was actually
         # dialled — see /dialstats.
-        cursor.execute("""
-            UPDATE crm_touches SET outcome = 'undone', connected = FALSE
-             WHERE id = (SELECT id FROM crm_touches WHERE lead_id = %s
-                          ORDER BY at DESC LIMIT 1)
-        """, (undo["lead_id"],))
+        # The touch this undo was recorded against. Falling back to the newest
+        # one covers undo rows written before touch_id existed; for anything
+        # written since, the pairing is exact.
+        if undo.get("touch_id"):
+            cursor.execute(
+                "UPDATE crm_touches SET outcome = 'undone', connected = FALSE WHERE id = %s",
+                (undo["touch_id"],))
+        else:
+            cursor.execute("""
+                UPDATE crm_touches SET outcome = 'undone', connected = FALSE
+                 WHERE id = (SELECT id FROM crm_touches WHERE lead_id = %s
+                              ORDER BY at DESC LIMIT 1)
+            """, (undo["lead_id"],))
 
         if undo["counters_spent"]:
             kind = (undo["action"] or "").split()[-1]
@@ -2026,6 +2074,10 @@ def undo_touch(undo_id: str, _: bool = Depends(require_crm_key)):
                            "email": "daily_emails_remaining",
                            "fb": "daily_fb_remaining"}.get(kind)
             if counter_col:
+                # And before a refund: crediting yesterday's number back is the
+                # same erasure, and leaves a call that didn't happen in the day's
+                # totals — which is exactly what the undo exists to take out.
+                _load_counters_locked(cursor)
                 cursor.execute(f"""
                     UPDATE crm_counters
                        SET {counter_col} = {counter_col} + %s,
@@ -2784,7 +2836,8 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
         sets.append("notes = COALESCE(notes || E'\\n', '') || %s"); params.append(note)
         applied["note"] = note
 
-        _record_touch(cursor, lead, data.kind, outcome_guess, attempt, lead.get("tz_offset_hours"))
+        _attach_touch(cursor, undo_id, _record_touch(
+            cursor, lead, data.kind, outcome_guess, attempt, lead.get("tz_offset_hours")))
         params.append(lead_id)
         cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
         updated = cursor.fetchone()

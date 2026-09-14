@@ -2754,14 +2754,22 @@ def _leadgen_should_run_now() -> bool:
     local_now = datetime.now(_reset_tz())
     if local_now.hour < LEADGEN_RUN_HOUR:
         return False
-    today = local_now.strftime("%Y-%m-%d")
+
+    # Compared as an instant, not as a date string. started_at is written by
+    # now_iso() in UTC, so slicing its first ten characters gives the UTC date —
+    # and west of UTC the local evening run hour falls on the NEXT UTC date. A
+    # 6pm Pacific run on local day D is stored as D+1, so on day D+1 a date
+    # comparison finds it and suppresses that day's run: the generator would
+    # fire every other day, quietly, and only in the zones this tool is for.
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    since = local_midnight.astimezone(timezone.utc).isoformat()
 
     with _get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT COUNT(*) AS n FROM crm_leadgen_runs "
-            "WHERE ok = TRUE AND SUBSTRING(started_at, 1, 10) >= %s",
-            (today,)
+            "WHERE ok = TRUE AND started_at >= %s",
+            (since,)
         )
         return cursor.fetchone()["n"] == 0
 
