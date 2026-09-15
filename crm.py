@@ -17,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -508,9 +509,16 @@ def _lead_row(row) -> dict:
     if seen:
         try:
             when = datetime.fromisoformat(str(seen).replace("Z", "+00:00"))
+            # A value with no offset parses fine and then explodes on the
+            # subtraction (TypeError, not ValueError). Every row goes through
+            # here on the way to the call list, so one naive timestamp — an
+            # older row, a hand-entered date — used to 500 the whole calling
+            # screen rather than losing one lead's age badge. Read it as UTC.
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
             lead["manager_age_days"] = max(
                 0, (datetime.now(timezone.utc) - when).days)
-        except ValueError:
+        except (ValueError, TypeError):
             pass
     return lead
 
@@ -2260,10 +2268,90 @@ def leadgen_health(_: bool = Depends(require_crm_key)):
 @crm_router.post("/leadgen/run", response_model=dict)
 def leadgen_run(target: Optional[int] = None, max_cities: int = 4,
                 max_enrich: int = 120, _: bool = Depends(require_crm_key)):
-    """Run the pipeline now. Same path the daily scheduler takes."""
+    """Run the pipeline now, and WAIT for it. Same path the daily scheduler takes.
+
+    Minutes, not seconds — it crawls venue sites. For the operator-facing
+    "fill the list, I want to call now" path use /leadgen/fill, which does the
+    same work without holding a request open.
+    """
     from leadgen import run_daily, DAILY_TARGET
     return run_daily(target=target or DAILY_TARGET, max_cities=max_cities,
                      max_enrich=max_enrich)
+
+
+# A run takes minutes (it crawls venue websites), which is far too long to hold
+# an HTTP request open — so the operator-facing fill starts a thread and the
+# page polls. The lock stops a second press, or a second tab, starting a
+# parallel run that would crawl the same candidates twice.
+_fill_lock = threading.Lock()
+_fill_thread: Optional[threading.Thread] = None
+
+
+def _fill_running() -> bool:
+    global _fill_thread
+    return _fill_thread is not None and _fill_thread.is_alive()
+
+
+def _run_fill(target: int, max_cities: int, max_enrich: int) -> None:
+    from leadgen import run_daily
+    try:
+        run_daily(target=target, max_cities=max_cities, max_enrich=max_enrich)
+    except Exception as exc:
+        # run_daily records its own failures; this only catches a crash before
+        # it could. Never let it kill the thread silently.
+        print(f"[crm] fill run crashed: {exc}", flush=True)
+
+
+@crm_router.post("/leadgen/fill", response_model=dict)
+def leadgen_fill(max_cities: int = 2, max_enrich: int = 200,
+                 _: bool = Depends(require_crm_key)):
+    """Start filling the call list now, in the background.
+
+    This exists because the daily schedule is the wrong master for someone who
+    has just sat down with a phone. The list refilling at 6pm is no use at 2pm
+    to an operator who is ready to work: an empty screen at the moment you
+    decide to call is the one state this tool must never be in.
+
+    Returns immediately. Poll GET /leadgen/fill for progress.
+    """
+    from leadgen import DAILY_TARGET
+    global _fill_thread
+    with _fill_lock:
+        if _fill_running():
+            return {"started": False, "running": True,
+                    "note": "A fill is already running — leads appear as they land."}
+        _fill_thread = threading.Thread(
+            target=_run_fill, args=(DAILY_TARGET, max_cities, max_enrich),
+            daemon=True, name="leadgen-fill")
+        _fill_thread.start()
+    return {"started": True, "running": True,
+            "note": "Filling the list. It crawls venue sites, so give it a few minutes."}
+
+
+@crm_router.get("/leadgen/fill", response_model=dict)
+def leadgen_fill_status(_: bool = Depends(require_crm_key)):
+    """Is a fill in flight, and what did the last one do?"""
+    from leadgen import bucket_deficits
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT phase, ok, started_at, finished_at, promoted, enriched,
+                   qualified, errors
+              FROM crm_leadgen_runs
+             ORDER BY started_at DESC LIMIT 1
+        """)
+        last = cursor.fetchone()
+        cursor.execute("""
+            SELECT COUNT(*) AS n FROM crm_leads
+             WHERE status = 'new' AND last_touch_at IS NULL
+        """)
+        waiting = cursor.fetchone()["n"]
+    return {
+        "running": _fill_running(),
+        "waiting_to_be_called": waiting,
+        "room_left": sum(bucket_deficits().values()),
+        "last_run": dict(last) if last else None,
+    }
 
 
 class CityCreate(BaseModel):
@@ -2566,6 +2654,11 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
         """, (_today(),))
         done_today = cursor.fetchone()["n"]
 
+    # Every unworked lead the query returned, before any window or phone
+    # filtering. This is "is there anything on the list at all", which is a
+    # different question from "is anyone reachable this minute".
+    unworked = len(rows)
+
     ready, soon = [], []
     for row in rows:
         lead = _lead_row(row)
@@ -2602,8 +2695,10 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
         pretty = f"{wait // 60}h {wait % 60}m" if wait >= 60 else f"{wait} min"
         headline = (f"Nobody's in a window yet — first one in {pretty}, "
                     f"{soon[0]['call_window'].get('starts_at_yours', '')} your time")
+    elif unworked == 0:
+        headline = "The list is empty — fill it now and start calling."
     else:
-        headline = "Nothing callable today. The list refills at 6pm."
+        headline = "Nothing callable today — every venue left is shut."
 
     return {
         "headline": headline,
@@ -2611,6 +2706,13 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
         "soon": soon[:12],
         "ready_count": len(ready),
         "soon_count": len(soon),
+        # Whether there is ANY unworked lead, reachable this minute or not.
+        # An empty list and a list of venues that are simply shut right now look
+        # identical from ready_count alone, and they need opposite responses:
+        # one is "go and fetch more", the other is "wait, they open at four".
+        # Only the first should start a fill.
+        "unworked_total": unworked,
+        "list_empty": unworked == 0,
         "done_today": done_today,
         "operator": {
             "zone": OPERATOR_TZ,

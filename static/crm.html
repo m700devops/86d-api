@@ -34,6 +34,9 @@
   .focustop h2{flex:0 1 auto}
   .focus .digits{font-size:20px;padding:8px 13px;letter-spacing:1px}
   .askinline{color:var(--go);font-size:13px;font-weight:600;margin-top:8px}
+  .focusacts{margin-top:10px}
+  .card.muted .hint{margin-top:8px}
+  .card.muted button.go{margin-top:4px}
 
   /* What to know before it rings. Facts first, each with where it came from,
      because a brief that asserts something wrong is the moment they decide
@@ -815,6 +818,9 @@ async function loadNow(){
     </div>
     ${next&&next.manager_name?`<div class="askinline">Ask if ${esc(next.manager_name)}
       is still ${esc(next.manager_role||'there')}</div>`:''}
+    ${next?`<div class="focusacts">
+      <button class="go" data-act="logtop" data-id="${esc(next.id)}">Log this call</button>
+    </div>`:''}
     <div id="brief" class="brief"></div>
     <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
       · ${d.soon_count} waiting on their window</div>`;
@@ -823,8 +829,24 @@ async function loadNow(){
   $('svcTabs').innerHTML=''; $('zoneTabs').innerHTML='';
 
   if(!d.ready.length){
-    $('zones').innerHTML='<div class="card muted">Nothing is in a calling window '
-      +'this minute.</div>'+soonStrip(d);
+    // An empty list and a list of venues that simply aren't open yet look the
+    // same from here and need opposite responses: go and fetch more, versus
+    // wait, they open at four. Only the first gets a button.
+    $('zones').innerHTML = d.list_empty
+      ? '<div class="card muted"><p>There is nothing on the list to call.</p>'
+        + '<button class="go" data-act="fill">Fill the list now</button>'
+        + '<p class="hint">Crawls venue sites for contacts — a few minutes. '
+        + 'Leads appear as they land.</p></div>'
+      : '<div class="card muted">Nothing is in a calling window this minute.</div>';
+    // Sitting down to call IS the request for leads. Waiting for 6pm is no
+    // answer to someone holding a phone now, so pressing "Ready to start
+    // calling" onto an empty list starts the fill itself rather than asking
+    // again. Once per session: this also runs on the 60s refresh, and an
+    // unguarded auto-start there would crawl in a loop.
+    if(d.list_empty && !AUTOFILLED && !FILLING){
+      AUTOFILLED=true;
+      startFill($('zones').querySelector('button[data-act="fill"]'));
+    }
     return;
   }
   $('zones').innerHTML=`
@@ -866,6 +888,7 @@ async function loadCalls(){
     return;
   }
   stopNowTimer();
+  AUTOFILLED=false;
   $('startBtn').textContent='Ready to start calling';
   $('startBtn').classList.remove('on');
   $('clock').innerHTML='';
@@ -878,8 +901,12 @@ async function loadCalls(){
 
   if(!d.services.some(sv=>sv.count)){
     $('svcTabs').innerHTML=''; $('zoneTabs').innerHTML='';
-    $('zones').innerHTML='<div class="card muted">Call list is empty. '
-      +'The engine refills it at 6pm, emptiest tab first.</div>';
+    $('zones').innerHTML='<div class="card muted">'
+      + '<p>Call list is empty.</p>'
+      + '<button class="go" data-act="fill">Fill the list now</button>'
+      + '<p class="hint">It refills on its own at 6pm, emptiest tab first — '
+      + 'this does it now instead. It crawls venue sites, so give it a few minutes; '
+      + 'leads appear as they land.</p></div>';
     return;
   }
   if(SVC===null || !d.services.some(sv=>sv.key===SVC)) autoPick(d);
@@ -1043,6 +1070,65 @@ async function copyDigits(el){
   toast('Copied '+num);
 }
 
+// Filling the list on demand. The 6pm schedule is the wrong master for
+// someone who has just sat down with a phone: an empty screen at the moment
+// you decide to start calling is the one state this tool must never be in.
+// The run crawls venue sites, so it happens in the background and the page
+// watches for leads landing rather than holding everything up.
+let FILLING=false, fillTimer=null, AUTOFILLED=false;
+
+async function startFill(btn){
+  if(FILLING) return;
+  FILLING=true;
+  if(btn){ btn.disabled=true; btn.textContent='Filling\u2026'; }
+  try{
+    const r=await api('/leadgen/fill',{method:'POST'});
+    toast(r.note||'Filling the list.');
+  }catch(err){
+    FILLING=false;
+    if(btn){ btn.disabled=false; btn.textContent='Fill the list now'; }
+    return toast('Could not start: '+err.message);
+  }
+  if(fillTimer) clearInterval(fillTimer);
+  fillTimer=setInterval(async()=>{
+    let st;
+    try{ st=await api('/leadgen/fill'); }catch{ return; }
+    // Leads landed — show them without waiting for the whole run to finish.
+    if(st.waiting_to_be_called>0){
+      clearInterval(fillTimer); fillTimer=null; FILLING=false;
+      toast(st.waiting_to_be_called+' ready to call');
+      return loadCalls();
+    }
+    if(!st.running){
+      clearInterval(fillTimer); fillTimer=null; FILLING=false;
+      const last=st.last_run||{};
+      toast(last.ok===false
+        ? 'The run failed \u2014 check the logs.'
+        : 'Nothing could be promoted yet \u2014 no qualified leads in the pool.');
+      return loadCalls();
+    }
+  }, 10000);
+}
+
+// The number you just dialled is in the box at the top; the button to record
+// what happened belongs there too, not found again in the table underneath.
+// It drives the existing row drawer rather than duplicating it, so logging
+// from here goes through exactly the same touch, undo and counter path.
+$('focus').onclick=e=>{
+  const btn=e.target.closest('button[data-act="logtop"]');
+  if(!btn) return;
+  const row=document.querySelector('#zones tr[data-id="'+CSS.escape(btn.dataset.id)+'"]');
+  const log=row&&row.querySelector('button[data-act="log"]');
+  if(!log) return toast('Open the list below to log this one.');
+  log.click();
+  const drawer=row.nextElementSibling;
+  if(drawer&&drawer.classList.contains('drawer')){
+    drawer.scrollIntoView({behavior:'smooth',block:'center'});
+    const ta=drawer.querySelector('textarea');
+    if(ta) setTimeout(()=>ta.focus(),300);
+  }
+};
+
 $('zones').onclick=async e=>{
   const cp=e.target.closest('[data-act="copy"]');
   if(cp) return copyDigits(cp);
@@ -1054,6 +1140,7 @@ $('zones').onclick=async e=>{
   if(dr) return drawerAction(dr,e);
 
   const btn=e.target.closest('button[data-act]'); if(!btn) return;
+  if(btn.dataset.act==='fill') return startFill(btn);
   const tr=btn.closest('tr'); const id=tr.dataset.id;
 
   if(btn.dataset.act==='del'){
