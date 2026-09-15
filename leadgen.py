@@ -1698,7 +1698,21 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
         #    Pacific candidates is a deep bank and an empty Eastern tab.
         depth = pool_depth()
         remaining_deficit = sum(bucket_deficits().values())
-        if depth["qualified"] < POOL_FLOOR or remaining_deficit > depth["qualified"]:
+        # Candidates that have been harvested but never crawled. These are the
+        # stock that matters here: turning one into a callable lead needs a
+        # crawl, not another trip to Overpass.
+        unenriched = depth["by_status"].get("new", 0)
+        # Only harvest when that stock is actually thin. Keyed on `qualified`
+        # alone this fired with thousands of uncrawled candidates already
+        # banked — a cold start has 0 qualified by definition, so every run
+        # opened with a dozen Overpass sweeps before crawling a single site.
+        # That is minutes of network in front of the one stage that produces
+        # leads, and on a small instance it is where the run gets killed: the
+        # observed result was a candidate pile that kept growing, enriched
+        # stuck at 0, and runs that never reached their own final write.
+        stock_thin = unenriched < max(max_enrich, POOL_FLOOR)
+        if stock_thin and (depth["qualified"] < POOL_FLOOR
+                           or remaining_deficit > depth["qualified"]):
             # A metro yields roughly 15-20 qualified leads. Filling eight
             # empty cells needs several of them, so a cold start harvests wide
             # and a topped-up list harvests one or two. Capped so a single run
