@@ -201,8 +201,11 @@ capture. Don't reintroduce them or describe them as current.)
   zero-element response as a miss and tries the next mirror
 - A total harvest failure RAISES rather than returning (0, 0) — a silent zero would mark the
   city harvested and look identical to a city with no bars
-- Runs interrupted mid-flight (Render free tier spins down constantly) are reconciled to
-  `phase='abandoned'` on the next run; the health endpoint warns when several are stuck
+- Runs interrupted mid-flight are reconciled to `phase='abandoned'` on the next run; the
+  health endpoint warns when several are stuck. Deploys and restarts are the cause, NOT a
+  sleeping instance — the web service is on Render's **Starter** plan, which does not spin
+  down. (Three runs did sit at `phase='running'` forever, but that was the harvest gate
+  opening every run with a dozen Overpass sweeps, not the host. See the harvest note above.)
 - Enrichment runs in a thread pool (`LEADGEN_ENRICH_WORKERS`, default 8) and gives up on a
   site the moment its homepage doesn't load — a dead domain used to cost one request per
   guessed path. It prefers links the homepage actually points at over guessed URLs
@@ -428,11 +431,13 @@ capture. Don't reintroduce them or describe them as current.)
 - **Queueing does NOT stamp the lead.** The touch happens when the mail actually goes, so the
   bar stays on the call list and stays callable — scheduling a note for Tuesday is no reason
   to stop ringing them today. Only `queued_email_at` is set, for the badge
-- **An email that comes due more than `CRM_EMAIL_STALE_MINUTES` (90) late is NOT sent.** On
-  Render's free tier the process sleeps after ~15 minutes idle and only wakes on a request,
-  so a 2pm send can surface at 6pm — landing "I know you're quiet right now" mail in the
-  middle of service, which is the exact harm scheduling exists to prevent. It's marked failed
-  with an explanation and shown to the operator to reschedule
+- **An email that comes due more than `CRM_EMAIL_STALE_MINUTES` (90) late is NOT sent.** A
+  2pm send surfacing at 6pm lands "I know you're quiet right now" mail in the middle of
+  service, which is the exact harm scheduling exists to prevent. It's marked failed with an
+  explanation and shown to the operator to reschedule. The guard was originally written for
+  a sleeping free-tier instance; the service is on **Starter** and does not sleep, so the
+  remaining causes are deploys, restarts and a loop that fell behind — rarer, but the harm
+  is identical and the guard still earns its place
 - Each due row is claimed with a conditional `UPDATE ... FOR UPDATE SKIP LOCKED` before the
   send, so two workers, or one worker and a Render restart mid-flight, cannot send the same
   email twice. Sending twice is the failure that matters: the recipient sees it, and nothing
@@ -537,6 +542,10 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 
 ## Deploy Rules
 - Deployed via Render (see Procfile) — do NOT change without approval
+- **The web service is on the Starter plan ($7/mo, 0.5 CPU, 512MB), not Free.** It does not
+  spin down, so there is no cold start to design around. Confirmed from the Render dashboard
+  on 2026-09-15; earlier notes in both repos assumed Free and were wrong. Postgres is on a
+  paid tier separately. 512MB has been enough to crawl 200 venue sites in one run
 - Requirements are pinned — check compatibility before upgrading
 - Cannot push directly to main — always work on a feature branch and open a PR (branch name is assigned
   per session, not fixed — the old hardcoded `claude/build-ios-preview-ASNee` reference here no longer exists)
