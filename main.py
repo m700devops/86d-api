@@ -3407,8 +3407,14 @@ Rules:
 
 # ─── AI provider helpers ───────────────────────────────────────────────────
 
-OPENAI_MODEL = "gpt-4o"
-GEMINI_MODEL = "gemini-2.0-flash"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+# Both are env-overridable because a provider can retire a model out from under
+# us, and it fails QUIETLY: the scan path just stops having a fallback and
+# nothing says so except a line in the boot log. gemini-2.0-flash was retired
+# this way — every scan had been running with no fallback since, and the only
+# evidence was `[warm] Gemini warm-up failed ... no longer available`. An env
+# var means the next retirement is a dashboard edit, not a deploy.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # Scan accuracy config — override via environment variables if needed.
 # CONFIDENCE_THRESHOLD:     AI confidence below this triggers needs_rescan=True.
@@ -3568,6 +3574,16 @@ async def _warm_providers() -> dict:
         except Exception as e:
             print(f"[warm] Gemini warm-up failed (non-fatal): {e}", flush=True)
 
+    # Say it loudly when a configured provider didn't come up. A warm-up failure
+    # is not cosmetic: it usually means that provider can't serve a scan either,
+    # and with one of the two down the scan path has no fallback left. That state
+    # is invisible from the app — scans keep working until the survivor has a bad
+    # minute — so the boot log is the only place it can be caught.
+    down = [name for name, key in (("openai", openai_key), ("gemini", gemini_key))
+            if key and not warmed.get(name)]
+    if down:
+        print(f"[warm] WARNING: configured provider(s) NOT available: {', '.join(down)} "
+              f"— the scan path is running without a fallback", flush=True)
     print(f"[warm] providers warmed: {warmed}", flush=True)
     return warmed
 

@@ -84,7 +84,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 ## AI Vision Rules
 - `POST /v1/scans/analyze` (main.py:3590) tries OpenAI first, falls through to Gemini on timeout/error —
   see `_run_providers()` at main.py:3528
-- Model constants (main.py:3206-3207): `OPENAI_MODEL = "gpt-4o"`, `GEMINI_MODEL = "gemini-2.0-flash"`
+- Model constants are ENV-OVERRIDABLE: `OPENAI_MODEL` (default `gpt-4o`), `GEMINI_MODEL`
+  (default `gemini-3.6-flash`). They are env vars because a provider can retire a model out from
+  under the app and it fails SILENTLY — `gemini-2.0-flash` was retired and every scan ran with no
+  fallback until a boot log was read. `_warm_providers()` now prints a loud
+  `[warm] WARNING: configured provider(s) NOT available` line for exactly this case; grep the
+  Render boot log for `[warm]` after any deploy. Swapping a retired model is a dashboard edit,
+  not a deploy
 - Env vars: `OPENAI_API_KEY` (primary), `GEMINI_API_KEY` or `GOOGLE_API_KEY` (fallback — also works alone
   if OPENAI_API_KEY is unset)
 - No Anthropic/Claude SDK anywhere in this file — if you're adding a third vision provider, don't assume
@@ -499,6 +505,7 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - SECRET_KEY — JWT signing key (CRITICAL if left at the default — anyone can forge login tokens)
 - OPENAI_API_KEY — primary bottle-scan provider; without it, scanning falls straight to Gemini
 - GEMINI_API_KEY or GOOGLE_API_KEY — fallback bottle-scan provider; without it, no fallback if OpenAI fails
+- OPENAI_MODEL / GEMINI_MODEL — optional, override the scan models when a provider retires one
 - RESEND_API_KEY — order emails and password resets cannot send without it
 - STRIPE_SECRET_KEY — checkout/billing endpoints 503 without it
 - STRIPE_PRICE_ID — checkout endpoint 503s without it, nobody can subscribe
