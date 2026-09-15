@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Header, Request, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 import asyncio
@@ -23,6 +23,8 @@ from helpers import (
 )
 from models import *
 from seed_data import SEED_PRODUCTS
+from crm import crm_router, init_crm_tables
+from leadgen import init_leadgen_tables
 import google.generativeai as genai
 import openai
 import os
@@ -57,6 +59,8 @@ async def lifespan(app: FastAPI):
         ("STRIPE_SECRET_KEY", bool(os.getenv("STRIPE_SECRET_KEY")), "checkout/billing endpoints will 503"),
         ("STRIPE_PRICE_ID", bool(os.getenv("STRIPE_PRICE_ID")), "checkout endpoint will 503 — nobody can subscribe"),
         ("STRIPE_WEBHOOK_SECRET", bool(os.getenv("STRIPE_WEBHOOK_SECRET")), "payments won't activate subscriptions — customers pay and stay locked out"),
+        ("ANTHROPIC_API_KEY", bool(os.getenv("ANTHROPIC_API_KEY")), "the CRM can't read call notes into fields — they get typed by hand (sales tool only, no effect on the app)"),
+        ("SPACEMAIL_USER / SPACEMAIL_PASSWORD", bool(os.getenv("SPACEMAIL_USER") and os.getenv("SPACEMAIL_PASSWORD")), "the CRM's Email button falls back to a mailto: link and sends nothing itself (sales tool only)"),
         ("SENTRY_DSN", bool(_sentry_dsn), "no error visibility (optional but recommended)"),
     ]
     missing = [(name, note) for name, ok, note in _config_checks if not ok]
@@ -71,10 +75,24 @@ async def lifespan(app: FastAPI):
         print("[lifespan] Database initialized successfully", flush=True)
     except Exception as e:
         print(f"[lifespan] Database init warning (may already exist): {e}", flush=True)
+    # CRM schema, in its own try so a failure here can never stop the product
+    # API from booting — the CRM is an internal sales tool sharing the process.
+    try:
+        await asyncio.to_thread(init_crm_tables)
+    except Exception as e:
+        print(f"[crm] CRM_TABLES_FAILED {e}", flush=True)
+    try:
+        await asyncio.to_thread(init_leadgen_tables)
+    except Exception as e:
+        print(f"[leadgen] LEADGEN_TABLES_FAILED {e}", flush=True)
     # Pre-warm AI provider connections so the first scan is fast (best-effort)
     asyncio.create_task(_warm_providers())
     # Periodic trial-ending reminder emails (best-effort, runs for the life of the process)
     asyncio.create_task(_trial_reminder_loop())
+    # Daily lead sourcing. Best-effort like the reminder loop — a failure here
+    # must never touch the product API.
+    asyncio.create_task(_leadgen_daily_loop())
+    asyncio.create_task(_scheduled_email_loop())
     yield
 
 app = FastAPI(
@@ -1089,40 +1107,39 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         now = now_iso()
         # Fetch existing row so we can preserve unchanged fields
         cursor.execute(
-            "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels WHERE location_id = %s AND product_id = %s",
+            "SELECT par_quantity, full_quantity, current_stock, price, par_set_at FROM par_levels WHERE location_id = %s AND product_id = %s",
             (location_id, product_id)
         )
         existing = cursor.fetchone()
 
-        # A price-only PATCH against a product this location has never counted is
-        # the Pricing screen filling in the price book, not somebody setting a par.
-        # generate_order_items iterates par_levels rather than scans, so defaulting
-        # that fresh row's par to 1 would emit a phantom "critical" order line for a
-        # bottle nobody ever scanned. Start it at 0 instead; a real count sets it later.
-        pricing_only_new_row = (
-            existing is None
-            and data.price is not None
-            and data.par is None
-            and data.full is None
-            and data.current_stock is None
-        )
-        default_par = 0.0 if pricing_only_new_row else 1.0
-        new_par = data.par if data.par is not None else (float(existing["par_quantity"]) if existing else default_par)
+        # par_quantity 0 means "nobody has set a par for this bottle yet" — the same
+        # convention price already uses, and the client relies on it to tell a real
+        # par from a placeholder when it pre-fills a new scan from the saved book.
+        # So a PATCH that doesn't carry `par` never invents one: a row created by a
+        # price write (Pricing screen) or a stock write (counting) starts at 0 and
+        # stays there until someone actually sets a par. That also keeps
+        # generate_order_items — which iterates par_levels, not scans — from emitting
+        # a phantom "critical" order line for a bottle nobody has parred.
+        new_par = data.par if data.par is not None else (float(existing["par_quantity"]) if existing else 0.0)
         new_full = data.full if data.full is not None else (float(existing["full_quantity"] or 0) if existing else 0.0)
         new_stock = data.current_stock if data.current_stock is not None else (float(existing["current_stock"] or 0) if existing else 0.0)
         new_price = data.price if data.price is not None else (float(existing["price"] or 0) if existing else 0.0)
+        # Stamped only when this request actually carried a par, so the column
+        # stays a record of deliberate choices rather than of row activity.
+        new_par_set_at = now if data.par is not None else (existing["par_set_at"] if existing else None)
 
         par_id = generate_id()
         cursor.execute("""
-            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, price, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, price, par_set_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(location_id, product_id) DO UPDATE SET
                 par_quantity = excluded.par_quantity,
                 full_quantity = excluded.full_quantity,
                 current_stock = excluded.current_stock,
                 price = excluded.price,
+                par_set_at = excluded.par_set_at,
                 updated_at = excluded.updated_at
-        """, (par_id, location_id, product_id, new_par, new_full, new_stock, new_price, now))
+        """, (par_id, location_id, product_id, new_par, new_full, new_stock, new_price, new_par_set_at, now))
         conn.commit()
 
         return {
@@ -2251,6 +2268,29 @@ def assign_product_distributor(location_id: str, assignment: LocationProductDist
         conn.commit()
         return {"success": True, "assignment_id": assignment_id}
 
+@v1_router.delete("/locations/{location_id}/product-distributors/{product_id}", response_model=dict)
+def unassign_product_distributor(location_id: str, product_id: str,
+                                 user_id: str = Depends(get_current_user)):
+    """Clear which distributor a product is ordered from at this location.
+
+    A hard delete, not a soft one: the row *is* the assignment, and the absence
+    of a row is exactly how the rest of the API reads "not assigned". Idempotent
+    — clearing an assignment that isn't there is a success, so a retry after a
+    dropped response doesn't 404.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+                       (location_id, user_id))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied"})
+        cursor.execute(
+            "DELETE FROM location_product_distributors WHERE location_id = %s AND product_id = %s",
+            (location_id, product_id)
+        )
+        conn.commit()
+        return {"success": True, "cleared": cursor.rowcount > 0}
+
 @v1_router.get("/locations/{location_id}/product-distributors", response_model=LocationProductDistributorListResponse)
 def list_product_distributors(location_id: str, user_id: str = Depends(get_current_user)):
     """List product-distributor assignments for a location"""
@@ -2693,6 +2733,94 @@ async def _trial_reminder_loop():
         except Exception as e:
             print(f"[trial_reminder] loop error: {e}", flush=True)
         await asyncio.sleep(TRIAL_REMINDER_CHECK_INTERVAL_SECONDS)
+
+
+# ============== LEAD GENERATOR SCHEDULER ==============
+
+LEADGEN_RUN_HOUR = int(os.getenv("LEADGEN_RUN_HOUR", "18"))  # 6pm local, CRM_TIMEZONE
+LEADGEN_CHECK_INTERVAL_SECONDS = 900                          # 15 min
+
+
+def _leadgen_should_run_now() -> bool:
+    """True once per day, at or after the configured local hour.
+
+    Checks the run log rather than keeping state in memory, so a restart — which
+    on Render's free tier happens whenever the service spins down — can't cause
+    a second run or skip the day entirely.
+    """
+    from crm import _reset_tz
+    from database import get_db as _get_db
+
+    local_now = datetime.now(_reset_tz())
+    if local_now.hour < LEADGEN_RUN_HOUR:
+        return False
+
+    # Compared as an instant, not as a date string. started_at is written by
+    # now_iso() in UTC, so slicing its first ten characters gives the UTC date —
+    # and west of UTC the local evening run hour falls on the NEXT UTC date. A
+    # 6pm Pacific run on local day D is stored as D+1, so on day D+1 a date
+    # comparison finds it and suppresses that day's run: the generator would
+    # fire every other day, quietly, and only in the zones this tool is for.
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    since = local_midnight.astimezone(timezone.utc).isoformat()
+
+    with _get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM crm_leadgen_runs "
+            "WHERE ok = TRUE AND started_at >= %s",
+            (since,)
+        )
+        return cursor.fetchone()["n"] == 0
+
+
+def _leadgen_tick():
+    from leadgen import run_daily
+    if not _leadgen_should_run_now():
+        return
+    run_daily()
+    # Attribution is cheap and wants to be fresh for the morning numbers.
+    try:
+        from crm import rematch_attribution
+        rematch_attribution()
+    except Exception as exc:
+        print(f"[leadgen] attribution rematch failed: {exc}", flush=True)
+
+
+async def _scheduled_email_loop():
+    """Send queued emails when their hour comes round.
+
+    A minute's resolution, which is far finer than the thing it's timing: the
+    whole point is to land inside a quiet half-hour at a bar, not to hit a
+    particular second. Each pass claims its rows conditionally, so a Render
+    restart mid-send can at worst leave one row marked 'sending' rather than
+    mail anybody twice.
+    """
+    await asyncio.sleep(30)
+    while True:
+        try:
+            from crm import run_due_emails
+            await asyncio.to_thread(run_due_emails)
+        except Exception as e:
+            print(f"[crm] scheduled email loop error: {e}", flush=True)
+        await asyncio.sleep(60)
+
+
+async def _leadgen_daily_loop():
+    """Wakes every 15 minutes and runs the pipeline once a day.
+
+    A polling loop rather than a cron: this process has no scheduler, and
+    Render restarts it freely. Whether today's run already happened is a
+    database question, so a restart at any hour resolves correctly.
+    """
+    # Let the app finish booting before the first check.
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await asyncio.to_thread(_leadgen_tick)
+        except Exception as e:
+            print(f"[leadgen] loop error: {e}", flush=True)
+        await asyncio.sleep(LEADGEN_CHECK_INTERVAL_SECONDS)
 
 
 @v1_router.post("/billing/create-checkout-session")
@@ -3736,6 +3864,53 @@ def market_pulse():
 # ============== INCLUDE V1 ROUTER ==============
 
 app.include_router(v1_router)
+
+# ============== CRM (internal sales tool) ==============
+# Separate router with its own /v1/crm prefix and its own shared-key auth —
+# none of the JWT-authenticated product routes above apply to it.
+app.include_router(crm_router)
+
+CRM_PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "crm.html")
+
+
+@app.get("/crm", include_in_schema=False)
+async def crm_page():
+    """The CRM UI itself.
+
+    Unauthenticated on purpose: it's the surface where the operator enters the
+    key, so gating it on the key would be a chicken-and-egg. The page ships no
+    credentials — every /v1/crm/* call it makes carries a key the operator
+    typed, held in their browser's localStorage. noindex because a public URL
+    that lists prospects has no business in a search index.
+    """
+    if not os.path.exists(CRM_PAGE):
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "CRM page is not installed on this server",
+        })
+    return FileResponse(CRM_PAGE, media_type="text/html", headers={
+        "X-Robots-Tag": "noindex, nofollow",
+        "Cache-Control": "no-store",
+    })
+
+
+@app.get("/crm/{asset:path}", include_in_schema=False)
+async def crm_asset(asset: str):
+    """The CRM page's own images — the app icon and favicon.
+
+    Restricted to an explicit allowlist rather than serving the directory: this
+    path sits next to the page, and a directory mount here would be one path
+    traversal away from handing out anything in the repo.
+    """
+    allowed = {"icon.png": "image/png", "favicon.png": "image/png"}
+    if asset not in allowed:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "No such asset"})
+    path = os.path.join(os.path.dirname(CRM_PAGE), asset)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "Asset missing on this server"})
+    return FileResponse(path, media_type=allowed[asset],
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 # ============== ERROR HANDLERS ==============
 

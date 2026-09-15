@@ -494,6 +494,59 @@ def init_db():
                 print(f"[db] migrated par_levels: added {col} {col_type}", flush=True)
         conn.commit()
 
+        # Migrate par_levels: par_set_at records when a human actually set a par, as
+        # opposed to a row that exists only because something else was written to it.
+        # Adding the column is also the one-shot gate for the backfill below, which
+        # has to run exactly once.
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'par_levels' AND column_name = 'par_set_at'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE par_levels ADD COLUMN par_set_at TEXT")
+            print("[db] migrated par_levels: added par_set_at TEXT", flush=True)
+
+            # Every par_quantity of 1 in this table was almost certainly invented
+            # by the API rather than chosen by anyone: the mobile app — the only
+            # client — has never sent a par at all (it PATCHes current_stock and
+            # price and GETs par levels, nothing more), and a row created by
+            # either of those writes defaulted to a par of 1. The client now
+            # reads par_quantity > 0 as "this bar set a par", so leaving those 1s
+            # in place presents a par nobody picked as deliberate: it drops the
+            # "Not set" warning and orders the bottle back up to 1.
+            #
+            # "Almost certainly" is the whole problem. POST /par-levels, its bulk
+            # variant and the sync route all accept any positive par and none of
+            # them stamp par_set_at, so a genuine par of 1 set through one of
+            # them is indistinguishable from the placeholder — and clearing it
+            # would silently drop that bottle out of every future order until
+            # someone noticed by hand. So the old values are copied out first.
+            # Nothing here reads this table; it exists so a wrongly-cleared par
+            # can be put back with a single UPDATE ... FROM rather than being
+            # gone for good.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS par_levels_backfill_log (
+                    location_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    old_par INTEGER NOT NULL,
+                    cleared_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                INSERT INTO par_levels_backfill_log (location_id, product_id, old_par, cleared_at)
+                SELECT location_id, product_id, par_quantity, %s
+                  FROM par_levels WHERE par_quantity = 1
+            """, (now_iso(),))
+            saved = cursor.rowcount
+
+            cursor.execute("UPDATE par_levels SET par_quantity = 0 WHERE par_quantity = 1")
+            print(
+                f"[db] migrated par_levels: cleared {cursor.rowcount} placeholder par(s) of 1 "
+                f"({saved} saved to par_levels_backfill_log)",
+                flush=True,
+            )
+        conn.commit()
+
         # Migrate products: add source, created_by_user_id, deleted_at if absent
         products_migrations = [
             ("source", "TEXT DEFAULT 'manual'"),
