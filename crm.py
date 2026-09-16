@@ -1161,6 +1161,16 @@ def _call_window(tz_offset: Optional[int], hours: Optional[str] = None,
     return out
 
 
+# How ringable each window state is, worst-to-best, in one place. The call
+# list, calling mode and anything added later have to agree: a venue sorted
+# second in one view and hidden in another is the same venue, and the operator
+# has no way to tell which screen is lying. `unknown` (no timezone on the row
+# at all) ranks with `good` because _call_window hands it good_now=True — it
+# gets the generic afternoon window rather than no window.
+WINDOW_RANK = {"good": 0, "unknown": 0, "early": 1, "generic": 1, "late": 2,
+               "shut_today": 3, "permanently_closed": 4}
+
+
 @crm_router.get("/queue", response_model=dict)
 def call_queue(limit: int = 50, _: bool = Depends(require_crm_key)):
     """The work for today, in the order it should be worked.
@@ -2514,8 +2524,6 @@ def call_list(_: bool = Depends(require_crm_key)):
         buckets[service].setdefault(offset if offset in ZONE_OFFSETS else None,
                                     []).append(lead)
 
-    rank = {"good": 0, "early": 1, "generic": 1, "late": 2,
-            "shut_today": 3, "permanently_closed": 4}
 
     def _call_order(lead: dict):
         """Which of two leads to ring first.
@@ -2533,7 +2541,7 @@ def call_list(_: bool = Depends(require_crm_key)):
         # reads.
         kind_rank = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
         return (
-            rank.get(lead["call_window"].get("state"), 2),
+            WINDOW_RANK.get(lead["call_window"].get("state"), 2),
             0 if lead.get("manager_name") else 1,
             kind_rank.get(lead.get("email_kind"), 2),
             lead.get("attempts") or 0,
@@ -2659,7 +2667,16 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
     # different question from "is anyone reachable this minute".
     unworked = len(rows)
 
-    ready, soon = [], []
+    # Three buckets, and NOTHING is discarded. The window decides the order and
+    # the label on a lead; it must never decide whether the lead is on screen at
+    # all. This used to be an if/elif with no else, so every venue that was past
+    # its window or shut today fell off the end of the loop — and outside US
+    # afternoons that is most of the list, which is how pressing "Ready to start
+    # calling" emptied a screen with four hundred leads banked behind it. The
+    # tab view never did this: it ranked these same rows and showed them. Two
+    # screens disagreeing about whether a lead exists is worse than either
+    # answer on its own.
+    ready, soon, rest = [], [], []
     for row in rows:
         lead = _lead_row(row)
         if not lead["phone_ok"]:
@@ -2672,6 +2689,12 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
             ready.append(lead)
         elif window.get("state") == "early":
             soon.append(lead)
+        else:
+            # late, shut_today, permanently_closed. `late` is the big one and it
+            # is NOT a closed venue: it means the quiet half hour has passed,
+            # not that the doors have. Those calls are still answerable, just
+            # noisier, and at 3am in Iloilo a noisier call beats no call.
+            rest.append(lead)
 
     def reach(lead):
         kind_rank = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
@@ -2685,27 +2708,70 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
     # The nearly-ready ones are ordered by the clock instead: the point of
     # showing them is "this is what you're waiting for and how long".
     soon.sort(key=lambda l: (l["call_window"].get("starts_in") or 9999, *reach(l)))
+    # Still-open-but-past-the-lull first, then shut today, then permanently
+    # closed, and within each the same reach order as the ready pile. Ringable
+    # ones rise to the top of the section on their own; nothing needs hiding to
+    # keep them there.
+    rest.sort(key=lambda l: (WINDOW_RANK.get(l["call_window"].get("state"), 2),
+                             *reach(l)))
+
+    # Whoever the operator should dial first, whatever bucket they landed in.
+    # There is always one while a dialable lead exists, so the focus card can
+    # always put a number under the headline — outside US afternoons `ready` is
+    # empty and that card used to go blank, which reads as "no work" to someone
+    # who deliberately stayed up for this.
+    queue = ready + soon + rest
+    dialable = len(queue)
+    next_best = queue[0] if queue else None
 
     op_now = datetime.now(_operator_tz())
     if ready:
-        head = ready[0]
-        headline = f"Call {head['name']} — {len(ready)} ready now"
+        headline = f"Call {ready[0]['name']} — {len(ready)} ready now"
     elif soon:
         wait = soon[0]["call_window"].get("starts_in") or 0
         pretty = f"{wait // 60}h {wait % 60}m" if wait >= 60 else f"{wait} min"
-        headline = (f"Nobody's in a window yet — first one in {pretty}, "
-                    f"{soon[0]['call_window'].get('starts_at_yours', '')} your time")
+        headline = (f"No perfect window for {pretty} — "
+                    f"{soon[0]['call_window'].get('starts_at_yours', '')} your time. "
+                    f"{dialable} still on the list below.")
+    elif rest:
+        # Don't say "every venue left is shut" over a pile of venues that are
+        # open. `late` means the quiet half hour has gone, and saying otherwise
+        # sent the operator to bed with callable leads on the screen.
+        open_now = sum(1 for l in rest if l["call_window"].get("state") == "late")
+        if open_now:
+            headline = (f"Past everyone's quiet hour — {open_now} still open, "
+                        f"{rest[0]['name']} first")
+        else:
+            headline = f"Every venue is shut right now — {len(rest)} waiting for tomorrow"
+    elif unworked and not dialable:
+        # Leads exist but not one carries a number phones.py will pass. That is
+        # a generator problem, not a clock problem, and telling the operator to
+        # wait for a window would be a lie.
+        headline = f"{unworked} leads on the list, none with a dialable number"
     elif unworked == 0:
         headline = "The list is empty — fill it now and start calling."
     else:
-        headline = "Nothing callable today — every venue left is shut."
+        headline = "Nothing to call right now."
 
     return {
         "headline": headline,
         "ready": ready[:limit],
         "soon": soon[:12],
+        # Everything the window says isn't ideal this minute, still ordered and
+        # still dialable. Capped at `limit` like `ready` — but `rest_count` is
+        # the real total, so the page can say how many it isn't showing instead
+        # of implying the list ends here.
+        "rest": rest[:limit],
         "ready_count": len(ready),
         "soon_count": len(soon),
+        "rest_count": len(rest),
+        # The single best lead across all three buckets, for the focus card.
+        "next": next_best,
+        # Unworked leads that phones.py will actually let us dial. Distinct from
+        # unworked_total: a list of 400 rows with no valid numbers is empty for
+        # calling purposes but must not trigger a fill, because filling won't
+        # fix it.
+        "dialable_total": dialable,
         # Whether there is ANY unworked lead, reachable this minute or not.
         # An empty list and a list of venues that are simply shut right now look
         # identical from ready_count alone, and they need opposite responses:
