@@ -802,7 +802,12 @@ async function loadNow(){
     <span class="zone">${esc(d.operator.date)} · ${esc(d.operator.zone.replace('_',' '))}</span>`;
 
   const go=d.ready_count>0;
-  const next=d.ready[0];
+  // The best lead across all three buckets, not just the ready pile. Outside
+  // US afternoons `ready` is empty, and keying the focus card off it left the
+  // headline with no number under it — which reads as "no work tonight" to
+  // somebody who deliberately stayed up. `d.ready[0]` is the fallback for an
+  // older API that doesn't send `next` yet.
+  const next=d.next||d.ready[0];
   $('focus').className='focus '+(go?'go':'wait');
   // The number you are about to dial belongs next to the name of the place you
   // are about to dial, not eight rows down in a table you have to find it in.
@@ -823,38 +828,52 @@ async function loadNow(){
     </div>`:''}
     <div id="brief" class="brief"></div>
     <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
-      · ${d.soon_count} waiting on their window</div>`;
+      · ${d.soon_count} waiting on their window${d.rest_count
+        ? ` · ${d.rest_count} outside a window`:''}</div>`;
   if(next) loadBrief(next.id);
 
   $('svcTabs').innerHTML=''; $('zoneTabs').innerHTML='';
 
-  if(!d.ready.length){
-    // An empty list and a list of venues that simply aren't open yet look the
-    // same from here and need opposite responses: go and fetch more, versus
-    // wait, they open at four. Only the first gets a button.
+  // Only a genuinely empty screen gets the empty screen. "Nothing is in a
+  // calling window this minute" used to be shown INSTEAD of the list, with a
+  // `return` before the table — so outside US afternoons, when most venues are
+  // past their window, the operator pressed "Ready to start calling" and
+  // watched hundreds of banked leads vanish. Being outside a window is a fact
+  // about the ordering, not a reason to hide the work.
+  const nothing = !d.ready.length && !d.soon.length && !d.rest.length;
+  if(nothing){
     $('zones').innerHTML = d.list_empty
       ? '<div class="card muted"><p>There is nothing on the list to call.</p>'
         + '<button class="go" data-act="fill">Fill the list now</button>'
         + '<p class="hint">Crawls venue sites for contacts — a few minutes. '
         + 'Leads appear as they land.</p></div>'
-      : '<div class="card muted">Nothing is in a calling window this minute.</div>';
+      : '<div class="card muted"><p>' + esc(d.headline) + '</p>'
+        + '<button class="go" data-act="fill">Fill the list now</button>'
+        + '<p class="hint">Every lead on the list failed phone validation, so '
+        + 'none can be dialled. Fetching more is the only fix.</p></div>';
     // Sitting down to call IS the request for leads. Waiting for 6pm is no
     // answer to someone holding a phone now, so pressing "Ready to start
     // calling" onto an empty list starts the fill itself rather than asking
     // again. Once per session: this also runs on the 60s refresh, and an
-    // unguarded auto-start there would crawl in a loop.
+    // unguarded auto-start there would crawl in a loop. Only a truly empty
+    // list auto-starts — a list of unusable numbers needs a human to look.
     if(d.list_empty && !AUTOFILLED && !FILLING){
       AUTOFILLED=true;
       startFill($('zones').querySelector('button[data-act="fill"]'));
     }
     return;
   }
-  $('zones').innerHTML=`
+
+  // One table per bucket, in dial order, and the bucket a lead is in is the
+  // only thing that changes about it. Each section says plainly why it's where
+  // it is, so a row below the fold is an informed choice rather than a
+  // mystery.
+  const sheet=(dot,name,when,leads,offset)=>`
     <div class="zbar">
-      <span class="dot d-good"></span>
-      <span class="name">CALL NOW</span>
-      <span class="when">${d.ready_count} in their window · best first</span>
-      <span class="tag go">${esc(d.operator.local_time)} your time</span>
+      <span class="dot ${dot}"></span>
+      <span class="name">${name}</span>
+      <span class="when">${when}</span>
+      ${offset?'':`<span class="tag go">${esc(d.operator.local_time)} your time</span>`}
     </div>
     <div class="zone"><div class="sheetwrap">
       <table class="sheet">
@@ -862,9 +881,37 @@ async function loadNow(){
           <th></th><th>BAR</th><th>PHONE</th><th>WHY NOW</th><th>TRY</th>
           <th>EMAIL</th><th>WHERE</th><th>ACTIONS</th>
         </tr></thead>
-        <tbody>${d.ready.map((l,i)=>row(l,i+1,true)).join('')}</tbody>
+        <tbody>${leads.map((l,i)=>row(l,offset+i+1,true)).join('')}</tbody>
       </table>
-    </div></div>` + soonStrip(d);
+    </div></div>`;
+
+  let html='', n=0;
+  if(d.ready.length){
+    html += sheet('d-good','CALL NOW',
+                  `${d.ready_count} in their window · best first`, d.ready, n);
+    n += d.ready.length;
+  }
+  // When something is ready, the soon leads stay a thin strip — they're a
+  // countdown, not work. When nothing is ready they ARE the work, and the ones
+  // opening soonest are the best calls on the screen, so they get a table.
+  if(!d.ready.length && d.soon.length){
+    html += sheet('d-opening','OPENING SOON',
+                  `${d.soon_count} about to hit their window · soonest first`,
+                  d.soon, n);
+    n += d.soon.length;
+  }
+  if(d.rest.length){
+    const openNow=d.rest.filter(l=>(l.call_window||{}).state==='late').length;
+    const shown=d.rest.length<d.rest_count?` · showing ${d.rest.length} of ${d.rest_count}`:'';
+    // Amber, not red: these are dialable, just not the pick of the list. Red is
+    // the page's "don't" colour and this section is work.
+    html += sheet(openNow?'d-opening':'d-closed',
+                  n?'ALSO ON THE LIST':'THE WHOLE LIST',
+                  (openNow?`${openNow} still open, past their quiet hour`
+                         :'all shut right now — labelled with the next day they open')
+                  + shown, d.rest, n);
+  }
+  $('zones').innerHTML = html + (d.ready.length?soonStrip(d):'');
 }
 
 function soonStrip(d){
@@ -1024,7 +1071,8 @@ function row(l,n,calling){
       <button class="copybtn" data-act="copy" data-copy="${esc(l.phone_digits)}">COPY</button>
     </div></td>
     <td title="${esc(w.hint||'')}">${calling
-      ? `<span class="win-good">${esc((w.hint||'').replace('CALL NOW — ',''))}</span>`
+      ? `<span class="${w.good_now?'win-good':shut?'win-shut':'win-bad'}">${
+           esc((w.hint||'').replace('CALL NOW — ',''))}</span>`
         + `<div class="opener" style="color:var(--text3)">${esc(w.local_time||'')} there</div>`
       : when}</td>
     <td>${tries?`<span class="tries">${tries}</span>`:'<span class="muted">—</span>'}</td>

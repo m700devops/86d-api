@@ -79,7 +79,12 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
-  test_callwindow.py test_timezones.py test_contacts.py test_venue.py -q` (215 tests)
+  test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py -q`
+  (223 tests)
+- test_callnow.py — calling mode's bucketing, ordering and headlines. Stubs `database` in
+  `sys.modules` (crm imports it, and it raises without `DATABASE_URL`) and stubs
+  `_call_window` per row, so the tests don't depend on the real clock — callwindow's own
+  logic is test_callwindow.py's job
 
 ## AI Vision Rules
 - `POST /v1/scans/analyze` (main.py:3590) tries OpenAI first, falls through to Gemini on timeout/error —
@@ -321,6 +326,23 @@ capture. Don't reintroduce them or describe them as current.)
   mailbox, then fit score). The tabs are the right way to UNDERSTAND the list and the wrong
   way to WORK it: sitting down to call, the only question is "who do I dial first", and
   answering it by clicking eight tabs reading local clocks is work the screen should do
+- **Nothing is ever filtered out by the window — it only sets order and label.** The
+  response has three buckets: `ready` (in a window now), `soon` (opens shortly) and `rest`
+  (past the window, shut today, permanently closed), plus `next`, the best lead across all
+  three, so the focus card always has a number under the headline. `rest` is ordered by
+  `WINDOW_RANK` — still-open-but-past-the-lull above shut — then by reach. The bucket loop
+  used to be an `if/elif` with no `else`, so everything in `rest` fell off the end and never
+  reached the page, and the page rendered a one-line "nothing in a window" INSTEAD of the
+  table. Outside US afternoons that is most of the list, so pressing "Ready to start
+  calling" emptied a screen with hundreds of banked leads behind it — while `/calllist`,
+  which ranks these same rows rather than dropping them, still showed every one. Two screens
+  disagreeing about whether a lead exists is worse than either answer alone
+- `WINDOW_RANK` (in crm.py, beside `_call_window`) is the ONE definition of how ringable each
+  window state is, shared by `/calllist` and `/now`. `late` ranks above `shut_today` because
+  it does not mean closed — it means the quiet half hour has passed, not that the doors have
+- `dialable_total` is distinct from `unworked_total`: a list of rows whose phones all failed
+  validation is empty for calling purposes but must NOT trigger a lead fill, because filling
+  won't fix it. Only `list_empty` (no unworked leads at all) auto-starts a fill
 - It crosses timezones freely on purpose — at any moment the Eastern bars setting up and the
   Pacific ones in their lull are both good calls, and the zone stops mattering once you know
   it's their quiet half hour
