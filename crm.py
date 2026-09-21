@@ -1095,6 +1095,16 @@ def funnel(_: bool = Depends(require_crm_key)):
 # this module, so importing back would be circular.
 USER_STATUSES = ("trial", "active", "canceled")
 
+# App Store review accounts and our own QA/dev accounts, matched by shape
+# rather than an exact list — a new one of these lands with every build
+# submitted for review, and they'd otherwise silently pad "signups" forever.
+# `appreview444@icloud.com` / `applereview@my86d.com` are Apple's reviewers;
+# `test+<timestamp>@86d.com` and `test-reconnect-2026@example.com` are ours;
+# `phase3-verify@86d.com` is a verification pass. `86d.com` (not the real
+# `my86d.com`) and `example.com` are never a real bar's domain. This is a
+# view filter only — it never touches the row, so nothing here is destructive.
+TEST_EMAIL_PATTERN = r"(^test[-+.]|app.*review|@86d\.com$|@example\.com$|-verify@)"
+
 
 @crm_router.get("/users", response_model=dict)
 def list_users(status: Optional[str] = None, q: Optional[str] = None,
@@ -1114,7 +1124,7 @@ def list_users(status: Optional[str] = None, q: Optional[str] = None,
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
-    where, params = ["deleted_at IS NULL"], []
+    where, params = ["deleted_at IS NULL", "email !~* %s"], [TEST_EMAIL_PATTERN]
     if status:
         where.append("subscription_status = %s"); params.append(status)
     if q and q.strip():
@@ -1151,13 +1161,16 @@ def list_users(status: Optional[str] = None, q: Optional[str] = None,
 
         # Always the totals for the whole customer base, not the current
         # filter — same reasoning as the pipeline tabs: a count that
-        # renumbers itself when you click it is unreadable.
+        # renumbers itself when you click it is unreadable. Test accounts
+        # stay excluded here too, or the tab counts would disagree with the
+        # rows actually shown under them.
         cursor.execute("""
             SELECT subscription_status, COUNT(*) AS n FROM users
-             WHERE deleted_at IS NULL GROUP BY subscription_status
-        """)
+             WHERE deleted_at IS NULL AND email !~* %s GROUP BY subscription_status
+        """, (TEST_EMAIL_PATTERN,))
         by_status = {(r["subscription_status"] or "trial"): r["n"] for r in cursor.fetchall()}
-        cursor.execute("SELECT COUNT(*) AS n FROM users WHERE deleted_at IS NULL")
+        cursor.execute("SELECT COUNT(*) AS n FROM users WHERE deleted_at IS NULL AND email !~* %s",
+                       (TEST_EMAIL_PATTERN,))
         everything = cursor.fetchone()["n"]
 
         # Which lead this account came from, if attribution has matched one —
@@ -1182,6 +1195,32 @@ def list_users(status: Optional[str] = None, q: Optional[str] = None,
     return {"users": users, "count": len(users), "matching": matching,
             "offset": offset, "limit": limit,
             "counts": {**{k: by_status.get(k, 0) for k in USER_STATUSES}, "all": everything}}
+
+
+@crm_router.delete("/users/{user_id}", response_model=dict)
+def delete_user(user_id: str, _: bool = Depends(require_crm_key)):
+    """Soft delete — sets the same `deleted_at` the product API already
+    checks everywhere a user matters (login, registration's email-exists
+    check, the funnel, this list). That makes it safe without any special
+    handling here: a deleted user can't log in, frees its email for reuse,
+    and every other query on `users` already filters `deleted_at IS NULL`.
+    A hard DELETE would also fail outright the moment the account has any
+    `locations` — that table's `user_id` is a real foreign key.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET deleted_at=%s, updated_at=%s "
+            "WHERE id=%s AND deleted_at IS NULL",
+            (now_iso(), now_iso(), user_id),
+        )
+        deleted = cursor.rowcount > 0
+        conn.commit()
+    if not deleted:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "Customer not found",
+        })
+    return {"success": True, "deleted_id": user_id}
 
 
 # ============== TODAY'S CALL QUEUE ==============
