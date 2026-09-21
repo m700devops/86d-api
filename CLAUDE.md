@@ -319,16 +319,34 @@ capture. Don't reintroduce them or describe them as current.)
   beside Numbers): everyone who actually downloaded the app and made an account, which is the
   other side of the pipeline tab (everyone who HASN'T). Reads straight from `users`, not
   `crm_leads` — most rows never touched the pipeline at all, since an organic download signs
-  up with no call or email behind it. Read-only: no touch/log/email actions, because this
-  answers "who signed up", not "who to call next". Each row carries `location_count`,
-  `sessions_completed` and `last_active_at` (from `locations`/`inventory_sessions`) and, where
-  attribution has matched one, the originating `lead` — the same `matched_user_id` join
-  `rematch_attribution` writes, done as a Python lookup here rather than a SQL join so an
-  unmatched user (most of them) needs no special-casing. `status` is one of `trial` / `active`
-  / `canceled` (the only values `billing_webhook` in main.py ever writes) and, like the
-  pipeline's stage tabs, the `counts` in the response are always whole-table, never the
-  current filter. Trial-days-left is computed client-side from `trial_ends_at` — plain date
-  arithmetic on a field already in the row, not worth a server round trip
+  up with no call or email behind it. No touch/log/email actions — the calling workflow lives
+  on the pipeline tab — but it does carry a delete button (see below), because this list
+  needs its own housekeeping. Each row carries `location_count`, `sessions_completed` and
+  `last_active_at` (from `locations`/`inventory_sessions`) and, where attribution has matched
+  one, the originating `lead` — the same `matched_user_id` join `rematch_attribution` writes,
+  done as a Python lookup here rather than a SQL join so an unmatched user (most of them)
+  needs no special-casing. `status` is one of `trial` / `active` / `canceled` (the only values
+  `billing_webhook` in main.py ever writes) and, like the pipeline's stage tabs, the `counts`
+  in the response are always whole-table, never the current filter. Trial-days-left is
+  computed client-side from `trial_ends_at` — plain date arithmetic on a field already in the
+  row, not worth a server round trip
+- **`TEST_EMAIL_PATTERN` (crm.py, beside `USER_STATUSES`) excludes App Store review and our
+  own QA accounts from the Customers list, unconditionally** — every row, every count, every
+  search. A build submitted for review gets a fresh `appreview…@icloud.com` /
+  `applereview@my86d.com` account every time, and our own test accounts follow
+  `test[-+.]…@86d.com` or land on `example.com`; left in, they silently padded "signups" and
+  made trial-conversion numbers look worse than reality. This is a VIEW filter only — it never
+  touches the row, so it costs nothing to widen or narrow later. It only matches on shape, so
+  an oddly-named but real signup (no `test`/`appreview`/`-verify` in the address, not on
+  `86d.com`/`example.com`) still shows up and has to be judged by hand
+- `DELETE /v1/crm/users/{id}` — the Customers list's own delete button, for exactly that: a
+  signup the pattern filter above doesn't catch (an ad hoc test account, a mistaken signup)
+  that still needs to go. **Soft delete**, setting the same `deleted_at` the product API
+  already checks everywhere a user matters — login, registration's email-exists check, the
+  funnel, this list itself — so deleting here can't orphan anything and needs no special
+  handling elsewhere: the account simply can't log in again and its email frees up. A hard
+  `DELETE FROM users` was never an option here anyway — `locations.user_id` is a real foreign
+  key, so it would fail outright the moment the account has any
 - `GET/POST /v1/crm/suppressions` — do-not-call. Checked at promote time, so a suppressed
   venue can never re-enter the pipeline through the generator either
 - `GET /v1/crm/leadgen/export.csv?scope=today|queue|all` — for an auto-dialer

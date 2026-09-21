@@ -1715,7 +1715,7 @@ async function loadUsers(){
     <div class="zone"><div class="sheetwrap">
       <table class="sheet">
         <thead><tr>
-          <th></th><th>CUSTOMER</th><th>STATUS</th><th>SIGNED UP</th><th>ACTIVITY</th><th>FROM</th>
+          <th></th><th>CUSTOMER</th><th>STATUS</th><th>SIGNED UP</th><th>ACTIVITY</th><th>FROM</th><th></th>
         </tr></thead>
         <tbody>${d.users.map((u,i)=>userRow(u,USERS.offset+i+1)).join('')}</tbody>
       </table>
@@ -1761,7 +1761,7 @@ function userRow(u,n){
   const from=u.lead
     ? `<span class="win-good">called first</span><div class="sub">${esc(u.lead.name)}</div>`
     : '<span class="muted">organic</span>';
-  return `<tr>
+  return `<tr data-id="${esc(u.id)}">
     <td class="rownum">${n}</td>
     <td class="nm">${esc(who)}${sub?`<div class="sub">${esc(sub)}</div>`:''}</td>
     <td><span class="st ${st.cls}">${esc(st.text)}</span></td>
@@ -1769,6 +1769,7 @@ function userRow(u,n){
     <td><span class="${u.sessions_completed?'win-good':'muted'}">${esc(activity)}</span>
         ${u.location_count>1?`<div class="sub">${u.location_count} locations</div>`:''}</td>
     <td>${from}</td>
+    <td><button class="del" data-act="del" title="Delete">✕</button></td>
   </tr>`;
 }
 
@@ -1782,10 +1783,17 @@ $('usersSearch').oninput=e=>{
   usersTimer=setTimeout(()=>{ USERS.q=v; USERS.offset=0;
     loadUsers().catch(x=>toast(x.message)); }, 250);
 };
-$('usersBody').onclick=e=>{
-  const page=e.target.closest('button[data-page]'); if(!page) return;
-  USERS.offset=Math.max(0,USERS.offset+(+page.dataset.page)*100);
-  loadUsers().catch(x=>toast(x.message));
+$('usersBody').onclick=async e=>{
+  const page=e.target.closest('button[data-page]');
+  if(page){ USERS.offset=Math.max(0,USERS.offset+(+page.dataset.page)*100);
+            return loadUsers().catch(x=>toast(x.message)); }
+
+  const del=e.target.closest('button[data-act="del"]'); if(!del) return;
+  const tr=del.closest('tr'); const id=tr.dataset.id;
+  const name=tr.querySelector('.nm').firstChild.textContent;
+  if(!confirm(`Delete ${name}? This removes their account — they won't be able to log in again.`)) return;
+  try{ await api('/users/'+id,{method:'DELETE'}); toast('Deleted'); await loadUsers(); }
+  catch(err){ toast(err.message); }
 };
 
 /* ── lead engine ──────────────────────────────────────────────────────── */
