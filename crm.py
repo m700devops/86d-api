@@ -1088,6 +1088,102 @@ def funnel(_: bool = Depends(require_crm_key)):
         }
 
 
+# ============== USERS (app customers) ==============
+
+# The three subscription_status values billing_webhook (main.py) ever writes.
+# Kept here rather than imported from main — main.py imports crm_router from
+# this module, so importing back would be circular.
+USER_STATUSES = ("trial", "active", "canceled")
+
+
+@crm_router.get("/users", response_model=dict)
+def list_users(status: Optional[str] = None, q: Optional[str] = None,
+               limit: int = 100, offset: int = 0,
+               _: bool = Depends(require_crm_key)):
+    """Everyone who actually downloaded the app and made an account — the
+    other side of the pipeline tab, which is everyone who HASN'T yet. A lead
+    turns into a row here the moment attribution matches it to a signup, but
+    most rows never touched the pipeline at all: an organic download signs up
+    with no call or email behind it.
+    """
+    if status is not None and status not in USER_STATUSES:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_status",
+            "message": f"status must be one of {', '.join(USER_STATUSES)}",
+        })
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    where, params = ["deleted_at IS NULL"], []
+    if status:
+        where.append("subscription_status = %s"); params.append(status)
+    if q and q.strip():
+        # Business name, manager name, the account holder's own name, or
+        # email — whichever the operator happens to remember.
+        term = f"%{q.strip().lower()}%"
+        where.append(
+            "(LOWER(email) LIKE %s OR LOWER(COALESCE(business_name,'')) LIKE %s "
+            "OR LOWER(COALESCE(manager_name,'')) LIKE %s OR LOWER(COALESCE(name,'')) LIKE %s)")
+        params += [term, term, term, term]
+    sql_where = " AND ".join(where)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) AS n FROM users WHERE {sql_where}", params)
+        matching = cursor.fetchone()["n"]
+
+        cursor.execute(f"""
+            SELECT u.id, u.email, u.name, u.business_name, u.manager_name,
+                   u.subscription_status, u.subscription_tier,
+                   u.trial_started_at, u.trial_ends_at, u.created_at,
+                   (SELECT COUNT(*) FROM locations
+                     WHERE user_id = u.id AND deleted_at IS NULL) AS location_count,
+                   (SELECT COUNT(*) FROM inventory_sessions
+                     WHERE user_id = u.id AND status = 'completed') AS sessions_completed,
+                   (SELECT MAX(started_at) FROM inventory_sessions
+                     WHERE user_id = u.id) AS last_active_at
+              FROM users u
+             WHERE {sql_where}
+             ORDER BY u.created_at DESC
+             LIMIT %s OFFSET %s
+        """, params + [limit, offset])
+        users = [dict(r) for r in cursor.fetchall()]
+
+        # Always the totals for the whole customer base, not the current
+        # filter — same reasoning as the pipeline tabs: a count that
+        # renumbers itself when you click it is unreadable.
+        cursor.execute("""
+            SELECT subscription_status, COUNT(*) AS n FROM users
+             WHERE deleted_at IS NULL GROUP BY subscription_status
+        """)
+        by_status = {(r["subscription_status"] or "trial"): r["n"] for r in cursor.fetchall()}
+        cursor.execute("SELECT COUNT(*) AS n FROM users WHERE deleted_at IS NULL")
+        everything = cursor.fetchone()["n"]
+
+        # Which lead this account came from, if attribution has matched one —
+        # a left join done in Python rather than SQL, the same shape as
+        # rematch_attribution, so an unmatched user (most of them; plenty of
+        # signups never went through a call at all) needs no special-casing.
+        ids = [u["id"] for u in users]
+        leads_by_user = {}
+        if ids:
+            cursor.execute(
+                "SELECT matched_user_id, id, name, loc, status FROM crm_leads "
+                "WHERE matched_user_id = ANY(%s)", (ids,))
+            for r in cursor.fetchall():
+                leads_by_user[r["matched_user_id"]] = dict(r)
+
+    for u in users:
+        u["subscription_status"] = u["subscription_status"] or "trial"
+        lead = leads_by_user.get(u["id"])
+        u["lead"] = {"id": lead["id"], "name": lead["name"], "loc": lead["loc"],
+                     "status": lead["status"]} if lead else None
+
+    return {"users": users, "count": len(users), "matching": matching,
+            "offset": offset, "limit": limit,
+            "counts": {**{k: by_status.get(k, 0) for k in USER_STATUSES}, "all": everything}}
+
+
 # ============== TODAY'S CALL QUEUE ==============
 
 # Bars are shut in the morning and slammed at night. Early afternoon is when
