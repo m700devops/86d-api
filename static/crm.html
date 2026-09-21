@@ -97,6 +97,10 @@
   .st-warm{color:var(--wait);border-color:#FFB02055;background:#FFB02012}
   .st-won{color:var(--go);border-color:#3DD68C55;background:#3DD68C14}
   .st-dead{color:var(--stop);border-color:#F0616D44;background:#F0616D10}
+  .st-active{color:var(--go);border-color:#3DD68C55;background:#3DD68C14}
+  .st-trial{color:var(--text2)}
+  .st-trial-out{color:var(--stop);border-color:#F0616D44;background:#F0616D10}
+  .st-canceled{color:var(--text3)}
   /* Everything that used to be its own column, stacked under the name. */
   .sub{color:var(--text3);font-size:12px;margin-top:3px;font-weight:400;
        max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -315,6 +319,8 @@
         <div class="menu hide" id="menu" role="menu">
           <button data-tab="numbers" role="menuitem">Numbers
             <em>funnel, connect rates, what's working</em></button>
+          <button data-tab="users" role="menuitem">Customers
+            <em>everyone who signed up in the app</em></button>
           <button data-tab="engine" role="menuitem">Lead engine
             <em>where tomorrow's leads come from</em></button>
         </div>
@@ -381,6 +387,17 @@
       <div class="card"><strong>What outreach produced</strong>
         <div class="grid" style="margin-top:12px" id="nChan"></div>
         <div style="margin-top:12px"><button id="rematch">Re-run matching</button></div></div>
+    </section>
+
+    <!-- Read-only roster: who actually signed up, not who to work. The
+         pipeline tab is the list with actions on it; this one just answers
+         "did it work" one account at a time instead of as a funnel total. -->
+    <section data-panel="users" class="hide">
+      <div class="pipebar">
+        <input id="usersSearch" placeholder="Search a customer by business, manager, name or email…">
+      </div>
+      <div class="zt" id="usersTabs"></div>
+      <div id="usersBody"></div>
     </section>
 
     <section data-panel="engine" class="hide">
@@ -488,7 +505,7 @@ function switchTab(b){
     .forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
-    numbers:loadNumbers,engine:loadEngine}[TAB])()
+    numbers:loadNumbers,users:loadUsers,engine:loadEngine}[TAB])()
     .catch(e=>toast(e.message));
 }
 
@@ -1664,6 +1681,111 @@ async function loadNumbers(){
 $('rematch').onclick=async()=>{
   try{const r=await api('/attribution/rematch',{method:'POST'});
       toast(`Matched ${r.matched}`); await loadNumbers();}catch(e){toast(e.message)}
+};
+
+/* ── customers (app users) ────────────────────────────────────────────────
+   Everyone who actually downloaded the app and made an account — separate
+   from the pipeline, which is everyone who hasn't. Read-only on purpose:
+   this answers "who signed up", not "who to call next", so there are no
+   row actions here, just the roster. */
+let USERS={status:'',q:'',offset:0};
+let usersTimer=null;
+const USER_STAGES=[['','All'],['trial','Trial'],['active','Paying'],['canceled','Canceled']];
+
+async function loadUsers(){
+  const qs=new URLSearchParams();
+  if(USERS.status) qs.set('status',USERS.status);
+  if(USERS.q) qs.set('q',USERS.q);
+  qs.set('offset',USERS.offset); qs.set('limit',100);
+  const d=await api('/users?'+qs);
+
+  $('usersTabs').innerHTML=USER_STAGES.map(([key,label])=>`
+    <button data-status="${esc(key)}" class="${key===USERS.status?'on':''}">
+      ${esc(label)} <span class="c">${d.counts[key||'all']??0}</span>
+    </button>`).join('');
+
+  if(!d.users.length){
+    $('usersBody').innerHTML=`<div class="card muted">${
+      USERS.q ? 'Nothing matches “'+esc(USERS.q)+'”.'
+              : 'No customers at this stage yet.'}</div>`;
+    return;
+  }
+
+  $('usersBody').innerHTML=`
+    <div class="zone"><div class="sheetwrap">
+      <table class="sheet">
+        <thead><tr>
+          <th></th><th>CUSTOMER</th><th>STATUS</th><th>SIGNED UP</th><th>ACTIVITY</th><th>FROM</th>
+        </tr></thead>
+        <tbody>${d.users.map((u,i)=>userRow(u,USERS.offset+i+1)).join('')}</tbody>
+      </table>
+    </div></div>
+    <div class="pipefoot">
+      <span>${d.count===d.matching
+        ? `${d.matching} customer${d.matching===1?'':'s'}`
+        : `Showing ${USERS.offset+1}–${USERS.offset+d.count} of ${d.matching}`}</span>
+      <span>
+        <button data-page="-1" ${USERS.offset?'':'disabled'}>← Back</button>
+        <button data-page="1" ${USERS.offset+d.count<d.matching?'':'disabled'}>More →</button>
+      </span>
+    </div>`;
+}
+
+// Subscription badge, computed here rather than sent from the server: it's
+// plain date arithmetic on a field already in the row, same as the pipeline
+// table works out "why" and "where things stand" client-side.
+function subBadge(u){
+  if(u.subscription_status==='active') return {text:'PAYING',cls:'st-active'};
+  if(u.subscription_status==='canceled') return {text:'CANCELED',cls:'st-canceled'};
+  if(!u.trial_ends_at) return {text:'TRIAL',cls:'st-trial'};
+  const days=Math.ceil((new Date(u.trial_ends_at)-new Date())/86400000);
+  return days<0 ? {text:'TRIAL EXPIRED',cls:'st-trial-out'}
+                : {text:`TRIAL · ${days}D LEFT`,cls:'st-trial'};
+}
+function timeAgo(iso){
+  if(!iso) return null;
+  const days=Math.floor((new Date()-new Date(iso))/86400000);
+  if(days<=0) return 'today';
+  if(days===1) return 'yesterday';
+  return days<30 ? `${days}d ago` : iso.slice(0,10);
+}
+
+function userRow(u,n){
+  const st=subBadge(u);
+  const who=u.business_name||u.name||u.email;
+  const sub=[who!==u.email?u.email:null, u.manager_name].filter(Boolean).join(' · ');
+  const active=timeAgo(u.last_active_at);
+  const activity=u.sessions_completed
+    ? `${u.sessions_completed} count${u.sessions_completed===1?'':'s'}${active?` · last ${active}`:''}`
+    : (active ? `started, never finished · last ${active}` : 'never started a count');
+  const from=u.lead
+    ? `<span class="win-good">called first</span><div class="sub">${esc(u.lead.name)}</div>`
+    : '<span class="muted">organic</span>';
+  return `<tr>
+    <td class="rownum">${n}</td>
+    <td class="nm">${esc(who)}${sub?`<div class="sub">${esc(sub)}</div>`:''}</td>
+    <td><span class="st ${st.cls}">${esc(st.text)}</span></td>
+    <td>${esc((u.created_at||'').slice(0,10))}</td>
+    <td><span class="${u.sessions_completed?'win-good':'muted'}">${esc(activity)}</span>
+        ${u.location_count>1?`<div class="sub">${u.location_count} locations</div>`:''}</td>
+    <td>${from}</td>
+  </tr>`;
+}
+
+$('usersTabs').onclick=e=>{
+  const b=e.target.closest('button[data-status]'); if(!b) return;
+  USERS.status=b.dataset.status; USERS.offset=0; loadUsers().catch(x=>toast(x.message));
+};
+$('usersSearch').oninput=e=>{
+  clearTimeout(usersTimer);
+  const v=e.target.value;
+  usersTimer=setTimeout(()=>{ USERS.q=v; USERS.offset=0;
+    loadUsers().catch(x=>toast(x.message)); }, 250);
+};
+$('usersBody').onclick=e=>{
+  const page=e.target.closest('button[data-page]'); if(!page) return;
+  USERS.offset=Math.max(0,USERS.offset+(+page.dataset.page)*100);
+  loadUsers().catch(x=>toast(x.message));
 };
 
 /* ── lead engine ──────────────────────────────────────────────────────── */

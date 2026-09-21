@@ -25,9 +25,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   it shares a process and a database with the product API but is not part of the product.
   Nothing in the inventory/scan/order paths reads from it. See the CRM section below
 - static/crm.html — the CRM UI, served at `/crm`. **Three tabs only** — Call list, CRM,
-  Follow-ups — with Numbers and Lead engine behind a burger top right: those are looked at
-  occasionally and thought about once, and in the tab row they competed with the three things
-  a working day actually needs. The burger turns orange when the open page lives inside it. Single self-contained file, no build step;
+  Follow-ups — with Numbers, Customers and Lead engine behind a burger top right: those are
+  looked at occasionally and thought about once, and in the tab row they competed with the
+  three things a working day actually needs. The burger turns orange when the open page lives
+  inside it. Single self-contained file, no build step;
   replacing this file replaces the UI. Holds no credentials — the operator types the key and
   it lives in their browser's localStorage. **Designed for an operator with ADHD**: one
   headline stating the single next action, a shrinking list as the progress bar, two rows of
@@ -314,6 +315,20 @@ capture. Don't reintroduce them or describe them as current.)
 - `POST /v1/crm/attribution/rematch` — joins crm_leads to users by email, then unique email
   domain, then unique normalized business_name, recording WHICH method matched. Conservative
   on purpose: a wrong attribution points the next 5,000 touches at the wrong city
+- `GET /v1/crm/users?status=&q=&limit=&offset=` — the **Customers** page (behind the burger,
+  beside Numbers): everyone who actually downloaded the app and made an account, which is the
+  other side of the pipeline tab (everyone who HASN'T). Reads straight from `users`, not
+  `crm_leads` — most rows never touched the pipeline at all, since an organic download signs
+  up with no call or email behind it. Read-only: no touch/log/email actions, because this
+  answers "who signed up", not "who to call next". Each row carries `location_count`,
+  `sessions_completed` and `last_active_at` (from `locations`/`inventory_sessions`) and, where
+  attribution has matched one, the originating `lead` — the same `matched_user_id` join
+  `rematch_attribution` writes, done as a Python lookup here rather than a SQL join so an
+  unmatched user (most of them) needs no special-casing. `status` is one of `trial` / `active`
+  / `canceled` (the only values `billing_webhook` in main.py ever writes) and, like the
+  pipeline's stage tabs, the `counts` in the response are always whole-table, never the
+  current filter. Trial-days-left is computed client-side from `trial_ends_at` — plain date
+  arithmetic on a field already in the row, not worth a server round trip
 - `GET/POST /v1/crm/suppressions` — do-not-call. Checked at promote time, so a suppressed
   venue can never re-enter the pipeline through the generator either
 - `GET /v1/crm/leadgen/export.csv?scope=today|queue|all` — for an auto-dialer
