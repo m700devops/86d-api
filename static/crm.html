@@ -34,7 +34,7 @@
   .focustop h2{flex:0 1 auto}
   .focus .digits{font-size:20px;padding:8px 13px;letter-spacing:1px}
   .askinline{color:var(--go);font-size:13px;font-weight:600;margin-top:8px}
-  .focusacts{margin-top:10px}
+  .focusacts{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
   .card.muted .hint{margin-top:8px}
   .card.muted button.go{margin-top:4px}
 
@@ -842,6 +842,7 @@ async function loadNow(){
       is still ${esc(next.manager_role||'there')}</div>`:''}
     ${next?`<div class="focusacts">
       <button class="go" data-act="logtop" data-id="${esc(next.id)}">Log this call</button>
+      <button class="del" data-act="skiptop" data-id="${esc(next.id)}">Not a bar — skip</button>
     </div>`:''}
     <div id="brief" class="brief"></div>
     <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
@@ -1179,7 +1180,23 @@ async function startFill(btn){
 // what happened belongs there too, not found again in the table underneath.
 // It drives the existing row drawer rather than duplicating it, so logging
 // from here goes through exactly the same touch, undo and counter path.
-$('focus').onclick=e=>{
+//
+// "Not a bar — skip" is the same idea for the other outcome: the headline is
+// the only thing an operator sitting down to call is meant to look at, so a
+// bad suggestion (a pizzeria with no liquor program, a chain that slipped
+// through) has to be dismissable right there. Before this the only way to
+// drop it was to find the matching row in the table below and hit Delete —
+// which defeats the one-thing-on-screen point of the focus card entirely.
+// It reuses the exact same DELETE endpoint and confirm as the table's own
+// Delete button, so it retires the lead the same way: for good.
+$('focus').onclick=async e=>{
+  const skip=e.target.closest('button[data-act="skiptop"]');
+  if(skip){
+    if(!confirm('Delete this lead? It will not come back.')) return;
+    try{ await api('/leads/'+skip.dataset.id,{method:'DELETE'}); toast('Skipped'); await loadCalls(); }
+    catch(err){ toast(err.message); }
+    return;
+  }
   const btn=e.target.closest('button[data-act="logtop"]');
   if(!btn) return;
   const row=document.querySelector('#zones tr[data-id="'+CSS.escape(btn.dataset.id)+'"]');

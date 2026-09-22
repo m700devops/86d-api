@@ -159,12 +159,53 @@ CHAIN_SITE_HINTS = re.compile(
 )
 
 # Words that confirm a full liquor program rather than a beer-and-wine cafe.
+#
+# Every term here is anchored to something a kitchen-only menu can't also say.
+# The previous list wasn't: bare "cocktail" matched "shrimp cocktail" and
+# "fruit cocktail" on family-restaurant menus, "bar menu" matched "salad bar
+# menu" and "raw bar menu", "spirits" (no word boundary) matched "spirited",
+# "shots" matched "screenshot", and bare "draft"/"happy hour" match a pizza
+# place's NFL-watch-party page or lunch specials with zero alcohol involved.
+# A real harvested pizzeria (no booze at all) qualified through exactly this
+# door. Every phrase below is one a kitchen-only site has no reason to use.
 LIQUOR_HINTS = re.compile(
-    r"(cocktail|full bar|craft beer|spirits?|whisk(e)?y|bourbon|tequila|mezcal|"
-    r"martini|margarita|happy hour|liquor|distiller|mixolog|draft|draught|"
-    r"wine list|bar menu|drink menu|shots?\b|tap list)",
+    r"(craft cocktail|cocktail menu|cocktail list|cocktail bar|signature cocktail|"
+    r"full bar|craft beer|beer on tap|\bon draft\b|draft beer|draught beer|"
+    r"whisk(e)?y|bourbon|tequila|mezcal|\bvodka\b|\brum\b|\bgin\b|"
+    r"martini|margarita|\bliquor\b|distiller|mixolog|wine list|tap list|beer list)",
     re.I,
 )
+
+# Explicit signals a venue does NOT pour, checked before LIQUOR_HINTS: a site
+# saying this outright beats any inference from a keyword match, and BYOB
+# specifically means there is no liquor license to sell against at all.
+NO_LIQUOR_HINTS = re.compile(
+    r"(\bbyob\b|bring your own (bottle|beer|wine)|no alcohol (is )?served|"
+    r"non-alcoholic (restaurant|establishment)|we do not serve alcohol|"
+    r"does not serve alcohol|\bdry\b (restaurant|county)|"
+    r"no liquor license|not licensed (to serve|for alcohol))",
+    re.I,
+)
+
+
+def _restaurant_pours(html_seen: str, tags: dict) -> tuple[bool, Optional[str]]:
+    """Whether a restaurant-tagged venue shows enough evidence it sells
+    alcohol to be worth a call. Pure function of the crawled text and the OSM
+    tags, so it's testable without a DB, network or clock — see
+    test_leadgen.py. Returns (qualifies, reject_reason).
+
+    An explicit "we don't serve alcohol"/BYOB statement on the venue's own
+    site wins over everything else, including an OSM `bar=yes` tag: OSM tags
+    are third-party edits and can be stale or wrong, but a venue is not wrong
+    about whether it holds a liquor license.
+    """
+    if html_seen and NO_LIQUOR_HINTS.search(html_seen):
+        return False, "site says no alcohol served"
+    drinks = bool(html_seen and LIQUOR_HINTS.search(html_seen))
+    tagged_bar = tags.get("bar") == "yes" or tags.get("drink:cocktail") == "yes"
+    if drinks or tagged_bar:
+        return True, None
+    return False, "restaurant with no sign of a bar programme"
 
 
 # ── Small HTTP helper ───────────────────────────────────────────────────────
@@ -1233,11 +1274,9 @@ def enrich_candidate(cand: dict) -> dict:
     # this the wider harvest would fill the list with sandwich shops.
     amenity = (cand.get("amenity") or "").lower()
     if amenity == "restaurant":
-        drinks = bool(html_seen and LIQUOR_HINTS.search(html_seen))
-        tagged_bar = tags.get("bar") == "yes" or tags.get("drink:cocktail") == "yes"
-        if not (drinks or tagged_bar):
-            return {"status": "rejected",
-                    "reject_reason": "restaurant with no sign of a bar programme",
+        qualifies, reason = _restaurant_pours(html_seen, tags)
+        if not qualifies:
+            return {"status": "rejected", "reject_reason": reason,
                     "email": None, "email_source": None, "email_kind": None,
                     "manager_name": None, "manager_role": None,
                     "manager_source": None, "manager_seen_at": None,
