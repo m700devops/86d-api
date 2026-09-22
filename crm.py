@@ -3280,85 +3280,135 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
 # path into the pipeline.
 
 class QuickAdd(BaseModel):
-    # Typed by the operator, not extracted — see quick_add_lead's docstring
-    # for why the model doesn't get a vote on this one field.
-    name: str = Field(min_length=1, max_length=200)
-    text: str = Field(min_length=1, max_length=4000)
+    text: str = Field(min_length=1, max_length=6000)
+    # Optional override. The operator shouldn't have to type it — the model
+    # reads it out of the notes — but a caller that already knows it wins.
+    name: Optional[str] = Field(default=None, max_length=200)
 
 
-QUICK_ADD_SYSTEM = """You turn a salesperson's rough notes about a call they just made — to a bar or restaurant that ISN'T already in the CRM — into fields for a new lead record. The bar's name is supplied separately; do not include it.
+QUICK_ADD_SYSTEM = """You turn a salesperson's rough notes about a call they just made — to a bar or restaurant that ISN'T already in the CRM — into a new lead record. The notes are often pasted straight off a website or Google listing, with words run together ("80002Primary Phone:") — read through that.
 
 They sell 86'd, an iPhone app for bar inventory, to independent bars and restaurants.
 
-Return ONLY a JSON object with these keys (omit any you cannot determine — never guess):
-  "loc": "City, ST" if a city or town is mentioned
+Return ONLY a JSON object with these keys (omit any you truly cannot find):
+  "name": the bar or restaurant's name. It is almost always the first thing in the notes and often repeated (e.g. after "Website:"). ALWAYS return it when any venue name appears anywhere in the text.
+  "loc": "City, ST"
+  "address": street address if given
+  "phone": the main phone number
+  "other_phones": any additional phone numbers, as one string
+  "website": a URL if one is given (only a real URL, never a guess)
+  "email": an email address, if one is given
+  "email_on_website": true if the notes say the email is on their website / to find it on the site
+  "contact": the person they spoke to, with role if given (e.g. "Taylor (bartender)")
+  "decision_makers": who makes the buying decision, with role if given (e.g. "Mallory and Mike (owners)")
   "status": one of "new","contacted","warm","won","dead"
-  "outcome": one of "answered","voicemail","gatekeeper","not_interested","callback" —
-    what SPECIFICALLY happened on this call, not to be confused with status. A voicemail and
-    an actual conversation can both land status "contacted", and outcome is the only field
-    that still tells them apart — getting this vague is exactly the bug it exists to prevent.
-  "contact": the name of the person they spoke to
-  "email": an email address, if one was given
-  "phone": a phone number, if one was given
+  "outcome": one of "answered","voicemail","gatekeeper","not_interested","callback"
   "followup_in_days": integer number of days until the agreed follow-up
-  "summary": one clean sentence recording what happened
+  "next_step": the concrete next action, one short sentence (e.g. "Email the owners")
+  "summary": one or two clean sentences recording what happened, keeping every useful detail
 
 Rules:
-- "not interested", "hung up", "don't call again", "no thanks" -> status "dead", outcome "not_interested"
+- "not interested", "hung up", "don't call again" -> status "dead", outcome "not_interested"
 - an agreed callback, a demo booked, real interest -> status "warm", outcome "callback"
-- reached the decision maker, had a real conversation, no clear next step -> status "contacted", outcome "answered"
-- signed up, bought, installed -> status "won", outcome "answered"
-- left a voicemail, no answer, nobody picked up -> status "contacted", outcome "voicemail"
-- spoke to staff/a gatekeeper, the decision maker wasn't in or available -> status "contacted", outcome "gatekeeper"
+- reached the decision maker, real conversation, no clear next step -> status "contacted", outcome "answered"
+- left a voicemail, nobody picked up -> status "contacted", outcome "voicemail"
+- spoke to staff/bartender/gatekeeper, the decision maker wasn't there -> status "contacted", outcome "gatekeeper"
 - "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
 """
 
 
 def _quick_add_extract(text: str) -> dict:
-    return _ask_claude(QUICK_ADD_SYSTEM, text, max_tokens=400)
+    return _ask_claude(QUICK_ADD_SYSTEM, text, max_tokens=700)
+
+
+_NAME_CUT = re.compile(r"\s+(?:at|@|-|–|—|:)\s+|\s*\(\d|\s*\d{3}[-.\s]\d{3}|[.,;\n]")
+
+
+def _name_from_text(text: str) -> Optional[str]:
+    """Last-resort name: whatever leads the notes, up to the first phone
+    number, "at", or punctuation. Pasted listings start with the venue."""
+    head = _NAME_CUT.split(text.strip(), maxsplit=1)[0].strip()
+    head = re.sub(r"^(called|call(ing)?|spoke (to|with))\s+", "", head, flags=re.I).strip()
+    return head[:200] if 2 <= len(head) <= 80 else None
+
+
+def _clean(v, limit: int = 300) -> Optional[str]:
+    return v.strip()[:limit] if isinstance(v, str) and v.strip() else None
 
 
 @crm_router.post("/leads/quick-add", response_model=dict, status_code=201)
 def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
-    """Describe a call to a bar that isn't in the CRM yet; get back a new
-    lead with that call already logged against it.
+    """Describe a call to a bar that isn't in the CRM yet — paste whatever you
+    have — and get back a new lead with the call logged and every detail kept.
 
-    The bar's name USED to be pulled from the free text by the model, on the
-    theory that it's "the one field that can't be inferred, so never guess
-    it" — which is the right instinct pointed at the wrong fix. A name
-    stated plainly and repeatedly in real notes (pasted straight off a
-    website's contact block: "Olde Town Tavern & Grill at (720) 242-9667...
-    Website: Olde Town Tavern & Grill, Called this place...") still came
-    back empty, because messy pasted text plus an instruction to withhold
-    rather than guess is exactly the combination that makes a model err
-    toward omitting when it isn't perfectly confident. That's a 422 on
-    input a human reads in one glance — not a caution that's earning its
-    keep. The name is now a required field the operator types directly, so
-    it can never be wrong AND never fail to arrive; the model only ever
-    extracts the fields that are genuinely optional.
+    The name comes from the model, then a plain-text fallback (the first thing
+    in pasted notes is the venue), and only 422s if both come up empty. A
+    separate "type the name" box was tried and rejected: the whole point is
+    pasting and walking away.
+
+    If the notes carry no email — or say it's on their website — this finds
+    the site (given URL, else OpenStreetMap by name + town) and reads the
+    address off it, the same way the lead generator does.
     """
     extracted = _quick_add_extract(data.text)
+
+    name = _clean(data.name, 200) or _clean(extracted.get("name"), 200) \
+        or _name_from_text(data.text)
+    if not name:
+        raise HTTPException(status_code=422, detail={
+            "error": "no_name",
+            "message": "Couldn't tell which bar this was — start with the bar's name.",
+        })
+
+    loc = _clean(extracted.get("loc"), 200)
+    website = _clean(extracted.get("website"), 300)
+    found_via = None
+    if not _clean(extracted.get("email"), 320):
+        try:
+            from leadgen import find_venue_website, find_email_on_site
+            if not website:
+                website = find_venue_website(name, loc)
+            if website:
+                email, page = find_email_on_site(website)
+                if email:
+                    extracted["email"] = email
+                    found_via = page
+        except Exception as exc:
+            print(f"[crm] quick-add email lookup failed: {exc}", flush=True)
+
+    # Everything the model found that has no column of its own goes into the
+    # notes, labelled — "contacted" alone tells the operator nothing.
+    details = [f"{label}: {val}" for label, val in [
+        ("Decision makers", _clean(extracted.get("decision_makers"))),
+        ("Spoke to", _clean(extracted.get("contact"))),
+        ("Next step", _clean(extracted.get("next_step"))),
+        ("Address", _clean(extracted.get("address"))),
+        ("Other phones", _clean(extracted.get("other_phones"))),
+        ("Website", website),
+        ("Email found on", found_via),
+    ] if val]
 
     today = _today()
     now = now_iso()
     lead_id = generate_id()
-    loc = extracted.get("loc")
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO crm_leads (id, name, loc, status, source, attempts,
+            INSERT INTO crm_leads (id, name, loc, status, source, attempts, notes,
                                    created_at, updated_at)
-            VALUES (%s, %s, %s, 'new', 'manual', 0, %s, %s)
+            VALUES (%s, %s, %s, 'new', 'manual', 0, %s, %s, %s)
             RETURNING *
-        """, (lead_id, data.name.strip()[:200],
-              loc.strip()[:200] if isinstance(loc, str) and loc.strip() else None,
-              now, now))
+        """, (lead_id, name, loc, "\n".join(details) or None, now, now))
         lead = cursor.fetchone()
 
         updated, applied, undo_id, counters = _apply_call_notes(
             cursor, lead, extracted, data.text, "call", today, now)
         conn.commit()
 
+    if found_via:
+        applied["email_found_on"] = found_via
+    elif extracted.get("email_on_website") and not extracted.get("email"):
+        applied["email_lookup"] = "couldn't find an address on their site"
     return {"lead": _lead_row(updated), "applied": applied, "undo_id": undo_id,
             "counters": _counters_row(counters) if counters else None}
 

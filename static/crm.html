@@ -34,6 +34,8 @@
   .focustop h2{flex:0 1 auto}
   .focus .digits{font-size:20px;padding:8px 13px;letter-spacing:1px}
   .askinline{color:var(--go);font-size:13px;font-weight:600;margin-top:8px}
+  #pipeBody tr[data-id]{cursor:pointer}
+  #pipeBody tr[data-id]:hover td{background:#ffffff08}
   .focusacts{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
   .card.muted .hint{margin-top:8px}
   .card.muted button.go{margin-top:4px}
@@ -346,11 +348,10 @@
         <button class="go" id="pipeAdd">Add a lead</button>
       </div>
       <div class="card hide" id="pipeAddPanel" style="margin:10px 0">
-        <p class="hint">Type the bar's name, then say who you called and what happened —
-          everything past the name is a bonus. This creates the lead AND logs the call in
-          one step.</p>
-        <input id="pipeAddName" placeholder="Bar name" style="margin-bottom:8px">
-        <textarea id="pipeAddText" placeholder="Talked to Sarah the manager, she said call back Thursday, her email is sarah@murphyspub.com"></textarea>
+        <p class="hint">Paste or type everything — the bar, their listing, who you spoke to,
+          what happened. It sorts it into the lead, logs the call, and if there's no email it
+          goes and finds one on their website.</p>
+        <textarea id="pipeAddText" rows="5" placeholder="Murphy's Pub, Nashville. Talked to Sarah the bartender, owner is Dave, she said email him — address is on their website"></textarea>
         <div class="row">
           <button class="go" id="pipeAddSave">Add lead</button>
           <button id="pipeAddCancel">Cancel</button>
@@ -1529,7 +1530,14 @@ $('pipeBody').onclick=async e=>{
   const dr=e.target.closest('.drawer');
   if(dr) return pipeDrawer(dr,e);
 
-  const btn=e.target.closest('button[data-act]'); if(!btn) return;
+  // Anywhere on a row that isn't a button opens the full record. The row
+  // itself only has room for a stage badge and one line — the details are
+  // what the operator actually needs before calling back.
+  let btn=e.target.closest('button[data-act]');
+  if(!btn){
+    const row=e.target.closest('tr[data-id]'); if(!row) return;
+    btn={dataset:{act:'view'}, closest:()=>row};
+  }
   const tr=btn.closest('tr'); const id=tr.dataset.id;
 
   if(btn.dataset.act==='del'){
@@ -1542,7 +1550,21 @@ $('pipeBody').onclick=async e=>{
     tr.nextElementSibling.remove(); return;
   }
   const d=document.createElement('tr'); d.className='drawer';
-  if(btn.dataset.act==='edit'){
+  if(btn.dataset.act==='view'){
+    let l;
+    try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
+    d.dataset.mode='view';
+    const f=(k,v)=>v?`<div class="mailrow"><label>${k}</label><div>${esc(String(v))}</div></div>`:'';
+    d.innerHTML=`<td colspan="6">
+      ${f('Bar',l.name)}${f('Where',l.loc)}${f('Stage',l.status)}
+      ${f('Last call',[outcomeLabel(l.last_outcome),(l.last_touch_at||'').slice(0,10)].filter(Boolean).join(' · '))}
+      ${f('Tries',l.attempts)}${f('Call back',l.followup_date)}
+      ${f('Spoke to',l.contact)}${f('Phone',l.phone_dial||l.phone)}${f('Email',l.email)}
+      ${f('Manager',l.manager_name&&`${l.manager_name}${l.manager_role?' ('+l.manager_role+')':''}`)}
+      <p class="hint" style="margin:10px 0 4px">Notes &amp; history</p>
+      <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
+      <div class="row" style="margin-top:10px"><button data-cancel>Close</button></div></td>`;
+  } else if(btn.dataset.act==='edit'){
     let l;
     try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
     d.dataset.mode='edit';
@@ -1660,28 +1682,27 @@ $('pipeAdd').onclick=()=>{
   const box=$('pipeAddPanel');
   box.classList.toggle('hide');
   if(!box.classList.contains('hide')){
-    $('pipeAddName').value=''; $('pipeAddText').value='';
+    $('pipeAddText').value='';
     $('pipeAddResult').className='applied hide';
-    $('pipeAddName').focus();
+    $('pipeAddText').focus();
   }
 };
 $('pipeAddCancel').onclick=()=>{ $('pipeAddPanel').classList.add('hide'); };
 $('pipeAddSave').onclick=async()=>{
-  const name=$('pipeAddName').value.trim();
   const text=$('pipeAddText').value.trim();
   const box=$('pipeAddResult'); box.className='applied hide';
-  if(!name){ box.className='applied err'; box.textContent="Needs the bar's name.";
-             return $('pipeAddName').focus(); }
   if(!text){ box.className='applied err'; box.textContent='Say what happened on the call.';
              return $('pipeAddText').focus(); }
-  const btn=$('pipeAddSave'); btn.disabled=true; btn.textContent='Adding…';
+  const btn=$('pipeAddSave'); btn.disabled=true; btn.textContent='Adding… (checking their website)';
   try{
-    const r=await api('/leads/quick-add',{method:'POST',body:JSON.stringify({name,text})});
+    const r=await api('/leads/quick-add',{method:'POST',body:JSON.stringify({text})});
     box.className='applied';
     box.textContent=`Added ${r.lead.name}${r.applied.status?' — '+r.applied.status:''}.`
-      +(r.applied.followup_date?` Follow up ${r.applied.followup_date}.`:'');
+      +(r.applied.followup_date?` Follow up ${r.applied.followup_date}.`:'')
+      +(r.applied.email_found_on?` Found ${r.lead.email} on their site.`:'')
+      +(r.applied.email_lookup?` Email: ${r.applied.email_lookup}.`:'');
     toast('Lead added', r.undo_id);
-    $('pipeAddName').value=''; $('pipeAddText').value='';
+    $('pipeAddText').value='';
     PIPE.q=''; $('pipeSearch').value=''; PIPE.offset=0;
     await loadPipeline();
   }catch(err){

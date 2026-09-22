@@ -1023,6 +1023,64 @@ def geocode_city(name: str, state: Optional[str] = None) -> Optional[tuple[float
         return None
 
 
+def find_venue_website(name: str, loc: Optional[str] = None) -> Optional[str]:
+    """A venue's own website from OpenStreetMap, looked up by name (+ town).
+
+    For a bar the operator found themselves: the notes say "their email is on
+    the website" without the URL, and OSM usually has the `website` tag.
+    """
+    query = ", ".join(x for x in [name, loc] if x)
+    url = (f"{NOMINATIM}?q={urllib.parse.quote(query)}"
+           "&format=json&limit=3&countrycodes=us&extratags=1")
+    body, status = _http(url, timeout=15)
+    if status != 200:
+        return None
+    try:
+        results = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    for r in results:
+        tags = r.get("extratags") or {}
+        site = (tags.get("website") or tags.get("contact:website") or "").strip()
+        if site:
+            return site if site.lower().startswith("http") else "http://" + site
+    return None
+
+
+def find_email_on_site(website: str, max_pages: int = 4) -> tuple[Optional[str], Optional[str]]:
+    """(email, page it was read on) from a venue's own site, or (None, None).
+
+    Same order enrich_candidate uses: homepage, then the site's own contact
+    links, then the usual guessed paths. Bounded so a click in the UI stays
+    a few seconds, not a minute.
+    """
+    home, status = _http(website, timeout=PAGE_TIMEOUT, verify_public=True)
+    if status != 200 or not home:
+        return None, None
+    found = extract_emails(home)
+    if found:
+        return found[0], website
+    urls: list[str] = []
+    for href, _kind in CONTACT_LINK_RE.findall(home):
+        if href.startswith(("mailto:", "tel:", "#", "javascript:")):
+            continue
+        full = urllib.parse.urljoin(website, href)
+        if full.lower().startswith(("http://", "https://")) \
+                and domain_of(full) == domain_of(website) and full not in urls:
+            urls.append(full)
+    for path in CONTACT_PATHS:
+        full = website.rstrip("/") + path
+        if full not in urls:
+            urls.append(full)
+    for url in urls[:max_pages - 1]:
+        body, status = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
+        if status == 200 and body:
+            found = extract_emails(body)
+            if found:
+                return found[0], url
+    return None, None
+
+
 # ── Stage 1: harvest ────────────────────────────────────────────────────────
 
 def _overpass(query: str) -> Optional[dict]:
