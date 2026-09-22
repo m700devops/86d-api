@@ -15,6 +15,9 @@ import re
 import sys
 import types
 
+import pydantic
+import pytest
+
 # crm imports `database`, which raises at import time without DATABASE_URL.
 if "database" not in sys.modules:
     stub = types.ModuleType("database")
@@ -129,7 +132,8 @@ def _lead(**kw):
 def test_apply_call_notes_on_an_existing_lead_matches_debrief_shape():
     cur = _FakeCursor()
     lead = _lead()
-    extracted = {"status": "warm", "contact": "Sarah", "followup_in_days": 3,
+    extracted = {"status": "warm", "outcome": "callback", "contact": "Sarah",
+                "followup_in_days": 3,
                 "summary": "Talked to Sarah, she wants a callback Thursday."}
     updated, applied, undo_id, counters = crm._apply_call_notes(
         cur, lead, extracted, "raw text here", "call", "2026-09-22", "2026-09-22T12:00:00Z")
@@ -137,11 +141,60 @@ def test_apply_call_notes_on_an_existing_lead_matches_debrief_shape():
     assert updated["status"] == "warm"
     assert updated["contact"] == "Sarah"
     assert updated["attempts"] == 1
+    assert updated["last_outcome"] == "callback"
     assert applied["attempt"] == 1
     assert applied["status"] == "warm"
+    assert applied["outcome"] == "callback"
     assert applied["followup_date"] == "2026-09-25"
     assert counters["daily_calls_remaining"] == 24
     assert undo_id
+
+
+def test_apply_call_notes_uses_the_models_outcome_not_a_status_guess():
+    # The bug: "left a voicemail" correctly lands status "contacted" (a
+    # voicemail is still contact attempted), but the OLD code then re-derived
+    # last_outcome from status alone — anything landing on warm/won/contacted
+    # became "answered", so a voicemail and an actual conversation were
+    # indistinguishable on screen. The model is now asked for outcome
+    # directly and that value must win.
+    cur = _FakeCursor()
+    lead = _lead()
+    extracted = {"status": "contacted", "outcome": "voicemail",
+                "summary": "Left a voicemail, no answer."}
+    updated, applied, _, _ = crm._apply_call_notes(
+        cur, lead, extracted, "left a voicemail", "call",
+        "2026-09-22", "2026-09-22T12:00:00Z")
+
+    assert updated["status"] == "contacted"
+    assert updated["last_outcome"] == "voicemail"
+    assert applied["outcome"] == "voicemail"
+    # A voicemail didn't reach anyone, so the cadence ladder should still
+    # schedule the next attempt — the old "answered" mislabel made _cadence
+    # think the call succeeded and skipped scheduling one entirely.
+    assert applied["followup_date"]
+
+
+def test_apply_call_notes_gatekeeper_outcome_is_not_collapsed_to_answered():
+    cur = _FakeCursor()
+    lead = _lead()
+    extracted = {"status": "contacted", "outcome": "gatekeeper",
+                "summary": "Spoke to a bartender, manager wasn't in."}
+    updated, _, _, _ = crm._apply_call_notes(
+        cur, lead, extracted, "spoke to staff", "call",
+        "2026-09-22", "2026-09-22T12:00:00Z")
+    assert updated["last_outcome"] == "gatekeeper"
+
+
+def test_apply_call_notes_falls_back_to_status_guess_when_model_omits_outcome():
+    # Older extractions, or a model that skips the field: don't lose the
+    # outcome entirely, fall back to the coarse status-based guess.
+    cur = _FakeCursor()
+    lead = _lead()
+    extracted = {"status": "warm", "summary": "Sounded interested."}
+    updated, applied, _, _ = crm._apply_call_notes(
+        cur, lead, extracted, "raw text", "call", "2026-09-22", "2026-09-22T12:00:00Z")
+    assert updated["last_outcome"] == "answered"
+    assert applied["outcome"] == "answered"
 
 
 def test_apply_call_notes_falls_back_to_raw_text_when_model_gives_no_summary():
@@ -175,23 +228,32 @@ def test_quick_add_lead_creates_and_logs_in_one_transaction(monkeypatch):
 
     monkeypatch.setattr(crm, "get_db", lambda: _Conn())
     monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
-        "name": "Murphy's Pub", "loc": "Nashville, TN", "status": "warm",
+        "loc": "Nashville, TN", "status": "warm", "outcome": "callback",
         "contact": "Sarah", "followup_in_days": 2,
         "summary": "Sarah the manager wants a callback Thursday.",
     })
 
     result = crm.quick_add_lead(
-        crm.QuickAdd(text="called Murphy's Pub, talked to Sarah..."), True)
+        crm.QuickAdd(name="Murphy's Pub", text="talked to Sarah..."), True)
 
     assert result["lead"]["name"] == "Murphy's Pub"
     assert result["lead"]["status"] == "warm"
     assert result["applied"]["contact"] == "Sarah"
+    assert result["applied"]["outcome"] == "callback"
     assert result["undo_id"]
 
 
-def test_quick_add_lead_refuses_when_the_model_cant_find_a_name(monkeypatch):
+def test_quick_add_lead_name_is_typed_not_extracted(monkeypatch):
+    # The bar's name used to be pulled from the free text by the model — a
+    # real harvested example (name stated twice, in messy pasted contact-
+    # block text) still came back "couldn't tell which bar this was", the
+    # exact failure mode a required, directly-typed field can't have: the
+    # model's extraction is never even asked for a name any more, and the
+    # lead still gets created correctly from whatever the operator typed.
+    cur = _FakeCursor()
+
     class _Conn:
-        def cursor(self_): return _FakeCursor()
+        def cursor(self_): return cur
         def commit(self_): pass
         def __enter__(self_): return self_
         def __exit__(self_, *a): return False
@@ -199,12 +261,14 @@ def test_quick_add_lead_refuses_when_the_model_cant_find_a_name(monkeypatch):
     monkeypatch.setattr(crm, "get_db", lambda: _Conn())
     monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {"summary": "some call"})
 
-    try:
-        crm.quick_add_lead(crm.QuickAdd(text="had a call, went fine"), True)
-        assert False, "expected an HTTPException"
-    except crm.HTTPException as exc:
-        assert exc.status_code == 422
-        assert exc.detail["error"] == "no_name"
+    result = crm.quick_add_lead(
+        crm.QuickAdd(name="Olde Town Tavern & Grill", text="had a call, went fine"), True)
+    assert result["lead"]["name"] == "Olde Town Tavern & Grill"
+
+
+def test_quick_add_requires_a_name():
+    with pytest.raises(pydantic.ValidationError):
+        crm.QuickAdd(text="had a call, went fine")
 
 
 if __name__ == "__main__":

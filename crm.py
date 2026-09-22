@@ -358,6 +358,12 @@ MAX_ATTEMPTS = len(CADENCE_DAYS) + 1     # after this many dials with no contact
 # Outcomes that mean a human was actually reached.
 CONNECTED_OUTCOMES = {"answered", "gatekeeper", "callback", "not_interested"}
 
+# Every outcome a touch can carry — the quick-outcome buttons' data-outcome
+# values, TouchLogged's Literal, and what DEBRIEF_SYSTEM/QUICK_ADD_SYSTEM are
+# now asked for directly (see _apply_call_notes). One set so all three ways
+# of logging a call agree on the vocabulary.
+TOUCH_OUTCOMES = {"answered", "voicemail", "gatekeeper", "not_interested", "callback"}
+
 # Columns a PATCH is allowed to write. `id`, `created_at` and `updated_at` are
 # not in here on purpose — an allowlist beats filtering a denylist when the
 # values are being interpolated into a SQL fragment.
@@ -3006,6 +3012,10 @@ They sell 86'd, an iPhone app for bar inventory, to independent bars and restaur
 
 Return ONLY a JSON object with these keys (omit any you cannot determine — never guess):
   "status": one of "new","contacted","warm","won","dead"
+  "outcome": one of "answered","voicemail","gatekeeper","not_interested","callback" —
+    what SPECIFICALLY happened on this call, not to be confused with status. A voicemail and
+    an actual conversation can both land status "contacted", and outcome is the only field
+    that still tells them apart — getting this vague is exactly the bug it exists to prevent.
   "contact": the name of the person they spoke to
   "email": a corrected or newly learned email address
   "phone": a corrected or newly learned phone number
@@ -3013,11 +3023,12 @@ Return ONLY a JSON object with these keys (omit any you cannot determine — nev
   "summary": one clean sentence recording what happened
 
 Rules:
-- "not interested", "hung up", "don't call again", "no thanks" -> status "dead"
-- an agreed callback, a demo booked, real interest -> status "warm"
-- reached someone but no clear outcome -> status "contacted"
-- signed up, bought, installed -> status "won"
-- voicemail or gatekeeper with nobody reached -> status "contacted"
+- "not interested", "hung up", "don't call again", "no thanks" -> status "dead", outcome "not_interested"
+- an agreed callback, a demo booked, real interest -> status "warm", outcome "callback"
+- reached the decision maker, had a real conversation, no clear next step -> status "contacted", outcome "answered"
+- signed up, bought, installed -> status "won", outcome "answered"
+- left a voicemail, no answer, nobody picked up -> status "contacted", outcome "voicemail"
+- spoke to staff/a gatekeeper, the decision maker wasn't in or available -> status "contacted", outcome "gatekeeper"
 - "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
 """
 
@@ -3154,15 +3165,32 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
 
     # The model reports what happened; the ladder decides when to try again
     # if nobody was reached and it didn't name a date itself.
-    outcome_guess = None
-    if status == "dead":
-        outcome_guess = "not_interested"
-    elif status in ("warm", "won", "contacted"):
-        outcome_guess = "answered"
+    #
+    # outcome comes from the model DIRECTLY now — it used to be re-derived
+    # from status alone (dead -> not_interested, anything else landing on
+    # warm/won/contacted -> "answered"), which threw away exactly the
+    # distinction the prompt itself already draws: "voicemail or gatekeeper
+    # with nobody reached -> status 'contacted'" was written so the PIPELINE
+    # STAGE stays coarse on purpose, not so last_outcome should collapse a
+    # voicemail into "Answered". A debrief reading "left a voicemail, no
+    # answer" landed status=contacted (correctly) and last_outcome=answered
+    # (wrong) — indistinguishable on screen from an actual conversation.
+    outcome_guess = extracted.get("outcome")
+    if outcome_guess not in TOUCH_OUTCOMES:
+        # Older extractions, or a model that skipped the field: fall back to
+        # the coarse guess rather than losing the outcome entirely.
+        if status == "dead":
+            outcome_guess = "not_interested"
+        elif status in ("warm", "won", "contacted"):
+            outcome_guess = "answered"
+        else:
+            outcome_guess = None
     cadence_days, forced_status = _cadence(attempt, outcome_guess) if kind == "call" else (None, None)
     if forced_status and not status:
         status = forced_status
         applied["status"] = status
+    if outcome_guess:
+        applied["outcome"] = outcome_guess
 
     if status:
         sets.append("status = %s"); params.append(status); applied["status"] = status
@@ -3252,17 +3280,23 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
 # path into the pipeline.
 
 class QuickAdd(BaseModel):
+    # Typed by the operator, not extracted — see quick_add_lead's docstring
+    # for why the model doesn't get a vote on this one field.
+    name: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=4000)
 
 
-QUICK_ADD_SYSTEM = """You turn a salesperson's rough notes about a call they just made — to a bar or restaurant that ISN'T already in the CRM — into a new lead record.
+QUICK_ADD_SYSTEM = """You turn a salesperson's rough notes about a call they just made — to a bar or restaurant that ISN'T already in the CRM — into fields for a new lead record. The bar's name is supplied separately; do not include it.
 
 They sell 86'd, an iPhone app for bar inventory, to independent bars and restaurants.
 
 Return ONLY a JSON object with these keys (omit any you cannot determine — never guess):
-  "name": the bar or restaurant's name — the one field that can't be inferred, so leave it out entirely rather than invent one if it truly isn't in the text
   "loc": "City, ST" if a city or town is mentioned
   "status": one of "new","contacted","warm","won","dead"
+  "outcome": one of "answered","voicemail","gatekeeper","not_interested","callback" —
+    what SPECIFICALLY happened on this call, not to be confused with status. A voicemail and
+    an actual conversation can both land status "contacted", and outcome is the only field
+    that still tells them apart — getting this vague is exactly the bug it exists to prevent.
   "contact": the name of the person they spoke to
   "email": an email address, if one was given
   "phone": a phone number, if one was given
@@ -3270,11 +3304,12 @@ Return ONLY a JSON object with these keys (omit any you cannot determine — nev
   "summary": one clean sentence recording what happened
 
 Rules:
-- "not interested", "hung up", "don't call again", "no thanks" -> status "dead"
-- an agreed callback, a demo booked, real interest -> status "warm"
-- reached someone but no clear outcome -> status "contacted"
-- signed up, bought, installed -> status "won"
-- voicemail or gatekeeper with nobody reached -> status "contacted"
+- "not interested", "hung up", "don't call again", "no thanks" -> status "dead", outcome "not_interested"
+- an agreed callback, a demo booked, real interest -> status "warm", outcome "callback"
+- reached the decision maker, had a real conversation, no clear next step -> status "contacted", outcome "answered"
+- signed up, bought, installed -> status "won", outcome "answered"
+- left a voicemail, no answer, nobody picked up -> status "contacted", outcome "voicemail"
+- spoke to staff/a gatekeeper, the decision maker wasn't in or available -> status "contacted", outcome "gatekeeper"
 - "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
 """
 
@@ -3288,18 +3323,21 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
     """Describe a call to a bar that isn't in the CRM yet; get back a new
     lead with that call already logged against it.
 
-    The bar's name is the one thing the model can't be trusted to invent:
-    without it in the text, this 422s asking for the name rather than
-    silently creating a lead for the wrong venue (or none).
+    The bar's name USED to be pulled from the free text by the model, on the
+    theory that it's "the one field that can't be inferred, so never guess
+    it" — which is the right instinct pointed at the wrong fix. A name
+    stated plainly and repeatedly in real notes (pasted straight off a
+    website's contact block: "Olde Town Tavern & Grill at (720) 242-9667...
+    Website: Olde Town Tavern & Grill, Called this place...") still came
+    back empty, because messy pasted text plus an instruction to withhold
+    rather than guess is exactly the combination that makes a model err
+    toward omitting when it isn't perfectly confident. That's a 422 on
+    input a human reads in one glance — not a caution that's earning its
+    keep. The name is now a required field the operator types directly, so
+    it can never be wrong AND never fail to arrive; the model only ever
+    extracts the fields that are genuinely optional.
     """
     extracted = _quick_add_extract(data.text)
-
-    name = extracted.get("name")
-    if not isinstance(name, str) or not name.strip():
-        raise HTTPException(status_code=422, detail={
-            "error": "no_name",
-            "message": "Couldn't tell which bar this was — say the name and try again.",
-        })
 
     today = _today()
     now = now_iso()
@@ -3312,7 +3350,7 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
                                    created_at, updated_at)
             VALUES (%s, %s, %s, 'new', 'manual', 0, %s, %s)
             RETURNING *
-        """, (lead_id, name.strip()[:200],
+        """, (lead_id, data.name.strip()[:200],
               loc.strip()[:200] if isinstance(loc, str) and loc.strip() else None,
               now, now))
         lead = cursor.fetchone()
