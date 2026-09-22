@@ -345,6 +345,16 @@
         <input id="pipeSearch" placeholder="Search a bar, town, contact, email or phone number…">
         <button class="go" id="pipeAdd">Add a lead</button>
       </div>
+      <div class="card hide" id="pipeAddPanel" style="margin:10px 0">
+        <p class="hint">Say who you called and what happened — needs the bar's name, everything
+          else is a bonus. This creates the lead AND logs the call in one step.</p>
+        <textarea id="pipeAddText" placeholder="Called Murphy's Pub in Nashville, talked to Sarah the manager, she said call back Thursday, her email is sarah@murphyspub.com"></textarea>
+        <div class="row">
+          <button class="go" id="pipeAddSave">Add lead</button>
+          <button id="pipeAddCancel">Cancel</button>
+        </div>
+        <div class="applied hide" id="pipeAddResult"></div>
+      </div>
       <div class="zt" id="pipeTabs"></div>
       <div id="pipeBody"></div>
     </section>
@@ -1604,14 +1614,38 @@ async function pipeDrawer(dr,e){
   }
 }
 
-$('pipeAdd').onclick=async()=>{
-  const name=prompt('Bar name?'); if(!name) return;
+// A bare name-only prompt() used to be the whole "Add a lead" flow, which
+// left every real field ("fill the rest in with Edit") for later. This
+// creates the lead AND logs the call that prompted adding it, in the same
+// step, through the same AI reader /debrief uses on an existing lead — so
+// a call to a bar that was never in the pipeline has somewhere to go
+// besides typed-in-by-hand.
+$('pipeAdd').onclick=()=>{
+  const box=$('pipeAddPanel');
+  box.classList.toggle('hide');
+  if(!box.classList.contains('hide')){
+    $('pipeAddText').value=''; $('pipeAddResult').className='applied hide';
+    $('pipeAddText').focus();
+  }
+};
+$('pipeAddCancel').onclick=()=>{ $('pipeAddPanel').classList.add('hide'); };
+$('pipeAddSave').onclick=async()=>{
+  const text=$('pipeAddText').value.trim();
+  if(!text) return;
+  const btn=$('pipeAddSave'); btn.disabled=true; btn.textContent='Adding…';
+  const box=$('pipeAddResult'); box.className='applied hide';
   try{
-    await api('/leads',{method:'POST',body:JSON.stringify({name})});
-    toast('Added — fill the rest in with Edit');
+    const r=await api('/leads/quick-add',{method:'POST',body:JSON.stringify({text})});
+    box.className='applied';
+    box.textContent=`Added ${r.lead.name}${r.applied.status?' — '+r.applied.status:''}.`
+      +(r.applied.followup_date?` Follow up ${r.applied.followup_date}.`:'');
+    toast('Lead added', r.undo_id);
+    $('pipeAddText').value='';
     PIPE.q=''; $('pipeSearch').value=''; PIPE.offset=0;
     await loadPipeline();
-  }catch(e){ toast(e.message); }
+  }catch(err){
+    box.className='applied err'; box.textContent=err.message;
+  }finally{ btn.disabled=false; btn.textContent='Add lead'; }
 };
 
 /* ── follow-ups ───────────────────────────────────────────────────────── */

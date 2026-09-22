@@ -3117,15 +3117,17 @@ def _debrief_extract(text: str) -> dict:
     return _ask_claude(DEBRIEF_SYSTEM, text, max_tokens=400)
 
 
-@crm_router.post("/leads/{lead_id}/debrief", response_model=dict)
-def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)):
-    """Free-text notes in, updated lead out.
+def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
+                      today: str, now: str) -> tuple[dict, dict, str, Optional[dict]]:
+    """Write a debrief's extracted fields onto `lead`, log the touch, spend
+    the day's counters, and return (updated_row, applied, undo_id, counters).
 
-    Everything it decides is echoed back in `applied` so a wrong reading is
-    visible immediately rather than silently rewriting the pipeline.
+    Shared by /debrief (an existing lead, fetched moments earlier) and
+    /leads/quick-add (a lead this same request just inserted) — a "here's
+    what happened on this call" write behaves identically whichever door it
+    came through, and a brand-new lead gets the exact same undo/counter/
+    cadence handling a touch on an old one gets, not a simplified copy of it.
     """
-    extracted = _debrief_extract(data.text)
-
     status = extracted.get("status")
     if status not in VALID_STATUSES:
         status = None
@@ -3137,6 +3139,90 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
     except (TypeError, ValueError):
         followup = None
 
+    undo_id = _snapshot(cursor, lead, f"debrief {kind}")
+    attempt = (lead["attempts"] or 0) + 1 if kind == "call" else (lead["attempts"] or 0)
+    sets = ["updated_at = %s", "last_touch_at = %s"]
+    params: list = [now, now]
+    applied: dict = {}
+
+    if kind == "call":
+        sets.append("call_date = %s"); params.append(today); applied["call_date"] = today
+        sets.append("attempts = %s"); params.append(attempt)
+        applied["attempt"] = attempt
+    elif kind == "email" and not lead["email_date"]:
+        sets.append("email_date = %s"); params.append(today); applied["email_date"] = today
+
+    # The model reports what happened; the ladder decides when to try again
+    # if nobody was reached and it didn't name a date itself.
+    outcome_guess = None
+    if status == "dead":
+        outcome_guess = "not_interested"
+    elif status in ("warm", "won", "contacted"):
+        outcome_guess = "answered"
+    cadence_days, forced_status = _cadence(attempt, outcome_guess) if kind == "call" else (None, None)
+    if forced_status and not status:
+        status = forced_status
+        applied["status"] = status
+
+    if status:
+        sets.append("status = %s"); params.append(status); applied["status"] = status
+    sets.append("last_outcome = %s"); params.append(outcome_guess or "logged")
+    # Length caps on model output: these columns are written straight from
+    # whatever the model returned, and a model is perfectly capable of
+    # handing back a paragraph where a name was asked for.
+    FIELD_LIMITS = {"contact": 200, "email": 320, "phone": 50}
+    for field, limit in FIELD_LIMITS.items():
+        value = extracted.get(field)
+        if isinstance(value, str) and value.strip():
+            clean = value.strip()[:limit]
+            sets.append(f"{field} = %s"); params.append(clean)
+            applied[field] = clean
+    follow_days = followup if followup is not None else cadence_days
+    if follow_days is not None:
+        when = (datetime.now(_reset_tz()) + timedelta(days=follow_days)).strftime("%Y-%m-%d")
+        sets.append("followup_date = %s"); params.append(when)
+        applied["followup_date"] = when
+        if followup is None:
+            applied["followup_set_by"] = f"cadence (attempt {attempt})"
+
+    summary = extracted.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        summary = raw_text.strip()
+    summary = summary.strip()[:2000]
+    stamp = f"[{today}] {kind}"
+    if kind == "call":
+        stamp += f" · attempt {attempt}"
+    note = f"{stamp}: {summary}"
+    sets.append("notes = COALESCE(notes || E'\\n', '') || %s"); params.append(note)
+    applied["note"] = note
+
+    _attach_touch(cursor, undo_id, _record_touch(
+        cursor, lead, kind, outcome_guess, attempt, lead.get("tz_offset_hours")))
+    params.append(lead["id"])
+    cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
+    updated = cursor.fetchone()
+
+    counter_col = {"call": "daily_calls_remaining", "email": "daily_emails_remaining",
+                   "fb": "daily_fb_remaining"}[kind]
+    cursor.execute(f"""
+        UPDATE crm_counters
+           SET {counter_col} = GREATEST(0, {counter_col} - 1),
+               touch_ticker_remaining = GREATEST(0, touch_ticker_remaining - 1),
+               touch_ticker_last_action = %s, updated_at = %s
+         WHERE id = 1 RETURNING *
+    """, (kind, now))
+    counters = cursor.fetchone()
+    return updated, applied, undo_id, counters
+
+
+@crm_router.post("/leads/{lead_id}/debrief", response_model=dict)
+def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)):
+    """Free-text notes in, updated lead out.
+
+    Everything it decides is echoed back in `applied` so a wrong reading is
+    visible immediately rather than silently rewriting the pipeline.
+    """
+    extracted = _debrief_extract(data.text)
     today = _today()
     now = now_iso()
     with get_db() as conn:
@@ -3147,79 +3233,92 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
             raise HTTPException(status_code=404, detail={
                 "error": "not_found", "message": "Lead not found"})
 
-        undo_id = _snapshot(cursor, lead, f"debrief {data.kind}")
-        attempt = (lead["attempts"] or 0) + 1 if data.kind == "call" else (lead["attempts"] or 0)
-        sets = ["updated_at = %s", "last_touch_at = %s"]
-        params: list = [now, now]
-        applied: dict = {}
+        updated, applied, undo_id, counters = _apply_call_notes(
+            cursor, lead, extracted, data.text, data.kind, today, now)
+        conn.commit()
 
-        if data.kind == "call":
-            sets.append("call_date = %s"); params.append(today); applied["call_date"] = today
-            sets.append("attempts = %s"); params.append(attempt)
-            applied["attempt"] = attempt
-        elif data.kind == "email" and not lead["email_date"]:
-            sets.append("email_date = %s"); params.append(today); applied["email_date"] = today
+    return {"lead": _lead_row(updated), "applied": applied, "undo_id": undo_id,
+            "counters": _counters_row(counters) if counters else None}
 
-        # The model reports what happened; the ladder decides when to try again
-        # if nobody was reached and it didn't name a date itself.
-        outcome_guess = None
-        if status == "dead":
-            outcome_guess = "not_interested"
-        elif status in ("warm", "won", "contacted"):
-            outcome_guess = "answered"
-        cadence_days, forced_status = _cadence(attempt, outcome_guess) if data.kind == "call" else (None, None)
-        if forced_status and not status:
-            status = forced_status
-            applied["status"] = status
 
-        if status:
-            sets.append("status = %s"); params.append(status); applied["status"] = status
-        sets.append("last_outcome = %s"); params.append(outcome_guess or "logged")
-        # Length caps on model output: these columns are written straight from
-        # whatever the model returned, and a model is perfectly capable of
-        # handing back a paragraph where a name was asked for.
-        FIELD_LIMITS = {"contact": 200, "email": 320, "phone": 50}
-        for field, limit in FIELD_LIMITS.items():
-            value = extracted.get(field)
-            if isinstance(value, str) and value.strip():
-                clean = value.strip()[:limit]
-                sets.append(f"{field} = %s"); params.append(clean)
-                applied[field] = clean
-        follow_days = followup if followup is not None else cadence_days
-        if follow_days is not None:
-            when = (datetime.now(_reset_tz()) + timedelta(days=follow_days)).strftime("%Y-%m-%d")
-            sets.append("followup_date = %s"); params.append(when)
-            applied["followup_date"] = when
-            if followup is None:
-                applied["followup_set_by"] = f"cadence (attempt {attempt})"
+# ============== AI QUICK ADD ==============
+#
+# A call that already happened to a bar that was never in the pipeline at
+# all — cold-found on the operator's own initiative, a referral, someone who
+# called in — has nowhere to go: /debrief updates a lead that already
+# exists. Describing the call in plain words creates the lead AND logs that
+# first call in the same step, through the exact same fields and cadence
+# /debrief writes (via _apply_call_notes), so it isn't a second, thinner
+# path into the pipeline.
 
-        summary = extracted.get("summary")
-        if not isinstance(summary, str) or not summary.strip():
-            summary = data.text.strip()
-        summary = summary.strip()[:2000]
-        stamp = f"[{today}] {data.kind}"
-        if data.kind == "call":
-            stamp += f" · attempt {attempt}"
-        note = f"{stamp}: {summary}"
-        sets.append("notes = COALESCE(notes || E'\\n', '') || %s"); params.append(note)
-        applied["note"] = note
+class QuickAdd(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
 
-        _attach_touch(cursor, undo_id, _record_touch(
-            cursor, lead, data.kind, outcome_guess, attempt, lead.get("tz_offset_hours")))
-        params.append(lead_id)
-        cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
-        updated = cursor.fetchone()
 
-        counter_col = {"call": "daily_calls_remaining", "email": "daily_emails_remaining",
-                       "fb": "daily_fb_remaining"}[data.kind]
-        cursor.execute(f"""
-            UPDATE crm_counters
-               SET {counter_col} = GREATEST(0, {counter_col} - 1),
-                   touch_ticker_remaining = GREATEST(0, touch_ticker_remaining - 1),
-                   touch_ticker_last_action = %s, updated_at = %s
-             WHERE id = 1 RETURNING *
-        """, (data.kind, now))
-        counters = cursor.fetchone()
+QUICK_ADD_SYSTEM = """You turn a salesperson's rough notes about a call they just made — to a bar or restaurant that ISN'T already in the CRM — into a new lead record.
+
+They sell 86'd, an iPhone app for bar inventory, to independent bars and restaurants.
+
+Return ONLY a JSON object with these keys (omit any you cannot determine — never guess):
+  "name": the bar or restaurant's name — the one field that can't be inferred, so leave it out entirely rather than invent one if it truly isn't in the text
+  "loc": "City, ST" if a city or town is mentioned
+  "status": one of "new","contacted","warm","won","dead"
+  "contact": the name of the person they spoke to
+  "email": an email address, if one was given
+  "phone": a phone number, if one was given
+  "followup_in_days": integer number of days until the agreed follow-up
+  "summary": one clean sentence recording what happened
+
+Rules:
+- "not interested", "hung up", "don't call again", "no thanks" -> status "dead"
+- an agreed callback, a demo booked, real interest -> status "warm"
+- reached someone but no clear outcome -> status "contacted"
+- signed up, bought, installed -> status "won"
+- voicemail or gatekeeper with nobody reached -> status "contacted"
+- "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
+"""
+
+
+def _quick_add_extract(text: str) -> dict:
+    return _ask_claude(QUICK_ADD_SYSTEM, text, max_tokens=400)
+
+
+@crm_router.post("/leads/quick-add", response_model=dict, status_code=201)
+def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
+    """Describe a call to a bar that isn't in the CRM yet; get back a new
+    lead with that call already logged against it.
+
+    The bar's name is the one thing the model can't be trusted to invent:
+    without it in the text, this 422s asking for the name rather than
+    silently creating a lead for the wrong venue (or none).
+    """
+    extracted = _quick_add_extract(data.text)
+
+    name = extracted.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=422, detail={
+            "error": "no_name",
+            "message": "Couldn't tell which bar this was — say the name and try again.",
+        })
+
+    today = _today()
+    now = now_iso()
+    lead_id = generate_id()
+    loc = extracted.get("loc")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO crm_leads (id, name, loc, status, source, attempts,
+                                   created_at, updated_at)
+            VALUES (%s, %s, %s, 'new', 'manual', 0, %s, %s)
+            RETURNING *
+        """, (lead_id, name.strip()[:200],
+              loc.strip()[:200] if isinstance(loc, str) and loc.strip() else None,
+              now, now))
+        lead = cursor.fetchone()
+
+        updated, applied, undo_id, counters = _apply_call_notes(
+            cursor, lead, extracted, data.text, "call", today, now)
         conn.commit()
 
     return {"lead": _lead_row(updated), "applied": applied, "undo_id": undo_id,
