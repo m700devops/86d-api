@@ -235,6 +235,20 @@ capture. Don't reintroduce them or describe them as current.)
   than bare `draft`, …). `NO_LIQUOR_HINTS` (byob, "we do not serve alcohol", "no liquor
   license") is checked FIRST and overrides everything else, including an OSM `bar=yes` tag —
   a mapper's edit can be stale, a venue is not wrong about its own liquor license
+- **`recheck_restaurant_leads()` is the one-time correction for rows the OLD gate let
+  through.** Tightening `LIQUOR_HINTS` only changes what NEW candidates do from here on —
+  restaurants already banked (`status='qualified'`) or already promoted-but-never-called sit
+  on data collected under the old rule. Unlike `_reconcile_bad_emails()`/
+  `_reconcile_timezones()` this can't be recomputed from stored columns alone (the crawled
+  HTML isn't kept), so it re-crawls each restaurant row's site and re-applies
+  `_restaurant_pours()`. Deliberately NOT run on every boot — re-fetching every restaurant
+  candidate's site is exactly the kind of network-heavy work the harvest cap exists to avoid
+  doing needlessly — so it's a manual action: `POST /v1/crm/leadgen/recheck-restaurants`
+  (poll the same path with GET), background-threaded like `/leadgen/fill` but under its own
+  lock, and a button in the Lead engine panel. It never touches a lead someone has already
+  called or logged — only banked candidates and promoted-but-`last_touch_at IS NULL` leads,
+  which it deletes the same way the operator's own Delete button does (retiring the
+  candidate too, so the generator can't re-promote the same venue tomorrow)
 - **`_seed_cities()` runs on EVERY boot**, not only into an empty table. It was gated on "no
   cities yet", which meant adding metros to `SEED_CITIES_EXTRA` did nothing at all to a
   database that already had the first batch — forty cities that would have silently never

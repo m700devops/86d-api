@@ -1501,6 +1501,90 @@ def bucket_deficits(cursor=None) -> dict:
     return {b: max(0, BUCKET_TARGET - n) for b, n in bucket_counts(cursor).items()}
 
 
+def recheck_restaurant_leads(limit: int = 200) -> dict:
+    """Re-run the (now tightened) liquor gate against restaurant rows that
+    were qualified or promoted under the old, looser LIQUOR_HINTS.
+
+    A one-time correction, not a boot-time reconciliation like
+    `_reconcile_bad_emails()`: an email string or a lat/lon can be
+    recomputed from what's already stored, but this decision needs the
+    venue's own site again, so fixing it means re-crawling every restaurant
+    row rather than a cheap recompute. Too heavy to run on every boot —
+    triggered on demand instead, from the Lead engine panel.
+
+    Only ever touches restaurant-tagged rows nobody has worked yet:
+      - banked candidates (`status='qualified'`) are re-rejected in place,
+        exactly as if they'd failed `enrich_candidate()` today.
+      - promoted-but-never-touched leads (`status='new' AND last_touch_at
+        IS NULL`) are deleted the same way the operator's own Delete button
+        deletes one — which also retires the candidate row, so the
+        generator can't re-promote the same venue tomorrow.
+    A lead that's already been called or logged is left alone: a keyword
+    list changing doesn't undo a call that already happened.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, website, raw_tags FROM crm_lead_candidates
+             WHERE amenity = 'restaurant' AND status = 'qualified'
+             ORDER BY discovered_at ASC LIMIT %s
+        """, (limit,))
+        banked = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT c.id AS candidate_id, c.website, c.raw_tags, c.promoted_lead_id
+              FROM crm_lead_candidates c
+              JOIN crm_leads l ON l.id = c.promoted_lead_id
+             WHERE c.amenity = 'restaurant' AND l.status = 'new'
+               AND l.last_touch_at IS NULL
+             ORDER BY c.discovered_at ASC LIMIT %s
+        """, (limit,))
+        promoted = [dict(r) for r in cursor.fetchall()]
+
+    rows = banked + promoted
+    result = {"checked": 0, "banked_rejected": 0, "leads_removed": 0}
+    if not rows:
+        return result
+
+    def _fetch(row: dict) -> str:
+        home, status = _http(row["website"], timeout=PAGE_TIMEOUT, verify_public=True)
+        return home[:200000] if status == 200 and home else ""
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=ENRICH_WORKERS) as pool:
+        htmls = list(pool.map(_fetch, rows))
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for row, html in zip(rows, htmls):
+            result["checked"] += 1
+            try:
+                tags = json.loads(row.get("raw_tags") or "{}")
+            except json.JSONDecodeError:
+                tags = {}
+            qualifies, reason = _restaurant_pours(html, tags)
+            if qualifies:
+                continue
+            if "candidate_id" in row:   # a promoted, never-touched lead
+                cursor.execute("DELETE FROM crm_leads WHERE id=%s", (row["promoted_lead_id"],))
+                cursor.execute("""
+                    UPDATE crm_lead_candidates
+                       SET status='rejected', reject_reason=%s, promoted_lead_id=NULL
+                     WHERE id=%s
+                """, (reason, row["candidate_id"]))
+                result["leads_removed"] += 1
+            else:                        # still banked, never promoted
+                cursor.execute("""
+                    UPDATE crm_lead_candidates
+                       SET status='rejected', reject_reason=%s
+                     WHERE id=%s
+                """, (reason, row["id"]))
+                result["banked_rejected"] += 1
+        conn.commit()
+
+    return result
+
+
 def promote_leads(limit: int = DAILY_TARGET) -> int:
     """Move the best qualified candidates into crm_leads. Returns how many.
 

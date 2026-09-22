@@ -413,6 +413,18 @@
           spots refill.</p>
         <div id="engineBanner" style="margin-top:12px"></div>
         <div class="grid" style="margin-top:12px" id="engineStats"></div>
+        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+            <strong style="font-size:13px">Restaurant liquor gate</strong>
+            <button id="recheckBtn" class="del">Recheck existing restaurant leads</button>
+          </div>
+          <p class="muted" style="margin:6px 0 0;font-size:12px">
+            One-time cleanup: re-crawls every banked or never-called restaurant
+            lead against today's (tighter) liquor gate and drops the ones that no
+            longer clear it — same as the old "pizzeria with no bar" bug. Never
+            touches a lead someone's already called.</p>
+          <div id="recheckResult" style="margin-top:8px"></div>
+        </div>
         <div class="tablewrap" style="margin-top:14px">
           <table class="sheet"><thead><tr>
             <th>TAB</th><th>EASTERN</th><th>CENTRAL</th><th>MOUNTAIN</th><th>PACIFIC</th>
@@ -1850,6 +1862,51 @@ $('runNow').onclick=async()=>{
       toast(`Added ${r.promoted} leads`); await loadEngine();}
   catch(e){toast(e.message)}finally{b.disabled=false;b.textContent='Run now'}
 };
+
+// The gate re-crawls sites, so this is the same "too slow for one request,
+// start it and poll" shape as startFill() above, just against its own
+// endpoint — a recheck and a fill are different jobs and shouldn't share a
+// lock or a status line.
+let recheckTimer=null;
+function renderRecheckResult(last){
+  if(!last) return;
+  if(last.error){
+    $('recheckResult').innerHTML=`<div class="banner bad">Recheck failed: ${esc(last.error)}</div>`;
+    return;
+  }
+  const removed=last.banked_rejected+last.leads_removed;
+  $('recheckResult').innerHTML=`<div class="banner ${removed?'':'ok'}">`
+    + `Checked ${last.checked} · dropped ${last.banked_rejected} from the bank`
+    + ` · removed ${last.leads_removed} never-called lead${last.leads_removed===1?'':'s'}`
+    + `</div>`;
+}
+async function startRecheck(){
+  const b=$('recheckBtn'); b.disabled=true; b.textContent='Rechecking…';
+  try{
+    const r=await api('/leadgen/recheck-restaurants',{method:'POST'});
+    if(!r.started && !r.running) toast(r.note||'Could not start');
+  }catch(err){
+    b.disabled=false; b.textContent='Recheck existing restaurant leads';
+    return toast('Could not start: '+err.message);
+  }
+  if(recheckTimer) clearInterval(recheckTimer);
+  recheckTimer=setInterval(async()=>{
+    let st;
+    try{ st=await api('/leadgen/recheck-restaurants'); }catch{ return; }
+    if(!st.running){
+      clearInterval(recheckTimer); recheckTimer=null;
+      b.disabled=false; b.textContent='Recheck existing restaurant leads';
+      renderRecheckResult(st.last_run);
+      if(st.last_run && !st.last_run.error){
+        const removed=st.last_run.banked_rejected+st.last_run.leads_removed;
+        toast(removed?`Removed ${removed} non-liquor restaurant lead${removed===1?'':'s'}`
+                     :'Nothing needed removing');
+      }
+      if(TAB==='calls') loadCalls();
+    }
+  }, 4000);
+}
+$('recheckBtn').onclick=startRecheck;
 
 (function(){let k=null;try{k=localStorage.getItem(KEY_STORE)}catch{}
   if(k) unlock(k); else lock(null);})();
