@@ -81,7 +81,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
-  test_leadgen.py test_quick_add.py -q` (254 tests)
+  test_leadgen.py test_quick_add.py -q` (255 tests)
 - test_leadgen.py — `_restaurant_pours()`, the restaurant liquor gate, pure (crawled text +
   OSM tags in, a yes/no and a reason out). Stubs `database` in `sys.modules` the same way
   test_callnow.py stubs it for crm
@@ -635,18 +635,27 @@ capture. Don't reintroduce them or describe them as current.)
   cadence handling an old one's touch gets, not a thinner copy of it. On the CRM tab, "Add a
   lead" opens this (a bare `prompt()` for a name used to be the whole flow, leaving every
   real field for later "Edit")
-- **The bar's name is a required field the operator types, not something the model
-  extracts.** It used to be pulled from the free text on the theory that it's "the one
-  field that can't be inferred, so never guess it" — the right instinct pointed at the
-  wrong fix. Real notes pasted straight off a website's contact block ("Olde Town Tavern &
-  Grill at (720) 242-9667... Website: Olde Town Tavern & Grill, Called this place...") —
-  the name stated plainly, twice — still came back "couldn't tell which bar this was",
-  because messy pasted text plus an instruction to withhold rather than guess is exactly
-  what makes a model err toward omitting when it isn't perfectly confident. That's a 422 on
-  input a human reads in one glance. `QuickAdd.name` is now required (Pydantic,
-  `min_length=1`) and a dedicated "Bar name" field on the CRM tab's compose box; the model
-  only ever extracts the genuinely optional fields (`loc`, `status`, `outcome`, `contact`,
-  `email`, `phone`, `followup_in_days`, `summary`)
+- **Quick-add takes ONE paste box — no separate name field.** The name comes from the model
+  (`QUICK_ADD_SYSTEM` tells it the venue is almost always the first thing in pasted notes and
+  to always return it), then `_name_from_text()` (the text before the first phone number,
+  " at ", or punctuation) if the model drops it, and only 422s if both are empty. A required
+  "Bar name" box was tried for a day and rejected by the operator: the point is to paste
+  a listing plus a sentence and walk away. The real input that drove this — "Olde Town
+  Tavern & Grill at (720) 242-9667 ... Website: Olde Town Tavern & Grill, Called this
+  place..." — is a test in test_quick_add.py
+- **Quick-add finds the email itself.** When the notes carry no address (or say "it's on
+  their website"), `leadgen.find_venue_website()` looks the venue up on Nominatim by name +
+  town for its OSM `website` tag (unless the notes gave a URL), and
+  `leadgen.find_email_on_site()` reads it the same way `enrich_candidate` does — homepage,
+  the site's own contact links, then the guessed paths, capped at 4 pages so the click
+  stays a few seconds. Where it was found is echoed in `applied.email_found_on` and noted
+- **Everything the model finds is kept, labelled, in the notes** — decision makers, who
+  was spoken to, next step, address, other phones, website, where the email came from.
+  crm_leads has no columns for most of these, and "CONTACTED" alone tells the operator
+  nothing when they come back to it
+- **Pipeline rows are clickable.** Anywhere on a row that isn't a button opens a read-only
+  drawer with every field plus the full notes/history — the row itself only has room for a
+  badge and one line
 
 ## Environment Variables Required
 Source of truth: the `_config_checks` startup list in main.py (~line 52) — it logs what's missing on boot.

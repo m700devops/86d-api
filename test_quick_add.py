@@ -15,7 +15,6 @@ import re
 import sys
 import types
 
-import pydantic
 import pytest
 
 # crm imports `database`, which raises at import time without DATABASE_URL.
@@ -217,58 +216,74 @@ def test_apply_call_notes_cadence_forces_a_status_when_model_gives_none():
     assert applied["status"] == "dead"
 
 
+class _Conn:
+    def __init__(self, cur): self.cur = cur
+    def cursor(self): return self.cur
+    def commit(self): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def _no_lookup(monkeypatch, website=None, email=None):
+    import leadgen
+    monkeypatch.setattr(leadgen, "find_venue_website", lambda name, loc=None: website)
+    monkeypatch.setattr(leadgen, "find_email_on_site",
+                        lambda site: (email, site + "/contact") if email else (None, None))
+
+
 def test_quick_add_lead_creates_and_logs_in_one_transaction(monkeypatch):
     cur = _FakeCursor()
-
-    class _Conn:
-        def cursor(self_): return cur
-        def commit(self_): pass
-        def __enter__(self_): return self_
-        def __exit__(self_, *a): return False
-
-    monkeypatch.setattr(crm, "get_db", lambda: _Conn())
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
+    _no_lookup(monkeypatch)
     monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
-        "loc": "Nashville, TN", "status": "warm", "outcome": "callback",
-        "contact": "Sarah", "followup_in_days": 2,
-        "summary": "Sarah the manager wants a callback Thursday.",
+        "name": "Murphy's Pub", "loc": "Nashville, TN", "status": "warm",
+        "outcome": "callback", "contact": "Sarah", "email": "sarah@murphys.com",
+        "followup_in_days": 2, "summary": "Sarah wants a callback Thursday.",
     })
-
-    result = crm.quick_add_lead(
-        crm.QuickAdd(name="Murphy's Pub", text="talked to Sarah..."), True)
-
+    result = crm.quick_add_lead(crm.QuickAdd(text="Murphy's Pub, talked to Sarah..."), True)
     assert result["lead"]["name"] == "Murphy's Pub"
     assert result["lead"]["status"] == "warm"
-    assert result["applied"]["contact"] == "Sarah"
     assert result["applied"]["outcome"] == "callback"
     assert result["undo_id"]
 
 
-def test_quick_add_lead_name_is_typed_not_extracted(monkeypatch):
-    # The bar's name used to be pulled from the free text by the model — a
-    # real harvested example (name stated twice, in messy pasted contact-
-    # block text) still came back "couldn't tell which bar this was", the
-    # exact failure mode a required, directly-typed field can't have: the
-    # model's extraction is never even asked for a name any more, and the
-    # lead still gets created correctly from whatever the operator typed.
+def test_quick_add_falls_back_to_the_leading_text_when_the_model_drops_the_name(monkeypatch):
+    # The real input that failed: name stated twice in pasted listing text,
+    # model still returned no name. The operator must not have to retype it.
     cur = _FakeCursor()
-
-    class _Conn:
-        def cursor(self_): return cur
-        def commit(self_): pass
-        def __enter__(self_): return self_
-        def __exit__(self_, *a): return False
-
-    monkeypatch.setattr(crm, "get_db", lambda: _Conn())
-    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {"summary": "some call"})
-
-    result = crm.quick_add_lead(
-        crm.QuickAdd(name="Olde Town Tavern & Grill", text="had a call, went fine"), True)
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
+    _no_lookup(monkeypatch)
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {"outcome": "gatekeeper"})
+    text = ("Olde Town Tavern & Grill at (720) 242-9667 or (303) 467-1472.Location & "
+            "ContactAddress: 7355 Ralston Rd, Arvada, CO 80002 ... Taylor the bartender picked up")
+    result = crm.quick_add_lead(crm.QuickAdd(text=text), True)
     assert result["lead"]["name"] == "Olde Town Tavern & Grill"
 
 
-def test_quick_add_requires_a_name():
-    with pytest.raises(pydantic.ValidationError):
-        crm.QuickAdd(text="had a call, went fine")
+def test_quick_add_finds_the_email_on_their_website(monkeypatch):
+    cur = _FakeCursor()
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
+    _no_lookup(monkeypatch, website="https://oldetowntavern.com", email="owners@oldetowntavern.com")
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
+        "name": "Olde Town Tavern & Grill", "loc": "Arvada, CO", "email_on_website": True,
+        "decision_makers": "Mallory and Mike (owners)", "contact": "Taylor (bartender)",
+        "outcome": "gatekeeper", "status": "contacted",
+    })
+    result = crm.quick_add_lead(crm.QuickAdd(text="Olde Town Tavern & Grill..."), True)
+    assert result["lead"]["email"] == "owners@oldetowntavern.com"
+    assert result["applied"]["email_found_on"] == "https://oldetowntavern.com/contact"
+    notes = result["lead"]["notes"]
+    assert "Decision makers: Mallory and Mike (owners)" in notes
+    assert "Website: https://oldetowntavern.com" in notes
+
+
+def test_quick_add_refuses_only_when_no_name_anywhere(monkeypatch):
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(_FakeCursor()))
+    _no_lookup(monkeypatch)
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {})
+    with pytest.raises(crm.HTTPException) as exc:
+        crm.quick_add_lead(crm.QuickAdd(text="(720) 242-9667"), True)
+    assert exc.value.detail["error"] == "no_name"
 
 
 if __name__ == "__main__":
