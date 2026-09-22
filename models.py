@@ -524,3 +524,17 @@ class AppEventBatch(BaseModel):
     events: List[str] = Field(..., min_length=1, max_length=20)
     platform: Optional[str] = Field(default=None, max_length=16)
     app_version: Optional[str] = Field(default=None, max_length=16)
+
+
+class AppleSignInRequest(BaseModel):
+    """A Sign in with Apple assertion from the iOS client.
+
+    `name` and `business_name` are only ever present on the FIRST
+    authorization — Apple hands the user's name to the app once and never
+    again, so the client sends whatever it was given and the server keeps
+    the first non-empty value it sees.
+    """
+    identity_token: str = Field(..., min_length=20, max_length=8192)
+    name: Optional[str] = Field(default=None, max_length=200)
+    business_name: Optional[str] = Field(default=None, max_length=200)
+    terms_accepted: bool = Field(default=False)
