@@ -446,6 +446,13 @@ capture. Don't reintroduce them or describe them as current.)
 - Eight columns, not ten: the contact's name sits under the bar's, and last-touch/next-due are
   one column. At ten the action buttons fell off the right-hand edge, and the buttons are the
   point of the screen
+- **WHERE THINGS STAND shows `last_outcome`, not just a bare date.** A STAGE badge of
+  CONTACTED covers a voicemail, a gatekeeper, and an actual conversation alike (`log_touch`
+  in crm.py lands all three on "contacted") — the badge alone can't answer "did I actually
+  reach anyone?", and "last touched 2026-09-22" didn't either. `last_outcome` has always
+  recorded the real answer (`OUTCOME_LABEL` in crm.html: Answered / Voicemail / Manager out /
+  Not interested / Asked for a callback / Logged); it just wasn't shown anywhere on this
+  screen. Follow-ups' mini table shows it too, under the bar's name, for the same reason
 - Edit, Log, Email and Delete all work inline here, sharing the same endpoints (and the same
   undo) as the call list
 
