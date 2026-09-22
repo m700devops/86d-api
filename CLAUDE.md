@@ -405,11 +405,13 @@ capture. Don't reintroduce them or describe them as current.)
   which ranks these same rows rather than dropping them, still showed every one. Two screens
   disagreeing about whether a lead exists is worse than either answer alone
 - **The focus card's only button used to be "Log this call".** If `next` was a bad suggestion
-  (wrong business type, already a customer, whatever) the only way off it was to scroll into
-  the table below and find the matching row's Delete — which defeats the point of a card
-  designed so the operator looks at nothing else. "Not a bar — skip" sits next to "Log this
-  call" now, hits the same `DELETE /v1/crm/leads/{id}` the table's Delete button does, and
-  `loadCalls()` pulls the next-best lead into the card immediately
+  the only way off it was to scroll into the table below and find the matching row's Delete —
+  which defeats the point of a card designed so the operator looks at nothing else. "Skip"
+  sits next to "Log this call" now, hits the same `DELETE /v1/crm/leads/{id}` the table's
+  Delete button does, and `loadCalls()` pulls the next-best lead into the card immediately.
+  It first shipped as "Not a bar — skip", from when it was built alongside the liquor-gate
+  fix below — but the gate is what keeps non-bars off this list now, so a lead still needing
+  a skip here isn't specifically a bar-detection problem and the button shouldn't say it is
 - `WINDOW_RANK` (in crm.py, beside `_call_window`) is the ONE definition of how ringable each
   window state is, shared by `/calllist` and `/now`. `late` ranks above `shut_today` because
   it does not mean closed — it means the quiet half hour has passed, not that the doors have
