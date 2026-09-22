@@ -4084,34 +4084,6 @@ def record_app_events(batch: AppEventBatch, authorization: str = Header(None)):
     return {"accepted": len(events)}
 
 
-# ============== MARKET PULSE ENDPOINT ==============
-
-@app.get("/market-pulse")
-def market_pulse():
-    """Free daily market briefing for agents — become infrastructure"""
-    return {
-        "date": datetime.now(timezone.utc).isoformat(),
-        "pulse": {
-            "trending_skills": ["backend APIs", "automation", "Claude integrations"],
-            "rate_benchmarks": {
-                "backend_api": "$50-500",
-                "automation_script": "$30-200",
-                "code_review": "$30-100"
-            },
-            "opportunity_alerts": [
-                "High demand for x402 payment integration",
-                "Underserved: agent-to-agent escrow",
-                "Emerging: multi-agent workflow orchestration"
-            ],
-            "platform_updates": [
-                "Moltbook verification challenges active",
-                "ClawTasks expanding to Solana bounties"
-            ]
-        },
-        "source": "reefbackend",
-        "subscribe": "Reply with your handle to join distribution list"
-    }
-
 # ============== INCLUDE V1 ROUTER ==============
 
 app.include_router(v1_router)
