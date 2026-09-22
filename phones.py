@@ -112,3 +112,18 @@ def format_us_phone(digits: Optional[str]) -> str:
     if not digits or len(digits) != 10:
         return ""
     return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+
+
+def format_us_phone_dashed(digits: Optional[str]) -> str:
+    """615-742-9095 — for the CALL LIST's copy button and click-to-copy digits.
+
+    Bare digits (6157429095) used to be what got copied, on the theory that a
+    dialer wants the plainest possible string. CloudTalk's own paste box
+    disagrees: it silently refuses a pasted string with no separators at all,
+    so the "COPY" button was producing a number that wouldn't paste into the
+    one place it's for. Dashes (not the parens `format_us_phone` uses, which
+    are for reading a number aloud, not pasting it) are what CloudTalk accepts.
+    """
+    if not digits or len(digits) != 10:
+        return ""
+    return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"

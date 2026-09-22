@@ -81,7 +81,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
-  test_leadgen.py -q` (244 tests)
+  test_leadgen.py test_quick_add.py -q` (250 tests)
 - test_leadgen.py — `_restaurant_pours()`, the restaurant liquor gate, pure (crawled text +
   OSM tags in, a yes/no and a reason out). Stubs `database` in `sys.modules` the same way
   test_callnow.py stubs it for crm
@@ -89,6 +89,12 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   `sys.modules` (crm imports it, and it raises without `DATABASE_URL`) and stubs
   `_call_window` per row, so the tests don't depend on the real clock — callwindow's own
   logic is test_callwindow.py's job
+- test_quick_add.py — `_apply_call_notes()` (the write path `/debrief` and `/leads/quick-add`
+  share) and `quick_add_lead()` itself. Stubs `database` the same way test_callnow.py does,
+  and also fakes the cursor: real Postgres tolerates a `sets`/`params` list falling out of
+  lockstep by raising loudly, but nothing here would have caught a silent mismatch without
+  something enforcing "every `%s` has exactly one param" and applying each write onto a row
+  dict so assertions can check what actually got saved, not just that nothing raised
 
 ## AI Vision Rules
 - `POST /v1/scans/analyze` (main.py:3590) tries OpenAI first, falls through to Gemini on timeout/error —
@@ -567,9 +573,14 @@ capture. Don't reintroduce them or describe them as current.)
   the filter is `status = 'new' AND last_touch_at IS NULL`. That is what makes it impossible
   to call the same restaurant twice, and the shrinking list doubles as the progress bar
 - `phone_digits` is on every lead: bare digits, US country code stripped (`+1-615-742-9095`
-  → `6157429095`), for pasting into CloudTalk. One click on the page copies it. A lead whose
-  phone doesn't validate is dropped from the call list entirely rather than shown with a
-  dead number — see phones.py
+  → `6157429095`). A lead whose phone doesn't validate is dropped from the call list entirely
+  rather than shown with a dead number — see phones.py
+- **What actually gets copied is `phone_dial` (`format_us_phone_dashed()`), not
+  `phone_digits`.** CloudTalk's paste box silently refuses a bare 10-digit string with no
+  separators, so a bare-digits COPY button was producing a number that wouldn't paste into
+  the one place it's for. `615-742-9095`, not `format_us_phone()`'s `(615) 742-9095` (that
+  one's for reading a number aloud, not pasting it, and CloudTalk doesn't take parens
+  either). One click on the page copies it
 - `DELETE /v1/crm/leads/{id}` and `POST /v1/crm/leads/bulk-delete` also RETIRE the
   `crm_lead_candidates` row that produced the lead. Without that the generator re-promotes
   the same restaurant on a later run and it reappears — the exact duplicate call that
@@ -586,12 +597,24 @@ capture. Don't reintroduce them or describe them as current.)
   stopped working with no API key set. Only free text a human typed is worth a model
 - `POST /v1/crm/leads/{id}/debrief` — free-text call notes in, structured fields out
   (status, contact, email, phone, follow-up date, a dated note), applied in one transaction
-  along with the counters. Uses the SAME providers as the scan path (OpenAI then Gemini), so
-  no new key. Everything the model decided is echoed back in `applied` so a misreading is
-  visible immediately. With no provider key it 503s with "type the fields in by hand"
-  rather than failing obscurely. Model output is treated as untrusted: `status` is checked
-  against VALID_STATUSES, `followup_in_days` is range-checked, and the free-text fields are
-  length-capped before they reach a column
+  along with the counters. Uses Claude (`_ask_claude()`, `ANTHROPIC_API_KEY`) — see AI is
+  Claude only, below; this bullet used to say it shared the scan path's OpenAI/Gemini pair,
+  which stopped being true when debrief moved to Claude and was never corrected here. With
+  no provider key it 503s with "type the fields in by hand" rather than failing obscurely.
+  Model output is treated as untrusted: `status` is checked against VALID_STATUSES,
+  `followup_in_days` is range-checked, and the free-text fields are length-capped before
+  they reach a column. Everything the model decided is echoed back in `applied` so a
+  misreading is visible immediately
+- **`POST /v1/crm/leads/quick-add` is the same idea for a call to a bar that was never in
+  the pipeline at all** — cold-found on the operator's own initiative, a referral, a walk-in.
+  `/debrief` only ever updates a lead that already exists; this describes the call in plain
+  words and creates the lead AND logs that first call in one step, sharing `_apply_call_notes()`
+  (extracted from `/debrief`'s body) so a brand-new lead gets the exact same undo/counter/
+  cadence handling an old one's touch gets, not a thinner copy of it. The bar's name is the
+  one field the model is told never to guess — no name in the text is a 422 asking for it,
+  not a lead created for the wrong venue or none. On the CRM tab, "Add a lead" opens this
+  (a bare `prompt()` for a name used to be the whole flow, leaving every real field for
+  later "Edit")
 
 ## Environment Variables Required
 Source of truth: the `_config_checks` startup list in main.py (~line 52) — it logs what's missing on boot.

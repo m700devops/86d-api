@@ -345,6 +345,16 @@
         <input id="pipeSearch" placeholder="Search a bar, town, contact, email or phone number…">
         <button class="go" id="pipeAdd">Add a lead</button>
       </div>
+      <div class="card hide" id="pipeAddPanel" style="margin:10px 0">
+        <p class="hint">Say who you called and what happened — needs the bar's name, everything
+          else is a bonus. This creates the lead AND logs the call in one step.</p>
+        <textarea id="pipeAddText" placeholder="Called Murphy's Pub in Nashville, talked to Sarah the manager, she said call back Thursday, her email is sarah@murphyspub.com"></textarea>
+        <div class="row">
+          <button class="go" id="pipeAddSave">Add lead</button>
+          <button id="pipeAddCancel">Cancel</button>
+        </div>
+        <div class="applied hide" id="pipeAddResult"></div>
+      </div>
       <div class="zt" id="pipeTabs"></div>
       <div id="pipeBody"></div>
     </section>
@@ -846,8 +856,8 @@ async function loadNow(){
   $('focus').innerHTML=`<div class="focustop">
       <h2>${esc(d.headline)}</h2>
       ${next&&next.phone_digits?`<div class="phcell">
-        <span class="digits" data-copy="${esc(next.phone_digits)}">${esc(next.phone_digits)}</span>
-        <button class="copybtn" data-act="copy" data-copy="${esc(next.phone_digits)}">COPY</button>
+        <span class="digits" data-copy="${esc(next.phone_dial)}">${esc(next.phone_dial)}</span>
+        <button class="copybtn" data-act="copy" data-copy="${esc(next.phone_dial)}">COPY</button>
       </div>`:''}
     </div>
     ${next&&next.manager_name?`<div class="askinline">Ask if ${esc(next.manager_name)}
@@ -1097,8 +1107,8 @@ function row(l,n,calling){
       ${ask(l)}
       ${l.opener?`<div class="opener">${esc(l.opener)}</div>`:''}</td>
     <td><div class="phcell">
-      <span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span>
-      <button class="copybtn" data-act="copy" data-copy="${esc(l.phone_digits)}">COPY</button>
+      <span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>
+      <button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button>
     </div></td>
     <td title="${esc(w.hint||'')}">${calling
       ? `<span class="${w.good_now?'win-good':shut?'win-shut':'win-bad'}">${
@@ -1455,8 +1465,8 @@ function pipeRow(l,n){
       ${sub?`<div class="sub">${esc(sub)}</div>`:''}</td>
     <td><span class="st st-${esc(l.status)}">${esc(l.status.toUpperCase())}</span></td>
     <td>${l.phone_digits
-      ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span>`
-        +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_digits)}">COPY</button></div>`
+      ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`
+        +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button></div>`
       : '<span class="muted">no number</span>'}</td>
     <td><span class="${tone}">${esc(stands)}</span><span class="muted">${esc(tries)}</span></td>
     <td><div class="acts">
@@ -1604,14 +1614,38 @@ async function pipeDrawer(dr,e){
   }
 }
 
-$('pipeAdd').onclick=async()=>{
-  const name=prompt('Bar name?'); if(!name) return;
+// A bare name-only prompt() used to be the whole "Add a lead" flow, which
+// left every real field ("fill the rest in with Edit") for later. This
+// creates the lead AND logs the call that prompted adding it, in the same
+// step, through the same AI reader /debrief uses on an existing lead — so
+// a call to a bar that was never in the pipeline has somewhere to go
+// besides typed-in-by-hand.
+$('pipeAdd').onclick=()=>{
+  const box=$('pipeAddPanel');
+  box.classList.toggle('hide');
+  if(!box.classList.contains('hide')){
+    $('pipeAddText').value=''; $('pipeAddResult').className='applied hide';
+    $('pipeAddText').focus();
+  }
+};
+$('pipeAddCancel').onclick=()=>{ $('pipeAddPanel').classList.add('hide'); };
+$('pipeAddSave').onclick=async()=>{
+  const text=$('pipeAddText').value.trim();
+  if(!text) return;
+  const btn=$('pipeAddSave'); btn.disabled=true; btn.textContent='Adding…';
+  const box=$('pipeAddResult'); box.className='applied hide';
   try{
-    await api('/leads',{method:'POST',body:JSON.stringify({name})});
-    toast('Added — fill the rest in with Edit');
+    const r=await api('/leads/quick-add',{method:'POST',body:JSON.stringify({text})});
+    box.className='applied';
+    box.textContent=`Added ${r.lead.name}${r.applied.status?' — '+r.applied.status:''}.`
+      +(r.applied.followup_date?` Follow up ${r.applied.followup_date}.`:'');
+    toast('Lead added', r.undo_id);
+    $('pipeAddText').value='';
     PIPE.q=''; $('pipeSearch').value=''; PIPE.offset=0;
     await loadPipeline();
-  }catch(e){ toast(e.message); }
+  }catch(err){
+    box.className='applied err'; box.textContent=err.message;
+  }finally{ btn.disabled=false; btn.textContent='Add lead'; }
 };
 
 /* ── follow-ups ───────────────────────────────────────────────────────── */
@@ -1622,7 +1656,7 @@ function miniTable(list){
     <tbody>${list.map((l,i)=>`<tr data-id="${esc(l.id)}">
       <td class="rownum">${i+1}</td>
       <td class="nm">${esc(l.name)}</td>
-      <td><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span></td>
+      <td><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span></td>
       <td>${l.attempts?`<span class="tries">${l.attempts}</span>`:'<span class="muted">—</span>'}</td>
       <td class="muted">${esc(l.followup_date||'')}</td>
       <td><div class="acts"><button class="go" data-act="log">Log call</button>
