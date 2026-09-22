@@ -462,7 +462,9 @@ def apple_sign_in(request: AppleSignInRequest):
     with get_db() as conn:
         cursor = conn.cursor()
 
-        user_columns = """id, email, name, subscription_status, subscription_tier,
+        # business_name comes back on purpose: the client shows its
+        # "what's your bar called?" step only when this is still empty.
+        user_columns = """id, email, name, business_name, subscription_status, subscription_tier,
                           trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at"""
 
         # 1. Returning Apple user.
@@ -530,6 +532,7 @@ def apple_sign_in(request: AppleSignInRequest):
                     "id": user_id,
                     "email": email,
                     "name": request.name,
+                    "business_name": request.business_name,
                     "subscription_status": "trial",
                     "subscription_tier": "starter",
                     "trial_ends_at": trial_ends,
@@ -565,6 +568,7 @@ def apple_sign_in(request: AppleSignInRequest):
                 "id": row["id"],
                 "email": row["email"],
                 "name": row["name"] or request.name,
+                "business_name": row["business_name"] or request.business_name,
                 "subscription_status": row["subscription_status"] or "trial",
                 "subscription_tier": row["subscription_tier"] or "starter",
                 "trial_ends_at": row["trial_ends_at"],
