@@ -1440,6 +1440,19 @@ async function loadPipeline(){
     </div>`;
 }
 
+// What a touch actually was, not just that one happened. A status of
+// CONTACTED covers a voicemail, a gatekeeper, and an actual conversation
+// alike (see log_touch in crm.py — all three land the lead on "contacted"),
+// so the status badge alone can't answer "did I actually reach anyone?".
+// last_outcome always carries the real answer; it just wasn't being shown
+// anywhere before this.
+const OUTCOME_LABEL = {
+  answered: 'Answered', voicemail: 'Voicemail', gatekeeper: 'Manager out',
+  not_interested: 'Not interested', callback: 'Asked for a callback',
+  logged: 'Logged',
+};
+const outcomeLabel = o => o ? (OUTCOME_LABEL[o] || o) : '';
+
 function pipeRow(l,n){
   /* Two lines per row instead of eight columns. Everything that was a column
      of its own — email, town, who to ask for — is still here, just stacked
@@ -1451,10 +1464,17 @@ function pipeRow(l,n){
   const sub=[who, l.email, l.loc].filter(Boolean).join(' · ');
 
   // The one thing that matters per row: what happens next, or that nothing is.
+  // A bare date used to be the whole answer — "last touched 2026-09-22" says
+  // a call happened, not whether anyone was reached, which is the actual
+  // question a CONTACTED badge leaves open.
+  const outcome=outcomeLabel(l.last_outcome);
   let stands, tone='muted';
-  if(l.followup_date){ stands=`call back ${l.followup_date}`; tone='win-good'; }
+  if(l.followup_date){
+    stands=`call back ${l.followup_date}`+(outcome?` — ${outcome}`:'');
+    tone='win-good';
+  }
   else if(l.queued_email_at){ stands='email queued'; tone='muted'; }
-  else if(touch){ stands=`last touched ${touch}`; tone='muted'; }
+  else if(touch){ stands=outcome?`${outcome} · ${touch}`:`last touched ${touch}`; tone='muted'; }
   else { stands='never contacted'; tone='muted'; }
   const tries=l.attempts?` · ${l.attempts} tr${l.attempts>1?'ies':'y'}`:'';
 
@@ -1655,7 +1675,8 @@ function miniTable(list){
     <thead><tr><th></th><th>BAR</th><th>PHONE</th><th>TRY</th><th>DUE</th><th>ACTIONS</th></tr></thead>
     <tbody>${list.map((l,i)=>`<tr data-id="${esc(l.id)}">
       <td class="rownum">${i+1}</td>
-      <td class="nm">${esc(l.name)}</td>
+      <td class="nm">${esc(l.name)}
+        ${l.last_outcome?`<div class="sub">${esc(outcomeLabel(l.last_outcome))}</div>`:''}</td>
       <td><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span></td>
       <td>${l.attempts?`<span class="tries">${l.attempts}</span>`:'<span class="muted">—</span>'}</td>
       <td class="muted">${esc(l.followup_date||'')}</td>
