@@ -492,8 +492,51 @@ def _cadence(attempt: int, outcome: Optional[str]) -> tuple[Optional[int], Optio
     return CADENCE_DAYS[min(attempt - 1, len(CADENCE_DAYS) - 1)], None
 
 
+# What the operator sees instead of new/contacted/warm/dead. The status column
+# stays (the generator, the cadence and the call-list filter all key off it);
+# this is the plain-English reading of status + what actually happened last.
+# "Contacted" used to cover a voicemail and a real conversation alike.
+STAGE_LABELS = {
+    "todo": "Not called yet",
+    "voicemail": "Voicemail left",
+    "staff": "Manager wasn't in",
+    "talked": "Talked to them",
+    "callback": "Call back",
+    "emailed": "Emailed",
+    "called": "Called",
+    "signed": "Signed up",
+    "no": "Not interested",
+    "gaveup": "No answer — stopped",
+}
+
+# Pipeline tabs → the statuses behind them.
+STAGE_GROUPS = {
+    "active": ("contacted", "warm"),
+    "todo": ("new",),
+    "signed": ("won",),
+    "closed": ("dead",),
+}
+
+
+def friendly_stage(status: Optional[str], last_outcome: Optional[str],
+                   touched: bool) -> str:
+    if status == "won":
+        return "signed"
+    if status == "dead":
+        return "gaveup" if last_outcome in ("voicemail", "gatekeeper") else "no"
+    if status == "warm" or last_outcome == "callback":
+        return "callback"
+    if status == "new" and not touched:
+        return "todo"
+    return {"voicemail": "voicemail", "gatekeeper": "staff", "answered": "talked",
+            "emailed": "emailed", "not_interested": "no"}.get(last_outcome or "", "called")
+
+
 def _lead_row(row) -> dict:
     lead = {k: row[k] for k in LEAD_COLUMNS}
+    lead["stage"] = friendly_stage(lead.get("status"), lead.get("last_outcome"),
+                                   bool(lead.get("last_touch_at")))
+    lead["stage_label"] = STAGE_LABELS[lead["stage"]]
     lead["phone_digits"] = phone_digits(lead.get("phone"))
     lead["phone_pretty"] = format_us_phone(lead["phone_digits"])
     # What the COPY button and click-to-copy actually hand the clipboard.
@@ -548,7 +591,7 @@ def _blank_to_none(value):
 
 @crm_router.get("/leads", response_model=dict)
 def list_leads(status: Optional[str] = None, q: Optional[str] = None,
-               limit: int = 200, offset: int = 0,
+               limit: int = 200, offset: int = 0, stage: Optional[str] = None,
                _: bool = Depends(require_crm_key)):
     """The whole pipeline: every lead, at every stage, searchable.
 
@@ -566,9 +609,16 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
+    if stage is not None and stage not in STAGE_GROUPS:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_stage",
+            "message": f"stage must be one of {', '.join(STAGE_GROUPS)}"})
+
     where, params = ["1=1"], []
     if status:
         where.append("status = %s"); params.append(status)
+    if stage:
+        where.append("status = ANY(%s)"); params.append(list(STAGE_GROUPS[stage]))
     if q and q.strip():
         # Name, town, contact, email or phone — whichever the operator happens
         # to remember. Digits match the phone with its punctuation ignored, so
@@ -610,7 +660,9 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     return {"leads": leads, "count": len(leads), "matching": matching,
             "offset": offset, "limit": limit,
             "counts": {**{k: by_status.get(k, 0) for k in VALID_STATUSES},
-                       "all": everything}}
+                       "all": everything},
+            "stage_counts": {g: sum(by_status.get(s, 0) for s in sts)
+                             for g, sts in STAGE_GROUPS.items()}}
 
 
 @crm_router.get("/leads/{lead_id}", response_model=dict)
@@ -1566,12 +1618,22 @@ def _draft_system(lead, sender_name: str) -> str:
         about.append(f". Something true about the venue, from their own website: "
                      f"{lead['opener']}")
 
+    # What has already happened with them, so "follow up on today's call"
+    # can reference the actual call. The salesperson's own log — facts about
+    # the conversation, not about the product.
+    history = ""
+    notes = (lead.get("notes") or "").strip()
+    if notes:
+        recent = "\n".join(notes.splitlines()[-6:])[-1500:]
+        history = ("\nWhat has happened with them so far (the salesperson's own log, "
+                   "newest last):\n" + recent + "\n")
+
     return f"""You write a single short sales email for a salesperson to send from their own mailbox.
 
 {chr(10).join(facts)}
 
 {' '.join(about)}.
-
+{history}
 The sender is {sender_name}. Sign off as them.
 
 Return ONLY a JSON object: {{"subject": "...", "body": "..."}}
@@ -2194,7 +2256,7 @@ def recent_touches(limit: int = 15, _: bool = Depends(require_crm_key)):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT u.id, u.lead_id, u.action, u.created_at, u.restored_at,
-                   l.name, l.loc, l.phone, l.status, l.last_outcome
+                   l.name, l.loc, l.phone, l.status, l.last_outcome, l.last_touch_at
               FROM crm_lead_undo u
               JOIN crm_leads l ON l.id = u.lead_id
              WHERE u.restored_at IS NULL
@@ -2204,6 +2266,8 @@ def recent_touches(limit: int = 15, _: bool = Depends(require_crm_key)):
         rows = [dict(r) for r in cursor.fetchall()]
     for row in rows:
         row["phone_digits"] = phone_digits(row.get("phone"))
+        row["stage_label"] = STAGE_LABELS[friendly_stage(
+            row.get("status"), row.get("last_outcome"), bool(row.get("last_touch_at")))]
     return {"touches": rows, "count": len(rows)}
 
 
@@ -3092,11 +3156,14 @@ ANTHROPIC_VERSION = "2023-06-01"
 DEBRIEF_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 
-def _ask_claude(system: str, user: str, max_tokens: int = 400) -> dict:
+def _ask_claude(system: str, user: str, max_tokens: int = 400,
+                history: Optional[list] = None, temperature: float = 0) -> dict:
     """One JSON answer from Claude. Raises HTTPException when unusable.
 
-    Shared by the call-notes reader and the email drafter — one place that
-    knows the headers, the prefill trick and what each failure should say.
+    Shared by every AI feature in the CRM — one place that knows the headers,
+    the prefill trick and what each failure should say. `history` is prior
+    turns ({"role": "user"|"assistant", "content": str}) for the assistant
+    and the practice-call roleplay.
     """
     import json as _json
 
@@ -3119,9 +3186,10 @@ def _ask_claude(system: str, user: str, max_tokens: int = 400) -> dict:
             json={
                 "model": DEBRIEF_MODEL,
                 "max_tokens": max_tokens,
-                "temperature": 0,
+                "temperature": temperature,
                 "system": system,
                 "messages": [
+                    *(history or []),
                     {"role": "user", "content": user},
                     # Prefilling the opening brace is what makes the reply JSON
                     # without a tool definition: the model can only continue an
@@ -3396,9 +3464,30 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
     address off it, the same way the lead generator does.
     """
     extracted = _quick_add_extract(data.text)
+    return _create_lead_from_call(extracted, data.text, data.name)
 
-    name = _clean(data.name, 200) or _clean(extracted.get("name"), 200) \
-        or _name_from_text(data.text)
+
+def _call_details(extracted: dict, website: Optional[str] = None,
+                  found_via: Optional[str] = None) -> list:
+    """Everything the model found that has no column of its own, labelled —
+    "contacted" alone tells the operator nothing when they come back to it."""
+    return [f"{label}: {val}" for label, val in [
+        ("Decision makers", _clean(extracted.get("decision_makers"))),
+        ("Spoke to", _clean(extracted.get("contact"))),
+        ("Next step", _clean(extracted.get("next_step"))),
+        ("Address", _clean(extracted.get("address"))),
+        ("Other phones", _clean(extracted.get("other_phones"))),
+        ("Website", website),
+        ("Email found on", found_via),
+    ] if val]
+
+
+def _create_lead_from_call(extracted: dict, text: str,
+                           name_override: Optional[str] = None) -> dict:
+    """A new lead with its first call already logged. Shared by quick-add and
+    /log-call when the call matched nothing already in the CRM."""
+    name = _clean(name_override, 200) or _clean(extracted.get("name"), 200) \
+        or _name_from_text(text)
     if not name:
         raise HTTPException(status_code=422, detail={
             "error": "no_name",
@@ -3421,17 +3510,7 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
         except Exception as exc:
             print(f"[crm] quick-add email lookup failed: {exc}", flush=True)
 
-    # Everything the model found that has no column of its own goes into the
-    # notes, labelled — "contacted" alone tells the operator nothing.
-    details = [f"{label}: {val}" for label, val in [
-        ("Decision makers", _clean(extracted.get("decision_makers"))),
-        ("Spoke to", _clean(extracted.get("contact"))),
-        ("Next step", _clean(extracted.get("next_step"))),
-        ("Address", _clean(extracted.get("address"))),
-        ("Other phones", _clean(extracted.get("other_phones"))),
-        ("Website", website),
-        ("Email found on", found_via),
-    ] if val]
+    details = _call_details(extracted, website, found_via)
 
     today = _today()
     now = now_iso()
@@ -3447,7 +3526,7 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
         lead = cursor.fetchone()
 
         updated, applied, undo_id, counters = _apply_call_notes(
-            cursor, lead, extracted, data.text, "call", today, now)
+            cursor, lead, extracted, text, "call", today, now)
         conn.commit()
 
     if found_via:
@@ -3456,6 +3535,604 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
         applied["email_lookup"] = "couldn't find an address on their site"
     return {"lead": _lead_row(updated), "applied": applied, "undo_id": undo_id,
             "counters": _counters_row(counters) if counters else None}
+
+
+# ============== LOG ANY CALL ==============
+#
+# One box for "I just got off the phone". The operator shouldn't have to know
+# whether the bar was already in the CRM, find it, and pick the right button:
+# they type what happened, the model reads it, and this either updates the lead
+# on screen, finds the lead it was about (same phone, then same name), or makes
+# a new one. Everything goes through the same _apply_call_notes write path.
+
+LOG_CALL_SYSTEM = QUICK_ADD_SYSTEM.replace(
+    "about a call they just made — to a bar or restaurant that ISN'T already in the CRM — into a new lead record.",
+    "about a call they just made to a bar or restaurant into CRM fields.",
+) + """- "outcome" matters most. Nobody picked up / left a message -> "voicemail". Staff answered but the decision maker wasn't there -> "gatekeeper". Never use "answered" unless they actually spoke with someone about the product.
+"""
+
+
+class LogCall(BaseModel):
+    text: str = Field(min_length=1, max_length=6000)
+    # The lead on screen, when there is one. Absent means "work out who".
+    lead_id: Optional[str] = Field(default=None, max_length=64)
+
+
+_OUTCOME_WORDS = [
+    ("not_interested", r"not interested|no thanks|don'?t call|hung up|do not call"),
+    ("voicemail", r"voice ?mail|\bvm\b|left (a )?message|no answer|didn'?t (pick|answer)|nobody (picked|answered)|rang out"),
+    ("callback", r"call (me |them )?back|callback|call again|interested|demo|send (me|them) (info|an email)"),
+    ("gatekeeper", r"(manager|owner|gm)\b.{0,20}\b(not|isn'?t|wasn'?t|out|off|away)|bartender|spoke to (staff|someone)"),
+]
+
+
+def guess_outcome(text: str) -> str:
+    """A keyword reading of call notes for when the model is unavailable, so
+    logging a call never depends on an API key. Order matters: "not
+    interested" contains "interested"."""
+    low = (text or "").lower()
+    for outcome, pattern in _OUTCOME_WORDS:
+        if re.search(pattern, low):
+            return outcome
+    return "answered"
+
+
+def _extract_call(text: str) -> dict:
+    try:
+        return _ask_claude(LOG_CALL_SYSTEM, text, max_tokens=700)
+    except HTTPException as exc:
+        if (exc.detail or {}).get("error") not in ("ai_unavailable", "ai_unreadable"):
+            raise
+        print("[crm] log-call: AI unavailable, falling back to keywords", flush=True)
+        return {"outcome": guess_outcome(text), "summary": text.strip()}
+
+
+def _match_lead(cursor, name: Optional[str], phone: Optional[str],
+                loc: Optional[str]):
+    """(row, why) for the lead these call notes are about, or (None, None).
+
+    Phone first — it's the one thing that can't be spelled two ways. Then an
+    exact name, narrowed by town when there's more than one. An ambiguous name
+    matches nothing: a new lead is recoverable, notes on the wrong bar aren't.
+    """
+    digits = normalize_us_phone(phone) if phone else None
+    if digits:
+        cursor.execute("""
+            SELECT * FROM crm_leads
+             WHERE RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = %s
+             ORDER BY updated_at DESC LIMIT 1
+        """, (digits,))
+        row = cursor.fetchone()
+        if row:
+            return row, "same phone number"
+    name = (name or "").strip().lower()
+    if not name:
+        return None, None
+    cursor.execute("""
+        SELECT * FROM crm_leads WHERE LOWER(TRIM(name)) = %s
+         ORDER BY updated_at DESC LIMIT 10
+    """, (name,))
+    rows = cursor.fetchall()
+    if len(rows) > 1 and loc:
+        city = loc.split(",")[0].strip().lower()
+        rows = [r for r in rows if city and city in (r.get("loc") or "").lower()]
+    if len(rows) == 1:
+        return rows[0], "same name"
+    return None, None
+
+
+@crm_router.post("/log-call", response_model=dict)
+def log_call(data: LogCall, _: bool = Depends(require_crm_key)):
+    """Type what happened on a call — any call — and it lands in the right place."""
+    extracted = _extract_call(data.text)
+    today = _today()
+    now = now_iso()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        lead, reason = None, None
+        if data.lead_id:
+            cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (data.lead_id,))
+            lead = cursor.fetchone()
+            if not lead:
+                raise HTTPException(status_code=404, detail={
+                    "error": "not_found", "message": "Lead not found"})
+            reason = "the lead on screen"
+        else:
+            lead, reason = _match_lead(cursor, extracted.get("name"),
+                                       extracted.get("phone"), extracted.get("loc"))
+            if lead:
+                cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (lead["id"],))
+                lead = cursor.fetchone()
+
+        if lead:
+            details = _call_details(extracted)
+            if details:
+                base = (extracted.get("summary") or data.text).strip()
+                extracted = {**extracted, "summary": f"{base} — {'; '.join(details)}"}
+            updated, applied, undo_id, counters = _apply_call_notes(
+                cursor, lead, extracted, data.text, "call", today, now)
+            conn.commit()
+            return {"lead": _lead_row(updated), "applied": applied, "undo_id": undo_id,
+                    "matched": "existing", "match_reason": reason,
+                    "counters": _counters_row(counters) if counters else None}
+
+    result = _create_lead_from_call(extracted, data.text)
+    result["matched"] = "new"
+    return result
+
+
+@crm_router.post("/leads/{lead_id}/find-email", response_model=dict)
+def find_lead_email(lead_id: str, _: bool = Depends(require_crm_key)):
+    """Look for an address on the venue's own website and save it if found —
+    the Email button's answer to a lead with no email on file."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+        row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "Lead not found"})
+    if row.get("email"):
+        return {"email": row["email"], "found_on": None, "already_had": True}
+
+    from leadgen import find_email_on_site, find_venue_website
+    m = re.search(r"Website:\s*(https?://\S+)", row.get("notes") or "")
+    website = m.group(1) if m else None
+    try:
+        website = website or find_venue_website(row["name"], row.get("loc"))
+        email, page = find_email_on_site(website) if website else (None, None)
+    except Exception as exc:
+        print(f"[crm] find-email failed for {lead_id}: {exc}", flush=True)
+        email, page = None, None
+    if not email:
+        return {"email": None, "website": website,
+                "message": ("Their website doesn't list an email." if website
+                            else "Couldn't find a website for them.")}
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE crm_leads SET email = %s, email_kind = %s, updated_at = %s,
+                   notes = COALESCE(notes || E'\\n', '') || %s
+             WHERE id = %s AND (email IS NULL OR email = '')
+        """, (email, _email_kind(email), now_iso(),
+              f"[{_today()}] found email {email} on {page}", lead_id))
+        conn.commit()
+    return {"email": email, "found_on": page, "website": website}
+
+
+def _email_kind(email: str) -> Optional[str]:
+    try:
+        from contacts import email_kind
+        return email_kind(email)
+    except Exception:
+        return None
+
+
+# ============== THE ASSISTANT ==============
+#
+# "Who did I call yesterday", "who should I call back", "what's my next
+# move". The model gets a snapshot of the CRM with every time already in the
+# operator's clock (they're in Manila; "yesterday" is their yesterday), and
+# answers only from it. Lead ids come back so the page can put the phone
+# number and a button right under the answer instead of making them go find it.
+
+ASSISTANT_SYSTEM = """You are the assistant inside a one-person sales CRM. The user sells 86'd (an iPhone app that counts bar inventory by camera and writes the distributor order) by cold-calling independent US bars and restaurants. They have ADHD: be short, concrete and ordered — the single most important thing first. No filler, no praise, no pep talk.
+
+You get a SNAPSHOT of their CRM below. Every time in it is already in the USER's local time, and "today"/"yesterday" mean the user's calendar days as given in the snapshot.
+
+Answer ONLY from the snapshot. Never invent a lead, a call, a number, a date or an outcome. If the snapshot can't answer, say what's missing in one line.
+
+Return ONLY a JSON object: {"answer": "...", "lead_ids": ["..."]}
+- answer: plain text, under ~120 words. Use "- " at the start of a line for list items. No markdown headings, no bold, no emoji.
+- lead_ids: the [id:...] values of leads your answer tells them to act on or names, in the order to act, at most 8. Empty list if none.
+- "What's my next move" / "what should I do": give ONE next action first (who, and why), then at most two more.
+- "Who should I call back": overdue first, then due today, then interested leads with no date.
+- When summarising calls, group by outcome (talked / voicemail / manager out / not interested) and name each bar."""
+
+
+class AskTurn(BaseModel):
+    q: str = Field(max_length=1000)
+    a: str = Field(max_length=4000)
+
+
+class Ask(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    history: list[AskTurn] = Field(default_factory=list, max_length=6)
+
+
+def _to_operator(iso: Optional[str]) -> Optional[datetime]:
+    if not iso:
+        return None
+    try:
+        when = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(_operator_tz())
+
+
+def _last_note(notes: Optional[str], limit: int = 220) -> str:
+    lines = [l for l in (notes or "").splitlines() if l.strip()]
+    return lines[-1].strip()[:limit] if lines else ""
+
+
+OUTCOME_WORDS = {"answered": "talked", "voicemail": "voicemail left",
+                 "gatekeeper": "manager wasn't in", "not_interested": "not interested",
+                 "callback": "asked for a call back", "emailed": "emailed",
+                 "logged": "logged"}
+
+
+def format_assistant_context(now_op: datetime, touches: list, followups: list,
+                             interested: list, stage_counts: dict, done_today: int,
+                             signups: list) -> tuple[str, set]:
+    """The snapshot the assistant reads, and the lead ids it is allowed to cite.
+    Pure, so it can be tested without a database or a model."""
+    ids: set = set()
+    today = now_op.date()
+
+    def day_word(d) -> str:
+        delta = (today - d).days
+        return {0: "today", 1: "yesterday"}.get(delta, d.strftime("%a %b %-d"))
+
+    def lead_ref(r) -> str:
+        ids.add(r["id"])
+        where = f" ({r['loc']})" if r.get("loc") else ""
+        return f"{r['name']}{where} [id:{r['id']}]"
+
+    out = [f"RIGHT NOW for the user: {now_op.strftime('%A %b %-d %Y, %-I:%M%p').lower()} "
+           f"({OPERATOR_TZ}). Today = {today.isoformat()}, "
+           f"yesterday = {(today - timedelta(days=1)).isoformat()}.",
+           f"Calls logged today: {done_today}.",
+           "PIPELINE: " + ", ".join(f"{STAGE_GROUP_WORDS[k]} {v}" for k, v in stage_counts.items()),
+           ""]
+
+    out.append("CALLS AND EMAILS, LAST 14 DAYS (newest first):")
+    seen_note = set()
+    if not touches:
+        out.append("- none")
+    for t in touches:
+        when = _to_operator(t.get("at"))
+        stamp = f"{day_word(when.date())} {when.strftime('%-I:%M%p').lower()}" if when else "?"
+        what = OUTCOME_WORDS.get(t.get("outcome") or "", t.get("outcome") or "logged")
+        line = (f"- {stamp} · {t.get('kind')} · {what}"
+                + (f" · attempt {t['attempt']}" if t.get("kind") == "call" and t.get("attempt") else "")
+                + f" · {lead_ref(t)} · now: {STAGE_LABELS[friendly_stage(t.get('status'), t.get('last_outcome'), True)]}")
+        if t.get("followup_date") and t.get("status") not in ("won", "dead"):
+            line += f" · next call {t['followup_date']}"
+        if t["id"] not in seen_note and t.get("notes"):
+            seen_note.add(t["id"])
+            line += f" · last note: {_last_note(t['notes'])}"
+        out.append(line)
+
+    out += ["", "FOLLOW-UPS BOOKED (open leads with a call-back date, soonest first):"]
+    if not followups:
+        out.append("- none")
+    for r in followups:
+        d = r.get("followup_date") or ""
+        tag = ("OVERDUE" if d < today.isoformat() else
+               "DUE TODAY" if d == today.isoformat() else "upcoming")
+        out.append(f"- {d} {tag} · {lead_ref(r)} · {STAGE_LABELS[friendly_stage(r.get('status'), r.get('last_outcome'), True)]}"
+                   + (f" · phone {r['phone']}" if r.get("phone") else "")
+                   + (f" · last note: {_last_note(r.get('notes'))}" if r.get("notes") else ""))
+
+    out += ["", "INTERESTED (asked for a call back or more info), any date:"]
+    if not interested:
+        out.append("- none")
+    for r in interested:
+        out.append(f"- {lead_ref(r)}" + (f" · call back {r['followup_date']}" if r.get("followup_date") else " · no date set")
+                   + (f" · last note: {_last_note(r.get('notes'))}" if r.get("notes") else ""))
+
+    out += ["", "APP SIGNUPS, LAST 14 DAYS:"]
+    if not signups:
+        out.append("- none")
+    for u in signups:
+        when = _to_operator(u.get("created_at"))
+        out.append(f"- {when.date().isoformat() if when else '?'} · "
+                   f"{u.get('business_name') or u.get('name') or u.get('email')}"
+                   f" · {u.get('subscription_status') or 'trial'}")
+    return "\n".join(out), ids
+
+
+STAGE_GROUP_WORDS = {"active": "in progress", "todo": "not called yet",
+                     "signed": "signed up", "closed": "not interested/stopped"}
+
+
+def _assistant_context(cursor) -> tuple[str, set]:
+    now_op = datetime.now(_operator_tz())
+    since = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+    cursor.execute("""
+        SELECT t.at, t.kind, t.outcome, t.attempt,
+               l.id, l.name, l.loc, l.status, l.last_outcome, l.followup_date, l.notes
+          FROM crm_touches t JOIN crm_leads l ON l.id = t.lead_id
+         WHERE t.at >= %s AND COALESCE(t.outcome, '') <> 'undone'
+         ORDER BY t.at DESC LIMIT 120
+    """, (since,))
+    touches = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("""
+        SELECT id, name, loc, status, last_outcome, followup_date, phone, notes
+          FROM crm_leads
+         WHERE followup_date IS NOT NULL AND status NOT IN ('won', 'dead')
+         ORDER BY followup_date ASC LIMIT 40
+    """)
+    followups = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("""
+        SELECT id, name, loc, status, last_outcome, followup_date, notes
+          FROM crm_leads WHERE status = 'warm'
+         ORDER BY updated_at DESC LIMIT 25
+    """)
+    interested = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("SELECT status, COUNT(*) AS n FROM crm_leads GROUP BY status")
+    by_status = {r["status"]: r["n"] for r in cursor.fetchall()}
+    stage_counts = {g: sum(by_status.get(s, 0) for s in sts) for g, sts in STAGE_GROUPS.items()}
+    cursor.execute("""
+        SELECT COUNT(*) AS n FROM crm_leads
+         WHERE SUBSTRING(COALESCE(last_touch_at, ''), 1, 10) = %s
+    """, (_today(),))
+    done_today = cursor.fetchone()["n"]
+    signups = []
+    try:
+        cursor.execute("""
+            SELECT created_at, business_name, name, email, subscription_status
+              FROM users WHERE deleted_at IS NULL AND created_at >= %s
+               AND NOT (LOWER(email) ~ %s)
+             ORDER BY created_at DESC LIMIT 30
+        """, (since, TEST_EMAIL_PATTERN))
+        signups = [dict(r) for r in cursor.fetchall()]
+    except Exception as exc:
+        print(f"[crm] assistant: signups unavailable: {exc}", flush=True)
+    return format_assistant_context(now_op, touches, followups, interested,
+                                    stage_counts, done_today, signups)
+
+
+@crm_router.post("/ask", response_model=dict)
+def ask_assistant(data: Ask, _: bool = Depends(require_crm_key)):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        context, allowed = _assistant_context(cursor)
+
+    history = []
+    for turn in data.history[-4:]:
+        history += [{"role": "user", "content": turn.q},
+                    {"role": "assistant", "content": json.dumps({"answer": turn.a, "lead_ids": []})}]
+    out = _ask_claude(ASSISTANT_SYSTEM + "\n\nSNAPSHOT:\n" + context,
+                      data.question, max_tokens=700, history=history)
+    answer = str(out.get("answer") or "").strip()[:3000] or "I couldn't work that out from the CRM."
+    wanted = [i for i in (out.get("lead_ids") or []) if isinstance(i, str) and i in allowed][:8]
+
+    leads = []
+    if wanted:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM crm_leads WHERE id = ANY(%s)", (wanted,))
+            by_id = {r["id"]: _lead_row(r) for r in cursor.fetchall()}
+        leads = [by_id[i] for i in wanted if i in by_id]
+    return {"answer": answer, "leads": leads}
+
+
+# ============== CALL COACH ==============
+#
+# The thing a cold caller needs mid-call is the next sentence. Common
+# objections are answered instantly from a fixed script (no model round trip
+# with someone waiting on the line); anything else goes to Claude with the
+# product facts and, when there is one, the lead on screen. Practice mode is a
+# roleplay against an AI bar manager with scored feedback at the end.
+#
+# Scripts follow what call-recording research keeps finding: say why you're
+# calling early, own that it's a cold call, answer an objection briefly and
+# then ask a question so they're the one talking.
+
+COMPANY_PRICE = os.getenv("COMPANY_PRICE", "").strip()
+
+
+def _price_line() -> str:
+    if COMPANY_PRICE:
+        return f"It's {COMPANY_PRICE}, and there's a free trial, so you can run a full count with it before paying anything."
+    return "It's a monthly subscription with a free trial, so you can run a full count with it before paying anything."
+
+
+def _sender_first_name() -> str:
+    name = (os.getenv("SPACEMAIL_FROM_NAME") or os.getenv("SPACEMAIL_USER") or "").strip()
+    name = name.split("@")[0].split()[0] if name else ""
+    return name.capitalize() if name else "[your name]"
+
+
+def coach_scripts() -> dict:
+    me = _sender_first_name()
+    openers = [
+        {"id": "permission", "label": "Honest opener",
+         "say": f"Hi, it's {me} with 86'd — this is a cold call. Can I take 30 seconds to tell you why I'm calling, and you can tell me if it's not a fit?",
+         "why": "Owning that it's a cold call disarms people; asking permission gets a yes more often than not."},
+        {"id": "reason", "label": "Reason for the call",
+         "say": "The reason I'm calling — most bars I talk to still count the back bar on a clipboard. We built an iPhone app that counts it with the camera and writes the order to each distributor. How are you doing inventory right now?",
+         "why": "Saying why you're calling early is one of the strongest signals in cold-call research. End on a question."},
+        {"id": "manager", "label": "Asking for the manager",
+         "say": "Hi, quick one — who handles inventory and ordering there? Is that the manager or the owner?",
+         "why": "Asking who owns the job gets you routed instead of screened."},
+    ]
+    objections = [
+        {"id": "not_interested", "label": "Not interested",
+         "say": "Totally fair — I did call out of the blue.",
+         "ask": "Before I let you go, how are you counting inventory right now — paper, or a spreadsheet?"},
+        {"id": "have_system", "label": "We already have a system",
+         "say": "Makes sense, most bars I call have something. The part people usually hate is the hour it takes and then typing the order out — this counts by camera and writes the order to each distributor.",
+         "ask": "How long does your count take right now?"},
+        {"id": "send_email", "label": "Just send me an email",
+         "say": "Happy to — and so I send something worth reading, can I ask one thing?",
+         "ask": "What's the biggest pain with inventory for you right now? And what's the best address?"},
+        {"id": "price", "label": "How much is it?",
+         "say": _price_line(),
+         "ask": "How often are you counting now — weekly?"},
+        {"id": "busy", "label": "I'm busy right now",
+         "say": "No problem, I'll be quick another time.",
+         "ask": "When's better — before you open tomorrow, or the afternoon lull?"},
+        {"id": "manager_out", "label": "Manager isn't here",
+         "say": "No worries at all.",
+         "ask": "What's their name, and when are they usually in? I'll call back then."},
+        {"id": "too_small", "label": "We're too small",
+         "say": "Smaller bars usually feel it most — every bottle that walks or gets over-ordered is real money, and there's nobody spare to count.",
+         "ask": "Who does the count now, you?"},
+        {"id": "other_app", "label": "We use another app",
+         "say": "Good — so you already count regularly.",
+         "ask": "What do you like about it, and what's still a pain? Does it build the distributor order for you?"},
+        {"id": "call_later", "label": "Call back later",
+         "say": "Sure, I'll put it in right now.",
+         "ask": "What day and time works best?"},
+        {"id": "how_number", "label": "How'd you get this number?",
+         "say": "It's on your listing — I call independent bars because they're the ones still counting by hand.",
+         "ask": "Are you the one doing inventory there, or someone else?"},
+    ]
+    return {"openers": openers, "objections": objections}
+
+
+@crm_router.get("/coach", response_model=dict)
+def coach(_: bool = Depends(require_crm_key)):
+    return {**coach_scripts(), "ai": bool(os.getenv("ANTHROPIC_API_KEY")),
+            "personas": [{"id": i, "label": p["label"]} for i, p in enumerate(PRACTICE_PERSONAS)]}
+
+
+def _coach_facts() -> str:
+    facts = COMPANY_BLURB or DEFAULT_BLURB
+    if COMPANY_PRICE:
+        facts += f" Price: {COMPANY_PRICE}."
+    return facts
+
+
+COACH_SYSTEM = """You coach a salesperson who is ON A LIVE COLD CALL to a bar or restaurant right now. They type what the other person just said; you give them the next thing to say.
+
+The product: {facts}
+
+Return ONLY a JSON object: {{"say": "...", "ask": "...", "tip": "..."}}
+- say: one or two short spoken sentences. Acknowledge what they said, then answer it plainly. Sounds like a person, not a script. No jargon.
+- ask: one short open question that gets THEM talking about how they count inventory or order today, or books the next step.
+- tip: at most 12 words of coaching (e.g. "Pause after the question — let them answer.").
+Rules: NEVER invent a price, a statistic, a customer, a feature or a promise not in the product description. If they ask something you can't answer from the description, the say line offers to find out and follow up by email."""
+
+
+class CoachAsk(BaseModel):
+    said: str = Field(min_length=1, max_length=1000)
+    lead_id: Optional[str] = Field(default=None, max_length=64)
+
+
+@crm_router.post("/coach/answer", response_model=dict)
+def coach_answer(data: CoachAsk, _: bool = Depends(require_crm_key)):
+    user = f"They just said: \"{data.said}\""
+    if data.lead_id:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name, loc, contact, notes FROM crm_leads WHERE id = %s",
+                           (data.lead_id,))
+            row = cursor.fetchone()
+        if row:
+            user = (f"The call is to {row['name']}" + (f" in {row['loc']}" if row.get("loc") else "")
+                    + (f", speaking with {row['contact']}" if row.get("contact") else "")
+                    + (f". Earlier notes: {_last_note(row.get('notes'), 400)}" if row.get("notes") else "")
+                    + ".\n\n" + user)
+    out = _ask_claude(COACH_SYSTEM.format(facts=_coach_facts()), user, max_tokens=300)
+    return {k: str(out.get(k) or "").strip()[:500] for k in ("say", "ask", "tip")}
+
+
+PRACTICE_PERSONAS = [
+    {"label": "Dan — GM of a busy sports bar, rushed",
+     "who": "Dan, the general manager of a busy sports bar. You're rushed and a bit short. You count on a clipboard every Sunday night and hate it, but you're skeptical of apps and salespeople."},
+    {"label": "Maria — wine bar owner, 'send me an email'",
+     "who": "Maria, owner of a small neighbourhood wine bar. Polite but guarded; your reflex is 'just send me an email'. You do inventory yourself on a spreadsheet and it takes most of Monday morning."},
+    {"label": "Tony — dive bar manager, 'our spreadsheet is fine'",
+     "who": "Tony, manager of a dive bar. You think your spreadsheet works fine and you don't see the problem. You'll only get curious if they ask good questions about how long it takes or what goes missing."},
+    {"label": "Priya — cocktail bar owner, worried about price and setup",
+     "who": "Priya, owner of a craft cocktail bar with a big back bar. You're genuinely interested but worried about price and how long setup takes, and you ask pointed questions."},
+]
+
+
+PRACTICE_SYSTEM = """Roleplay. You are {who} You're answering the phone at your bar and a salesperson is cold-calling you about 86'd, an iPhone app that counts bar inventory by camera and writes distributor orders.
+
+Stay fully in character. Reply with what you'd say out loud: 1-3 short sentences, natural spoken language, no stage directions.
+Be realistic — push back the way a real busy bar person does. Warm up only if they earn it: a clear reason for calling, respect for your time, good questions about how you do things now. If they ask for a clear next step and you've warmed up, agree to one. If they're pushy or ramble, get shorter and try to end the call.
+
+Return ONLY a JSON object: {{"reply": "...", "hung_up": false}} — set hung_up true only if you end the call."""
+
+
+PRACTICE_FEEDBACK_SYSTEM = """You review a practice cold call. The salesperson sells 86'd (iPhone app: counts bar inventory by camera, writes distributor orders) to bar managers. In the transcript, SALESPERSON is the trainee and BAR is the prospect.
+
+Judge them on what call-recording research says works: stating the reason for the call early, being honest that it's a cold call, asking open questions about how they do things now, letting the prospect talk, handling objections briefly and turning them into a question, and asking for a specific next step.
+
+Return ONLY a JSON object: {"score": 1-10, "went_well": ["..."], "try_next": ["..."], "better_line": "..."}
+- went_well / try_next: at most 3 each, one short sentence each, specific to THIS call (quote them where useful).
+- better_line: the single line they should have said at their weakest moment, written out ready to use.
+Be honest and kind. No filler."""
+
+
+class PracticeTurn(BaseModel):
+    role: Literal["me", "them"]
+    text: str = Field(max_length=1500)
+
+
+class Practice(BaseModel):
+    persona: int = Field(default=0, ge=0)
+    history: list[PracticeTurn] = Field(default_factory=list, max_length=40)
+    feedback: bool = False
+
+
+def practice_messages(history: list) -> list:
+    """Transcript → alternating Anthropic messages, the bar being the
+    assistant. Starts with the phone ringing, merges back-to-back turns."""
+    msgs = [{"role": "user", "content": "(The phone rings at your bar. Answer it.)"}]
+    for turn in history:
+        role = "assistant" if turn.role == "them" else "user"
+        if msgs[-1]["role"] == role:
+            msgs[-1]["content"] += "\n" + turn.text
+        else:
+            msgs.append({"role": role, "content": turn.text})
+    return msgs
+
+
+@crm_router.post("/coach/practice", response_model=dict)
+def coach_practice(data: Practice, _: bool = Depends(require_crm_key)):
+    persona = PRACTICE_PERSONAS[data.persona % len(PRACTICE_PERSONAS)]
+    if data.feedback:
+        transcript = "\n".join(
+            f"{'SALESPERSON' if t.role == 'me' else 'BAR'}: {t.text}" for t in data.history)
+        if not transcript.strip():
+            raise HTTPException(status_code=422, detail={
+                "error": "empty", "message": "Say something first."})
+        out = _ask_claude(PRACTICE_FEEDBACK_SYSTEM, transcript, max_tokens=600)
+        try:
+            score = max(1, min(10, int(out.get("score"))))
+        except (TypeError, ValueError):
+            score = None
+        return {"score": score,
+                "went_well": [str(x)[:300] for x in (out.get("went_well") or [])][:3],
+                "try_next": [str(x)[:300] for x in (out.get("try_next") or [])][:3],
+                "better_line": str(out.get("better_line") or "")[:500]}
+
+    msgs = practice_messages(data.history)
+    if msgs[-1]["role"] == "assistant":
+        raise HTTPException(status_code=422, detail={
+            "error": "your_turn", "message": "It's your turn to talk."})
+    out = _ask_claude(PRACTICE_SYSTEM.format(who=persona["who"]), msgs[-1]["content"],
+                      max_tokens=250, history=msgs[:-1], temperature=0.8)
+    return {"reply": str(out.get("reply") or "...").strip()[:600],
+            "hung_up": bool(out.get("hung_up"))}
+
+
+# ============== APP STORE ==============
+
+@crm_router.get("/appstore", response_model=dict)
+def appstore_summary(days: int = 30, refresh: bool = False,
+                     _: bool = Depends(require_crm_key)):
+    """Downloads, versions, builds and reviews from App Store Connect, next to
+    our own signups — so nobody has to log in to Apple to see them."""
+    import appstore
+    if not appstore.is_configured():
+        return {"configured": False, "missing": appstore.missing_config(),
+                "bundle_id": appstore.BUNDLE_ID}
+    try:
+        return appstore.summary(days, refresh)
+    except Exception as exc:
+        print(f"[appstore] summary failed: {exc}", flush=True)
+        raise HTTPException(status_code=502, detail={
+            "error": "appstore_failed", "message": f"App Store Connect: {exc}"})
 
 
 class BulkDelete(BaseModel):

@@ -76,7 +76,7 @@
                font-size:13px;font-weight:700;padding:9px 15px}
   .clock{color:var(--text2);font-size:13px;line-height:1.35}
   .clock strong{color:var(--text);font-variant-numeric:tabular-nums}
-  .clock .zone{color:var(--text3);font-size:11px;display:block}
+  .clock .tzn{color:var(--text3);font-size:11px;display:block}
   .soon{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 0;font-size:12px;
         color:var(--text3)}
   .soon span{border:1px solid var(--line);border-radius:999px;padding:3px 10px}
@@ -277,6 +277,108 @@
          transition:opacity .18s;pointer-events:none;z-index:50;font-weight:600}
   #toast.show{opacity:1}
   @media (max-width:700px){ .em{display:none} }
+
+  /* ── the assistant: ask anything about your calls ── */
+  .askbar{display:flex;gap:8px;align-items:center;margin:0 0 8px}
+  .askbar input{flex:1;padding:11px 13px;border-radius:11px;border-color:#FF6B3555;
+                background:#FF6B350A}
+  .askbar input:focus{outline:none;border-color:var(--accent)}
+  .askbar button{flex:none;background:var(--accent);border-color:var(--accent);color:#fff;
+                 font-weight:700;padding:10px 16px;border-radius:11px}
+  .askchips{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 14px}
+  .askchips button{border-radius:999px;font-size:12px;padding:4px 11px;color:var(--text2)}
+  .askchips button:hover{color:var(--text);border-color:var(--accent)}
+  .askout{position:relative;border:1px solid #FF6B3555;background:#FF6B350D;border-radius:12px;
+          padding:13px 40px 13px 15px;margin:0 0 14px}
+  .askout .q{font-size:11px;color:var(--text3);font-weight:700;letter-spacing:.4px;
+             text-transform:uppercase;margin-bottom:6px}
+  .askout .a{white-space:pre-wrap;line-height:1.55;font-size:14px}
+  .askout .x{position:absolute;top:8px;right:8px;padding:2px 9px;border:0;background:transparent;
+             color:var(--text3);font-size:17px}
+  .askleads{display:flex;flex-direction:column;gap:6px;margin-top:11px}
+  .asklead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--surface);
+           border:1px solid var(--line);border-radius:9px;padding:7px 10px}
+  .asklead .nm2{font-weight:700}
+  .asklead .meta{color:var(--text3);font-size:12px;flex:1;min-width:140px}
+
+  /* ── focus card: the one lead, and the one box to log it ── */
+  .focus .headline{font-size:13px;color:var(--text2);font-weight:600;margin-bottom:6px}
+  .focus.go .headline{color:var(--go)}
+  .leadname{font-size:24px;font-weight:800;letter-spacing:-0.5px;margin:0}
+  .where{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px;
+         color:var(--text2);font-size:13px}
+  .where .pin{font-weight:700;color:var(--text)}
+  .where .chip{border:1px solid var(--line2);border-radius:999px;padding:2px 9px;font-size:12px}
+  .where .chip.now{color:var(--go);border-color:#3DD68C55}
+  .logbox{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+  .logbox textarea{min-height:64px;font-size:14px}
+  .logbox .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center}
+  .logbox .spacer{flex:1}
+  .logbox .alt{font-size:12px;color:var(--text3);background:none;border:0;padding:4px 0;
+               text-decoration:underline;cursor:pointer}
+  .logbox .bound{font-size:12px;color:var(--text3);margin-bottom:6px}
+  .lastlog{margin-top:12px;font-size:13px;color:var(--go);display:flex;gap:10px;
+           align-items:center;flex-wrap:wrap}
+  .lastlog button{font-size:12px;padding:4px 10px}
+  .tag-skip{display:inline-block;font-size:10px;font-weight:700;letter-spacing:0.4px;
+            padding:1px 6px;border-radius:5px;margin-left:6px;color:var(--text3);
+            border:1px solid var(--line2)}
+
+  /* Stage badges in words, not codes. */
+  .sg{display:inline-block;font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;
+      border:1px solid var(--line2);color:var(--text2);white-space:nowrap}
+  .sg-voicemail,.sg-staff,.sg-called,.sg-emailed{color:#7FB2FF;border-color:#7FB2FF44;background:#7FB2FF10}
+  .sg-talked,.sg-callback{color:var(--wait);border-color:#FFB02055;background:#FFB02012}
+  .sg-signed{color:var(--go);border-color:#3DD68C55;background:#3DD68C14}
+  .sg-no,.sg-gaveup{color:var(--text3)}
+
+  /* ── modal (email compose, quick coach) ── */
+  .modalwrap{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:60;display:flex;
+             align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto}
+  .modal{background:var(--surface);border:1px solid var(--line2);border-radius:14px;
+         width:100%;max-width:680px;padding:18px;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+  .modal h3{margin:0 0 4px;font-size:18px}
+  .modal .hint{color:var(--text3);font-size:12px;margin:0 0 12px}
+  .modal .row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .noemail{border:1px dashed var(--wait);border-radius:9px;padding:10px 12px;margin-bottom:10px;
+           color:var(--wait);font-size:13px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+
+  /* ── coach ── */
+  .objs{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+  .objs button{text-align:left;padding:11px 12px;border-radius:10px;font-weight:600}
+  .objs button.on{border-color:var(--accent);background:#FF6B351A}
+  .reply{margin-top:12px;border-radius:12px;border:1px solid #3DD68C55;background:#3DD68C0F;
+         padding:14px 16px}
+  .reply .say{font-size:18px;line-height:1.45;font-weight:600}
+  .reply .ask2{font-size:16px;line-height:1.45;margin-top:2px;color:var(--go)}
+  .noemail.ok{border-color:var(--go);color:var(--go)}
+  .reply .tip{font-size:12px;color:var(--text3);margin-top:8px}
+  .reply .lbl{font-size:10px;letter-spacing:1px;font-weight:800;color:var(--text3);margin-bottom:3px}
+  .opener-card{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px;
+               margin-top:8px}
+  .opener-card b{display:block;font-size:12px;color:var(--accent);margin-bottom:4px}
+  .opener-card .why2{font-size:12px;color:var(--text3);margin-top:6px}
+  .chat{display:flex;flex-direction:column;gap:8px;margin:12px 0;max-height:420px;overflow-y:auto}
+  .bubble{max-width:80%;padding:9px 12px;border-radius:12px;line-height:1.45;font-size:14px}
+  .bubble.them{align-self:flex-start;background:var(--surface2);border:1px solid var(--line2)}
+  .bubble.me{align-self:flex-end;background:#FF6B3522;border:1px solid #FF6B3555}
+  .fb li{margin:4px 0}
+
+  /* ── app store ── */
+  .chart{margin-top:12px}
+  .chart svg{display:block;width:100%;height:auto}
+  .legend{display:flex;gap:14px;font-size:12px;color:var(--text2);margin-top:6px}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;
+            vertical-align:-1px}
+  #chartTip{position:fixed;pointer-events:none;background:#242424;border:1px solid var(--line2);
+            border-radius:8px;padding:7px 10px;font-size:12px;z-index:55;display:none}
+  .review{border-top:1px solid var(--line);padding:10px 0}
+  .review .stars{color:var(--wait);letter-spacing:1px}
+  .review .rt{font-weight:700}
+  .review .rb{color:var(--text2);font-size:13px;margin-top:3px}
+  .steps{margin:8px 0 0;padding-left:20px;line-height:1.7;font-size:13px;color:var(--text2)}
+  .steps code{background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:1px 5px;
+              color:var(--text)}
 </style>
 </head>
 <body>
@@ -303,6 +405,20 @@
 
   <div id="app" class="hide">
 
+    <!-- Ask anything. The AI reads the whole CRM (in your clock) and answers,
+         with the bars it mentions right under the answer, number ready. -->
+    <div class="askbar">
+      <input id="askIn" placeholder="Ask AI anything — who did I call yesterday? who should I call back?" autocomplete="off">
+      <button id="askBtn">Ask</button>
+    </div>
+    <div class="askchips" id="askChips">
+      <button>What's my next move?</button>
+      <button>Who should I call back?</button>
+      <button>Summarize who I called yesterday</button>
+      <button>How did today go?</button>
+    </div>
+    <div id="askOut"></div>
+
     <!-- Three tabs, because three is what a working day actually needs: who to
          call, who you've spoken to, who owes you a callback. The numbers and
          the generator are things you look at occasionally and think about
@@ -321,8 +437,12 @@
         <div class="menu hide" id="menu" role="menu">
           <button data-tab="numbers" role="menuitem">Numbers
             <em>funnel, connect rates, what's working</em></button>
+          <button data-tab="coach" role="menuitem">Call coach
+            <em>what to say when they push back — and practice calls</em></button>
           <button data-tab="users" role="menuitem">Customers
             <em>everyone who signed up in the app</em></button>
+          <button data-tab="appstore" role="menuitem">App Store
+            <em>downloads, reviews and builds — no Apple login</em></button>
           <button data-tab="engine" role="menuitem">Lead engine
             <em>where tomorrow's leads come from</em></button>
         </div>
@@ -345,15 +465,15 @@
     <section data-panel="pipeline" class="hide">
       <div class="pipebar">
         <input id="pipeSearch" placeholder="Search a bar, town, contact, email or phone number…">
-        <button class="go" id="pipeAdd">Add a lead</button>
+        <button class="go" id="pipeAdd">Log a call</button>
       </div>
       <div class="card hide" id="pipeAddPanel" style="margin:10px 0">
-        <p class="hint">Paste or type everything — the bar, their listing, who you spoke to,
-          what happened. It sorts it into the lead, logs the call, and if there's no email it
-          goes and finds one on their website.</p>
+        <p class="hint">Any call — on the list or not. Paste or type everything: the bar, their
+          listing, who you spoke to, what happened. AI finds the lead if it's already here (or
+          makes a new one), logs the call, and looks up an email on their website if there isn't one.</p>
         <textarea id="pipeAddText" rows="5" placeholder="Murphy's Pub, Nashville. Talked to Sarah the bartender, owner is Dave, she said email him — address is on their website"></textarea>
         <div class="row">
-          <button class="go" id="pipeAddSave">Add lead</button>
+          <button class="go" id="pipeAddSave">Save</button>
           <button id="pipeAddCancel">Cancel</button>
         </div>
         <div class="applied hide" id="pipeAddResult"></div>
@@ -413,6 +533,49 @@
       <div id="usersBody"></div>
     </section>
 
+    <section data-panel="coach" class="hide">
+      <div class="card">
+        <strong>They just said…</strong>
+        <p class="muted" style="margin:4px 0 12px;font-size:12px">Tap what they said and read the
+          reply out loud. Answer briefly, then ask a question so they're the one talking.</p>
+        <div id="coachMain"></div>
+      </div>
+      <div class="card">
+        <strong>Openers</strong>
+        <p class="muted" style="margin:4px 0 0;font-size:12px">In Gong's analysis of 100k+ cold calls,
+          saying why you're calling early and owning that it's a cold call beat the classic
+          "how are you today?". Pick one and say it the same way every time.</p>
+        <div id="coachOpeners"></div>
+      </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <strong>Practice call</strong>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="practicePersona" style="width:auto"></select>
+            <button class="go" id="practiceStart" style="white-space:nowrap">Start</button>
+          </div>
+        </div>
+        <p class="muted" style="margin:4px 0 0;font-size:12px">AI plays a bar manager. Type what you'd
+          say. When you're done, get a score and the one line to fix. Five minutes of this before a
+          session makes the first real call easier.</p>
+        <div class="chat" id="practiceChat"></div>
+        <div id="practiceInput" class="hide">
+          <div style="display:flex;gap:8px">
+            <input id="practiceSay" placeholder="What do you say?">
+            <button class="go" id="practiceSend">Say it</button>
+          </div>
+          <div class="row" style="display:flex;gap:8px;margin-top:8px">
+            <button id="practiceEnd">End call &amp; get feedback</button>
+          </div>
+        </div>
+        <div id="practiceFb"></div>
+      </div>
+    </section>
+
+    <section data-panel="appstore" class="hide">
+      <div id="asBody"><div class="card muted">Loading…</div></div>
+    </section>
+
     <section data-panel="engine" class="hide">
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
@@ -448,6 +611,8 @@
   </div>
 </div>
 <div id="toast"></div>
+<div id="modalWrap" class="modalwrap hide"><div class="modal" id="modal"></div></div>
+<div id="chartTip"></div>
 
 <script>
 const KEY_STORE='86d_crm_key';
@@ -530,7 +695,8 @@ function switchTab(b){
     .forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
-    numbers:loadNumbers,users:loadUsers,engine:loadEngine}[TAB])()
+    numbers:loadNumbers,users:loadUsers,engine:loadEngine,
+    coach:loadCoach,appstore:()=>loadAppStore()}[TAB])()
     .catch(e=>toast(e.message));
 }
 
@@ -670,7 +836,7 @@ async function loadUndoBar(){
   const more=d.touches.slice(1,4);
   box.innerHTML=`<div class="undobar">
     <span class="who">Just worked: <strong>${esc(last.name)}</strong>${
-      last.last_outcome?` · ${esc(last.last_outcome)}`:''}</span>
+      last.stage_label?` · ${esc(last.stage_label)}`:''}</span>
     <button data-undo="${esc(last.id)}">Put back on the list</button>
     ${more.map(t=>`<button data-undo="${esc(t.id)}" title="Put back on the list"
         >${esc(t.name.length>22?t.name.slice(0,21)+'\u2026':t.name)}</button>`).join('')}
@@ -701,20 +867,52 @@ $('startBtn').onclick=()=>{
   loadCalls();
 };
 
-/* The compose box. Say what the email needs to say and Claude writes it; say
-   what's wrong with it and Claude changes that bit rather than starting over.
-   Either way the draft lands in the same two fields you can edit by hand, and
-   nothing sends until you press Send. */
-function composeDrawer(addr, contact){
-  return `<td colspan="8">
+/* ── the modal ─────────────────────────────────────────────────────────── */
+function openModal(html){ $('modal').innerHTML=html; $('modalWrap').classList.remove('hide'); }
+function closeModal(){ $('modalWrap').classList.add('hide'); $('modal').innerHTML='';
+  delete $('modal').dataset.lead; delete $('modal').dataset.drafted;
+  delete $('modal').dataset.mode; }
+$('modalWrap').addEventListener('click', e=>{ if(e.target===$('modalWrap')) closeModal(); });
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !$('modalWrap').classList.contains('hide')) closeModal(); });
+
+/* Refresh whatever screen is open after something changed a lead. */
+function refreshCurrent(){
+  const f={calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups}[TAB];
+  return f ? f().catch(e=>toast(e.message)) : Promise.resolve();
+}
+
+/* The compose box, in a modal so it works the same from every screen. Say
+   what the email needs to say and Claude writes it (it has the call notes);
+   say what's wrong and it changes that bit. Nothing sends until Send.
+
+   No address on file used to be a dead end ("No email address on this one").
+   Now the To box is simply empty and asks for one — it's saved to the lead
+   when the mail goes — with a button that looks on their website for it. */
+async function openCompose(lead, opts={}){
+  if(!lead) return;
+  if(!MAIL.configured){
+    let addr=lead.email;
+    if(!addr){
+      addr=(prompt(`No email on file for ${lead.name} yet. What's their email?`)||'').trim();
+      if(!addr) return;
+      try{ await api('/leads/'+lead.id,{method:'PATCH',body:JSON.stringify({email:addr})}); }
+      catch(e){ return toast(e.message); }
+    }
+    window.location.href=`mailto:${addr}?subject=${encodeURIComponent(MAIL_SUBJECT)}`
+      +`&body=${encodeURIComponent(mailBody(lead.contact))}`;
+    return;
+  }
+  openModal(`<h3>Email ${esc(lead.name)}</h3>
     <p class="hint">Sending as <strong>${esc(MAIL.from||'')}</strong>. Nothing goes until you press Send.</p>
-    <div class="mailrow"><label>To</label><input data-to value="${esc(addr)}"></div>
+    ${lead.email?'':`<div class="noemail">No email on file yet — type it in the To box and it's
+       saved to this bar when you send.<button data-find>Find it on their website</button></div>`}
+    <div class="mailrow"><label>To</label><input data-to value="${esc(lead.email||'')}" placeholder="their@email.com"></div>
     ${MAIL.ai?`<div class="aibox">
-      <textarea data-brief rows="2" placeholder="What should this say? e.g. Ed the manager wants more information about the app — include a link to it and my website, and what the company does"></textarea>
+      <textarea data-brief rows="2" placeholder="What should it say? e.g. follow up on today's call, include my website — or just 'follow up on the call'"></textarea>
       <button data-draft>Draft it</button>
     </div>`:''}
     <div class="mailrow"><label>Subject</label><input data-subject value="${esc(MAIL_SUBJECT)}"></div>
-    <textarea data-body rows="9">${esc(mailBody(contact))}</textarea>
+    <textarea data-body rows="9">${esc(mailBody(lead.contact))}</textarea>
     <div class="whenbox">
       <div class="whenhead">When should it land?
         <span class="muted" data-clocks></span></div>
@@ -724,8 +922,57 @@ function composeDrawer(addr, contact){
       <button class="go" data-send>Send it now</button>
       <button data-cancel>Cancel</button>
     </div>
-    <div class="applied hide"></div>
-  </td>`;
+    <div class="applied hide"></div>`);
+  const m=$('modal'); m.dataset.lead=lead.id; m.dataset.mode='mail';
+  wireSlots(m); loadSlots(m, lead.id);
+  if(!lead.email) m.querySelector('[data-to]').focus();
+  if(opts.autodraft && MAIL.ai){
+    m.querySelector('[data-brief]').value='Follow up on the call I just made — use what my notes say happened. Keep it short.';
+    runDraft(m, lead.id);
+  }
+}
+
+$('modal').addEventListener('click', async e=>{
+  const m=$('modal');
+  if(e.target.closest('[data-cancel]')) return closeModal();
+  if(m.dataset.mode==='coach') return coachClick(m, e);
+  if(m.dataset.mode!=='mail') return;
+  const id=m.dataset.lead;
+  const box=m.querySelector('.applied');
+  const fail=msg=>{ box.className='applied err'; box.textContent=msg; };
+  if(e.target.closest('[data-draft]')) return runDraft(m, id);
+  const find=e.target.closest('[data-find]');
+  if(find){
+    find.disabled=true; find.textContent='Looking…';
+    try{
+      const r=await api(`/leads/${id}/find-email`,{method:'POST'});
+      if(r.email){ m.querySelector('[data-to]').value=r.email;
+        find.closest('.noemail').innerHTML=`Found <b>${esc(r.email)}</b>${r.found_on?' on their site':''} — saved to this bar.`;
+        find.closest('.noemail')?.classList.add('ok');
+      } else { find.textContent='Not found'; toast(r.message||'No email on their site'); }
+    }catch(err){ find.disabled=false; find.textContent='Find it on their website'; toast(err.message); }
+    return;
+  }
+  const send=e.target.closest('[data-send]');
+  if(!send) return;
+  const to=m.querySelector('[data-to]').value.trim();
+  if(!to){ m.querySelector('[data-to]').focus(); return fail('Type their email in the To box first.'); }
+  send.disabled=true; send.textContent=chosenTime(m)?'Scheduling…':'Sending…';
+  try{
+    const r=await api(`/leads/${id}/send-email`,{method:'POST',body:JSON.stringify({
+      to, subject:m.querySelector('[data-subject]').value.trim(),
+      body:m.querySelector('[data-body]').value, send_at:chosenTime(m)})});
+    closeModal();
+    toast(r.queued ? `Queued for ${r.venue_time} their time (${r.your_time} yours)`
+                   : 'Sent to '+r.sent.to, r.undo_id);
+    refreshCurrent();
+  }catch(err){ send.disabled=false; refreshSendLabel(m); fail(err.message); }
+});
+
+/* A lead's email/name/contact off a table row, for the compose box. */
+function rowLead(tr){
+  return {id:tr.dataset.id, name:tr.dataset.name||'this bar', email:tr.dataset.email||'',
+          contact:tr.dataset.contact||''};
 }
 
 /* Good hours to land at THIS venue, worked out from its own opening hours and
@@ -841,7 +1088,7 @@ async function loadNow(){
   // night in the Philippines, and a screen that only shows venue-local time
   // hides that from the person who has to be awake for it.
   $('clock').innerHTML=`<strong>${esc(d.operator.local_time)}</strong> where you are
-    <span class="zone">${esc(d.operator.date)} · ${esc(d.operator.zone.replace('_',' '))}</span>`;
+    <span class="tzn">${esc(d.operator.date)} · ${esc(d.operator.zone.replace('_',' '))}</span>`;
 
   const go=d.ready_count>0;
   // The best lead across all three buckets, not just the ready pile. Outside
@@ -850,30 +1097,35 @@ async function loadNow(){
   // somebody who deliberately stayed up. `d.ready[0]` is the fallback for an
   // older API that doesn't send `next` yet.
   const next=d.next||d.ready[0];
-  $('focus').className='focus '+(go?'go':'wait');
-  // The number you are about to dial belongs next to the name of the place you
-  // are about to dial, not eight rows down in a table you have to find it in.
-  // Name and number on one line — they're one thought, and the number is the
-  // thing the hand is reaching for. Everything that helps the conversation
-  // sits under them.
-  $('focus').innerHTML=`<div class="focustop">
-      <h2>${esc(d.headline)}</h2>
-      ${next&&next.phone_digits?`<div class="phcell">
-        <span class="digits" data-copy="${esc(next.phone_dial)}">${esc(next.phone_dial)}</span>
-        <button class="copybtn" data-act="copy" data-copy="${esc(next.phone_dial)}">COPY</button>
-      </div>`:''}
-    </div>
-    ${next&&next.manager_name?`<div class="askinline">Ask if ${esc(next.manager_name)}
-      is still ${esc(next.manager_role||'there')}</div>`:''}
-    ${next?`<div class="focusacts">
-      <button class="go" data-act="logtop" data-id="${esc(next.id)}">Log this call</button>
-      <button data-act="skiptop" data-id="${esc(next.id)}">Skip</button>
-    </div>`:''}
-    <div id="brief" class="brief"></div>
-    <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
-      · ${d.soon_count} waiting on their window${d.rest_count
-        ? ` · ${d.rest_count} outside a window`:''}</div>`;
-  if(next) loadBrief(next.id);
+  // Half-typed call notes survive the 60s refresh: the card isn't redrawn —
+  // and the lead isn't swapped — under someone mid-sentence.
+  const typing=$('logText')&&$('logText').value.trim();
+  if(!typing){
+    FOCUSLEAD=next||null;
+    $('focus').className='focus '+(go?'go':'wait');
+    // One lead, one number, one box. Where the bar is sits right under its
+    // name — which part of the country you're ringing decides what time it
+    // is there and how you open.
+    $('focus').innerHTML=`<div class="headline">${esc(d.headline)}</div>
+      ${next?`<div class="focustop">
+        <h2 class="leadname">${esc(next.name)}${next.skipped_at?'<span class="tag-skip">SKIPPED</span>':''}</h2>
+        ${next.phone_digits?`<div class="phcell">
+          <span class="digits" data-copy="${esc(next.phone_dial)}">${esc(next.phone_dial)}</span>
+          <button class="copybtn" data-act="copy" data-copy="${esc(next.phone_dial)}">COPY</button>
+        </div>`:''}
+      </div>
+      ${whereLine(next)}
+      ${next.manager_name?`<div class="askinline">Ask if ${esc(next.manager_name)}
+        is still ${esc(next.manager_role||'there')}</div>`:''}`:''}
+      <div id="brief" class="brief"></div>
+      <div id="logSlot"></div>
+      <div id="lastLog"></div>
+      <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
+        · ${d.soon_count} waiting on their window${d.rest_count
+          ? ` · ${d.rest_count} outside a window`:''}</div>`;
+    renderLogSlot(); renderLastLog();
+    if(next) loadBrief(next.id);
+  }
 
   $('svcTabs').innerHTML=''; $('zoneTabs').innerHTML='';
 
@@ -985,9 +1237,14 @@ async function loadCalls(){
   const d=await api('/calllist'); LAST=d;
   loadUndoBar(); loadQueueBar();
   const go = /^Call /.test(d.focus);
-  $('focus').className='focus '+(go?'go':'wait');
-  $('focus').innerHTML=`<h2>${esc(d.focus)}</h2>
-    <div class="prog">${d.done_today} done today · ${d.remaining} left in the list</div>`;
+  if(!($('logText')&&$('logText').value.trim())){
+    FOCUSLEAD=null;
+    $('focus').className='focus '+(go?'go':'wait');
+    $('focus').innerHTML=`<h2>${esc(d.focus)}</h2>
+      <div id="logSlot"></div><div id="lastLog"></div>
+      <div class="prog">${d.done_today} done today · ${d.remaining} left in the list</div>`;
+    renderLogSlot(); renderLastLog();
+  }
 
   if(!d.services.some(sv=>sv.count)){
     $('svcTabs').innerHTML=''; $('zoneTabs').innerHTML='';
@@ -1060,11 +1317,6 @@ function render(){
     </div></div>`;
 }
 
-$('focus').onclick=e=>{
-  const cp=e.target.closest('[data-act="copy"]')||e.target.closest('.digits');
-  if(cp) copyDigits(cp);
-};
-
 $('svcTabs').onclick=e=>{
   const b=e.target.closest('button[data-svc]'); if(!b) return;
   SVC=b.dataset.svc; render();
@@ -1104,9 +1356,11 @@ function row(l,n,calling){
              : shut      ? `<span class="win-shut">${esc(w.hint||'closed')}</span>`
                          : `<span class="win-bad">${esc(w.window||'—')}</span>`;
   const tries = l.attempts||0;
-  return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}" data-contact="${esc(l.contact||'')}">
+  return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}" data-contact="${esc(l.contact||'')}"
+              data-name="${esc(l.name)}">
     <td class="rownum">${n}</td>
-    <td class="nm" title="${esc(w.hint||l.name)}">${esc(l.name)}${whyTag(l)}
+    <td class="nm" title="${esc(w.hint||l.name)}">${esc(l.name)}${whyTag(l)}${
+      l.skipped_at?'<span class="tag-skip">SKIPPED</span>':''}
       ${ask(l)}
       ${l.opener?`<div class="opener">${esc(l.opener)}</div>`:''}</td>
     <td><div class="phcell">
@@ -1125,7 +1379,8 @@ function row(l,n,calling){
     <td><div class="acts">
       <button class="go" data-act="log">Log call</button>
       <button data-act="mail">Email</button>
-      <button class="del" data-act="del">Delete</button>
+      <button data-act="skip" title="Move to the bottom of the list">${l.skipped_at?'Unskip':'Skip'}</button>
+      <button class="del" data-act="del" title="Delete for good">✕</button>
     </div></td>
   </tr>`;
 }
@@ -1224,24 +1479,125 @@ async function startFill(btn){
 // call order (server-side, in both /calllist and /now) instead of removing
 // it — it's still on the pipeline and call-list screens, just out of the
 // way until the rest of the list is worked or it's un-skipped.
-$('focus').onclick=async e=>{
-  const skip=e.target.closest('button[data-act="skiptop"]');
-  if(skip){
-    try{ await api('/leads/'+skip.dataset.id+'/skip',{method:'POST'}); toast('Skipped — moved to the bottom of the list'); await loadCalls(); }
-    catch(err){ toast(err.message); }
-    return;
+//
+// The log box lives IN the focus card now, under the number: dial, type what
+// happened however it comes out, Save — and the next bar is already there.
+// "Logging a different call?" flips the same box to any call at all (a bar
+// that was never on the list, a callback that rang you): the AI finds the
+// lead or adds a new one.
+let FOCUSLEAD=null, LOGMODE_ANY=false, LASTLOG=null;
+
+function whereLine(l){
+  if(!l) return '';
+  const w=l.call_window||{};
+  const bits=[];
+  if(l.zone&&l.zone!=='—') bits.push(`<span class="chip">${esc(l.zone)} time</span>`);
+  if(w.local_time) bits.push(`<span class="chip ${w.good_now?'now':''}">${esc(w.local_time)} there</span>`);
+  if(l.attempts) bits.push(`<span class="chip">try #${l.attempts+1}</span>`);
+  return `<div class="where"><span class="pin">${esc(l.loc||'Location unknown')}</span>${bits.join('')}</div>`;
+}
+
+const QUICK_NOTES={voicemail:'Left a voicemail, no answer.',
+                   gatekeeper:'Spoke to staff, manager not in.',
+                   not_interested:'Not interested.'};
+
+function renderLogSlot(){
+  const slot=$('logSlot'); if(!slot) return;
+  const lead=FOCUSLEAD, bound=!!lead&&!LOGMODE_ANY;
+  slot.innerHTML=`<div class="logbox">
+    <div class="bound">${bound
+      ? `After the call: what happened with ${esc(lead.name)}? Type it any way — AI sorts it out.`
+      : `Log any call — AI finds the bar if it's already here, or adds it.`}</div>
+    <textarea id="logText" placeholder="${bound
+      ? 'e.g. voicemail — or: talked to Dave the GM, call back Tuesday, his email is dave@bar.com'
+      : "e.g. Murphy's Pub, Nashville — talked to Sarah, owner Dave wants a demo Tuesday"}"></textarea>
+    <div class="row">
+      <button class="go" data-act="logsave">${bound?'Save &amp; next':'Save'}</button>
+      ${bound?`<button data-act="quick" data-outcome="voicemail">Voicemail left</button>
+        <button data-act="quick" data-outcome="gatekeeper">Manager out</button>
+        <button data-act="quick" data-outcome="not_interested">Not interested</button>
+        <span class="spacer"></span>
+        <button data-act="mailtop">Email</button>
+        <button data-act="coachtop">They said…</button>
+        <button data-act="skiptop" title="Move to the bottom of the list — it stays on it">Skip</button>`:''}
+    </div>
+    ${lead?`<button class="alt" data-act="altmode">${bound
+      ? 'Logging a different call?' : 'Back to '+esc(lead.name)}</button>`:''}
+  </div>`;
+}
+
+function renderLastLog(){
+  const box=$('lastLog'); if(!box) return;
+  if(!LASTLOG){ box.innerHTML=''; return; }
+  const l=LASTLOG.lead;
+  box.innerHTML=`<div class="lastlog">Saved: <b>${esc(l.name)}</b> → ${esc(l.stage_label||'')}${
+      l.followup_date&&l.status!=='dead'?` · next call ${esc(l.followup_date)}`:''}${
+      LASTLOG.matched==='new'?' · added as a new lead':''}
+    <button data-act="followmail">${l.email?'Send a follow-up email':'Email them'}</button>
+    <button data-act="undolast">Undo</button></div>`;
+}
+
+function afterLog(r, label){
+  LASTLOG={lead:r.lead, undo_id:r.undo_id, matched:r.matched};
+  LOGMODE_ANY=false;
+  if($('logText')) $('logText').value='';
+  toast(`${label||r.lead.stage_label} — ${r.lead.name}`, r.undo_id);
+  return refreshCurrent();
+}
+
+async function submitLog(btn, text, leadId){
+  btn.disabled=true; const was=btn.textContent; btn.textContent='Saving…';
+  try{
+    const r=await api('/log-call',{method:'POST',body:JSON.stringify({text, lead_id:leadId||null})});
+    await afterLog(r);
+    return true;
+  }catch(err){ btn.disabled=false; btn.textContent=was; toast(err.message); return false; }
+}
+
+async function quickLog(btn, leadId, typed){
+  btn.disabled=true;
+  try{
+    const r=await api(`/leads/${leadId}/touch`,{method:'POST',body:JSON.stringify({
+      kind:'call', outcome:btn.dataset.outcome,
+      note:typed||QUICK_NOTES[btn.dataset.outcome]})});
+    await afterLog(r);
+  }catch(err){ btn.disabled=false; toast(err.message); }
+}
+
+async function skipLead(id){
+  try{ const r=await api('/leads/'+id+'/skip',{method:'POST'});
+       toast(r.skipped ? 'Skipped — moved to the bottom of the list. It’s still there.'
+                       : 'Unskipped — back in its normal place.');
+       await refreshCurrent(); }
+  catch(err){ toast(err.message); }
+}
+
+$('focus').addEventListener('keydown', e=>{
+  if(e.target.id==='logText' && e.key==='Enter' && (e.metaKey||e.ctrlKey)){
+    e.preventDefault(); $('focus').querySelector('[data-act="logsave"]')?.click();
   }
-  const btn=e.target.closest('button[data-act="logtop"]');
-  if(!btn) return;
-  const row=document.querySelector('#zones tr[data-id="'+CSS.escape(btn.dataset.id)+'"]');
-  const log=row&&row.querySelector('button[data-act="log"]');
-  if(!log) return toast('Open the list below to log this one.');
-  log.click();
-  const drawer=row.nextElementSibling;
-  if(drawer&&drawer.classList.contains('drawer')){
-    drawer.scrollIntoView({behavior:'smooth',block:'center'});
-    const ta=drawer.querySelector('textarea');
-    if(ta) setTimeout(()=>ta.focus(),300);
+});
+
+$('focus').onclick=async e=>{
+  const cp=e.target.closest('[data-act="copy"]')||e.target.closest('.digits');
+  if(cp) return copyDigits(cp);
+  const b=e.target.closest('button[data-act]'); if(!b) return;
+  const lead=FOCUSLEAD, bound=!!lead&&!LOGMODE_ANY;
+  const typed=($('logText')?.value||'').trim();
+  switch(b.dataset.act){
+    case 'logsave':
+      if(!typed){ $('logText')?.focus(); return toast('Type what happened — or tap Voicemail left'); }
+      return submitLog(b, typed, bound?lead.id:null);
+    case 'quick': return bound && quickLog(b, lead.id, typed);
+    case 'skiptop': return lead && skipLead(lead.id);
+    case 'mailtop': return openCompose(lead);
+    case 'coachtop': return openCoachModal(lead);
+    case 'altmode':
+      LOGMODE_ANY=!LOGMODE_ANY; renderLogSlot(); $('logText')?.focus(); return;
+    case 'followmail': return LASTLOG && openCompose(LASTLOG.lead, {autodraft:true});
+    case 'undolast':
+      if(LASTLOG){ const id=LASTLOG.undo_id; LASTLOG=null; renderLastLog(); undoTouch(id); }
+      return;
   }
 };
 
@@ -1265,111 +1621,50 @@ $('zones').onclick=async e=>{
     catch(err){ toast(err.message); }
     return;
   }
-  if(btn.dataset.act==='mail'){
-    const addr=tr.dataset.email;
-    if(!addr) return toast('No email address on this one');
-    if(!MAIL.configured){
-      window.location.href=`mailto:${addr}?subject=${encodeURIComponent(MAIL_SUBJECT)}`
-        +`&body=${encodeURIComponent(mailBody(tr.dataset.contact))}`;
-      return;
-    }
-    if(tr.nextElementSibling?.classList.contains('drawer')){
-      tr.nextElementSibling.remove(); return;
-    }
-    const d=document.createElement('tr');
-    d.className='drawer mailer';
-    d.innerHTML=composeDrawer(addr, tr.dataset.contact);
-    tr.after(d);
-    wireSlots(d); loadSlots(d, id);
-    return;
-  }
+  if(btn.dataset.act==='mail') return openCompose(rowLead(tr));
+  if(btn.dataset.act==='skip') return skipLead(id);
   if(btn.dataset.act==='log'){
     if(tr.nextElementSibling?.classList.contains('drawer')){
       tr.nextElementSibling.remove(); return;
     }
     const d=document.createElement('tr');
     d.className='drawer';
-    d.innerHTML=`<td colspan="8">
-      <p class="hint">Type what happened however it comes out and it gets sorted into the right fields — or just hit one of the buttons.</p>
-      <textarea placeholder="spoke to Dave the GM, still counting on a clipboard, wants me to call back Tuesday, his email is dave@thebar.com"></textarea>
-      <div class="row">
-        <button class="go" data-save>Save &amp; next</button>
-        <button data-outcome="voicemail" data-note="Left a voicemail, no answer.">Voicemail</button>
-        <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
-        <button data-outcome="not_interested" data-note="Not interested, asked not to be called again.">Not interested</button>
-        <button data-cancel>Cancel</button>
-      </div>
-      <div class="applied hide"></div>
-    </td>`;
+    d.innerHTML=logDrawerHTML(8);
     tr.after(d);
     d.querySelector('textarea').focus();
   }
 };
 
+/* Same log box as the focus card, for a row in any table. The quick buttons
+   go straight to /touch with a known outcome — no model round trip to be told
+   what the button already said. Typed notes go through /log-call, which
+   works (keyword reading) even with no AI key set. */
+function logDrawerHTML(cols){
+  return `<td colspan="${cols}">
+    <p class="hint">What happened? Type it any way — AI sorts it out. Or tap a button.</p>
+    <textarea placeholder="talked to Dave the GM, still counting on a clipboard, call back Tuesday, his email is dave@thebar.com"></textarea>
+    <div class="row">
+      <button class="go" data-save>Save</button>
+      <button data-outcome="voicemail">Voicemail left</button>
+      <button data-outcome="gatekeeper">Manager out</button>
+      <button data-outcome="not_interested">Not interested</button>
+      <button data-cancel>Cancel</button>
+    </div>
+    <div class="applied hide"></div>
+  </td>`;
+}
+
 async function drawerAction(dr,e){
   const tr=dr.previousElementSibling; const id=tr.dataset.id;
   const ta=dr.querySelector('textarea');
   if(e.target.closest('[data-cancel]')) return dr.remove();
-
-  if(dr.classList.contains('mailer')){
-    if(e.target.closest('[data-draft]')) return runDraft(dr, id);
-    if(!e.target.closest('[data-send]')) return;
-    const btn=dr.querySelector('[data-send]');
-    btn.disabled=true; btn.textContent='Sending…';
-    try{
-      const r=await api(`/leads/${id}/send-email`,{method:'POST',body:JSON.stringify({
-        to:dr.querySelector('[data-to]').value.trim(),
-        subject:dr.querySelector('[data-subject]').value.trim(),
-        body:dr.querySelector('[data-body]').value,
-        send_at:chosenTime(dr)})});
-      toast(r.queued
-        ? `Queued for ${r.venue_time} their time (${r.your_time} yours)`
-        : 'Sent to '+r.sent.to, r.undo_id);
-      await loadCalls();
-    }catch(err){
-      btn.disabled=false; refreshSendLabel(dr);
-      const box=dr.querySelector('.applied');
-      box.className='applied err'; box.textContent=err.message;
-    }
-    return;
-  }
-
-  /* The three commonest outcomes go straight to /touch with a known outcome.
-     They used to post a canned sentence through the model, which is a paid
-     round trip to be told what the button already said — and it meant the
-     quick path stopped working entirely when no API key was set. Only free
-     text a human actually typed is worth a model. */
   const quick=e.target.closest('[data-outcome]');
-  if(quick){
-    quick.disabled=true;
-    const typed=ta.value.trim();
-    try{
-      const r=await api(`/leads/${id}/touch`,{method:'POST',body:JSON.stringify({
-        kind:'call', outcome:quick.dataset.outcome,
-        note:typed||quick.dataset.note})});
-      toast(`${quick.textContent} logged — ${r.lead.name}`, r.undo_id);
-      await loadCalls();
-    }catch(err){ quick.disabled=false; toast(err.message); }
-    return;
-  }
-  if(!e.target.closest('[data-save]')) return;
-
+  if(quick) return quickLog(quick, id, ta.value.trim());
+  const save=e.target.closest('[data-save]');
+  if(!save) return;
   const text=ta.value.trim();
   if(!text) return toast('Type what happened, or use one of the buttons');
-  const save=dr.querySelector('[data-save]');
-  save.disabled=true; save.textContent='Saving…';
-  try{
-    const r=await api(`/leads/${id}/debrief`,
-      {method:'POST',body:JSON.stringify({text,kind:'call'})});
-    const bits=Object.entries(r.applied).filter(([k])=>k!=='note')
-      .map(([k,v])=>`${k.replace(/_/g,' ')}: ${v}`).join(' · ');
-    toast(bits?('Saved — '+bits):'Saved', r.undo_id);
-    await loadCalls();
-  }catch(err){
-    save.disabled=false; save.textContent='Save & next';
-    const box=dr.querySelector('.applied');
-    box.className='applied err'; box.textContent=err.message;
-  }
+  return submitLog(save, text, id);
 }
 
 /* ── the pipeline ─────────────────────────────────────────────────────────
@@ -1379,50 +1674,36 @@ async function drawerAction(dr,e){
    Without this, a bar you spoke to on Tuesday and forgot to book a callback
    for is invisible — which is how warm leads quietly die. */
 // Opens on the people you've actually spoken to, not on 312 cold names.
-let PIPE={stage:'working',q:'',offset:0};
+let PIPE={stage:'active',q:'',offset:0};
 let pipeTimer=null;
 
-/* Six stage chips was five too many to scan mid-thought. The list really
-   answers three questions — who's live, who hasn't been called, who's done —
-   so those are the chips, with the raw stages folded underneath. */
+/* Plain words, not pipeline jargon. "Warm", "dead" and "contacted" are gone
+   from the screen: each row says what actually happened ("Voicemail left",
+   "Talked to them", "Call back"), and the tabs answer the only four
+   questions that matter — who's in progress, who's not been called, who
+   signed up, who said no. The server filters (?stage=). */
 const STAGES=[
-  ['working','In play',       'contacted,warm', 'people you have actually spoken to'],
-  ['new',    'Not called yet','new',            'still on the call list'],
-  ['won',    'Won',           'won',            'signed up'],
-  ['dead',   'Dead',          'dead',           'do not call again'],
-  ['',       'Everything',    '',               'every lead, any stage'],
+  ['active','In progress',    'anyone you have called or emailed and are still working'],
+  ['todo',  'Not called yet', 'still on the call list'],
+  ['signed','Signed up',      'became customers'],
+  ['closed','Not interested', 'said no, or never answered after every try'],
+  ['',      'Everything',     'every lead'],
 ];
-// The edit form still writes one real status at a time.
-const STATUSES=[['','Everything'],['new','Not called'],['contacted','Contacted'],
-                ['warm','Warm'],['won','Won'],['dead','Dead']];
+// The edit form's choices, in the same words. Each maps to one stored status.
+const STATUSES=[['new','Not called yet'],['contacted','In progress'],
+                ['warm','Interested — call back'],['won','Signed up'],['dead','Not interested']];
 
 async function loadPipeline(){
-  const stage=STAGES.find(x=>x[0]===PIPE.stage)||STAGES[0];
-  const statuses=stage[2]?stage[2].split(','):[];
   const qs=new URLSearchParams();
-  // "In play" spans two stages, so it's fetched wide and narrowed here rather
-  // than making someone click two chips to see one idea.
-  if(statuses.length===1) qs.set('status',statuses[0]);
+  if(PIPE.stage) qs.set('stage',PIPE.stage);
   if(PIPE.q) qs.set('q',PIPE.q);
-  qs.set('offset',PIPE.offset); qs.set('limit',statuses.length>1?400:100);
+  qs.set('offset',PIPE.offset); qs.set('limit',100);
   const d=await api('/leads?'+qs);
-  if(statuses.length>1){
-    d.leads=d.leads.filter(l=>statuses.includes(l.status));
-    // The server counted before this filter ran, so its totals describe a
-    // different list than the one on screen. Saying "showing 1-318 of 318"
-    // over seven rows is the page contradicting itself.
-    d.count=d.leads.length;
-    d.matching=statuses.reduce((n,x)=>n+(d.counts[x]??0),0);
-  }
 
-  const tally=key=>{
-    const st=STAGES.find(x=>x[0]===key);
-    if(!st||!st[2]) return d.counts.all??0;
-    return st[2].split(',').reduce((n,x)=>n+(d.counts[x]??0),0);
-  };
-  $('pipeTabs').innerHTML=STAGES.map(([key,label,,why])=>`
+  const sc=d.stage_counts||{};
+  $('pipeTabs').innerHTML=STAGES.map(([key,label,why])=>`
     <button data-status="${esc(key)}" class="${key===PIPE.stage?'on':''}" title="${esc(why)}">
-      ${esc(label)} <span class="c">${tally(key)}</span>
+      ${esc(label)} <span class="c">${key?(sc[key]??0):(d.counts.all??0)}</span>
     </button>`).join('');
 
   if(!d.leads.length){
@@ -1436,7 +1717,7 @@ async function loadPipeline(){
     <div class="zone"><div class="sheetwrap">
       <table class="sheet">
         <thead><tr>
-          <th></th><th>BAR</th><th>STAGE</th><th>PHONE</th><th>WHERE THINGS STAND</th><th></th>
+          <th></th><th>BAR</th><th>WHERE IT'S AT</th><th>PHONE</th><th>NEXT</th><th></th>
         </tr></thead>
         <tbody>${d.leads.map((l,i)=>pipeRow(l,PIPE.offset+i+1)).join('')}</tbody>
       </table>
@@ -1479,23 +1760,26 @@ function pipeRow(l,n){
   // A bare date used to be the whole answer — "last touched 2026-09-22" says
   // a call happened, not whether anyone was reached, which is the actual
   // question a CONTACTED badge leaves open.
-  const outcome=outcomeLabel(l.last_outcome);
   let stands, tone='muted';
-  if(l.followup_date){
-    stands=`call back ${l.followup_date}`+(outcome?` — ${outcome}`:'');
+  const closed=l.status==='won'||l.status==='dead';
+  if(l.followup_date && !closed){
+    const today=new Date().toISOString().slice(0,10);
+    stands=l.followup_date<today?`call back — overdue (${l.followup_date})`
+          :l.followup_date===today?'call back today':`call back ${l.followup_date}`;
     tone='win-good';
   }
-  else if(l.queued_email_at){ stands='email queued'; tone='muted'; }
-  else if(touch){ stands=outcome?`${outcome} · ${touch}`:`last touched ${touch}`; tone='muted'; }
-  else { stands='never contacted'; tone='muted'; }
-  const tries=l.attempts?` · ${l.attempts} tr${l.attempts>1?'ies':'y'}`:'';
+  else if(l.queued_email_at){ stands='email queued'; }
+  else if(closed){ stands=touch?`last ${touch}`:''; }
+  else if(touch){ stands=`last ${touch} · nothing booked`; }
+  else { stands='never called'; }
+  const tries=l.attempts?` · ${l.attempts} call${l.attempts>1?'s':''}`:'';
 
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}"
-              data-contact="${esc(l.contact||'')}">
+              data-contact="${esc(l.contact||'')}" data-name="${esc(l.name)}">
     <td class="rownum">${n}</td>
     <td class="nm">${esc(l.name)}
       ${sub?`<div class="sub">${esc(sub)}</div>`:''}</td>
-    <td><span class="st st-${esc(l.status)}">${esc(l.status.toUpperCase())}</span></td>
+    <td><span class="sg sg-${esc(l.stage||'called')}">${esc(l.stage_label||l.status)}</span></td>
     <td>${l.phone_digits
       ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`
         +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button></div>`
@@ -1560,7 +1844,7 @@ $('pipeBody').onclick=async e=>{
     d.dataset.mode='view';
     const f=(k,v)=>v?`<div class="mailrow"><label>${k}</label><div>${esc(String(v))}</div></div>`:'';
     d.innerHTML=`<td colspan="6">
-      ${f('Bar',l.name)}${f('Where',l.loc)}${f('Stage',l.status)}
+      ${f('Bar',l.name)}${f('Where',l.loc)}${f('Where it’s at',l.stage_label)}
       ${f('Last call',[outcomeLabel(l.last_outcome),(l.last_touch_at||'').slice(0,10)].filter(Boolean).join(' · '))}
       ${f('Tries',l.attempts)}${f('Call back',l.followup_date)}
       ${f('Spoke to',l.contact)}${f('Phone',l.phone_dial||l.phone)}${f('Email',l.email)}
@@ -1574,7 +1858,7 @@ $('pipeBody').onclick=async e=>{
     d.dataset.mode='edit';
     d.innerHTML=`<td colspan="6">
       <div class="mailrow"><label>Stage</label>
-        <select data-f="status">${STATUSES.filter(x=>x[0]).map(([k,v])=>
+        <select data-f="status">${STATUSES.map(([k,v])=>
           `<option value="${k}" ${k===l.status?'selected':''}>${v}</option>`).join('')}</select></div>
       <div class="mailrow"><label>Contact</label><input data-f="contact" value="${esc(l.contact||'')}"></div>
       <div class="mailrow"><label>Phone</label><input data-f="phone" value="${esc(l.phone||'')}"></div>
@@ -1587,28 +1871,10 @@ $('pipeBody').onclick=async e=>{
       <div class="applied hide"></div></td>`;
   } else if(btn.dataset.act==='log'){
     d.dataset.mode='log';
-    d.innerHTML=`<td colspan="6">
-      <p class="hint">What happened? Type it however it comes out, or hit a button.</p>
-      <textarea rows="3" placeholder="spoke to Dave, wants a callback Tuesday"></textarea>
-      <div class="row">
-        <button class="go" data-save>Save</button>
-        <button data-outcome="voicemail" data-note="Left a voicemail, no answer.">Voicemail</button>
-        <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
-        <button data-outcome="not_interested" data-note="Not interested.">Not interested</button>
-        <button data-cancel>Cancel</button>
-      </div>
-      <div class="applied hide"></div></td>`;
+    d.innerHTML=logDrawerHTML(6);
+    setTimeout(()=>d.querySelector('textarea')?.focus(),0);
   } else if(btn.dataset.act==='mail'){
-    const addr=tr.dataset.email;
-    if(!addr) return toast('No email address on this one');
-    if(!MAIL.configured){
-      window.location.href=`mailto:${addr}?subject=${encodeURIComponent(MAIL_SUBJECT)}`
-        +`&body=${encodeURIComponent(mailBody(tr.dataset.contact))}`;
-      return;
-    }
-    d.className='drawer mailer'; d.dataset.mode='mail';
-    d.innerHTML=composeDrawer(addr, tr.dataset.contact);
-    setTimeout(()=>{ wireSlots(d); loadSlots(d, id); }, 0);
+    return openCompose(rowLead(tr));
   }
   tr.after(d);
 };
@@ -1627,44 +1893,7 @@ async function pipeDrawer(dr,e){
     catch(err){ fail(err.message); }
     return;
   }
-  if(dr.dataset.mode==='mail' && e.target.closest('[data-draft]')){
-    return runDraft(dr, id);
-  }
-  if(dr.dataset.mode==='mail' && e.target.closest('[data-send]')){
-    const b=dr.querySelector('[data-send]'); b.disabled=true;
-    b.textContent=chosenTime(dr)?'Scheduling…':'Sending…';
-    try{
-      const r=await api(`/leads/${id}/send-email`,{method:'POST',body:JSON.stringify({
-        to:dr.querySelector('[data-to]').value.trim(),
-        subject:dr.querySelector('[data-subject]').value.trim(),
-        body:dr.querySelector('[data-body]').value,
-        send_at:chosenTime(dr)})});
-      toast(r.queued
-        ? `Queued for ${r.venue_time} their time (${r.your_time} yours)`
-        : 'Sent to '+r.sent.to, r.undo_id);
-      await loadPipeline();
-    }catch(err){ b.disabled=false; refreshSendLabel(dr); fail(err.message); }
-    return;
-  }
-  if(dr.dataset.mode==='log'){
-    const quick=e.target.closest('[data-outcome]');
-    const ta=dr.querySelector('textarea');
-    if(quick){
-      try{ const r=await api(`/leads/${id}/touch`,{method:'POST',body:JSON.stringify({
-             kind:'call', outcome:quick.dataset.outcome,
-             note:ta.value.trim()||quick.dataset.note})});
-           toast(`${quick.textContent} logged`, r.undo_id); await loadPipeline(); }
-      catch(err){ fail(err.message); }
-      return;
-    }
-    if(!e.target.closest('[data-save]')) return;
-    const text=ta.value.trim();
-    if(!text) return toast('Type what happened, or use a button');
-    try{ const r=await api(`/leads/${id}/debrief`,{method:'POST',
-           body:JSON.stringify({text,kind:'call'})});
-         toast('Saved', r.undo_id); await loadPipeline(); }
-    catch(err){ fail(err.message); }
-  }
+  if(dr.dataset.mode==='log') return drawerAction(dr, e);
 }
 
 // A bare name-only prompt() used to be the whole "Add a lead" flow, which
@@ -1697,21 +1926,23 @@ $('pipeAddSave').onclick=async()=>{
   const box=$('pipeAddResult'); box.className='applied hide';
   if(!text){ box.className='applied err'; box.textContent='Say what happened on the call.';
              return $('pipeAddText').focus(); }
-  const btn=$('pipeAddSave'); btn.disabled=true; btn.textContent='Adding… (checking their website)';
+  const btn=$('pipeAddSave'); btn.disabled=true; btn.textContent='Saving… (may check their website)';
   try{
-    const r=await api('/leads/quick-add',{method:'POST',body:JSON.stringify({text})});
+    const r=await api('/log-call',{method:'POST',body:JSON.stringify({text})});
     box.className='applied';
-    box.textContent=`Added ${r.lead.name}${r.applied.status?' — '+r.applied.status:''}.`
-      +(r.applied.followup_date?` Follow up ${r.applied.followup_date}.`:'')
+    box.textContent=(r.matched==='existing'
+        ? `Logged on ${r.lead.name} (matched by ${r.match_reason}) — ${r.lead.stage_label}.`
+        : `Added ${r.lead.name} — ${r.lead.stage_label}.`)
+      +(r.lead.followup_date&&r.lead.status!=='dead'?` Next call ${r.lead.followup_date}.`:'')
       +(r.applied.email_found_on?` Found ${r.lead.email} on their site.`:'')
       +(r.applied.email_lookup?` Email: ${r.applied.email_lookup}.`:'');
-    toast('Lead added', r.undo_id);
+    toast(r.matched==='existing'?'Call logged':'Lead added', r.undo_id);
     $('pipeAddText').value='';
     PIPE.q=''; $('pipeSearch').value=''; PIPE.offset=0;
     await loadPipeline();
   }catch(err){
     box.className='applied err'; box.textContent=err.message;
-  }finally{ btn.disabled=false; btn.textContent='Add lead'; }
+  }finally{ btn.disabled=false; btn.textContent='Save'; }
 };
 
 /* ── follow-ups ───────────────────────────────────────────────────────── */
@@ -1719,15 +1950,17 @@ function miniTable(list){
   if(!list.length) return '<p class="muted">Nothing here.</p>';
   return `<div class="sheetwrap"><table class="sheet">
     <thead><tr><th></th><th>BAR</th><th>PHONE</th><th>TRY</th><th>DUE</th><th>ACTIONS</th></tr></thead>
-    <tbody>${list.map((l,i)=>`<tr data-id="${esc(l.id)}">
+    <tbody>${list.map((l,i)=>`<tr data-id="${esc(l.id)}" data-name="${esc(l.name)}"
+        data-email="${esc(l.email||'')}" data-contact="${esc(l.contact||'')}">
       <td class="rownum">${i+1}</td>
       <td class="nm">${esc(l.name)}
-        ${l.last_outcome?`<div class="sub">${esc(outcomeLabel(l.last_outcome))}</div>`:''}</td>
+        ${l.stage_label?`<div class="sub">${esc(l.stage_label)}</div>`:''}</td>
       <td><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span></td>
       <td>${l.attempts?`<span class="tries">${l.attempts}</span>`:'<span class="muted">—</span>'}</td>
       <td class="muted">${esc(l.followup_date||'')}</td>
       <td><div class="acts"><button class="go" data-act="log">Log call</button>
-          <button class="del" data-act="del">Delete</button></div></td>
+          <button data-act="mail">Email</button>
+          <button class="del" data-act="del" title="Delete for good">✕</button></div></td>
     </tr>`).join('')}</tbody></table></div>`;
 }
 async function loadFollowups(){
@@ -1761,20 +1994,19 @@ async function loadFollowups(){
   const el=$(id); if(!el) return;
   el.onclick=async e=>{
     const dig=e.target.closest('.digits'); if(dig) return copyDigits(dig);
+    const dr=e.target.closest('.drawer'); if(dr) return drawerAction(dr,e);
     const btn=e.target.closest('button[data-act]'); if(!btn) return;
-    const leadId=btn.closest('tr').dataset.id;
+    const tr=btn.closest('tr'); const leadId=tr.dataset.id;
+    if(btn.dataset.act==='mail') return openCompose(rowLead(tr));
     if(btn.dataset.act==='del'){
       if(!confirm('Delete this lead?')) return;
       try{await api('/leads/'+leadId,{method:'DELETE'});toast('Deleted');await loadFollowups();}
       catch(err){toast(err.message)}
       return;
     }
-    const what=prompt('What happened on this call?');
-    if(!what) return;
-    try{ await api(`/leads/${leadId}/debrief`,{method:'POST',
-           body:JSON.stringify({text:what,kind:'call'})});
-         toast('Saved'); await loadFollowups(); }
-    catch(err){ toast(err.message); }
+    if(tr.nextElementSibling?.classList.contains('drawer')) return tr.nextElementSibling.remove();
+    const d=document.createElement('tr'); d.className='drawer';
+    d.innerHTML=logDrawerHTML(6); tr.after(d); d.querySelector('textarea').focus();
   };
 });
 
@@ -2008,6 +2240,343 @@ async function startRecheck(){
   }, 4000);
 }
 $('recheckBtn').onclick=startRecheck;
+
+/* ── ask AI ───────────────────────────────────────────────────────────────
+   One box, top of every page. The server hands Claude a snapshot of the CRM
+   in your clock; the answer comes back with the bars it named underneath,
+   number ready to copy. The last few questions ride along so "and the day
+   before?" works. */
+let ASKHIST=[], ASKLEADS=[];
+async function askAI(q){
+  q=(q||'').trim(); if(!q) return;
+  $('askIn').value='';
+  $('askOut').innerHTML=`<div class="askout"><div class="q">${esc(q)}</div>
+    <div class="a muted">Reading your CRM…</div></div>`;
+  try{
+    const r=await api('/ask',{method:'POST',body:JSON.stringify({question:q,history:ASKHIST})});
+    ASKHIST=[...ASKHIST,{q,a:r.answer}].slice(-4);
+    ASKLEADS=r.leads||[];
+    $('askOut').innerHTML=`<div class="askout">
+      <button class="x" data-ask="close" title="Close">×</button>
+      <div class="q">${esc(q)}</div>
+      <div class="a">${esc(r.answer)}</div>
+      ${ASKLEADS.length?`<div class="askleads">${ASKLEADS.map((l,i)=>`
+        <div class="asklead">
+          <span class="nm2">${esc(l.name)}</span>
+          <span class="meta">${esc([l.loc,l.stage_label,
+            l.followup_date&&l.status!=='dead'&&l.status!=='won'?'call back '+l.followup_date:''].filter(Boolean).join(' · '))}</span>
+          ${l.phone_dial?`<span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`:''}
+          <button data-ask="log" data-i="${i}">Log call</button>
+          <button data-ask="mail" data-i="${i}">Email</button>
+        </div>`).join('')}</div>`:''}
+    </div>`;
+  }catch(err){
+    $('askOut').innerHTML=`<div class="askout"><button class="x" data-ask="close">×</button>
+      <div class="q">${esc(q)}</div><div class="a err">${esc(err.message)}</div></div>`;
+  }
+}
+$('askBtn').onclick=()=>askAI($('askIn').value);
+$('askIn').onkeydown=e=>{ if(e.key==='Enter') askAI($('askIn').value); };
+$('askChips').onclick=e=>{ const b=e.target.closest('button'); if(b) askAI(b.textContent); };
+$('askOut').onclick=e=>{
+  const dig=e.target.closest('.digits'); if(dig) return copyDigits(dig);
+  const b=e.target.closest('[data-ask]'); if(!b) return;
+  if(b.dataset.ask==='close'){ $('askOut').innerHTML=''; ASKHIST=[]; return; }
+  const l=ASKLEADS[+b.dataset.i]; if(!l) return;
+  if(b.dataset.ask==='mail') return openCompose(l);
+  if(b.dataset.ask==='log') return openLogModal(l);
+};
+
+/* Log a call against one specific lead from anywhere (the ask answers). */
+function openLogModal(l){
+  openModal(`<h3>${esc(l.name)}</h3>
+    <p class="hint">${esc([l.loc,l.stage_label].filter(Boolean).join(' · '))}</p>
+    ${l.phone_dial?`<div class="phcell" style="margin-bottom:10px"><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>
+      <button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button></div>`:''}
+    <textarea data-logtext placeholder="What happened? Type it any way — AI sorts it out."></textarea>
+    <div class="row">
+      <button class="go" data-logsave>Save</button>
+      <button data-outcome="voicemail">Voicemail left</button>
+      <button data-outcome="gatekeeper">Manager out</button>
+      <button data-outcome="not_interested">Not interested</button>
+      <button data-cancel>Cancel</button>
+    </div>`);
+  const m=$('modal'); m.dataset.mode='log'; m.dataset.lead=l.id;
+  m.querySelector('[data-logtext]').focus();
+}
+$('modal').addEventListener('click', async e=>{
+  const m=$('modal'); if(m.dataset.mode!=='log') return;
+  const cp=e.target.closest('[data-copy]'); if(cp) return copyDigits(cp);
+  const typed=(m.querySelector('[data-logtext]')?.value||'').trim();
+  const q=e.target.closest('[data-outcome]');
+  if(q){ await quickLog(q, m.dataset.lead, typed); return closeModal(); }
+  const s=e.target.closest('[data-logsave]');
+  if(!s) return;
+  if(!typed) return toast('Type what happened, or tap a button');
+  if(await submitLog(s, typed, m.dataset.lead)) closeModal();
+});
+
+/* ── call coach ───────────────────────────────────────────────────────────
+   The thing you need mid-call is the next sentence. The common objections
+   answer instantly from a fixed script; anything else goes to Claude with
+   the product facts (and the lead, from the focus card). */
+let COACH=null, PRACTICE={persona:0,history:[],on:false};
+async function getCoach(){ if(!COACH) COACH=await api('/coach'); return COACH; }
+
+function coachWidgetHTML(){
+  return `<div class="objs">${COACH.objections.map(o=>
+      `<button data-obj="${esc(o.id)}">${esc(o.label)}</button>`).join('')}</div>
+    ${COACH.ai?`<div style="display:flex;gap:8px;margin-top:12px">
+      <input data-said placeholder="Something else? Type what they said…">
+      <button class="go" data-coachask style="white-space:nowrap">Get a reply</button>
+    </div>`:''}
+    <div data-reply></div>`;
+}
+function replyHTML(r){
+  return `<div class="reply">
+    <div class="lbl">SAY</div><div class="say">${esc(r.say)}</div>
+    ${r.ask?`<div class="lbl" style="margin-top:10px">THEN ASK</div><div class="ask2">${esc(r.ask)}</div>`:''}
+    ${r.tip?`<div class="tip">${esc(r.tip)}</div>`:''}</div>`;
+}
+async function coachClick(box, e){
+  const o=e.target.closest('[data-obj]');
+  if(o){
+    box.querySelectorAll('[data-obj]').forEach(x=>x.classList.toggle('on',x===o));
+    const s=COACH.objections.find(x=>x.id===o.dataset.obj);
+    box.querySelector('[data-reply]').innerHTML=replyHTML(s);
+    return;
+  }
+  const ask=e.target.closest('[data-coachask]');
+  if(!ask) return;
+  const said=box.querySelector('[data-said]').value.trim();
+  if(!said) return box.querySelector('[data-said]').focus();
+  ask.disabled=true; ask.textContent='Thinking…';
+  box.querySelectorAll('[data-obj]').forEach(x=>x.classList.remove('on'));
+  try{
+    const r=await api('/coach/answer',{method:'POST',
+      body:JSON.stringify({said, lead_id:box.dataset.lead||null})});
+    box.querySelector('[data-reply]').innerHTML=replyHTML(r);
+  }catch(err){ box.querySelector('[data-reply]').innerHTML=`<p class="err">${esc(err.message)}</p>`; }
+  finally{ ask.disabled=false; ask.textContent='Get a reply'; }
+}
+function wireCoachEnter(box){
+  box.addEventListener('keydown', e=>{
+    if(e.target.matches('[data-said]') && e.key==='Enter') box.querySelector('[data-coachask]')?.click();
+  });
+}
+
+async function openCoachModal(lead){
+  try{ await getCoach(); }catch(err){ return toast(err.message); }
+  openModal(`<h3>They said…</h3>
+    <p class="hint">Tap it, read the reply out loud, then ask the question.</p>
+    ${coachWidgetHTML()}
+    <div class="row"><button data-cancel>Close</button></div>`);
+  const m=$('modal'); m.dataset.mode='coach';
+  if(lead) m.dataset.lead=lead.id;
+  if(!m.dataset.wired){ wireCoachEnter(m); m.dataset.wired='1'; }
+}
+
+async function loadCoach(){
+  await getCoach();
+  const main=$('coachMain');
+  if(!main.dataset.wired){
+    main.addEventListener('click', e=>coachClick(main,e)); wireCoachEnter(main);
+    main.dataset.wired='1';
+  }
+  main.innerHTML=coachWidgetHTML();
+  $('coachOpeners').innerHTML=COACH.openers.map(o=>`<div class="opener-card">
+    <b>${esc(o.label)}</b>${esc(o.say)}<div class="why2">${esc(o.why)}</div></div>`).join('');
+  $('practicePersona').innerHTML=COACH.personas.map(p=>
+    `<option value="${p.id}">${esc(p.label)}</option>`).join('');
+  if(!COACH.ai){
+    $('practiceStart').disabled=true;
+    $('practiceFb').innerHTML='<p class="muted" style="font-size:12px">Practice calls need ANTHROPIC_API_KEY set on the server.</p>';
+  }
+}
+
+function renderPractice(){
+  $('practiceChat').innerHTML=PRACTICE.history.map(t=>
+    `<div class="bubble ${t.role}">${esc(t.text)}</div>`).join('');
+  $('practiceChat').scrollTop=$('practiceChat').scrollHeight;
+}
+async function practiceTurn(){
+  try{
+    const r=await api('/coach/practice',{method:'POST',body:JSON.stringify(
+      {persona:PRACTICE.persona,history:PRACTICE.history})});
+    PRACTICE.history.push({role:'them',text:r.reply});
+    renderPractice();
+    if(r.hung_up){ toast('They hung up — get your feedback'); }
+  }catch(err){ toast(err.message); }
+}
+$('practiceStart').onclick=async()=>{
+  PRACTICE={persona:+$('practicePersona').value,history:[],on:true};
+  $('practiceFb').innerHTML=''; $('practiceInput').classList.remove('hide');
+  $('practiceChat').innerHTML='<div class="muted">Ringing…</div>';
+  await practiceTurn(); $('practiceSay').focus();
+};
+async function practiceSend(){
+  const t=$('practiceSay').value.trim(); if(!t||!PRACTICE.on) return;
+  $('practiceSay').value='';
+  PRACTICE.history.push({role:'me',text:t}); renderPractice();
+  $('practiceSend').disabled=true; await practiceTurn(); $('practiceSend').disabled=false;
+  $('practiceSay').focus();
+}
+$('practiceSend').onclick=practiceSend;
+$('practiceSay').onkeydown=e=>{ if(e.key==='Enter') practiceSend(); };
+$('practiceEnd').onclick=async()=>{
+  const b=$('practiceEnd'); b.disabled=true; b.textContent='Scoring…';
+  try{
+    const r=await api('/coach/practice',{method:'POST',body:JSON.stringify(
+      {persona:PRACTICE.persona,history:PRACTICE.history,feedback:true})});
+    PRACTICE.on=false; $('practiceInput').classList.add('hide');
+    $('practiceFb').innerHTML=`<div class="reply">
+      <div class="lbl">SCORE</div><div class="say">${r.score??'—'} / 10</div>
+      ${r.went_well.length?`<div class="lbl" style="margin-top:10px">WENT WELL</div>
+        <ul class="fb">${r.went_well.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}
+      ${r.try_next.length?`<div class="lbl">TRY NEXT TIME</div>
+        <ul class="fb">${r.try_next.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}
+      ${r.better_line?`<div class="lbl">SAY THIS INSTEAD</div><div class="ask2">${esc(r.better_line)}</div>`:''}
+    </div>`;
+  }catch(err){ toast(err.message); }
+  finally{ b.disabled=false; b.textContent='End call & get feedback'; }
+};
+
+/* ── app store ────────────────────────────────────────────────────────────
+   Downloads, the live version, builds and reviews from App Store Connect,
+   next to our own signups — the one number Apple can't show. */
+let AS_DAYS=30;
+async function loadAppStore(refresh){
+  const body=$('asBody');
+  if(!body.innerHTML.trim()||refresh===undefined) body.innerHTML='<div class="card muted">Loading from App Store Connect…</div>';
+  let d;
+  try{ d=await api(`/appstore?days=${AS_DAYS}${refresh?'&refresh=true':''}`); }
+  catch(err){ body.innerHTML=`<div class="banner bad">${esc(err.message)}</div>`; return; }
+  if(!d.configured){ body.innerHTML=appStoreSetup(d); return; }
+
+  const t=d.totals;
+  const errs=Object.entries(d.errors||{});
+  const live=(d.versions||[]).find(v=>v.state==='READY_FOR_SALE'||v.state==='READY_FOR_DISTRIBUTION');
+  const pending=(d.versions||[]).find(v=>v!==live && v.state && !/READY_FOR_(SALE|DISTRIBUTION)|REPLACED/.test(v.state));
+  body.innerHTML=`
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <strong>${esc(d.app?.name||'Your app')}${live?` <span class="muted" style="font-weight:400">· v${esc(live.version)} live</span>`:''}</strong>
+        <div class="zt" style="margin:0" id="asDays">
+          ${[7,30,90].map(n=>`<button data-days="${n}" class="${n===AS_DAYS?'on':''}">${n} days</button>`).join('')}
+          <button data-refresh>Refresh</button>
+        </div>
+      </div>
+      ${errs.length?`<div class="banner" style="margin-top:12px">${errs.map(([k,v])=>`<div><b>${esc(k)}:</b> ${esc(v)}</div>`).join('')}</div>`:''}
+      <div class="grid" style="margin-top:12px">
+        ${tile(t.downloads,'DOWNLOADS')}
+        ${tile(t.signups,'ACCOUNTS MADE')}
+        ${tile(t.signup_rate_pct==null?'—':t.signup_rate_pct+'%','DOWNLOAD → ACCOUNT')}
+        ${tile(t.redownloads,'RE-DOWNLOADS')}
+        ${tile(t.updates,'UPDATES')}
+        ${tile(t.recent_rating==null?'—':t.recent_rating+' ★','RECENT RATING')}
+      </div>
+      ${chartHTML(d)}
+    </div>
+    ${pending?`<div class="banner">v${esc(pending.version)}: ${esc(pending.state.replace(/_/g,' ').toLowerCase())}</div>`:''}
+    <div class="card"><strong>Recent builds</strong>
+      ${(d.builds||[]).length?`<div class="tablewrap" style="margin-top:10px"><table class="sheet">
+        <thead><tr><th>VERSION</th><th>BUILD</th><th>STATUS</th><th>UPLOADED</th></tr></thead>
+        <tbody>${d.builds.map(b=>`<tr><td>${esc(b.version||'')}</td><td>${esc(b.build||'')}</td>
+          <td class="${b.state==='VALID'?'win-good':''}">${esc((b.state||'').toLowerCase())}${b.expired?' · expired':''}</td>
+          <td class="muted">${esc((b.uploaded||'').slice(0,10))}</td></tr>`).join('')}</tbody></table></div>`
+      :'<p class="muted">No builds found.</p>'}</div>
+    <div class="card"><strong>Where downloads came from</strong>
+      ${t.top_countries.length?`<div class="grid" style="margin-top:10px">${t.top_countries.map(([c,n])=>tile(n,c)).join('')}</div>`
+      :'<p class="muted">No downloads in this period.</p>'}</div>
+    <div class="card"><strong>Latest reviews</strong>
+      ${(d.reviews||[]).length?d.reviews.map(r=>`<div class="review">
+        <span class="stars">${'★'.repeat(r.rating||0)}${'☆'.repeat(5-(r.rating||0))}</span>
+        <span class="rt">${esc(r.title||'')}</span>
+        <span class="muted" style="font-size:12px"> — ${esc(r.who||'')}, ${esc(r.territory||'')}, ${esc((r.date||'').slice(0,10))}</span>
+        <div class="rb">${esc(r.body||'')}</div></div>`).join('')
+      :'<p class="muted">No written reviews yet.</p>'}</div>`;
+  wireChart(d);
+}
+$('asBody').onclick=e=>{
+  const b=e.target.closest('button[data-days]');
+  if(b){ AS_DAYS=+b.dataset.days; return loadAppStore(false); }
+  if(e.target.closest('[data-refresh]')) loadAppStore(true);
+};
+
+function appStoreSetup(d){
+  return `<div class="card"><strong>Connect App Store Connect</strong>
+    <p class="muted" style="font-size:13px;margin:6px 0 0">Once this is set up, downloads, reviews
+      and build status show here — no Apple login needed. About five minutes, once.</p>
+    <ol class="steps">
+      <li>In App Store Connect go to <b>Users and Access → Integrations → App Store Connect API</b>
+        → <b>Team Keys</b> → <b>Generate API Key</b>. Name it "CRM"; for Access pick <b>Admin</b>
+        (or <b>Sales</b> if you only want downloads).</li>
+      <li>Download the <code>.p8</code> file (Apple only lets you download it once). Note the
+        <b>Key ID</b> and the <b>Issuer ID</b> shown above the list.</li>
+      <li>For downloads: <b>Payments and Financial Reports</b> → your <b>Vendor number</b> is at the top left.</li>
+      <li>In Render → the API service → <b>Environment</b>, add:
+        <code>ASC_ISSUER_ID</code>, <code>ASC_KEY_ID</code>, <code>ASC_PRIVATE_KEY</code>
+        (paste the whole .p8 file) and <code>ASC_VENDOR_NUMBER</code>. Save — it redeploys.</li>
+    </ol>
+    <p class="muted" style="font-size:12px;margin-top:10px">Still missing: ${esc((d.missing||[]).join(', '))}
+      · App: ${esc(d.bundle_id||'')}</p></div>`;
+}
+
+/* Downloads vs accounts made, per day — one axis (both are counts), two
+   series, a legend, and a per-day hover. The table under it is the same
+   numbers for anyone who'd rather read than squint. */
+const SERIES=[{key:'downloads',label:'Downloads',color:'#3987e5'},
+              {key:'signups',label:'Accounts made',color:'#d95926'}];
+function chartRows(d){
+  const out=[];
+  const days=Object.keys(d.daily||{}).sort();
+  const end=days.length?new Date(days[days.length-1]+'T00:00:00Z'):new Date(Date.now()-86400000);
+  for(let i=d.days-1;i>=0;i--){
+    const day=new Date(end.getTime()-i*86400000).toISOString().slice(0,10);
+    out.push({day, downloads:(d.daily[day]||{}).downloads||0, signups:(d.signups||{})[day]||0});
+  }
+  return out;
+}
+function chartHTML(d){
+  const rows=chartRows(d);
+  const max=Math.max(1,...rows.map(r=>Math.max(r.downloads,r.signups)));
+  const W=720,H=180,pad=24,inner=W-pad*2, step=inner/rows.length;
+  const bw=Math.max(1,Math.min(10,(step-4)/2));
+  const y=v=>H-pad-(v/max)*(H-pad*2);
+  const bar=(x,v,c)=>v?`<rect x="${x.toFixed(1)}" y="${y(v).toFixed(1)}" width="${bw.toFixed(1)}"
+      height="${(H-pad-y(v)).toFixed(1)}" rx="${Math.min(4,bw/2)}" fill="${c}"/>`:'';
+  const bars=rows.map((r,i)=>{
+    const x0=pad+i*step+(step-bw*2-2)/2;
+    return `<g>${bar(x0,r.downloads,SERIES[0].color)}${bar(x0+bw+2,r.signups,SERIES[1].color)}
+      <rect data-i="${i}" x="${(pad+i*step).toFixed(1)}" y="0" width="${step.toFixed(1)}" height="${H}" fill="transparent"/></g>`;
+  }).join('');
+  const ticks=[0,Math.round(max/2),max].map(v=>`<line x1="${pad}" x2="${W-pad}" y1="${y(v)}" y2="${y(v)}"
+      stroke="#2A2A2A" stroke-width="1"/><text x="${pad-6}" y="${y(v)+4}" fill="#6E6E6E" font-size="10" text-anchor="end">${v}</text>`).join('');
+  const first=rows[0]?.day.slice(5)||'', last=rows[rows.length-1]?.day.slice(5)||'';
+  return `<div class="chart" id="asChart">
+    <svg viewBox="0 0 ${W} ${H+14}" role="img" aria-label="Downloads and accounts made per day">
+      ${ticks}${bars}
+      <text x="${pad}" y="${H+10}" fill="#6E6E6E" font-size="10">${first}</text>
+      <text x="${W-pad}" y="${H+10}" fill="#6E6E6E" font-size="10" text-anchor="end">${last}</text>
+    </svg>
+    <div class="legend">${SERIES.map(s=>`<span><i style="background:${s.color}"></i>${s.label}</span>`).join('')}</div>
+    <details style="margin-top:8px"><summary class="muted" style="font-size:12px;cursor:pointer">Show as a table</summary>
+      <div class="tablewrap" style="margin-top:8px"><table class="sheet"><thead><tr><th>DAY</th><th>DOWNLOADS</th><th>ACCOUNTS</th></tr></thead>
+      <tbody>${rows.slice().reverse().map(r=>`<tr><td>${r.day}</td><td>${r.downloads}</td><td>${r.signups}</td></tr>`).join('')}</tbody></table></div>
+    </details></div>`;
+}
+function wireChart(d){
+  const svg=document.querySelector('#asChart svg'); if(!svg) return;
+  const rows=chartRows(d), tip=$('chartTip');
+  svg.addEventListener('mousemove', e=>{
+    const hit=e.target.closest('rect[data-i]');
+    if(!hit){ tip.style.display='none'; return; }
+    const r=rows[+hit.dataset.i];
+    tip.innerHTML=`<b>${r.day}</b><br>${r.downloads} download${r.downloads===1?'':'s'}<br>${r.signups} account${r.signups===1?'':'s'} made`;
+    tip.style.display='block'; tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY+14)+'px';
+  });
+  svg.addEventListener('mouseleave', ()=>{ tip.style.display='none'; });
+}
 
 (function(){let k=null;try{k=localStorage.getItem(KEY_STORE)}catch{}
   if(k) unlock(k); else lock(null);})();

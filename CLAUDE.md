@@ -25,7 +25,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   it shares a process and a database with the product API but is not part of the product.
   Nothing in the inventory/scan/order paths reads from it. See the CRM section below
 - static/crm.html — the CRM UI, served at `/crm`. **Three tabs only** — Call list, CRM,
-  Follow-ups — with Numbers, Customers and Lead engine behind a burger top right: those are
+  Follow-ups — with Numbers, Call coach, Customers, App Store and Lead engine behind a burger
+  top right, and an **Ask AI** bar above the tabs on every page: those are
   looked at occasionally and thought about once, and in the tab row they competed with the
   three things a working day actually needs. The burger turns orange when the open page lives
   inside it. Single self-contained file, no build step;
@@ -72,6 +73,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   anything this can't prove dialable returns None and is never promoted. It can promise the
   digits are a structurally valid US number, NOT that the line still belongs to that venue —
   nothing short of dialling proves that
+- appstore.py — the App Store tab: App Store Connect API (ES256 JWT via python-jose, already a
+  dependency — no new package). Downloads per day from Sales and Trends (cached per day in
+  `crm_appstore_daily`, since a published daily report never changes), versions, builds and
+  reviews, next to our own signups per day. Each section fails on its own. Impressions / page
+  views / crashes are NOT covered — they need Apple's separate Analytics Reports API
 - leadgen.py — the daily lead generator: harvest (OpenStreetMap/Overpass) → enrich (crawl
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
@@ -81,7 +87,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
-  test_leadgen.py test_quick_add.py -q` (255 tests)
+  test_leadgen.py test_quick_add.py test_crm_ai.py -q` (269 tests)
 - test_leadgen.py — `_restaurant_pours()`, the restaurant liquor gate, pure (crawled text +
   OSM tags in, a yes/no and a reason out). Stubs `database` in `sys.modules` the same way
   test_callnow.py stubs it for crm
@@ -176,6 +182,42 @@ capture. Don't reintroduce them or describe them as current.)
   `X-CRM-Key` header. That's fine while the page is served from `/crm` on this same origin
   (same-origin requests skip CORS entirely), but hosting the CRM page on another domain and
   calling this API cross-origin would fail on both counts
+
+## AI IN THE CRM (all Claude, all through `_ask_claude()`)
+- **Stages are plain English, not new/contacted/warm/dead.** `friendly_stage()` +
+  `STAGE_LABELS` read `status` + `last_outcome` into "Voicemail left", "Talked to them",
+  "Call back", "Manager wasn't in", "Signed up", "Not interested", "No answer — stopped". The
+  `status` column is unchanged (the generator, cadence and call-list filter key off it);
+  every `_lead_row` carries `stage`/`stage_label` and the page never shows a raw status. A
+  voicemail used to read CONTACTED, indistinguishable from a conversation. Pipeline tabs are
+  `STAGE_GROUPS` (`/leads?stage=active|todo|signed|closed`)
+- **`POST /v1/crm/log-call` is the one "I just got off the phone" box**, in the focus card
+  under the number. With `lead_id` it logs that lead; without, the model reads the notes and
+  `_match_lead()` finds the lead by phone then exact name (narrowed by town; ambiguous matches
+  nothing — a new lead is recoverable, notes on the wrong bar aren't), else
+  `_create_lead_from_call()` (shared with quick-add) makes one. With no AI key it still works:
+  `guess_outcome()` reads the notes by keyword. The focus card's text survives the 60s
+  refresh — the card isn't redrawn under someone mid-sentence
+- **`POST /v1/crm/ask` is the assistant** ("who did I call yesterday", "who should I call
+  back", "what's my next move"). `format_assistant_context()` (pure, tested) builds a snapshot
+  — 14 days of touches, booked follow-ups, interested leads, pipeline counts, app signups —
+  with every time already in `CRM_OPERATOR_TZ`, so "yesterday" is the operator's yesterday.
+  The model returns `lead_ids`, filtered to ids that were in the snapshot, and the page puts
+  each lead's number and Log/Email buttons under the answer
+- **The email drafter now sees the lead's last notes**, so "follow up on the call" references
+  the actual call. After logging, the focus card offers "Send a follow-up email", which opens
+  the compose box and drafts it
+- **No email on file no longer dead-ends the Email button.** The compose box opens with an
+  empty To field (the address is saved to the lead when the mail sends — `_record_email_sent`
+  already did that) and a "Find it on their website" button, `POST /leads/{id}/find-email`
+- **Call coach** (burger → Call coach, and "They said…" on the focus card): ten common
+  objections answered instantly from `coach_scripts()` (no model wait with someone on the
+  line), free text via `POST /coach/answer` with the lead's context, three openers, and
+  `POST /coach/practice` — a roleplay against one of `PRACTICE_PERSONAS` with a score and
+  "say this instead" at the end. Chosen as the extra tab because objection handling is where
+  calls are won or lost, and practice is the confidence builder. Scripts follow Gong Labs'
+  cold-call findings (state the reason for calling early, own that it's a cold call, answer
+  briefly then ask). **Never states a price** unless `COMPANY_PRICE` is set
 
 ## LEAD GENERATOR (leadgen.py)
 - **The cap is PER TAB, not global: `LEADGEN_BUCKET_TARGET` (50) unworked leads in each of
@@ -699,6 +741,11 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   LEADGEN_ENRICH_WORKERS (8),
   LEADGEN_RUN_HOUR (18 = 6pm, local) — optional lead generator tuning. No API key needed: the
   generator uses OpenStreetMap, which has neither keys nor billing
+- ASC_ISSUER_ID, ASC_KEY_ID, ASC_PRIVATE_KEY (the .p8 contents — raw, `\n`-escaped or
+  base64 all work; or ASC_PRIVATE_KEY_PATH), ASC_VENDOR_NUMBER (downloads only),
+  ASC_BUNDLE_ID (default `com.my86d.app`) / ASC_APP_ID — the App Store tab. Unset shows
+  setup steps instead. The key needs Admin (or Sales for downloads only)
+- COMPANY_PRICE — optional; the only way the call coach will ever say a price
 - SENTRY_DSN — optional, error visibility only
 - CONFIDENCE_THRESHOLD, LEVEL_DEADBAND — optional tuning, see AI Vision Rules above
 
