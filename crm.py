@@ -367,7 +367,7 @@ LEAD_WRITABLE = (
 )
 
 
-from phones import normalize_us_phone, format_us_phone
+from phones import normalize_us_phone, format_us_phone, format_us_phone_dashed
 
 
 def phone_digits(phone: Optional[str]) -> str:
@@ -486,6 +486,10 @@ def _lead_row(row) -> dict:
     lead = {k: row[k] for k in LEAD_COLUMNS}
     lead["phone_digits"] = phone_digits(lead.get("phone"))
     lead["phone_pretty"] = format_us_phone(lead["phone_digits"])
+    # What the COPY button and click-to-copy actually hand the clipboard.
+    # CloudTalk's paste box rejects a bare 10-digit string with no
+    # separators, so the dashed form is what's copyable, not phone_digits.
+    lead["phone_dial"] = format_us_phone_dashed(lead["phone_digits"])
     # Surfaced rather than hidden: a lead whose number didn't validate should
     # look wrong on screen, not quietly get dialled.
     lead["phone_ok"] = bool(lead["phone_digits"])

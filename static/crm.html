@@ -846,8 +846,8 @@ async function loadNow(){
   $('focus').innerHTML=`<div class="focustop">
       <h2>${esc(d.headline)}</h2>
       ${next&&next.phone_digits?`<div class="phcell">
-        <span class="digits" data-copy="${esc(next.phone_digits)}">${esc(next.phone_digits)}</span>
-        <button class="copybtn" data-act="copy" data-copy="${esc(next.phone_digits)}">COPY</button>
+        <span class="digits" data-copy="${esc(next.phone_dial)}">${esc(next.phone_dial)}</span>
+        <button class="copybtn" data-act="copy" data-copy="${esc(next.phone_dial)}">COPY</button>
       </div>`:''}
     </div>
     ${next&&next.manager_name?`<div class="askinline">Ask if ${esc(next.manager_name)}
@@ -1097,8 +1097,8 @@ function row(l,n,calling){
       ${ask(l)}
       ${l.opener?`<div class="opener">${esc(l.opener)}</div>`:''}</td>
     <td><div class="phcell">
-      <span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span>
-      <button class="copybtn" data-act="copy" data-copy="${esc(l.phone_digits)}">COPY</button>
+      <span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>
+      <button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button>
     </div></td>
     <td title="${esc(w.hint||'')}">${calling
       ? `<span class="${w.good_now?'win-good':shut?'win-shut':'win-bad'}">${
@@ -1455,8 +1455,8 @@ function pipeRow(l,n){
       ${sub?`<div class="sub">${esc(sub)}</div>`:''}</td>
     <td><span class="st st-${esc(l.status)}">${esc(l.status.toUpperCase())}</span></td>
     <td>${l.phone_digits
-      ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span>`
-        +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_digits)}">COPY</button></div>`
+      ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`
+        +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button></div>`
       : '<span class="muted">no number</span>'}</td>
     <td><span class="${tone}">${esc(stands)}</span><span class="muted">${esc(tries)}</span></td>
     <td><div class="acts">
@@ -1622,7 +1622,7 @@ function miniTable(list){
     <tbody>${list.map((l,i)=>`<tr data-id="${esc(l.id)}">
       <td class="rownum">${i+1}</td>
       <td class="nm">${esc(l.name)}</td>
-      <td><span class="digits" data-copy="${esc(l.phone_digits)}">${esc(l.phone_digits)}</span></td>
+      <td><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span></td>
       <td>${l.attempts?`<span class="tries">${l.attempts}</span>`:'<span class="muted">—</span>'}</td>
       <td class="muted">${esc(l.followup_date||'')}</td>
       <td><div class="acts"><button class="go" data-act="log">Log call</button>

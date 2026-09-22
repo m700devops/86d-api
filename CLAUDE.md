@@ -567,9 +567,14 @@ capture. Don't reintroduce them or describe them as current.)
   the filter is `status = 'new' AND last_touch_at IS NULL`. That is what makes it impossible
   to call the same restaurant twice, and the shrinking list doubles as the progress bar
 - `phone_digits` is on every lead: bare digits, US country code stripped (`+1-615-742-9095`
-  → `6157429095`), for pasting into CloudTalk. One click on the page copies it. A lead whose
-  phone doesn't validate is dropped from the call list entirely rather than shown with a
-  dead number — see phones.py
+  → `6157429095`). A lead whose phone doesn't validate is dropped from the call list entirely
+  rather than shown with a dead number — see phones.py
+- **What actually gets copied is `phone_dial` (`format_us_phone_dashed()`), not
+  `phone_digits`.** CloudTalk's paste box silently refuses a bare 10-digit string with no
+  separators, so a bare-digits COPY button was producing a number that wouldn't paste into
+  the one place it's for. `615-742-9095`, not `format_us_phone()`'s `(615) 742-9095` (that
+  one's for reading a number aloud, not pasting it, and CloudTalk doesn't take parens
+  either). One click on the page copies it
 - `DELETE /v1/crm/leads/{id}` and `POST /v1/crm/leads/bulk-delete` also RETIRE the
   `crm_lead_candidates` row that produced the lead. Without that the generator re-promotes
   the same restaurant on a later run and it reappears — the exact duplicate call that
