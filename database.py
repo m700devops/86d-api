@@ -596,6 +596,38 @@ def init_db():
         conn.commit()
 
 
+        # App funnel events. The product API can only see a user once the row
+        # exists, so everything before that — opened the app, reached the
+        # sign-up form, abandoned it — was invisible. These five events fill in
+        # exactly that gap and nothing more.
+        #
+        # anon_id is a per-install random id, not a device identifier: it exists
+        # so one install's open → view → submit can be joined into a funnel, and
+        # it is regenerated if the app is reinstalled. There is deliberately no
+        # free-form properties column — the write route is unauthenticated (a
+        # pre-signup event has no user to authenticate), and a JSON blob on an
+        # open endpoint is somebody else's storage.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_events (
+                id TEXT PRIMARY KEY,
+                anon_id TEXT NOT NULL,
+                user_id TEXT,
+                event TEXT NOT NULL,
+                platform TEXT,
+                app_version TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_app_events_event_created
+            ON app_events(event, created_at)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_app_events_anon
+            ON app_events(anon_id)
+        """)
+        conn.commit()
+
         # Seed products — always runs but is idempotent (checks name+brand before insert)
         seed_products(conn)
 

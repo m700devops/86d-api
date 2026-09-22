@@ -3849,6 +3849,64 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
         print(f"[analyze_bottle] total timeout exceeded ({TOTAL_SCAN_TIMEOUT_SEC}s)", flush=True)
         return JSONResponse(status_code=200, content=None)
 
+# ============== APP FUNNEL EVENTS ==============
+
+# The five steps between opening the app and having an account. Everything
+# after this point is already measurable from `users`, `inventory_sessions`
+# and /v1/crm/funnel; none of it is, which is why "does the sign-up screen
+# lose people" has never had an answer.
+APP_EVENTS = {
+    "app_opened",
+    "login_viewed",
+    "register_viewed",
+    "register_submitted",
+    "register_succeeded",
+}
+
+
+@v1_router.post("/events", status_code=202)
+def record_app_events(batch: AppEventBatch, authorization: str = Header(None)):
+    """Record client funnel events. Unauthenticated, allowlisted, best-effort.
+
+    Unauthenticated because the events worth having happen before the account
+    exists. A bearer token is read when one is present so post-sign-up events
+    carry a user_id, but a bad or expired token is ignored rather than
+    rejected — losing a metric must never surface as an error in the app.
+
+    Returns 202 whatever happens: analytics is not worth failing a user's
+    session over, and the client treats this as fire-and-forget.
+    """
+    events = [e for e in batch.events if e in APP_EVENTS]
+    if not events:
+        return {"accepted": 0}
+
+    user_id = None
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer":
+            claims = get_token_claims(token, "access")
+            if claims:
+                user_id = claims.get("sub")
+
+    now = now_iso()
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            for event in events:
+                cursor.execute("""
+                    INSERT INTO app_events
+                        (id, anon_id, user_id, event, platform, app_version, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (str(uuid.uuid4()), batch.anon_id, user_id, event,
+                      batch.platform, batch.app_version, now))
+            conn.commit()
+    except Exception as e:
+        print(f"[events] failed to record {len(events)} event(s): {e}", flush=True)
+        return {"accepted": 0}
+
+    return {"accepted": len(events)}
+
+
 # ============== MARKET PULSE ENDPOINT ==============
 
 @app.get("/market-pulse")

@@ -510,3 +510,17 @@ class DistributorEmail(BaseModel):
 class OrderPrepareEmailsResponse(BaseModel):
     emails: List[DistributorEmail]
     summary: dict
+# ============== APP FUNNEL EVENTS ==============
+
+class AppEventBatch(BaseModel):
+    """A flush from the mobile client's event queue.
+
+    Events are posted as bare names from a server-side allowlist rather than
+    free-form objects: this route is unauthenticated by necessity (the whole
+    point is the steps BEFORE an account exists) and an open endpoint that
+    accepts arbitrary payloads is storage for whoever finds it.
+    """
+    anon_id: str = Field(..., min_length=8, max_length=64)
+    events: List[str] = Field(..., min_length=1, max_length=20)
+    platform: Optional[str] = Field(default=None, max_length=16)
+    app_version: Optional[str] = Field(default=None, max_length=16)
