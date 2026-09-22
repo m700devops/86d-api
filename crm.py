@@ -145,6 +145,9 @@ def init_crm_tables():
             ("queued_email_at", "TEXT"),            # denormalised so every list can show it
             ("venue_facts", "TEXT"),                # attributable facts for the call
             ("call_brief", "TEXT"),                 # the talking points written from them
+            ("skipped_at", "TEXT"),                 # set by the focus card's Skip button —
+                                                     # sinks the lead to the bottom of the
+                                                     # call order rather than deleting it
         ]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -343,6 +346,7 @@ LEAD_COLUMNS = (
     "opening_hours", "opener",
     "lead_score", "email_kind", "tz_name", "queued_email_at", "venue_facts",
     "manager_name", "manager_role", "manager_source", "manager_seen_at",
+    "skipped_at",
 )
 
 # How long to wait before the next dial, by attempt number. Spread across days
@@ -752,6 +756,39 @@ def mark_email_sent(lead_id: str, _: bool = Depends(require_crm_key)):
         updated = cursor.fetchone()
         conn.commit()
         return {"lead": _lead_row(updated), "field_set": field, "date": today}
+
+
+@crm_router.post("/leads/{lead_id}/skip", response_model=dict)
+def skip_lead(lead_id: str, _: bool = Depends(require_crm_key)):
+    """Toggle "skip": sink this lead to the bottom of the call order.
+
+    The focus card's Skip button used to hit DELETE — the same "gone for
+    good" action as the table's own Delete button. That's the wrong tool for
+    "not this one right now": the operator meant to come back to it, not
+    retire the venue and lose it from the pipeline entirely. This just stamps
+    `skipped_at`; the lead stays exactly where it is in status/new/
+    unworked, still shows on the pipeline and call-list screens, and both
+    `/calllist` and `/now` sort a skipped lead after every un-skipped one so
+    it stops being suggested first without disappearing. Calling it again on
+    an already-skipped lead un-skips it (clears `skipped_at`), so the same
+    button works both ways from a drawer or a re-click.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT skipped_at FROM crm_leads WHERE id = %s FOR UPDATE", (lead_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "Lead not found",
+            })
+        skipping = not row["skipped_at"]
+        cursor.execute(
+            "UPDATE crm_leads SET skipped_at = %s, updated_at = %s WHERE id = %s RETURNING *",
+            (now_iso() if skipping else None, now_iso(), lead_id),
+        )
+        updated = cursor.fetchone()
+        conn.commit()
+        return {"lead": _lead_row(updated), "skipped": skipping}
 
 
 # ============== COUNTERS ==============
@@ -2747,6 +2784,9 @@ def call_list(_: bool = Depends(require_crm_key)):
         # reads.
         kind_rank = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
         return (
+            # Skipped leads sort after everything else in the zone — still on
+            # the list, just out of the way until worked or un-skipped.
+            1 if lead.get("skipped_at") else 0,
             WINDOW_RANK.get(lead["call_window"].get("state"), 2),
             0 if lead.get("manager_name") else 1,
             kind_rank.get(lead.get("email_kind"), 2),
@@ -2904,7 +2944,12 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
 
     def reach(lead):
         kind_rank = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
-        return (0 if lead.get("manager_name") else 1,
+        # Skipped leads sort last within whichever bucket they landed in — the
+        # window state still decides ready/soon/rest, but a skip means "not
+        # this one first", so it never wins the "next" slot over an
+        # un-skipped lead in the same bucket.
+        return (1 if lead.get("skipped_at") else 0,
+                0 if lead.get("manager_name") else 1,
                 kind_rank.get(lead.get("email_kind"), 2),
                 lead.get("attempts") or 0,
                 -(lead.get("lead_score") or 0),

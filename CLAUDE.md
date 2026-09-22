@@ -407,11 +407,20 @@ capture. Don't reintroduce them or describe them as current.)
 - **The focus card's only button used to be "Log this call".** If `next` was a bad suggestion
   the only way off it was to scroll into the table below and find the matching row's Delete —
   which defeats the point of a card designed so the operator looks at nothing else. "Skip"
-  sits next to "Log this call" now, hits the same `DELETE /v1/crm/leads/{id}` the table's
-  Delete button does, and `loadCalls()` pulls the next-best lead into the card immediately.
-  It first shipped as "Not a bar — skip", from when it was built alongside the liquor-gate
-  fix below — but the gate is what keeps non-bars off this list now, so a lead still needing
-  a skip here isn't specifically a bar-detection problem and the button shouldn't say it is
+  sits next to "Log this call" now, and `loadCalls()` pulls the next-best lead into the card
+  immediately. It first shipped as "Not a bar — skip", from when it was built alongside the
+  liquor-gate fix below — but the gate is what keeps non-bars off this list now, so a lead
+  still needing a skip here isn't specifically a bar-detection problem and the button
+  shouldn't say it is
+- **Skip is not delete.** It used to hit the same `DELETE /v1/crm/leads/{id}` the table's own
+  Delete button does — "not this one right now" and "retire this venue for good" landed on
+  the same irreversible action, and a misclick (or a lead that was simply low-priority, not
+  wrong) meant a real venue was gone from the pipeline. `POST /v1/crm/leads/{id}/skip` just
+  stamps `skipped_at` (calling it again clears it — the same endpoint un-skips). The lead
+  stays `status='new'`/unworked and keeps showing on the pipeline and call-list screens;
+  `_call_order` in `/calllist` and `reach()` in `/now` both sort a skipped lead after every
+  un-skipped one in its bucket, so it stops being suggested first without disappearing —
+  "I'll come back to it" instead of "it's gone"
 - `WINDOW_RANK` (in crm.py, beside `_call_window`) is the ONE definition of how ringable each
   window state is, shared by `/calllist` and `/now`. `late` ranks above `shut_today` because
   it does not mean closed — it means the quiet half hour has passed, not that the doors have
