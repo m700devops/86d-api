@@ -346,9 +346,11 @@
         <button class="go" id="pipeAdd">Add a lead</button>
       </div>
       <div class="card hide" id="pipeAddPanel" style="margin:10px 0">
-        <p class="hint">Say who you called and what happened — needs the bar's name, everything
-          else is a bonus. This creates the lead AND logs the call in one step.</p>
-        <textarea id="pipeAddText" placeholder="Called Murphy's Pub in Nashville, talked to Sarah the manager, she said call back Thursday, her email is sarah@murphyspub.com"></textarea>
+        <p class="hint">Type the bar's name, then say who you called and what happened —
+          everything past the name is a bonus. This creates the lead AND logs the call in
+          one step.</p>
+        <input id="pipeAddName" placeholder="Bar name" style="margin-bottom:8px">
+        <textarea id="pipeAddText" placeholder="Talked to Sarah the manager, she said call back Thursday, her email is sarah@murphyspub.com"></textarea>
         <div class="row">
           <button class="go" id="pipeAddSave">Add lead</button>
           <button id="pipeAddCancel">Cancel</button>
@@ -1645,27 +1647,41 @@ async function pipeDrawer(dr,e){
 // step, through the same AI reader /debrief uses on an existing lead — so
 // a call to a bar that was never in the pipeline has somewhere to go
 // besides typed-in-by-hand.
+//
+// The bar name is its own field, typed directly, NOT pulled from the free
+// text by the model. It used to be: real notes pasted straight off a
+// website's contact block ("Olde Town Tavern & Grill at (720) 242-9667...
+// Website: Olde Town Tavern & Grill, Called this place...") came back
+// "couldn't tell which bar this was" — messy pasted text plus an
+// instruction to never guess is exactly what makes a cautious model
+// withhold a name that's sitting right there. A required field can't fail
+// to arrive; the model only extracts what's genuinely optional now.
 $('pipeAdd').onclick=()=>{
   const box=$('pipeAddPanel');
   box.classList.toggle('hide');
   if(!box.classList.contains('hide')){
-    $('pipeAddText').value=''; $('pipeAddResult').className='applied hide';
-    $('pipeAddText').focus();
+    $('pipeAddName').value=''; $('pipeAddText').value='';
+    $('pipeAddResult').className='applied hide';
+    $('pipeAddName').focus();
   }
 };
 $('pipeAddCancel').onclick=()=>{ $('pipeAddPanel').classList.add('hide'); };
 $('pipeAddSave').onclick=async()=>{
+  const name=$('pipeAddName').value.trim();
   const text=$('pipeAddText').value.trim();
-  if(!text) return;
-  const btn=$('pipeAddSave'); btn.disabled=true; btn.textContent='Adding…';
   const box=$('pipeAddResult'); box.className='applied hide';
+  if(!name){ box.className='applied err'; box.textContent="Needs the bar's name.";
+             return $('pipeAddName').focus(); }
+  if(!text){ box.className='applied err'; box.textContent='Say what happened on the call.';
+             return $('pipeAddText').focus(); }
+  const btn=$('pipeAddSave'); btn.disabled=true; btn.textContent='Adding…';
   try{
-    const r=await api('/leads/quick-add',{method:'POST',body:JSON.stringify({text})});
+    const r=await api('/leads/quick-add',{method:'POST',body:JSON.stringify({name,text})});
     box.className='applied';
     box.textContent=`Added ${r.lead.name}${r.applied.status?' — '+r.applied.status:''}.`
       +(r.applied.followup_date?` Follow up ${r.applied.followup_date}.`:'');
     toast('Lead added', r.undo_id);
-    $('pipeAddText').value='';
+    $('pipeAddName').value=''; $('pipeAddText').value='';
     PIPE.q=''; $('pipeSearch').value=''; PIPE.offset=0;
     await loadPipeline();
   }catch(err){

@@ -81,7 +81,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
-  test_leadgen.py test_quick_add.py -q` (250 tests)
+  test_leadgen.py test_quick_add.py -q` (254 tests)
 - test_leadgen.py — `_restaurant_pours()`, the restaurant liquor gate, pure (crawled text +
   OSM tags in, a yes/no and a reason out). Stubs `database` in `sys.modules` the same way
   test_callnow.py stubs it for crm
@@ -605,25 +605,48 @@ capture. Don't reintroduce them or describe them as current.)
   a paid round trip to be told what the button already said, which also meant the quick path
   stopped working with no API key set. Only free text a human typed is worth a model
 - `POST /v1/crm/leads/{id}/debrief` — free-text call notes in, structured fields out
-  (status, contact, email, phone, follow-up date, a dated note), applied in one transaction
-  along with the counters. Uses Claude (`_ask_claude()`, `ANTHROPIC_API_KEY`) — see AI is
-  Claude only, below; this bullet used to say it shared the scan path's OpenAI/Gemini pair,
-  which stopped being true when debrief moved to Claude and was never corrected here. With
-  no provider key it 503s with "type the fields in by hand" rather than failing obscurely.
-  Model output is treated as untrusted: `status` is checked against VALID_STATUSES,
-  `followup_in_days` is range-checked, and the free-text fields are length-capped before
-  they reach a column. Everything the model decided is echoed back in `applied` so a
-  misreading is visible immediately
+  (status, outcome, contact, email, phone, follow-up date, a dated note), applied in one
+  transaction along with the counters. Uses Claude (`_ask_claude()`, `ANTHROPIC_API_KEY`) —
+  see AI is Claude only, below; this bullet used to say it shared the scan path's
+  OpenAI/Gemini pair, which stopped being true when debrief moved to Claude and was never
+  corrected here. With no provider key it 503s with "type the fields in by hand" rather than
+  failing obscurely. Model output is treated as untrusted: `status` is checked against
+  VALID_STATUSES, `outcome` against `TOUCH_OUTCOMES`, `followup_in_days` is range-checked,
+  and the free-text fields are length-capped before they reach a column. Everything the
+  model decided is echoed back in `applied` so a misreading is visible immediately
+- **`outcome` is asked for and used DIRECTLY, not re-derived from `status`.** It used to be:
+  `status` is a coarse pipeline stage on purpose ("voicemail or gatekeeper with nobody
+  reached -> status 'contacted'", same as an actual conversation), and `_apply_call_notes`
+  then inferred `last_outcome` from THAT alone — anything landing on warm/won/contacted
+  became "answered". A debrief reading "left a voicemail, no answer" landed `status`
+  correctly and `last_outcome='answered'` wrong, indistinguishable on screen from a real
+  conversation — the exact thing WHERE THINGS STAND (above) was built to show. Worse: `answered`
+  is in the set `_cadence()` treats as "reached, stop scheduling", so a voicemail silently
+  fell out of the retry ladder too. `DEBRIEF_SYSTEM`/`QUICK_ADD_SYSTEM` now ask for `outcome`
+  (`TOUCH_OUTCOMES`: answered/voicemail/gatekeeper/not_interested/callback) alongside
+  `status` explicitly, and `_apply_call_notes` uses it when the model supplies a valid one,
+  falling back to the old status-based guess only when it doesn't (an older extraction, or a
+  model that skips the field)
 - **`POST /v1/crm/leads/quick-add` is the same idea for a call to a bar that was never in
   the pipeline at all** — cold-found on the operator's own initiative, a referral, a walk-in.
   `/debrief` only ever updates a lead that already exists; this describes the call in plain
   words and creates the lead AND logs that first call in one step, sharing `_apply_call_notes()`
   (extracted from `/debrief`'s body) so a brand-new lead gets the exact same undo/counter/
-  cadence handling an old one's touch gets, not a thinner copy of it. The bar's name is the
-  one field the model is told never to guess — no name in the text is a 422 asking for it,
-  not a lead created for the wrong venue or none. On the CRM tab, "Add a lead" opens this
-  (a bare `prompt()` for a name used to be the whole flow, leaving every real field for
-  later "Edit")
+  cadence handling an old one's touch gets, not a thinner copy of it. On the CRM tab, "Add a
+  lead" opens this (a bare `prompt()` for a name used to be the whole flow, leaving every
+  real field for later "Edit")
+- **The bar's name is a required field the operator types, not something the model
+  extracts.** It used to be pulled from the free text on the theory that it's "the one
+  field that can't be inferred, so never guess it" — the right instinct pointed at the
+  wrong fix. Real notes pasted straight off a website's contact block ("Olde Town Tavern &
+  Grill at (720) 242-9667... Website: Olde Town Tavern & Grill, Called this place...") —
+  the name stated plainly, twice — still came back "couldn't tell which bar this was",
+  because messy pasted text plus an instruction to withhold rather than guess is exactly
+  what makes a model err toward omitting when it isn't perfectly confident. That's a 422 on
+  input a human reads in one glance. `QuickAdd.name` is now required (Pydantic,
+  `min_length=1`) and a dedicated "Bar name" field on the CRM tab's compose box; the model
+  only ever extracts the genuinely optional fields (`loc`, `status`, `outcome`, `contact`,
+  `email`, `phone`, `followup_in_days`, `summary`)
 
 ## Environment Variables Required
 Source of truth: the `_config_checks` startup list in main.py (~line 52) — it logs what's missing on boot.
