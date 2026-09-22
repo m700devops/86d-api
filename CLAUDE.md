@@ -80,8 +80,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
-  test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py -q`
-  (223 tests)
+  test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
+  test_leadgen.py -q` (244 tests)
+- test_leadgen.py — `_restaurant_pours()`, the restaurant liquor gate, pure (crawled text +
+  OSM tags in, a yes/no and a reason out). Stubs `database` in `sys.modules` the same way
+  test_callnow.py stubs it for crm
 - test_callnow.py — calling mode's bucketing, ordering and headlines. Stubs `database` in
   `sys.modules` (crm imports it, and it raises without `DATABASE_URL`) and stubs
   `_call_window` per row, so the tests don't depend on the real clock — callwindow's own
@@ -220,7 +223,32 @@ capture. Don't reintroduce them or describe them as current.)
   restaurant with a licence has a back bar to count exactly like a tavern does, and in OSM it
   is `amenity=restaurant`. The cost is that most restaurants have no bar worth calling, so a
   restaurant must SHOW a drinks programme on its own site (`LIQUOR_HINTS`, or a `bar=yes`
-  tag) before it can qualify. Harvesting is cheap; promoting is what matters
+  tag) before it can qualify — `_restaurant_pours()`, covered by test_leadgen.py. Harvesting
+  is cheap; promoting is what matters
+- **`LIQUOR_HINTS` is anchored, not bare words, after a real harvested pizzeria with zero
+  alcohol reached the call list through it.** Bare `cocktail` matched "shrimp cocktail" and
+  "fruit cocktail" on a kitchen menu, `bar menu` matched "salad bar menu", `spirits` (no word
+  boundary) matched "spirited", `shots?\b` (no LEADING boundary) matched "screenshot", and
+  bare `draft`/`happy hour` matched an NFL-watch-party page or a lunch special — none of which
+  mean the venue pours. Every phrase now requires something a kitchen-only site has no reason
+  to say (`full bar`, `craft cocktail menu`, `wine list`, a named liquor, `draft beer` rather
+  than bare `draft`, …). `NO_LIQUOR_HINTS` (byob, "we do not serve alcohol", "no liquor
+  license") is checked FIRST and overrides everything else, including an OSM `bar=yes` tag —
+  a mapper's edit can be stale, a venue is not wrong about its own liquor license
+- **`recheck_restaurant_leads()` is the one-time correction for rows the OLD gate let
+  through.** Tightening `LIQUOR_HINTS` only changes what NEW candidates do from here on —
+  restaurants already banked (`status='qualified'`) or already promoted-but-never-called sit
+  on data collected under the old rule. Unlike `_reconcile_bad_emails()`/
+  `_reconcile_timezones()` this can't be recomputed from stored columns alone (the crawled
+  HTML isn't kept), so it re-crawls each restaurant row's site and re-applies
+  `_restaurant_pours()`. Deliberately NOT run on every boot — re-fetching every restaurant
+  candidate's site is exactly the kind of network-heavy work the harvest cap exists to avoid
+  doing needlessly — so it's a manual action: `POST /v1/crm/leadgen/recheck-restaurants`
+  (poll the same path with GET), background-threaded like `/leadgen/fill` but under its own
+  lock, and a button in the Lead engine panel. It never touches a lead someone has already
+  called or logged — only banked candidates and promoted-but-`last_touch_at IS NULL` leads,
+  which it deletes the same way the operator's own Delete button does (retiring the
+  candidate too, so the generator can't re-promote the same venue tomorrow)
 - **`_seed_cities()` runs on EVERY boot**, not only into an empty table. It was gated on "no
   cities yet", which meant adding metros to `SEED_CITIES_EXTRA` did nothing at all to a
   database that already had the first batch — forty cities that would have silently never
@@ -370,6 +398,12 @@ capture. Don't reintroduce them or describe them as current.)
   calling" emptied a screen with hundreds of banked leads behind it — while `/calllist`,
   which ranks these same rows rather than dropping them, still showed every one. Two screens
   disagreeing about whether a lead exists is worse than either answer alone
+- **The focus card's only button used to be "Log this call".** If `next` was a bad suggestion
+  (wrong business type, already a customer, whatever) the only way off it was to scroll into
+  the table below and find the matching row's Delete — which defeats the point of a card
+  designed so the operator looks at nothing else. "Not a bar — skip" sits next to "Log this
+  call" now, hits the same `DELETE /v1/crm/leads/{id}` the table's Delete button does, and
+  `loadCalls()` pulls the next-best lead into the card immediately
 - `WINDOW_RANK` (in crm.py, beside `_call_window`) is the ONE definition of how ringable each
   window state is, shared by `/calllist` and `/now`. `late` ranks above `shut_today` because
   it does not mean closed — it means the quiet half hour has passed, not that the doors have

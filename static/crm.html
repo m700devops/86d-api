@@ -34,7 +34,7 @@
   .focustop h2{flex:0 1 auto}
   .focus .digits{font-size:20px;padding:8px 13px;letter-spacing:1px}
   .askinline{color:var(--go);font-size:13px;font-weight:600;margin-top:8px}
-  .focusacts{margin-top:10px}
+  .focusacts{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
   .card.muted .hint{margin-top:8px}
   .card.muted button.go{margin-top:4px}
 
@@ -413,6 +413,18 @@
           spots refill.</p>
         <div id="engineBanner" style="margin-top:12px"></div>
         <div class="grid" style="margin-top:12px" id="engineStats"></div>
+        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+            <strong style="font-size:13px">Restaurant liquor gate</strong>
+            <button id="recheckBtn" class="del">Recheck existing restaurant leads</button>
+          </div>
+          <p class="muted" style="margin:6px 0 0;font-size:12px">
+            One-time cleanup: re-crawls every banked or never-called restaurant
+            lead against today's (tighter) liquor gate and drops the ones that no
+            longer clear it — same as the old "pizzeria with no bar" bug. Never
+            touches a lead someone's already called.</p>
+          <div id="recheckResult" style="margin-top:8px"></div>
+        </div>
         <div class="tablewrap" style="margin-top:14px">
           <table class="sheet"><thead><tr>
             <th>TAB</th><th>EASTERN</th><th>CENTRAL</th><th>MOUNTAIN</th><th>PACIFIC</th>
@@ -842,6 +854,7 @@ async function loadNow(){
       is still ${esc(next.manager_role||'there')}</div>`:''}
     ${next?`<div class="focusacts">
       <button class="go" data-act="logtop" data-id="${esc(next.id)}">Log this call</button>
+      <button class="del" data-act="skiptop" data-id="${esc(next.id)}">Not a bar — skip</button>
     </div>`:''}
     <div id="brief" class="brief"></div>
     <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
@@ -1179,7 +1192,23 @@ async function startFill(btn){
 // what happened belongs there too, not found again in the table underneath.
 // It drives the existing row drawer rather than duplicating it, so logging
 // from here goes through exactly the same touch, undo and counter path.
-$('focus').onclick=e=>{
+//
+// "Not a bar — skip" is the same idea for the other outcome: the headline is
+// the only thing an operator sitting down to call is meant to look at, so a
+// bad suggestion (a pizzeria with no liquor program, a chain that slipped
+// through) has to be dismissable right there. Before this the only way to
+// drop it was to find the matching row in the table below and hit Delete —
+// which defeats the one-thing-on-screen point of the focus card entirely.
+// It reuses the exact same DELETE endpoint and confirm as the table's own
+// Delete button, so it retires the lead the same way: for good.
+$('focus').onclick=async e=>{
+  const skip=e.target.closest('button[data-act="skiptop"]');
+  if(skip){
+    if(!confirm('Delete this lead? It will not come back.')) return;
+    try{ await api('/leads/'+skip.dataset.id,{method:'DELETE'}); toast('Skipped'); await loadCalls(); }
+    catch(err){ toast(err.message); }
+    return;
+  }
   const btn=e.target.closest('button[data-act="logtop"]');
   if(!btn) return;
   const row=document.querySelector('#zones tr[data-id="'+CSS.escape(btn.dataset.id)+'"]');
@@ -1833,6 +1862,51 @@ $('runNow').onclick=async()=>{
       toast(`Added ${r.promoted} leads`); await loadEngine();}
   catch(e){toast(e.message)}finally{b.disabled=false;b.textContent='Run now'}
 };
+
+// The gate re-crawls sites, so this is the same "too slow for one request,
+// start it and poll" shape as startFill() above, just against its own
+// endpoint — a recheck and a fill are different jobs and shouldn't share a
+// lock or a status line.
+let recheckTimer=null;
+function renderRecheckResult(last){
+  if(!last) return;
+  if(last.error){
+    $('recheckResult').innerHTML=`<div class="banner bad">Recheck failed: ${esc(last.error)}</div>`;
+    return;
+  }
+  const removed=last.banked_rejected+last.leads_removed;
+  $('recheckResult').innerHTML=`<div class="banner ${removed?'':'ok'}">`
+    + `Checked ${last.checked} · dropped ${last.banked_rejected} from the bank`
+    + ` · removed ${last.leads_removed} never-called lead${last.leads_removed===1?'':'s'}`
+    + `</div>`;
+}
+async function startRecheck(){
+  const b=$('recheckBtn'); b.disabled=true; b.textContent='Rechecking…';
+  try{
+    const r=await api('/leadgen/recheck-restaurants',{method:'POST'});
+    if(!r.started && !r.running) toast(r.note||'Could not start');
+  }catch(err){
+    b.disabled=false; b.textContent='Recheck existing restaurant leads';
+    return toast('Could not start: '+err.message);
+  }
+  if(recheckTimer) clearInterval(recheckTimer);
+  recheckTimer=setInterval(async()=>{
+    let st;
+    try{ st=await api('/leadgen/recheck-restaurants'); }catch{ return; }
+    if(!st.running){
+      clearInterval(recheckTimer); recheckTimer=null;
+      b.disabled=false; b.textContent='Recheck existing restaurant leads';
+      renderRecheckResult(st.last_run);
+      if(st.last_run && !st.last_run.error){
+        const removed=st.last_run.banked_rejected+st.last_run.leads_removed;
+        toast(removed?`Removed ${removed} non-liquor restaurant lead${removed===1?'':'s'}`
+                     :'Nothing needed removing');
+      }
+      if(TAB==='calls') loadCalls();
+    }
+  }, 4000);
+}
+$('recheckBtn').onclick=startRecheck;
 
 (function(){let k=null;try{k=localStorage.getItem(KEY_STORE)}catch{}
   if(k) unlock(k); else lock(null);})();

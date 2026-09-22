@@ -2499,6 +2499,67 @@ def leadgen_fill_status(_: bool = Depends(require_crm_key)):
     }
 
 
+# The restaurant liquor gate got stricter after a real harvested pizzeria
+# with no alcohol program qualified through the old LIQUOR_HINTS regex (see
+# leadgen._restaurant_pours). Rechecking already-banked/promoted restaurant
+# rows means re-crawling their sites — the same "too slow for one request"
+# problem /leadgen/fill has — so it gets its own lock, background thread and
+# poll endpoint rather than reusing _fill_lock, which is specifically about
+# not double-running the harvest/enrich/promote pipeline.
+_recheck_lock = threading.Lock()
+_recheck_thread: Optional[threading.Thread] = None
+_recheck_last: Optional[dict] = None
+
+
+def _recheck_running() -> bool:
+    global _recheck_thread
+    return _recheck_thread is not None and _recheck_thread.is_alive()
+
+
+def _run_recheck(limit: int) -> None:
+    global _recheck_last
+    from leadgen import recheck_restaurant_leads
+    try:
+        result = recheck_restaurant_leads(limit=limit)
+    except Exception as exc:
+        result = {"error": str(exc)}
+        print(f"[crm] restaurant recheck crashed: {exc}", flush=True)
+    with _recheck_lock:
+        _recheck_last = result
+
+
+@crm_router.post("/leadgen/recheck-restaurants", response_model=dict)
+def leadgen_recheck_restaurants(limit: int = 200, _: bool = Depends(require_crm_key)):
+    """One-time correction for restaurant rows a since-tightened liquor gate
+    would now reject: re-crawls each one and applies the current rule.
+
+    Not part of the daily run and not run automatically on boot — unlike
+    _reconcile_bad_emails()/_reconcile_timezones(), this can't be recomputed
+    from stored data alone, so it means re-fetching every restaurant-tagged
+    candidate's site. Triggered from the Lead engine panel when wanted, not
+    on every deploy. Returns immediately; poll GET for the result.
+    """
+    global _recheck_thread
+    with _recheck_lock:
+        if _recheck_running():
+            return {"started": False, "running": True,
+                    "note": "A recheck is already running."}
+        _recheck_thread = threading.Thread(
+            target=_run_recheck, args=(limit,),
+            daemon=True, name="leadgen-recheck-restaurants")
+        _recheck_thread.start()
+    return {"started": True, "running": True,
+            "note": "Rechecking restaurant leads against the current liquor gate."}
+
+
+@crm_router.get("/leadgen/recheck-restaurants", response_model=dict)
+def leadgen_recheck_restaurants_status(_: bool = Depends(require_crm_key)):
+    """Is a recheck in flight, and what did the last one find?"""
+    with _recheck_lock:
+        last = _recheck_last
+    return {"running": _recheck_running(), "last_run": last}
+
+
 class CityCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     state: Optional[str] = Field(default=None, max_length=40)
