@@ -864,7 +864,7 @@ async function loadNow(){
       is still ${esc(next.manager_role||'there')}</div>`:''}
     ${next?`<div class="focusacts">
       <button class="go" data-act="logtop" data-id="${esc(next.id)}">Log this call</button>
-      <button class="del" data-act="skiptop" data-id="${esc(next.id)}">Not a bar — skip</button>
+      <button class="del" data-act="skiptop" data-id="${esc(next.id)}">Skip</button>
     </div>`:''}
     <div id="brief" class="brief"></div>
     <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
@@ -1203,14 +1203,19 @@ async function startFill(btn){
 // It drives the existing row drawer rather than duplicating it, so logging
 // from here goes through exactly the same touch, undo and counter path.
 //
-// "Not a bar — skip" is the same idea for the other outcome: the headline is
-// the only thing an operator sitting down to call is meant to look at, so a
-// bad suggestion (a pizzeria with no liquor program, a chain that slipped
-// through) has to be dismissable right there. Before this the only way to
-// drop it was to find the matching row in the table below and hit Delete —
-// which defeats the one-thing-on-screen point of the focus card entirely.
-// It reuses the exact same DELETE endpoint and confirm as the table's own
-// Delete button, so it retires the lead the same way: for good.
+// "Skip" is the same idea for the other outcome: the headline is the only
+// thing an operator sitting down to call is meant to look at, so a bad
+// suggestion (wrong number, a duplicate, anything not worth this call) has
+// to be dismissable right there. Before this the only way to drop it was to
+// find the matching row in the table below and hit Delete — which defeats
+// the one-thing-on-screen point of the focus card entirely. Deliberately
+// NOT labelled around any one reason (it used to say "Not a bar — skip",
+// back when the liquor gate itself still let non-bars through): the gate is
+// the thing that keeps non-bars off this list now, so a lead reaching the
+// focus card and still needing to go isn't specifically a bar-detection
+// problem, and the button shouldn't imply it always is. It reuses the exact
+// same DELETE endpoint and confirm as the table's own Delete button, so it
+// retires the lead the same way: for good.
 $('focus').onclick=async e=>{
   const skip=e.target.closest('button[data-act="skiptop"]');
   if(skip){
