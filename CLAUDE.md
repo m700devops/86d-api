@@ -25,17 +25,20 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   it shares a process and a database with the product API but is not part of the product.
   Nothing in the inventory/scan/order paths reads from it. See the CRM section below
 - static/crm.html — the CRM UI, served at `/crm`. **Three tabs only** — Call list, CRM,
-  Follow-ups — with Numbers, Customers and Lead engine behind a burger top right: those are
-  looked at occasionally and thought about once, and in the tab row they competed with the
-  three things a working day actually needs. The burger turns orange when the open page lives
-  inside it. Single self-contained file, no build step;
+  Follow-ups — with School, Numbers, Customers and Lead engine behind a burger top right:
+  those are looked at occasionally and thought about once, and in the tab row they competed
+  with the three things a working day actually needs. The burger turns orange when the open
+  page lives inside it. Single self-contained file, no build step;
   replacing this file replaces the UI. Holds no credentials — the operator types the key and
-  it lives in their browser's localStorage. **Designed for an operator with ADHD**: one
-  headline stating the single next action, a shrinking list as the progress bar, two rows of
-  tabs (service, then timezone) with exactly ONE table on screen at a time, and one primary
-  button per row. The zone accordion it replaced meant four headers and four open/shut states
-  to hold in your head; tabs mean one list and a fixed place for every tab. Keep it that way —
-  extra choices on this screen are a cost, not a feature
+  it lives in their browser's localStorage. **The Call list tab is one button and one table,
+  nothing else.** It used to carry a focus card, a clock, a queued-email banner, an undo
+  banner, and service/timezone tabs above the table — all of that was decision-making the
+  operator had already done by pressing the button. Pressing "Ready to start calling" now
+  does exactly what it says: fetches whoever is in a calling window this minute
+  (`GET /v1/crm/now`) and lists only that, in one excel-style table. Nobody in a window right
+  now gets a one-line status instead of a table, not a wall of leads that aren't callable yet.
+  Undo still works — the 10-second Undo on the toast after every logged call — it just isn't
+  a permanent banner anymore
 - static/icon.png, static/favicon.png — the app logo, copied from the mobile repo's assets and
   served via the allowlisted `/crm/{asset}` route (NOT a directory mount — that would be one
   traversal away from serving the repo). Re-copy from 86d-mobile/assets when rebranding
@@ -75,8 +78,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - leadgen.py — the daily lead generator: harvest (OpenStreetMap/Overpass) → enrich (crawl
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
-- coach.py — cold-call PRACTICE, opened by "Warm up first" inside the Call list tab (not a
-  tab of its own, on purpose). Prompts for the drills and for "The Holdout", a game where
+- coach.py — cold-call PRACTICE, opened via **School** in the burger menu (`data-panel`
+  section, same as Numbers/Customers/Lead engine — it used to live inline in the Call list
+  tab behind a "Warm up first" button, which put practice above the actual dial list; moving
+  it behind the menu is what let the Call list tab shrink to one button and one table).
+  Prompts for the drills and for "The Holdout", a game where
   Claude plays a tough bar owner with hidden problems. Pure: `apply_turn()` is the referee
   that clamps the meters and only lets the owner say yes once trust >= 70 and two
   problems have been found. Left to itself the model agrees far too easily. Routes are
@@ -415,33 +421,23 @@ capture. Don't reintroduce them or describe them as current.)
   be contacted is the one mistake this list must never cause
 
 ## CALLING MODE — the "Ready to start calling" button
-- `GET /v1/crm/now` — ONE flat queue across all eight tabs, ordered by who is in a calling
-  window this minute, then by how far the call can get (a name to ask for, then a direct
-  mailbox, then fit score). The tabs are the right way to UNDERSTAND the list and the wrong
-  way to WORK it: sitting down to call, the only question is "who do I dial first", and
-  answering it by clicking eight tabs reading local clocks is work the screen should do
-- **Nothing is ever filtered out by the window — it only sets order and label.** The
-  response has three buckets: `ready` (in a window now), `soon` (opens shortly) and `rest`
-  (past the window, shut today, permanently closed), plus `next`, the best lead across all
-  three, so the focus card always has a number under the headline. `rest` is ordered by
-  `WINDOW_RANK` — still-open-but-past-the-lull above shut — then by reach. The bucket loop
-  used to be an `if/elif` with no `else`, so everything in `rest` fell off the end and never
-  reached the page, and the page rendered a one-line "nothing in a window" INSTEAD of the
-  table. Outside US afternoons that is most of the list, so pressing "Ready to start
-  calling" emptied a screen with hundreds of banked leads behind it — while `/calllist`,
-  which ranks these same rows rather than dropping them, still showed every one. Two screens
-  disagreeing about whether a lead exists is worse than either answer alone
-- **The focus card's only button used to be "Log this call".** If `next` was a bad suggestion
-  the only way off it was to scroll into the table below and find the matching row's Delete —
-  which defeats the point of a card designed so the operator looks at nothing else. "Skip"
-  sits next to "Log this call" now, hits the same `DELETE /v1/crm/leads/{id}` the table's
-  Delete button does, and `loadCalls()` pulls the next-best lead into the card immediately.
-  It first shipped as "Not a bar — skip", from when it was built alongside the liquor-gate
-  fix below — but the gate is what keeps non-bars off this list now, so a lead still needing
-  a skip here isn't specifically a bar-detection problem and the button shouldn't say it is
+- `GET /v1/crm/now` — ONE flat queue, ordered by who is in a calling window this minute,
+  then by how far the call can get (a name to ask for, then a direct mailbox, then fit
+  score). The response still has three buckets — `ready` (in a window now), `soon` (opens
+  shortly), `rest` (past the window, shut today, permanently closed) — plus counts and a
+  `headline`, but **the page only ever renders `ready` as a table.** It used to also render
+  `soon`/`rest` as tables (and, before that, an eight-tab service×timezone browser via a
+  separate `/calllist` endpoint) — all removed as over-complication: the button's only job
+  now is "fetch whoever I can call right now," so that's the only thing on screen. When
+  `ready` is empty the page shows one line of status (list truly empty → offer to fill it;
+  leads exist but none dialable → say so; leads exist but none in a window → say how many
+  are coming up) instead of a second table, and keeps polling every 60s until one opens
 - `WINDOW_RANK` (in crm.py, beside `_call_window`) is the ONE definition of how ringable each
-  window state is, shared by `/calllist` and `/now`. `late` ranks above `shut_today` because
-  it does not mean closed — it means the quiet half hour has passed, not that the doors have
+  window state is. `late` ranks above `shut_today` because it does not mean closed — it
+  means the quiet half hour has passed, not that the doors have. Still used to order `rest`
+  server-side even though the page no longer renders that bucket as a table, since a future
+  screen (or `/calllist`, still live server-side for anything that wants the old tabbed view)
+  can rely on the same ranking
 - `dialable_total` is distinct from `unworked_total`: a list of rows whose phones all failed
   validation is empty for calling purposes but must NOT trigger a lead fill, because filling
   won't fix it. Only `list_empty` (no unworked leads at all) auto-starts a fill
@@ -450,11 +446,11 @@ capture. Don't reintroduce them or describe them as current.)
   it's their quiet half hour
 - The page refreshes this every 60s while it's on screen. Windows open and shut on the clock,
   so a list left sitting goes stale under you
-- **`CRM_OPERATOR_TZ` (default `Asia/Manila`) is where the caller is, and every screen shows
-  their clock.** The operator is in Iloilo, UTC+8, so the entire US calling day lands in the
-  middle of their night — US Eastern afternoon is roughly 2-4am there. "Best at 2:00pm"
-  means nothing to someone thirteen hours away deciding whether to stay up, so every
-  upcoming window is also printed in their own time (`starts_at_yours`)
+- **`CRM_OPERATOR_TZ` (default `Asia/Manila`) is where the caller is.** The operator is in
+  Iloilo, UTC+8, so the entire US calling day lands in the middle of their night — US Eastern
+  afternoon is roughly 2-4am there. The page dropped its persistent "your clock" readout when
+  the calling-mode UI was stripped down to one button and one table; `starts_at_yours` is
+  still in the API for anything that wants to show it
 - **Venue-local time comes from an IANA zone (`tz_name`), not the raw offset.** The offset is
   standard time, so from March to November it is an hour behind the real local clock
   everywhere except Arizona — and an hour is the entire width of the pre-open window, enough

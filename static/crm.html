@@ -22,38 +22,10 @@
   header h1{font-size:20px;margin:0;letter-spacing:-0.4px}
   header .sub{color:var(--text3);font-size:12px}
 
-  /* The one thing to do right now. Nothing else on the page competes with it. */
-  .focus{border-radius:14px;padding:18px 20px;margin-bottom:16px;
-         border:1px solid var(--line);background:var(--surface)}
-  .focus.go{border-color:#3DD68C66;background:#3DD68C14}
-  .focus.wait{border-color:#FFB02055;background:#FFB02010}
-  .focus h2{margin:0;font-size:22px;letter-spacing:-0.5px}
-  .focus.go h2{color:var(--go)}
-  .focus .prog{color:var(--text2);margin-top:10px;font-size:13px}
-  .focustop{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
-  .focustop h2{flex:0 1 auto}
-  .focus .digits{font-size:20px;padding:8px 13px;letter-spacing:1px}
-  .askinline{color:var(--go);font-size:13px;font-weight:600;margin-top:8px}
   #pipeBody tr[data-id]{cursor:pointer}
   #pipeBody tr[data-id]:hover td{background:#ffffff08}
-  .focusacts{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
   .card.muted .hint{margin-top:8px}
   .card.muted button.go{margin-top:4px}
-
-  /* What to know before it rings. Facts first, each with where it came from,
-     because a brief that asserts something wrong is the moment they decide
-     you're reading off a list. */
-  .brief{margin-top:12px}
-  .brief .pts{display:flex;flex-direction:column;gap:5px;margin-bottom:9px}
-  .brief .pt{font-size:14px;color:var(--text);line-height:1.45;
-             padding-left:14px;position:relative}
-  .brief .pt::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;
-                     border-radius:50%;background:var(--accent)}
-  .brief .fx{display:flex;gap:7px;flex-wrap:wrap}
-  .brief .fx span{font-size:11px;color:var(--text2);background:var(--surface2);
-                  border:1px solid var(--line);border-radius:999px;padding:3px 9px}
-  .brief .fx span i{color:var(--text3);font-style:normal;font-size:10px}
-  .brief .none{font-size:12px;color:var(--text3)}
 
   .dot{width:9px;height:9px;border-radius:50%;flex:none}
   .d-good{background:var(--go)} .d-opening{background:var(--wait)}
@@ -61,33 +33,15 @@
   .zbar .name{font-weight:700;letter-spacing:0.3px}
   .zbar .when{color:var(--text2);font-size:12px}
 
-  /* Service tabs, then timezone sub-tabs under them. Two questions in order:
-     "who is even open at this hour?" then "who's in their window right now?"
-     Both rows stay in a fixed order so the same tab is always in the same
-     place — one thing to click, never a layout to re-read. */
   /* The one button that starts a calling session. Deliberately the largest
-     thing on the screen after the headline — sitting down to call should be
-     one click, not a tour of eight tabs. */
-  .startbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+     thing on the screen — sitting down to call should be one click, not a
+     tour of tabs. */
   .startbtn{font-size:16px;font-weight:800;letter-spacing:-0.2px;padding:14px 22px;
-            border-radius:13px;background:var(--go);border-color:var(--go);color:#06251A}
+            border-radius:13px;background:var(--go);border-color:var(--go);color:#06251A;
+            margin-bottom:14px}
   .startbtn:hover{filter:brightness(1.06)}
   .startbtn.on{background:var(--surface2);border-color:var(--line2);color:var(--text);
                font-size:13px;font-weight:700;padding:9px 15px}
-  .clock{color:var(--text2);font-size:13px;line-height:1.35}
-  .clock strong{color:var(--text);font-variant-numeric:tabular-nums}
-  .clock .zone{color:var(--text3);font-size:11px;display:block}
-  .soon{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 0;font-size:12px;
-        color:var(--text3)}
-  .soon span{border:1px solid var(--line);border-radius:999px;padding:3px 10px}
-
-  .svc{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
-  .svc button{text-align:left;padding:13px 15px;border-radius:12px;line-height:1.3}
-  .svc button .t{font-weight:700;font-size:15px;display:block}
-  .svc button .s{font-size:11px;color:var(--text3);display:block;margin-top:3px}
-  .svc button.on{border-color:var(--accent);background:#FF6B351A}
-  .svc button.on .t{color:var(--accent)}
-  .svc button .n{float:right;font-weight:700;font-size:15px;color:var(--text2)}
 
   .pipebar{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
   .pipebar input{flex:1;min-width:220px}
@@ -108,17 +62,6 @@
        max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .pipefoot{display:flex;justify-content:space-between;align-items:center;gap:10px;
             margin-top:12px;color:var(--text3);font-size:12px;flex-wrap:wrap}
-  .zt{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
-  .zt button{border-radius:999px;padding:7px 14px;font-size:13px;display:flex;
-             align-items:center;gap:7px}
-  .zt button.on{background:var(--surface2);border-color:var(--accent);color:var(--text);
-                font-weight:700}
-  .zt button .c{font-variant-numeric:tabular-nums;color:var(--text3);font-weight:600}
-  .zt button.on .c{color:var(--text2)}
-  .zt button .dot{width:8px;height:8px;border-radius:50%;flex:none}
-  .zt button.rec{border-color:var(--go)}
-  .zt button.rec .c{color:var(--go)}
-
   .zbar{display:flex;align-items:center;gap:10px;padding:11px 14px;
         background:var(--surface2);border:1px solid var(--line);
         border-radius:12px 12px 0 0;border-bottom:0}
@@ -128,7 +71,6 @@
   .zbar .tag.stop{color:var(--stop);border-color:#F0616D44}
   .zone{border:1px solid var(--line);border-radius:0 0 12px 12px;overflow:hidden;
         background:var(--surface)}
-  @media (max-width:560px){ .svc{grid-template-columns:1fr} }
 
   .sheetwrap,.tablewrap{overflow-x:auto}
   table.sheet{width:100%;border-collapse:collapse;font-size:13px}
@@ -162,10 +104,6 @@
   .why{display:inline-block;font-size:10px;font-weight:700;letter-spacing:0.4px;
        padding:1px 6px;border-radius:5px;margin-left:6px;
        color:var(--accent);border:1px solid #FF6B3555;background:#FF6B3514}
-  .undobar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-           background:var(--surface);border:1px solid var(--line);border-radius:10px;
-           padding:9px 12px;margin-bottom:12px;font-size:13px}
-  .undobar .who{color:var(--text2)}
   #toast button{margin-left:12px;padding:4px 12px;font-size:12px;font-weight:700;
                 background:var(--go);border-color:var(--go);color:#06251A}
   #toast.show{pointer-events:auto}
@@ -223,12 +161,6 @@
                color:var(--text3);cursor:default}
   .slot.custom input{width:auto;padding:5px 8px;font-size:12px}
 
-  .queuebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-            background:var(--surface);border:1px solid var(--line);border-radius:10px;
-            padding:9px 12px;margin-bottom:12px;font-size:13px}
-  .queuebar.bad{border-color:#F0616D55;background:#F0616D10}
-  .queuebar .qitem{color:var(--text2)}
-  .queuebar .qitem b{color:var(--text)}
   .qchip{display:inline-block;font-size:10px;font-weight:700;letter-spacing:0.4px;
          padding:1px 6px;border-radius:5px;margin-left:6px;
          color:var(--wait);border:1px solid #FFB02055;background:#FFB02012}
@@ -278,10 +210,9 @@
   #toast.show{opacity:1}
   @media (max-width:700px){ .em{display:none} }
 
-  /* ── practice (inside the Call list tab) ─────────────────────────────────
+  /* ── School (behind the burger menu) ─────────────────────────────────────
      Same rule as the rest of the page: one headline saying the single next
      thing, one big button, and everything else folded away until asked for. */
-  .practicebtn{font-weight:700;padding:11px 16px;border-radius:12px}
   .pnow{border:1px solid var(--line2);background:var(--surface);border-radius:14px;padding:18px 20px;margin-bottom:12px}
   .pnow .meta{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--text3);margin-bottom:12px}
   .pnow .meta b{color:var(--wait);font-weight:700}
@@ -439,6 +370,8 @@
           <span></span><span></span><span></span>
         </button>
         <div class="menu hide" id="menu" role="menu">
+          <button data-tab="school" role="menuitem">School
+            <em>warm up and learn before you dial</em></button>
           <button data-tab="numbers" role="menuitem">Numbers
             <em>funnel, connect rates, what's working</em></button>
           <button data-tab="users" role="menuitem">Customers
@@ -451,22 +384,13 @@
 
     <section data-panel="calls">
       <div id="callMain">
-      <div id="focus" class="focus"><h2>Loading…</h2></div>
-      <div class="startbar">
-        <button class="startbtn" id="startBtn">Ready to start calling</button>
-        <button class="practicebtn" id="practiceBtn">Warm up first</button>
-        <div class="clock" id="clock"></div>
-      </div>
-      <div id="queueBar"></div>
-      <div id="undoBar"></div>
-      <div class="svc" id="svcTabs"></div>
-      <div class="zt" id="zoneTabs"></div>
+      <button class="startbtn" id="startBtn">Ready to start calling</button>
       <div id="zones"></div>
       </div>
-      <!-- Practice lives here, not in its own tab: warming up is the first
-           five minutes of a calling session, and a fourth tab would be one
-           more thing competing for attention on every other minute. -->
-      <div id="practice" class="hide">
+    </section>
+
+    <section data-panel="school" class="hide">
+      <div id="practice">
         <div id="pHome">
           <div class="rot" id="pRot"></div>
           <div class="pnow">
@@ -835,7 +759,11 @@ document.addEventListener('click', e=>{
 document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeMenu(); });
 
 function switchTab(b){
+  const prev=TAB;
   TAB=b.dataset.tab;
+  // Leaving School stops anything still running there — a live game clock or
+  // a mic left listening shouldn't keep going once the tab is out of view.
+  if(prev==='school' && TAB!=='school'){ gQuit(); xQuit(); tpQuit(); speechCancel(); }
   // The burger goes orange when what you're looking at lives inside it —
   // otherwise a page behind a closed menu has nothing on screen saying so.
   const inMenu=!!b.closest('#menu');
@@ -844,7 +772,8 @@ function switchTab(b){
     .forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
-    numbers:loadNumbers,users:loadUsers,engine:loadEngine}[TAB])()
+    numbers:loadNumbers,users:loadUsers,engine:loadEngine,
+    school:loadSchoolPanel}[TAB])()
     .catch(e=>toast(e.message));
 }
 
@@ -859,40 +788,12 @@ $('menu').onclick=e=>{
 };
 
 /* ── the call list ────────────────────────────────────────────────────────
-   Two rows of tabs, then one table. Service first ("who is even open at this
-   hour?"), timezone second ("who's in their window right now?").
-
-   Only one table is ever on screen. The version this replaced stacked every
-   zone as a collapsible accordion, which meant four headers, four states to
-   remember, and a page that moved under you as leads were worked off. Tabs
-   put exactly one list in front of you and keep every tab in a fixed place.
+   One button, one table. Pressing "Ready to start calling" fetches whoever
+   is in a calling window this minute and lists them — nothing else on
+   screen decides anything, so there's nothing to read before dialing.
 
    Worked leads vanish from the list entirely, which is what stops the same
-   place being called twice, and what makes the shrinking count a progress bar
-   rather than a score. */
-let SVC=null, ZONE=null, LAST=null;
-/* Set only by a click on a zone tab, cleared once honoured. */
-let PICKED=false;
-
-try{ const p=JSON.parse(localStorage.getItem('crmTab')||'null');
-     if(p){ SVC=p.svc; ZONE=p.zone; } }catch{}
-
-function remember(){ try{ localStorage.setItem('crmTab',
-  JSON.stringify({svc:SVC,zone:ZONE})); }catch{} }
-
-/* Where to land when nothing has been picked yet: whichever tab actually has
-   bars ringable this minute, so opening the page is never a decision. */
-function autoPick(d){
-  let best=null;
-  d.services.forEach(sv=>sv.zones.forEach(z=>{
-    if(z.callable_now && (!best || z.callable_now>best.z.callable_now)) best={sv,z};
-  }));
-  if(best){ SVC=best.sv.key; ZONE=best.z.offset; return; }
-  const fullest=d.services.slice().sort((a,b)=>b.count-a.count)[0];
-  SVC=fullest?fullest.key:'lunch';
-  const z=(fullest?fullest.zones:[]).slice().sort((a,b)=>b.count-a.count)[0];
-  ZONE=z?z.offset:-5;
-}
+   place being called twice. */
 
 /* Putting a lead back after a mis-logged call.
 
@@ -909,111 +810,15 @@ async function undoTouch(id){
   }catch(e){ toast(e.message); }
 }
 
-/* Mail waiting on a better hour, and anything that tried and failed.
+/* ── calling mode ──────────────────────────────────────────────────
+   One button, one list, no decisions. Pressing it fetches whoever is in a
+   calling window THIS MINUTE — the half hour before their doors open, and
+   the 2-4pm lull — best-reachable first, and lists exactly that. Nothing
+   above the table explains or decides anything; there's nothing to do but
+   press the button and start dialing the first row. */
+let NOWDATA=null, nowTimer=null;
 
-   The failures are why this is on screen at all: an email you believe went out
-   and didn't is a follow-up you'll wait on forever. A queued one is just a
-   reminder that this bar already has something coming. */
-async function loadQueueBar(){
-  let d;
-  try{ d=await api('/scheduled'); }catch{ return; }
-  const box=$('queueBar');
-  if(!d.count){ box.innerHTML=''; return; }
-  const rows=[];
-  if(d.failed.length){
-    rows.push(`<div class="queuebar bad">
-      <span class="qitem"><b>${d.failed.length} email${d.failed.length>1?'s':''} didn't send.</b>
-        ${esc(d.failed[0].name)} — ${esc(d.failed[0].error||'no reason given')}</span>
-      ${d.failed.map(f=>`<button data-drop="${esc(f.id)}">Dismiss ${esc(f.name.slice(0,18))}</button>`).join('')}
-    </div>`);
-  }
-  if(d.queued.length){
-    const next=d.queued[0];
-    rows.push(`<div class="queuebar">
-      <span class="qitem"><b>${d.queued.length}</b> email${d.queued.length>1?'s':''} queued ·
-        next to <b>${esc(next.name)}</b> at ${esc(next.venue_time)} their time
-        (${esc(next.your_time)} yours)${next.overdue?' <span class="qchip">sending shortly</span>':''}</span>
-      <button data-drop="${esc(next.id)}">Call it back</button>
-    </div>`);
-  }
-  box.innerHTML=rows.join('');
-}
-
-$('queueBar').onclick=async e=>{
-  const b=e.target.closest('button[data-drop]'); if(!b) return;
-  try{ await api('/scheduled/'+b.dataset.drop,{method:'DELETE'});
-       toast('Cancelled'); await loadCalls(); }
-  catch(err){ toast(err.message); }
-};
-
-/* The pre-call brief. Facts are extracted and attributable; the notes on top
-   are written only from them. Cached server-side, so opening the page doesn't
-   wait on a model. */
-const BRIEFS={};
-async function loadBrief(leadId, into){
-  const box=into||$('brief');
-  if(!box) return;
-  if(BRIEFS[leadId]) return renderBrief(box, BRIEFS[leadId]);
-  box.innerHTML='<div class="none">reading up on them…</div>';
-  try{
-    const d=await api(`/leads/${leadId}/brief`);
-    BRIEFS[leadId]=d;
-    renderBrief(box, d);
-  }catch{ box.innerHTML=''; }
-}
-
-function renderBrief(box, d){
-  if(!d.facts.length && !d.points.length){
-    box.innerHTML='<div class="none">Nothing on file about this one — '
-      +'the map entry is bare and their site gave nothing up.</div>';
-    return;
-  }
-  box.innerHTML=
-    (d.points.length?`<div class="pts">${d.points.map(p=>
-      `<div class="pt">${esc(p)}</div>`).join('')}</div>`:'')
-    +`<div class="fx">${d.facts.map(f=>
-      `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`;
-}
-
-async function loadUndoBar(){
-  let d;
-  try{ d=await api('/undo?limit=5'); }catch{ return; }
-  const box=$('undoBar');
-  if(!d.touches.length){ box.innerHTML=''; return; }
-  const last=d.touches[0];
-  const more=d.touches.slice(1,4);
-  box.innerHTML=`<div class="undobar">
-    <span class="who">Just worked: <strong>${esc(last.name)}</strong>${
-      last.last_outcome?` · ${esc(last.last_outcome)}`:''}</span>
-    <button data-undo="${esc(last.id)}">Put back on the list</button>
-    ${more.map(t=>`<button data-undo="${esc(t.id)}" title="Put back on the list"
-        >${esc(t.name.length>22?t.name.slice(0,21)+'\u2026':t.name)}</button>`).join('')}
-  </div>`;
-}
-
-$('undoBar').onclick=e=>{
-  const b=e.target.closest('button[data-undo]'); if(!b) return;
-  undoTouch(b.dataset.undo);
-};
-
-/* ── calling mode ─────────────────────────────────────────────────────────
-   One button, one list, no decisions. The service and timezone tabs explain
-   the list; they are not a good way to work it. Sitting down to call, the
-   question is only ever "who do I dial first", and clicking through eight
-   tabs reading local clocks to answer it is work the screen should have done.
-
-   So this flattens every tab into one queue of venues that are in a calling
-   window THIS MINUTE — the half hour before their doors open, and the 2-4pm
-   lull — best-reachable first. Windows open and shut as the hour moves, so it
-   refreshes itself while it's on screen rather than going stale under you. */
-let CALLING=false, NOWDATA=null, nowTimer=null;
-try{ CALLING = localStorage.getItem('crmCalling')==='1'; }catch{}
-
-$('startBtn').onclick=()=>{
-  CALLING=!CALLING;
-  try{ localStorage.setItem('crmCalling', CALLING?'1':'0'); }catch{}
-  loadCalls();
-};
+$('startBtn').onclick=()=>loadCalls();
 
 /* The compose box. Say what the email needs to say and Claude writes it; say
    what's wrong with it and Claude changes that bit rather than starting over.
@@ -1148,89 +953,38 @@ function stopNowTimer(){ if(nowTimer){ clearInterval(nowTimer); nowTimer=null; }
 
 async function loadNow(){
   const d=await api('/now'); NOWDATA=d;
-  $('startBtn').textContent='Back to the tabs';
-  $('startBtn').classList.add('on');
 
-  // Their clock, always. The whole US calling day falls in the middle of the
-  // night in the Philippines, and a screen that only shows venue-local time
-  // hides that from the person who has to be awake for it.
-  $('clock').innerHTML=`<strong>${esc(d.operator.local_time)}</strong> where you are
-    <span class="zone">${esc(d.operator.date)} · ${esc(d.operator.zone.replace('_',' '))}</span>`;
-
-  const go=d.ready_count>0;
-  // The best lead across all three buckets, not just the ready pile. Outside
-  // US afternoons `ready` is empty, and keying the focus card off it left the
-  // headline with no number under it — which reads as "no work tonight" to
-  // somebody who deliberately stayed up. `d.ready[0]` is the fallback for an
-  // older API that doesn't send `next` yet.
-  const next=d.next||d.ready[0];
-  $('focus').className='focus '+(go?'go':'wait');
-  // The number you are about to dial belongs next to the name of the place you
-  // are about to dial, not eight rows down in a table you have to find it in.
-  // Name and number on one line — they're one thought, and the number is the
-  // thing the hand is reaching for. Everything that helps the conversation
-  // sits under them.
-  $('focus').innerHTML=`<div class="focustop">
-      <h2>${esc(d.headline)}</h2>
-      ${next&&next.phone_digits?`<div class="phcell">
-        <span class="digits" data-copy="${esc(next.phone_dial)}">${esc(next.phone_dial)}</span>
-        <button class="copybtn" data-act="copy" data-copy="${esc(next.phone_dial)}">COPY</button>
-      </div>`:''}
-    </div>
-    ${next&&next.manager_name?`<div class="askinline">Ask if ${esc(next.manager_name)}
-      is still ${esc(next.manager_role||'there')}</div>`:''}
-    ${next?`<div class="focusacts">
-      <button class="go" data-act="logtop" data-id="${esc(next.id)}">Log this call</button>
-      <button class="del" data-act="skiptop" data-id="${esc(next.id)}">Skip</button>
-    </div>`:''}
-    <div id="brief" class="brief"></div>
-    <div class="prog">${d.done_today} done today · ${d.ready_count} ringable right now
-      · ${d.soon_count} waiting on their window${d.rest_count
-        ? ` · ${d.rest_count} outside a window`:''}</div>`;
-  if(next) loadBrief(next.id);
-
-  $('svcTabs').innerHTML=''; $('zoneTabs').innerHTML='';
-
-  // Only a genuinely empty screen gets the empty screen. "Nothing is in a
-  // calling window this minute" used to be shown INSTEAD of the list, with a
-  // `return` before the table — so outside US afternoons, when most venues are
-  // past their window, the operator pressed "Ready to start calling" and
-  // watched hundreds of banked leads vanish. Being outside a window is a fact
-  // about the ordering, not a reason to hide the work.
-  const nothing = !d.ready.length && !d.soon.length && !d.rest.length;
-  if(nothing){
-    $('zones').innerHTML = d.list_empty
-      ? '<div class="card muted"><p>There is nothing on the list to call.</p>'
+  if(!d.ready.length){
+    stopNowTimer();
+    if(d.list_empty){
+      $('zones').innerHTML='<div class="card muted"><p>There is nothing on the list to call.</p>'
         + '<button class="go" data-act="fill">Fill the list now</button>'
         + '<p class="hint">Crawls venue sites for contacts — a few minutes. '
-        + 'Leads appear as they land.</p></div>'
-      : '<div class="card muted"><p>' + esc(d.headline) + '</p>'
+        + 'Leads appear as they land.</p></div>';
+      if(!AUTOFILLED && !FILLING){
+        AUTOFILLED=true;
+        startFill($('zones').querySelector('button[data-act="fill"]'));
+      }
+    } else if(!d.dialable_total){
+      $('zones').innerHTML='<div class="card muted"><p>' + esc(d.headline) + '</p>'
         + '<button class="go" data-act="fill">Fill the list now</button>'
         + '<p class="hint">Every lead on the list failed phone validation, so '
         + 'none can be dialled. Fetching more is the only fix.</p></div>';
-    // Sitting down to call IS the request for leads. Waiting for 6pm is no
-    // answer to someone holding a phone now, so pressing "Ready to start
-    // calling" onto an empty list starts the fill itself rather than asking
-    // again. Once per session: this also runs on the 60s refresh, and an
-    // unguarded auto-start there would crawl in a loop. Only a truly empty
-    // list auto-starts — a list of unusable numbers needs a human to look.
-    if(d.list_empty && !AUTOFILLED && !FILLING){
-      AUTOFILLED=true;
-      startFill($('zones').querySelector('button[data-act="fill"]'));
+    } else {
+      $('zones').innerHTML='<div class="card muted"><p>Nobody\'s in a calling window '
+        + 'right now.</p><p class="hint">' + d.soon_count + ' about to open, '
+        + d.rest_count + ' outside a window. Press the button again once one opens.</p></div>';
     }
+    // Windows open and shut on the clock — keep checking even while empty.
+    if(!nowTimer) nowTimer=setInterval(()=>{ if(TAB==='calls') loadNow(); }, 60000);
     return;
   }
 
-  // One table per bucket, in dial order, and the bucket a lead is in is the
-  // only thing that changes about it. Each section says plainly why it's where
-  // it is, so a row below the fold is an informed choice rather than a
-  // mystery.
-  const sheet=(dot,name,when,leads,offset)=>`
+  $('zones').innerHTML=`
     <div class="zbar">
-      <span class="dot ${dot}"></span>
-      <span class="name">${name}</span>
-      <span class="when">${when}</span>
-      ${offset?'':`<span class="tag go">${esc(d.operator.local_time)} your time</span>`}
+      <span class="dot d-good"></span>
+      <span class="name">CALL NOW</span>
+      <span class="when">${d.ready_count} in their window right now · best first</span>
     </div>
     <div class="zone"><div class="sheetwrap">
       <table class="sheet">
@@ -1238,160 +992,17 @@ async function loadNow(){
           <th></th><th>BAR</th><th>PHONE</th><th>WHY NOW</th><th>TRY</th>
           <th>EMAIL</th><th>WHERE</th><th>ACTIONS</th>
         </tr></thead>
-        <tbody>${leads.map((l,i)=>row(l,offset+i+1,true)).join('')}</tbody>
+        <tbody>${d.ready.map((l,i)=>row(l,i+1,true)).join('')}</tbody>
       </table>
     </div></div>`;
 
-  let html='', n=0;
-  if(d.ready.length){
-    html += sheet('d-good','CALL NOW',
-                  `${d.ready_count} in their window · best first`, d.ready, n);
-    n += d.ready.length;
-  }
-  // A working session needs a full table to dial through, not a one-line
-  // "1 ready now". MIN_WORKING_TABLE is the floor: whenever the truly-ready
-  // pile is thinner than that, the soon-to-open leads become the table (not a
-  // 6-item strip) so there's always a real excel-style list on screen. Only
-  // once ready alone already clears the floor does soon shrink back to a
-  // countdown strip — at that point it's genuinely "next up", not "the work".
-  const MIN_WORKING_TABLE=15;
-  const soonIsTable = d.soon.length && d.ready.length < MIN_WORKING_TABLE;
-  if(soonIsTable){
-    html += sheet('d-opening','OPENING SOON',
-                  `${d.soon_count} about to hit their window · soonest first`,
-                  d.soon, n);
-    n += d.soon.length;
-  }
-  if(d.rest.length){
-    const openNow=d.rest.filter(l=>(l.call_window||{}).state==='late').length;
-    const shown=d.rest.length<d.rest_count?` · showing ${d.rest.length} of ${d.rest_count}`:'';
-    // Amber, not red: these are dialable, just not the pick of the list. Red is
-    // the page's "don't" colour and this section is work.
-    html += sheet(openNow?'d-opening':'d-closed',
-                  n?'ALSO ON THE LIST':'THE WHOLE LIST',
-                  (openNow?`${openNow} still open, past their quiet hour`
-                         :'all shut right now — labelled with the next day they open')
-                  + shown, d.rest, n);
-  }
-  $('zones').innerHTML = html + ((d.ready.length && !soonIsTable)?soonStrip(d):'');
-}
-
-function soonStrip(d){
-  if(!d.soon.length) return '';
-  return '<div class="soon"><span>Next up:</span>'
-    + d.soon.slice(0,6).map(l=>{
-        const w=l.call_window||{};
-        const mins=w.starts_in||0;
-        const pretty=mins>=60?`${Math.floor(mins/60)}h ${mins%60}m`:`${mins}m`;
-        return `<span>${esc(l.name.length>24?l.name.slice(0,23)+'\u2026':l.name)}`
-             + ` — ${pretty}${w.starts_at_yours?` (${esc(w.starts_at_yours)} yours)`:''}</span>`;
-      }).join('') + '</div>';
+  // Windows open and shut on the clock, so a list left sitting goes stale.
+  if(!nowTimer) nowTimer=setInterval(()=>{ if(TAB==='calls') loadNow(); }, 60000);
 }
 
 async function loadCalls(){
-  if(CALLING){
-    await loadNow();
-    loadUndoBar(); loadQueueBar();
-    // Windows open and close on the clock, so a list left sitting goes stale.
-    if(!nowTimer) nowTimer=setInterval(()=>{ if(CALLING&&TAB==='calls') loadNow(); }, 60000);
-    return;
-  }
-  stopNowTimer();
-  AUTOFILLED=false;
-  $('startBtn').textContent='Ready to start calling';
-  $('startBtn').classList.remove('on');
-  $('clock').innerHTML='';
-  const d=await api('/calllist'); LAST=d;
-  loadUndoBar(); loadQueueBar();
-  const go = /^Call /.test(d.focus);
-  $('focus').className='focus '+(go?'go':'wait');
-  $('focus').innerHTML=`<h2>${esc(d.focus)}</h2>
-    <div class="prog">${d.done_today} done today · ${d.remaining} left in the list</div>`;
-
-  if(!d.services.some(sv=>sv.count)){
-    $('svcTabs').innerHTML=''; $('zoneTabs').innerHTML='';
-    $('zones').innerHTML='<div class="card muted">'
-      + '<p>Call list is empty.</p>'
-      + '<button class="go" data-act="fill">Fill the list now</button>'
-      + '<p class="hint">It refills on its own at 6pm, emptiest tab first — '
-      + 'this does it now instead. It crawls venue sites, so give it a few minutes; '
-      + 'leads appear as they land.</p></div>';
-    return;
-  }
-  if(SVC===null || !d.services.some(sv=>sv.key===SVC)) autoPick(d);
-  render();
+  await loadNow();
 }
-
-function render(){
-  const d=LAST; if(!d) return;
-  const svc=d.services.find(sv=>sv.key===SVC)||d.services[0];
-  SVC=svc.key;
-
-  $('svcTabs').innerHTML=d.services.map(sv=>`
-    <button data-svc="${esc(sv.key)}" class="${sv.key===SVC?'on':''}">
-      <span class="n">${sv.count}</span>
-      <span class="t">${esc(sv.label)}</span>
-      <span class="s">${esc(sv.blurb)}</span>
-    </button>`).join('');
-
-  let zone=svc.zones.find(z=>z.offset===ZONE);
-  /* An empty zone nobody asked for gets skipped past — switching service tabs
-     shouldn't drop you on a blank screen. A zone you CLICKED is never skipped,
-     even when it's empty: silently landing somewhere else after a deliberate
-     click is the more disorienting of the two, and the empty state says what
-     the generator is doing about it. */
-  if(!zone || (!zone.count && !PICKED)){
-    const alt=svc.zones.find(z=>z.callable_now) ||
-              svc.zones.slice().sort((a,b)=>b.count-a.count)[0];
-    if(alt && alt.count) zone=alt;
-  }
-  zone=zone||svc.zones[0]; ZONE=zone.offset; PICKED=false; remember();
-
-  $('zoneTabs').innerHTML=svc.zones.map(z=>`
-    <button data-zone="${z.offset}"
-            class="${z.offset===ZONE?'on':''} ${z.recommended?'rec':''}">
-      <span class="dot d-${esc(z.state)}"></span>${esc(z.label)}
-      <span class="c">${z.count}</span>
-    </button>`).join('');
-
-  const tagCls=zone.state==='good'?'go':(zone.callable?'':'stop');
-  if(!zone.count){
-    $('zones').innerHTML='<div class="card muted">Nothing in '
-      +esc(zone.label)+' under this tab yet — the generator fills the '
-      +'emptiest tabs first.</div>';
-    return;
-  }
-  $('zones').innerHTML=`
-    <div class="zbar">
-      <span class="dot d-${esc(zone.state)}"></span>
-      <span class="name">${esc(zone.label.toUpperCase())}</span>
-      <span class="when">${esc(zone.local_time)} · ${esc(zone.count)} leads</span>
-      <span class="tag ${tagCls}">${esc(zone.headline)}</span>
-    </div>
-    <div class="zone"><div class="sheetwrap">
-      <table class="sheet">
-        <thead><tr>
-          <th></th><th>BAR</th><th>PHONE</th><th>WHEN</th><th>TRY</th>
-          <th>EMAIL</th><th>CITY</th><th>ACTIONS</th>
-        </tr></thead>
-        <tbody>${zone.leads.map((l,i)=>row(l,i+1)).join('')}</tbody>
-      </table>
-    </div></div>`;
-}
-
-$('focus').onclick=e=>{
-  const cp=e.target.closest('[data-act="copy"]')||e.target.closest('.digits');
-  if(cp) copyDigits(cp);
-};
-
-$('svcTabs').onclick=e=>{
-  const b=e.target.closest('button[data-svc]'); if(!b) return;
-  SVC=b.dataset.svc; render();
-};
-$('zoneTabs').onclick=e=>{
-  const b=e.target.closest('button[data-zone]'); if(!b) return;
-  ZONE=parseInt(b.dataset.zone,10); PICKED=true; render();
-};
 
 /* Why this row is where it is. The list reorders itself for reasons the
    screen should state, or it just looks arbitrary. */
@@ -1519,46 +1130,6 @@ async function startFill(btn){
     }
   }, 10000);
 }
-
-// The number you just dialled is in the box at the top; the button to record
-// what happened belongs there too, not found again in the table underneath.
-// It drives the existing row drawer rather than duplicating it, so logging
-// from here goes through exactly the same touch, undo and counter path.
-//
-// "Skip" is the same idea for the other outcome: the headline is the only
-// thing an operator sitting down to call is meant to look at, so a bad
-// suggestion (wrong number, a duplicate, anything not worth this call) has
-// to be dismissable right there. Before this the only way to drop it was to
-// find the matching row in the table below and hit Delete — which defeats
-// the one-thing-on-screen point of the focus card entirely. Deliberately
-// NOT labelled around any one reason (it used to say "Not a bar — skip",
-// back when the liquor gate itself still let non-bars through): the gate is
-// the thing that keeps non-bars off this list now, so a lead reaching the
-// focus card and still needing to go isn't specifically a bar-detection
-// problem, and the button shouldn't imply it always is. It reuses the exact
-// same DELETE endpoint and confirm as the table's own Delete button, so it
-// retires the lead the same way: for good.
-$('focus').onclick=async e=>{
-  const skip=e.target.closest('button[data-act="skiptop"]');
-  if(skip){
-    if(!confirm('Delete this lead? It will not come back.')) return;
-    try{ await api('/leads/'+skip.dataset.id,{method:'DELETE'}); toast('Skipped'); await loadCalls(); }
-    catch(err){ toast(err.message); }
-    return;
-  }
-  const btn=e.target.closest('button[data-act="logtop"]');
-  if(!btn) return;
-  const row=document.querySelector('#zones tr[data-id="'+CSS.escape(btn.dataset.id)+'"]');
-  const log=row&&row.querySelector('button[data-act="log"]');
-  if(!log) return toast('Open the list below to log this one.');
-  log.click();
-  const drawer=row.nextElementSibling;
-  if(drawer&&drawer.classList.contains('drawer')){
-    drawer.scrollIntoView({behavior:'smooth',block:'center'});
-    const ta=drawer.querySelector('textarea');
-    if(ta) setTimeout(()=>ta.focus(),300);
-  }
-};
 
 $('zones').onclick=async e=>{
   const cp=e.target.closest('[data-act="copy"]');
@@ -2359,14 +1930,17 @@ function rng(seed){ return ()=>{ seed|=0; seed=seed+0x6D2B79F5|0; let t=Math.imu
 function pick(arr,n,salt){ const r=rng(BLOCK*97+salt), a=arr.slice();
   for(let i=a.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a.slice(0,n); }
 
-function showPractice(on){
-  $('practice').classList.toggle('hide',!on);
-  $('callMain').classList.toggle('hide',on);
-  if(on){ prView('pHome'); prRender(); window.scrollTo(0,0); loadSchool(); } else { gQuit(); xQuit(); tpQuit(); speechCancel(); }
+// The School panel lives behind the burger menu now, its own [data-panel]
+// section — switchTab() shows/hides it like any other tab. This just does
+// the setup on the way in and the teardown (stop any live game/timer) on
+// the way out, both driven from switchTab's loader map and its tab-leave
+// check below.
+function loadSchoolPanel(){
+  prView('pHome'); prRender(); window.scrollTo(0,0); loadSchool();
+  return Promise.resolve();
 }
 function prView(id){ ['pHome','pSch','pGame','pGaunt','pTape','pCards'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
-$('practiceBtn').onclick=()=>showPractice(true);
-$('pTileBack').onclick=()=>showPractice(false);
+$('pTileBack').onclick=()=>switchTab($('tabs').querySelector('button[data-tab="calls"]'));
 
 /* ── content banks ── */
 const P_MODS=[
