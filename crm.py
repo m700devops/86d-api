@@ -2962,7 +2962,12 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
     return {
         "headline": headline,
         "ready": ready[:limit],
-        "soon": soon[:12],
+        # Capped at `limit`, not a fixed 12: when the ready pile is thin the
+        # page turns this into the actual working table (see crm.html's
+        # MIN_WORKING_TABLE), and a 12-row cap would starve that table before
+        # it ever reached a usable size. It's still a countdown strip's data
+        # when ready alone already clears the floor — cheap either way.
+        "soon": soon[:limit],
         # Everything the window says isn't ideal this minute, still ordered and
         # still dialable. Capped at `limit` like `ready` — but `rest_count` is
         # the real total, so the page can say how many it isn't showing instead
