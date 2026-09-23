@@ -93,6 +93,14 @@ async def lifespan(app: FastAPI):
     # must never touch the product API.
     asyncio.create_task(_leadgen_daily_loop())
     asyncio.create_task(_scheduled_email_loop())
+    # Cold-call school refresh: every few days at 10am Asia/Manila. Own try,
+    # own loop — nothing here may affect the product API or the CRM.
+    try:
+        from school import init_school_tables
+        await asyncio.to_thread(init_school_tables)
+    except Exception as e:
+        print(f"[school] SCHOOL_TABLES_FAILED {e}", flush=True)
+    asyncio.create_task(_school_refresh_loop())
     yield
 
 app = FastAPI(
@@ -2804,6 +2812,19 @@ async def _scheduled_email_loop():
         except Exception as e:
             print(f"[crm] scheduled email loop error: {e}", flush=True)
         await asyncio.sleep(60)
+
+
+async def _school_refresh_loop():
+    """Wakes every 15 minutes; school.is_due() decides from the database, so a
+    restart or a spun-down service delays a refresh but never doubles it."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            from school import refresh_if_due
+            await asyncio.to_thread(refresh_if_due)
+        except Exception as e:
+            print(f"[school] loop error: {e}", flush=True)
+        await asyncio.sleep(LEADGEN_CHECK_INTERVAL_SECONDS)
 
 
 async def _leadgen_daily_loop():

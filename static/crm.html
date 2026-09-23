@@ -395,6 +395,8 @@
   .tline.miss{border-color:var(--wait);background:#FFB02012}
   .tline .v{display:block;font-size:12px;margin-top:6px;color:var(--text2)}
   .tbar{position:sticky;bottom:0;background:var(--bg);padding:10px 0;display:flex;gap:10px;align-items:center;border-top:1px solid var(--line)}
+  .vmeta .steal{color:var(--text2);margin-top:5px;font-size:12px;line-height:1.4}
+  .vmeta .steal b{color:var(--accent);font-weight:700}
 </style>
 </head>
 <body>
@@ -555,6 +557,10 @@
             <div class="pgrid" id="pSkills" style="margin-bottom:22px"></div>
 
             <div class="psec"><h3>Watched</h3><p class="hint" id="pWatched"></p></div>
+            <div class="psec"><h3>School updates</h3>
+              <p class="hint">Every 3 days at 10am Iloilo time, the school searches YouTube for new videos under 21 minutes. Claude reads each one's title, channel and description (it doesn't watch them), keeps only what fits calling independent bar owners, and says what to try from each. It also writes new Gauntlet rounds and test questions.</p>
+              <div class="card"><div id="sStatus" class="muted" style="font-size:13px">Checking…</div>
+                <button id="sRefresh" style="margin-top:10px">Update the school now</button></div></div>
           </div>
         </div>
         <div id="pGame" class="hide">
@@ -2341,7 +2347,8 @@ function prScore(rec){ PR.scores.push({...rec, at:new Date().toISOString(), day:
 
 /* rotation: a block number from the local date, and a seeded shuffle */
 const dayNum=()=>{ const d=new Date(); return Math.floor(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())/864e5); };
-const BLOCK=Math.floor(dayNum()/ROT_DAYS);
+let BLOCK=Math.floor(dayNum()/ROT_DAYS);
+let SCHOOL=null, DAILY=[];   // the server's school pack, once applied (see applyPack)
 const daysLeft=()=>ROT_DAYS-(dayNum()%ROT_DAYS);
 function rng(seed){ return ()=>{ seed|=0; seed=seed+0x6D2B79F5|0; let t=Math.imul(seed^seed>>>15,1|seed); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
 function pick(arr,n,salt){ const r=rng(BLOCK*97+salt), a=arr.slice();
@@ -2350,7 +2357,7 @@ function pick(arr,n,salt){ const r=rng(BLOCK*97+salt), a=arr.slice();
 function showPractice(on){
   $('practice').classList.toggle('hide',!on);
   $('callMain').classList.toggle('hide',on);
-  if(on){ prView('pHome'); prRender(); window.scrollTo(0,0); } else { gQuit(); xQuit(); tpQuit(); speechCancel(); }
+  if(on){ prView('pHome'); prRender(); window.scrollTo(0,0); loadSchool(); } else { gQuit(); xQuit(); tpQuit(); speechCancel(); }
 }
 function prView(id){ ['pHome','pSch','pGame','pGaunt','pTape','pCards'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
 $('practiceBtn').onclick=()=>showPractice(true);
@@ -2367,7 +2374,7 @@ const P_MODS=[
 ];
 /* Every video is embeddable, under 21 minutes, and checked by hand: [id, title, channel, length, topic].
    Topics tie videos to modules (0-5) or to the rotating pool ('x'). */
-const VIDS=[
+let VIDS=[
   ['EKr0bYFsNrU','Nailing the first 30 seconds of a cold call','Josh Braun','3:19',0],
   ['MRJS6nEKjcI','The best way to open a cold call','30 Minutes to President\'s Club','8:01',0],
   ['vkj_1-NB8YQ','The permission-based opener (with a twist)','30 Minutes to President\'s Club','4:42',0],
@@ -2401,7 +2408,7 @@ const vSecs=v=>{ const [m,x]=v[3].split(':').map(Number); return m*60+x; };
 function vidHTML(v){
   const w=PR.watched[v[0]];
   return `<div class="vid" data-v="${v[0]}"><button class="vplay" data-play="${v[0]}" aria-label="Play ${esc(v[1])}" style="background-image:url(https://i.ytimg.com/vi/${v[0]}/mqdefault.jpg)"><span class="vlen">${v[3]}</span></button>
-    <div class="vmeta">${esc(v[1])}<span>${esc(v[2])}${w?' · <b class="w">✓ watched</b>':''}</span></div></div>`;
+    <div class="vmeta">${esc(v[1])}<span>${esc(v[2])}${w?' · <b class="w">✓ watched</b>':''}</span>${v[6]?`<span class="steal"><b>Try on your next call:</b> ${esc(v[6])}</span>`:''}</div></div>`;
 }
 /* Tap to play: the real player only loads on a tap, so the page stays fast
    and nothing starts making noise on its own. */
@@ -2499,8 +2506,15 @@ ROT.rule=pick(RULE_KEYS,1,6)[0];
   ROT.films=pick(VIDS.filter(v=>!inSteps.has(v[0])),4,2); }
 const RULE_TXT={short_fuse:'Short fuse: owners start less patient.',price_first:'Price first: they\'ll demand the price early.',speed:'Speed round: win in 10 lines or fewer.',storm:'Interruption storm: expect a chaotic back-of-house.',gatekeeper:'Wrong person: a bartender answers first.',callback:'The callback: you spoke last week. Do you remember them?'};
 
-$('pRot').innerHTML=`Rotation <b>#${BLOCK%1000}</b> · ${esc(RULE_TXT[ROT.rule])} · new stuff in ${daysLeft()} day${daysLeft()===1?'':'s'}`;
-$('pFinds').innerHTML=ROT.finds.map(f=>`<div class="find"><div class="v">${esc(f[0])}<small>${esc(f[1])}</small></div><p>${f[2]}</p></div>`).join('');
+function rotBanner(){
+  if(SCHOOL&&SCHOOL.pack){
+    const f=d=>new Date(d).toLocaleString([], {weekday:'short', hour:'numeric', minute:'2-digit', timeZone:SCHOOL.tz||'Asia/Manila'});
+    $('pRot').innerHTML=`School updated <b>${esc(f(SCHOOL.updated_at))}</b> · ${esc(RULE_TXT[ROT.rule])} · next update ${esc(f(SCHOOL.next_at))} Iloilo time`;
+  } else $('pRot').innerHTML=`Rotation <b>#${BLOCK%1000}</b> · ${esc(RULE_TXT[ROT.rule])} · new stuff in ${daysLeft()} day${daysLeft()===1?'':'s'}`;
+}
+rotBanner();
+function renderFinds(){ $('pFinds').innerHTML=ROT.finds.map(f=>`<div class="find"><div class="v">${esc(f[0])}<small>${esc(f[1])}</small></div><p>${f[2]}</p></div>`).join(''); }
+renderFinds();
 
 function prMods(){
   const i=Math.max(0,Math.min(5,PR.mi|0)), m=P_MODS[i], on=!!PR.mods['m'+i];
@@ -2524,7 +2538,7 @@ $('pMods').onchange=e=>{ if(e.target.id!=='mDone') return; PR.mods['m'+(PR.mi|0)
 function prVids(){
   $('pFilms').innerHTML=ROT.films.map(vidHTML).join('');
   // One short video a day, 10 minutes or less, rotating through the whole library.
-  const short=VIDS.filter(v=>vSecs(v)<=630), v=short[dayNum()%short.length];
+  const short=DAILY.length?DAILY:VIDS.filter(v=>vSecs(v)<=630), v=short[dayNum()%short.length];
   $('pVid').innerHTML=`<div class="todayvid">${vidHTML(v).replace('<div class="vmeta">','<div class="vmeta hide">')}<div><div class="glabel" style="margin:0 0 4px">TODAY'S VIDEO · ${v[3]}</div><b>${esc(v[1])}</b><div class="muted" style="font-size:12px">${esc(v[2])}${PR.watched[v[0]]?' · ✓ watched':''}</div></div></div>`;
   const n=Object.keys(PR.watched).length;
   $('pWatched').textContent=`${n} of ${VIDS.length} videos watched.`+(n<VIDS.length?' Unwatched ones keep rotating in.':' All of them. Nice.');
@@ -3005,6 +3019,65 @@ $('tpFixGo').onclick=async()=>{
     const rec2={kind:'drill',score:r.score}; if(r.skill) rec2[r.skill]=r.score; prScore(rec2);
     o.innerHTML=`<div class="big">${r.score}<span class="muted" style="font-size:14px"> / 10</span></div><div><strong>Fix:</strong> ${esc(r.fix)}</div><div class="say">${esc(r.better)}</div>`;
   }catch{ o.innerHTML=`<div>Compare yours with the model answer:</div><div class="say">${esc(w.fix)}</div>`; }
+};
+
+/* ── the school pack: refreshed on the server every 3 days at 10am Iloilo time ──
+   Applied over the built-in content: the pack's id becomes the rotation seed,
+   so guests, the house rule, the Gauntlet, the test and the videos all turn
+   over together at 10am. No pack yet, or the server's unreachable: the
+   built-in library and the date-based rotation carry on exactly as before. */
+const SC_STORE='crmSchoolPack';
+function packVid(v,step){ return [v.id,v.title,v.channel,v.len,step,v.why||'',v.steal||'']; }
+function applyPack(info){
+  if(!info||!info.pack||!info.pack.videos) return;
+  const P=info.pack, V=P.videos, vids=[];
+  try{
+    Object.entries(V.steps||{}).forEach(([k,list])=>(list||[]).forEach(v=>vids.push(packVid(v,+k))));
+    (V.shelf||[]).forEach(v=>vids.push(packVid(v,'x')));
+    // A step the refresh couldn't fill keeps its built-in videos.
+    for(let i=0;i<6;i++) if(!vids.some(v=>v[4]===i)) VIDS.filter(v=>v[4]===i).slice(0,2).forEach(v=>vids.push(v));
+    if(!vids.every(v=>typeof v[0]==='string'&&/^\d+:\d\d$/.test(v[3]))) return;
+    SCHOOL=info; BLOCK=100000+(info.pack_id|0); VIDS=vids;
+    DAILY=(V.daily||[]).map(v=>packVid(v,'x')).filter(v=>/^\d+:\d\d$/.test(v[3]));
+    ROT.mods=pick(P_MODS.map((_,i)=>i),1,1)[0];
+    ROT.quiz=(P.quiz&&P.quiz.length>=6)?P.quiz.slice(0,10):pick(P_QUIZ,10,3);
+    ROT.gaunt=(P.gauntlet&&P.gauntlet.length>=6)?P.gauntlet.slice(0,10):pick(GAUNT,10,5);
+    ROT.finds=pick(P_FINDS,4,4); ROT.rule=pick(RULE_KEYS,1,6)[0]; ROT.guests=pick(Object.keys(GUEST_META),2,7);
+    ROT.films=(V.shelf||[]).length?(V.shelf||[]).map(v=>packVid(v,'x')):ROT.films;
+  }catch{ return; }
+  rotBanner(); renderFinds(); tRender(); prRender();
+}
+function schoolStatus(){
+  const el=$('sStatus'); if(!el) return; const I=SINFO;
+  if(!I){ el.textContent='Can\'t reach the server right now. Using the built-in library.'; return; }
+  const f=d=>d?new Date(d).toLocaleString([], {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit', timeZone:I.tz||'Asia/Manila'}):'—';
+  const st=I.pack&&I.pack.stats;
+  el.innerHTML=(I.updated_at?`Last update: <b style="color:var(--text)">${esc(f(I.updated_at))}</b> · `:'No update has run yet, so the built-in library is in use. ')
+    +`Next: ${esc(f(I.next_at))} (Iloilo time)`
+    +(st?`<br>Looked at ${st.candidates} videos, kept ${st.kept} that fit your calls.`:'')
+    +(I.running?'<br>An update is running now.':'')
+    +(I.last_error?`<br><span style="color:var(--stop)">The last attempt failed: ${esc(I.last_error)}.${I.pack?' The previous update is still in use.':''}</span>`:'');
+}
+let schoolLoaded=false, SINFO=null;
+async function loadSchool(force){
+  if(schoolLoaded&&!force) return; schoolLoaded=true;
+  try{ const info=await api('/coach/school'); SINFO=info;
+    try{ localStorage.setItem(SC_STORE,JSON.stringify(info)); }catch{}
+    if(info&&info.pack) applyPack(info);
+  }catch{}
+  schoolStatus();
+}
+try{ SINFO=JSON.parse(localStorage.getItem(SC_STORE)||'null'); applyPack(SINFO); }catch{}
+$('sRefresh').onclick=async()=>{
+  const b=$('sRefresh'); b.disabled=true; b.textContent='Updating… (a few minutes)';
+  try{ await api('/coach/school/refresh',{method:'POST'}); toast('Update started. It takes a few minutes.'); }
+  catch(e){ toast(e.message); b.disabled=false; b.textContent='Update the school now'; return; }
+  let tries=0; const t=setInterval(async()=>{ tries++;
+    try{ const info=await api('/coach/school');
+      if(info&&!info.running&&tries>1){ clearInterval(t); b.disabled=false; b.textContent='Update the school now'; SINFO=info;
+        try{ localStorage.setItem(SC_STORE,JSON.stringify(info)); }catch{}
+        if(info.pack) applyPack(info); schoolStatus(); toast(info.last_error?'Update failed. Kept the previous one.':'School updated.'); } }catch{}
+    if(tries>40){ clearInterval(t); b.disabled=false; b.textContent='Update the school now'; } },15000);
 };
 tRender(); prRender();
 

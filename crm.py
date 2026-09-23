@@ -3048,7 +3048,7 @@ DEBRIEF_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 
 def _ask_claude(system: str, user: str, max_tokens: int = 400,
-                temperature: float = 0) -> dict:
+                temperature: float = 0, timeout: float = 40.0) -> dict:
     """One JSON answer from Claude. Raises HTTPException when unusable.
 
     Shared by the call-notes reader and the email drafter — one place that
@@ -3085,7 +3085,7 @@ def _ask_claude(system: str, user: str, max_tokens: int = 400,
                     {"role": "assistant", "content": "{"},
                 ],
             },
-            timeout=40.0,
+            timeout=timeout,
         )
     except Exception as exc:
         print(f"[crm] Claude request failed: {exc}", flush=True)
@@ -3648,3 +3648,19 @@ def coach_tape(data: TapeRequest, _: bool = Depends(require_crm_key)):
             return tape
     raise HTTPException(status_code=503, detail={
         "error": "tape_unusable", "message": "Couldn't make a fair tape. Here's a built-in one."})
+
+
+@crm_router.get("/coach/school", response_model=dict)
+def coach_school(_: bool = Depends(require_crm_key)):
+    """The latest refreshed school pack, or {pack: None} before the first one."""
+    import school
+    return school.latest_pack()
+
+
+@crm_router.post("/coach/school/refresh", response_model=dict)
+def coach_school_refresh(_: bool = Depends(require_crm_key)):
+    """Run a refresh now instead of waiting for 10am. Returns at once; the pack
+    lands a few minutes later and the page picks it up on its next load."""
+    import school
+    threading.Thread(target=school.refresh_if_due, kwargs={"force": True}, daemon=True).start()
+    return {"started": True}

@@ -89,13 +89,26 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   rep mistakes in a generated call; `validate_tape()` rejects any tape that can't be scored
   fairly and `tape_score()` charges −25 per false accusation vs +40 per find. Three built-in
   tapes in the page cover the no-AI case
+- school.py — the practice school's REFRESH. Every `SCHOOL_EVERY_DAYS` (3) days at
+  `SCHOOL_RUN_HOUR` (10) in `SCHOOL_TZ` (Asia/Manila — the operator is in Iloilo and asleep
+  then), `_school_refresh_loop()` in main.py runs `refresh_if_due()`: search YouTube with
+  use-case queries (rotated per run), keep 3–21 min embeddable videos not shown in the last
+  4 packs, have Claude vet them against the bar-owner use case from title/channel/
+  description (it can't watch them — the UI says so), and write fresh Gauntlet rounds and
+  test questions. Saved to `crm_school_packs`; `GET /v1/crm/coach/school` serves the latest
+  good one, `POST /coach/school/refresh` forces a run. Optional `YOUTUBE_API_KEY` switches
+  search from the public results page to the Data API (exact durations + embeddable flag).
+  A pack must fill 4+ call steps to replace the previous one; otherwise the last good pack
+  (or the page's built-in library) stays. Grep Render logs for `SCHOOL_REFRESH`.
+  On a free-tier service that's spun down at 10am, the refresh runs when it next wakes.
+  See test_school.py
 - seed_data.py — default product catalog
 - test_level_classifier.py — unit tests for helpers.py level logic
 - test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
-  test_leadgen.py test_quick_add.py -q` (255 tests)
+  test_leadgen.py test_quick_add.py test_coach.py test_school.py -q`
 - test_leadgen.py — `_restaurant_pours()`, the restaurant liquor gate, pure (crawled text +
   OSM tags in, a yes/no and a reason out). Stubs `database` in `sys.modules` the same way
   test_callnow.py stubs it for crm
