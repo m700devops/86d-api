@@ -82,6 +82,17 @@
   table.sheet tr:nth-child(even) td{background:#131313}
   table.sheet tr:hover td{background:#1C1C1C}
   table.sheet td:last-child,table.sheet th:last-child{border-right:0}
+  /* ACTIONS pinned to the right edge of the scroll area. Half-width windows
+     (or anything narrower than the full table) push the buttons off-screen
+     behind horizontal scroll — sticky keeps Log call/Email/Delete/Skip
+     reachable without having to find and drag a scrollbar to get to them.
+     Each state needs its own explicit background (not just position:sticky)
+     or the columns scrolling underneath show through the pinned cell. */
+  table.sheet td:last-child:not([colspan]){position:sticky;right:0;z-index:1;
+        background:var(--surface);box-shadow:-8px 0 8px -8px rgba(0,0,0,.5)}
+  table.sheet tr:nth-child(even) td:last-child:not([colspan]){background:#131313}
+  table.sheet tr:hover td:last-child:not([colspan]){background:#1C1C1C}
+  table.sheet th:last-child{position:sticky;right:0;z-index:2}
   .rownum{color:var(--text3);width:34px;text-align:right;font-variant-numeric:tabular-nums}
   .nm{font-weight:600;white-space:nowrap;max-width:230px;overflow:hidden;text-overflow:ellipsis}
   /* Digits only, monospace, one click to copy — it goes straight into CloudTalk. */
