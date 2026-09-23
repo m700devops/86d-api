@@ -74,3 +74,30 @@ def test_challenge_twist_reaches_prompt():
     assert CHALLENGES["price_first"]["prompt"] in system
     system, _ = turn_prompt("dale", [], "hi", 50, 10, [], None, "made_up")
     assert "TODAY'S TWIST" not in system
+
+
+def _tape(n_mistakes=3, bad_index=None):
+    from coach import MISTAKE_KINDS
+    lines = [{"role": "rep" if i % 2 == 0 else "owner", "text": f"l{i}"} for i in range(14)]
+    kinds = list(MISTAKE_KINDS)
+    ms = [{"line": i * 2, "kind": kinds[i], "why": "w", "fix": "f"} for i in range(n_mistakes)]
+    if bad_index is not None:
+        ms[0]["line"] = bad_index
+    return {"owner": "x", "lines": lines, "mistakes": ms}
+
+
+def test_tape_needs_exactly_three_rep_mistakes():
+    from coach import validate_tape
+    assert validate_tape(_tape())["mistakes"][0]["line"] == 0
+    assert validate_tape(_tape(2)) is None
+    assert validate_tape(_tape(bad_index=1)) is None      # an owner line isn't a rep mistake
+    assert validate_tape(_tape(bad_index=99)) is None
+    assert validate_tape({"lines": "nope"}) is None
+
+
+def test_tape_scoring_punishes_false_accusations():
+    from coach import tape_score
+    assert tape_score([0, 2, 4], [0, 2, 4], 20) == {"hits": 3, "false": 0, "missed": 0, "pts": 170, "perfect": True}
+    r = tape_score([0, 2, 4], [0, 2, 6], 50)
+    assert r["hits"] == 2 and r["false"] == 1 and r["pts"] == 55 and not r["perfect"]
+    assert tape_score([0, 2, 4], [1, 3, 5], 90)["pts"] == 0

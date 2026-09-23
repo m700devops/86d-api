@@ -85,7 +85,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_coach.py. Content ROTATES every 3 days, seeded from the local date in the page
   (guests from `coach.GUESTS`, a house rule from `coach.CHALLENGES`, 10 of 30 test
   questions, research, videos, Gauntlet rounds). Every AI path has an offline fallback:
-  the Gauntlet game and the drill's offline deck need no server at all
+  the Gauntlet game and the drill's offline deck need no server at all. Tape Doctor (`/coach/tape`) plants exactly 3
+  rep mistakes in a generated call; `validate_tape()` rejects any tape that can't be scored
+  fairly and `tape_score()` charges −25 per false accusation vs +40 per find. Three built-in
+  tapes in the page cover the no-AI case
 - seed_data.py — default product catalog
 - test_level_classifier.py — unit tests for helpers.py level logic
 - test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone

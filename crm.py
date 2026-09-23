@@ -3631,3 +3631,20 @@ def coach_review(data: ReviewRequest, _: bool = Depends(require_crm_key)):
     scores = {k: _coach.clamp(out.get(k), 0, 10) for k in ("opener", "discovery", "objections", "ask")}
     return {**scores, "turning_point": str(out.get("turning_point") or "")[:400],
             "redo": str(out.get("redo") or "")[:400]}
+
+
+class TapeRequest(BaseModel):
+    subtle: bool = False
+
+
+@crm_router.post("/coach/tape", response_model=dict)
+def coach_tape(data: TapeRequest, _: bool = Depends(require_crm_key)):
+    """A call with three planted mistakes. Asked twice at most: a tape the game
+    can't score fairly is worse than no tape."""
+    system, user = _coach.tape_prompt(data.subtle)
+    for _attempt in range(2):
+        tape = _coach.validate_tape(_ask_claude(system, user, max_tokens=1800, temperature=1))
+        if tape:
+            return tape
+    raise HTTPException(status_code=503, detail={
+        "error": "tape_unusable", "message": "Couldn't make a fair tape. Here's a built-in one."})

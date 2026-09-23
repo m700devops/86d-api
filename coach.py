@@ -309,3 +309,84 @@ def script_prompt(skill: str, draft: str) -> tuple[str, str]:
             "give a tightened version under 40 words that still sounds like them. "
             "Return {\"score\": n, \"keep\": \"...\", \"change\": \"...\", \"tight\": \"...\"}.")
     return system, user
+
+
+# ── Tape Doctor ──────────────────────────────────────────────────────────────
+# A recorded call with exactly three rep mistakes hidden in it. You find them
+# against the clock; false accusations cost more than misses, because on a
+# real call "fixing" a line that was working is how good calls go bad.
+
+MISTAKE_KINDS = {
+    "bad_time": "asked if it's a bad time / gave an easy exit",
+    "feature_dump": "listed features instead of asking or naming a problem",
+    "no_reason": "never said why they were calling",
+    "talked_over": "kept talking instead of letting the owner answer",
+    "missed_pain": "ignored a pain the owner just mentioned",
+    "argued": "argued with an objection instead of acknowledging it",
+    "overpromise": "promised something untrue (e.g. Android support)",
+    "weak_ask": "vague close like 'let me know' or 'can I send info'",
+    "closed_question": "a yes/no question where an open one was needed",
+    "fake_rapport": "fake flattery or small talk that wastes their time",
+    "rushed_ask": "asked for the meeting before earning it",
+    "attacked_rep": "badmouthed their distributor rep or current tool",
+}
+
+TAPE_PICKS = 3
+
+
+def tape_prompt(subtle: bool) -> tuple[str, str]:
+    system = ("You write training tapes for cold callers selling " + PRODUCT +
+              " Reply with JSON only.")
+    kinds = "\n".join(f"- {k}: {v}" for k, v in MISTAKE_KINDS.items())
+    user = (
+        "Write a realistic 14-18 line cold call between a REP and an independent US bar "
+        "owner (invent the bar, city and owner). Most rep lines should be GOOD. Plant "
+        f"exactly {TAPE_PICKS} rep mistakes, each on a different rep line, each a different "
+        f"kind from this list:\n{kinds}\n\n"
+        + ("Make the mistakes SUBTLE: plausible lines a decent rep might say, not cartoonish. "
+           "Also include one rep line that sounds risky but is actually good.\n" if subtle else
+           "Make the mistakes clear but realistic.\n") +
+        "Return {\"owner\": \"name, bar, city\", \"lines\": [{\"role\": \"rep\"|\"owner\", "
+        "\"text\": \"...\"}], \"mistakes\": [{\"line\": index into lines (0-based), "
+        "\"kind\": one of the kinds, \"why\": \"one sentence\", "
+        "\"fix\": \"what to say instead, max 30 words\"}]}")
+    return system, user
+
+
+def validate_tape(out: dict) -> Optional[dict]:
+    """Keep only a tape the game can be scored on. None means ask again."""
+    lines = out.get("lines")
+    if not isinstance(lines, list) or not 8 <= len(lines) <= 30:
+        return None
+    clean = []
+    for ln in lines:
+        if not isinstance(ln, dict) or ln.get("role") not in ("rep", "owner"):
+            return None
+        clean.append({"role": ln["role"], "text": str(ln.get("text") or "")[:400]})
+    seen, mistakes = set(), []
+    for m in out.get("mistakes") or []:
+        try:
+            i = int(m.get("line"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if 0 <= i < len(clean) and clean[i]["role"] == "rep" and i not in seen \
+                and m.get("kind") in MISTAKE_KINDS:
+            seen.add(i)
+            mistakes.append({"line": i, "kind": m["kind"], "label": MISTAKE_KINDS[m["kind"]],
+                             "why": str(m.get("why") or "")[:300],
+                             "fix": str(m.get("fix") or "")[:300]})
+    if len(mistakes) != TAPE_PICKS:
+        return None
+    return {"owner": str(out.get("owner") or "A bar owner")[:120], "lines": clean,
+            "mistakes": sorted(mistakes, key=lambda m: m["line"])}
+
+
+def tape_score(mistake_lines: list[int], picks: list[int], seconds_left: int) -> dict:
+    """+40 per hit, -25 per false accusation, time bonus only for a clean sweep."""
+    real, chosen = set(mistake_lines), set(picks)
+    hits, false = len(real & chosen), len(chosen - real)
+    pts = max(0, hits * 40 - false * 25)
+    perfect = hits == len(real) and false == 0
+    if perfect:
+        pts += 30 + max(0, seconds_left)
+    return {"hits": hits, "false": false, "missed": len(real) - hits, "pts": pts, "perfect": perfect}
