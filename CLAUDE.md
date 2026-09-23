@@ -75,6 +75,14 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - leadgen.py — the daily lead generator: harvest (OpenStreetMap/Overpass) → enrich (crawl
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
+- coach.py — cold-call PRACTICE, opened by "Warm up first" inside the Call list tab (not a
+  tab of its own, on purpose). Prompts for the drills and for "The Holdout", a game where
+  Claude plays a tough bar owner with hidden problems. Pure: `apply_turn()` is the referee
+  that clamps the meters and only lets the owner say yes once trust >= 70 and two
+  problems have been found. Left to itself the model agrees far too easily. Routes are
+  `/v1/crm/coach/*` in crm.py, using the same `_ask_claude()` helper. Practice scores
+  live in the operator's browser (localStorage `crmPractice`), not the database. See
+  test_coach.py
 - seed_data.py — default product catalog
 - test_level_classifier.py — unit tests for helpers.py level logic
 - test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone
