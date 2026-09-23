@@ -1248,10 +1248,15 @@ async function loadNow(){
                   `${d.ready_count} in their window · best first`, d.ready, n);
     n += d.ready.length;
   }
-  // When something is ready, the soon leads stay a thin strip — they're a
-  // countdown, not work. When nothing is ready they ARE the work, and the ones
-  // opening soonest are the best calls on the screen, so they get a table.
-  if(!d.ready.length && d.soon.length){
+  // A working session needs a full table to dial through, not a one-line
+  // "1 ready now". MIN_WORKING_TABLE is the floor: whenever the truly-ready
+  // pile is thinner than that, the soon-to-open leads become the table (not a
+  // 6-item strip) so there's always a real excel-style list on screen. Only
+  // once ready alone already clears the floor does soon shrink back to a
+  // countdown strip — at that point it's genuinely "next up", not "the work".
+  const MIN_WORKING_TABLE=15;
+  const soonIsTable = d.soon.length && d.ready.length < MIN_WORKING_TABLE;
+  if(soonIsTable){
     html += sheet('d-opening','OPENING SOON',
                   `${d.soon_count} about to hit their window · soonest first`,
                   d.soon, n);
@@ -1268,7 +1273,7 @@ async function loadNow(){
                          :'all shut right now — labelled with the next day they open')
                   + shown, d.rest, n);
   }
-  $('zones').innerHTML = html + (d.ready.length?soonStrip(d):'');
+  $('zones').innerHTML = html + ((d.ready.length && !soonIsTable)?soonStrip(d):'');
 }
 
 function soonStrip(d){
