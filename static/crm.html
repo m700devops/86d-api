@@ -46,6 +46,13 @@
   .pipebar{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
   .pipebar input{flex:1;min-width:220px}
   .pipebar button{flex:none;white-space:nowrap}
+  /* Read-only — nothing here is a button. Five pill toggles used to sit here,
+     each one a decision to make before the actual table even loaded; this is
+     just where things stand, at a glance, while the table below always shows
+     the one stage that needs a human: who's in play. */
+  .glance{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;
+          font-size:12px;color:var(--text3)}
+  .glance b{color:var(--text);font-size:14px;font-weight:700;margin-right:4px}
   .st{display:inline-block;font-size:10px;font-weight:800;letter-spacing:0.5px;
       padding:2px 8px;border-radius:5px;border:1px solid var(--line2);color:var(--text2)}
   .st-new{color:var(--text2)}
@@ -625,7 +632,7 @@
         </div>
         <div class="applied hide" id="pipeAddResult"></div>
       </div>
-      <div class="zt" id="pipeTabs"></div>
+      <div class="glance" id="pipeStats"></div>
       <div id="pipeBody"></div>
     </section>
 
@@ -1397,32 +1404,34 @@ async function drawerAction(dr,e){
    Without this, a bar you spoke to on Tuesday and forgot to book a callback
    for is invisible — which is how warm leads quietly die. */
 // Opens on the people you've actually spoken to, not on 312 cold names.
-let PIPE={stage:'working',q:'',offset:0};
+let PIPE={q:'',offset:0};
 let pipeTimer=null;
 
-/* Six stage chips was five too many to scan mid-thought. The list really
-   answers three questions — who's live, who hasn't been called, who's done —
-   so those are the chips, with the raw stages folded underneath. */
+/* No stage buttons: a row of five pill toggles was five decisions to make
+   before the actual work — the table — even loaded. Instead, one table with
+   one rule. Empty search box: show who's IN PLAY (contacted or warm) —
+   that's the only stage this screen exists for, since the Call list already
+   owns "not called yet" and duplicating its 195-row list here was pure
+   noise. Typed a search: widen to every stage at once, because finding one
+   specific bar shouldn't depend on first guessing which chip it's filed
+   under. STAGES still drives the read-only glance line below the table. */
 const STAGES=[
-  ['working','In play',       'contacted,warm', 'people you have actually spoken to'],
-  ['new',    'Not called yet','new',            'still on the call list'],
-  ['won',    'Won',           'won',            'signed up'],
-  ['dead',   'Dead',          'dead',           'do not call again'],
-  ['',       'Everything',    '',               'every lead, any stage'],
+  ['working','in play',        'contacted,warm'],
+  ['new',    'not called yet', 'new'],
+  ['won',    'won',            'won'],
+  ['dead',   'dead',           'dead'],
 ];
 // The edit form still writes one real status at a time.
 const STATUSES=[['','Everything'],['new','Not called'],['contacted','Contacted'],
                 ['warm','Warm'],['won','Won'],['dead','Dead']];
 
 async function loadPipeline(){
-  const stage=STAGES.find(x=>x[0]===PIPE.stage)||STAGES[0];
-  const statuses=stage[2]?stage[2].split(','):[];
+  const searching=!!PIPE.q;
+  const statuses=searching?[]:['contacted','warm'];
   const qs=new URLSearchParams();
-  // "In play" spans two stages, so it's fetched wide and narrowed here rather
-  // than making someone click two chips to see one idea.
   if(statuses.length===1) qs.set('status',statuses[0]);
   if(PIPE.q) qs.set('q',PIPE.q);
-  qs.set('offset',PIPE.offset); qs.set('limit',statuses.length>1?400:100);
+  qs.set('offset',PIPE.offset); qs.set('limit',searching||statuses.length>1?400:100);
   const d=await api('/leads?'+qs);
   if(statuses.length>1){
     d.leads=d.leads.filter(l=>statuses.includes(l.status));
@@ -1438,15 +1447,17 @@ async function loadPipeline(){
     if(!st||!st[2]) return d.counts.all??0;
     return st[2].split(',').reduce((n,x)=>n+(d.counts[x]??0),0);
   };
-  $('pipeTabs').innerHTML=STAGES.map(([key,label,,why])=>`
-    <button data-status="${esc(key)}" class="${key===PIPE.stage?'on':''}" title="${esc(why)}">
-      ${esc(label)} <span class="c">${tally(key)}</span>
-    </button>`).join('');
+  // Plain numbers, not buttons — nothing here is clickable, it's just where
+  // things stand. Search for a name and this keeps showing the whole
+  // book's shape even while the table below is narrowed to matches.
+  $('pipeStats').innerHTML=STAGES.map(([key,label])=>
+    `<span><b>${tally(key)}</b> ${esc(label)}</span>`).join('')
+    + `<span><b>${d.counts.all??0}</b> everything</span>`;
 
   if(!d.leads.length){
     $('pipeBody').innerHTML=`<div class="card muted">${
-      PIPE.q ? 'Nothing matches “'+esc(PIPE.q)+'”.'
-             : 'No leads at this stage yet.'}</div>`;
+      searching ? 'Nothing matches “'+esc(PIPE.q)+'”.'
+             : 'Nobody in play right now — log a call from the Call list and they show up here.'}</div>`;
     return;
   }
 
@@ -1528,10 +1539,6 @@ function pipeRow(l,n){
   </tr>`;
 }
 
-$('pipeTabs').onclick=e=>{
-  const b=e.target.closest('button[data-status]'); if(!b) return;
-  PIPE.stage=b.dataset.status; PIPE.offset=0; loadPipeline().catch(x=>toast(x.message));
-};
 $('pipeSearch').oninput=e=>{
   // Debounced: every keystroke is a query otherwise, and the table redrawing
   // under your fingers is worse than waiting a moment for it.

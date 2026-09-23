@@ -24,7 +24,7 @@ if "database" not in sys.modules:
     stub.get_db = lambda: None
     sys.modules["database"] = stub
 
-from leadgen import _restaurant_pours  # noqa: E402
+from leadgen import _restaurant_pours, _on_tourist_strip, score_candidate  # noqa: E402
 
 
 def _rejected(html="", tags=None):
@@ -144,6 +144,46 @@ def test_explicit_no_alcohol_statement_overrides():
 def test_case_insensitive():
     _qualified("WE HAVE A FULL BAR AND CRAFT COCKTAILS.")
     _rejected("WE DO NOT SERVE ALCOHOL.")
+
+
+# ── Tourist-strip address penalty (criterion 6: not mainstream tourist bars) ─
+# These are already-crowded pitches — a resort bar on the Strip or a honky-tonk
+# on Lower Broadway almost certainly already runs some system, whatever it is.
+# It's a scoring penalty like POS_STACK_HINTS, never a reject: a real
+# independent bar on one of these blocks still makes the list, just lower.
+
+def test_flags_a_venue_on_the_vegas_strip():
+    assert _on_tourist_strip({"addr:street": "Las Vegas Blvd S"}, "Las Vegas") is True
+
+
+def test_flags_a_venue_on_lower_broadway_nashville():
+    assert _on_tourist_strip({"addr:street": "Broadway"}, "Nashville") is True
+
+
+def test_does_not_flag_broadway_in_a_city_with_no_strip_defined():
+    # "Broadway" is an ordinary street name in plenty of towns — only the
+    # metros with a curated strip in TOURIST_STRIP_STREETS get checked.
+    assert _on_tourist_strip({"addr:street": "Broadway"}, "Columbus") is False
+
+
+def test_does_not_flag_a_side_street_off_the_strip():
+    assert _on_tourist_strip({"addr:street": "Sahara Ave"}, "Las Vegas") is False
+
+
+def test_no_address_tag_never_flags():
+    assert _on_tourist_strip({}, "Las Vegas") is False
+
+
+def test_no_city_never_flags():
+    assert _on_tourist_strip({"addr:street": "Las Vegas Blvd"}, None) is False
+
+
+def test_tourist_strip_lowers_score_but_does_not_zero_it():
+    tags_off_strip = {"amenity": "bar", "addr:street": "Sahara Ave"}
+    tags_on_strip = {"amenity": "bar", "addr:street": "Las Vegas Blvd"}
+    off = score_candidate(tags_off_strip, None, "", None, "Las Vegas")
+    on = score_candidate(tags_on_strip, None, "", None, "Las Vegas")
+    assert on == off - 4   # a penalty, not a rejection — no exception, no zeroing
 
 
 if __name__ == "__main__":
