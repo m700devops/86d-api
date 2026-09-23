@@ -357,6 +357,34 @@
   .boss.guest .lv{color:var(--wait)}
   .mine{display:grid;gap:6px}
   .mine div{font-size:13px} .mine b{font-size:10px;letter-spacing:.8px;color:var(--text3);display:block}
+  .snav{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px}
+  @media (max-width:640px){.snav{grid-template-columns:1fr 1fr}}
+  .snav button{text-align:left;padding:12px 13px;border-radius:12px;line-height:1.3}
+  .snav b{display:block;font-size:14px} .snav span{font-size:11.5px;color:var(--text3)}
+  .seg{display:flex;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:4px;margin-bottom:16px;position:sticky;top:0;z-index:5}
+  .seg button{flex:1;border:0;background:none;border-radius:9px;padding:9px 6px;font-weight:700;color:var(--text2)}
+  .seg button.on{background:var(--surface2);color:var(--text);box-shadow:inset 0 -2px 0 var(--accent)}
+  .stepper{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+  .stepper button{width:38px;height:38px;border-radius:50%;padding:0;font-weight:800}
+  .stepper button.on{border-color:var(--accent);color:var(--accent)}
+  .stepper button.ok{background:#3DD68C1F;border-color:#3DD68C66;color:var(--go)}
+  #mCard h3{margin:2px 0 6px;font-size:18px} #mCard p{margin:0 0 10px;color:var(--text2)}
+  .mnav{display:flex;justify-content:space-between;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center}
+  .vgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+  .vid{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .vplay{display:block;position:relative;width:100%;aspect-ratio:16/9;padding:0;border:0;border-radius:0;background:#000 center/cover no-repeat;cursor:pointer}
+  .vplay::after{content:"▶";position:absolute;inset:0;margin:auto;width:54px;height:38px;border-radius:10px;background:#FF0000E6;color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center}
+  .vplay:hover::after{background:#FF0000}
+  .vlen{position:absolute;right:6px;bottom:6px;background:#000C;color:#fff;font-size:11px;font-weight:700;padding:2px 6px;border-radius:4px;z-index:1}
+  .vid iframe{display:block;width:100%;aspect-ratio:16/9;border:0}
+  .vmeta{padding:9px 11px;font-size:13px;line-height:1.35}
+  .vmeta span{display:block;font-size:11.5px;color:var(--text3);margin-top:2px}
+  .vmeta .w{color:var(--go)}
+  .todayvid{display:grid;grid-template-columns:150px 1fr;gap:12px;align-items:center;margin-bottom:14px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:8px}
+  .todayvid .vplay{border-radius:8px}
+  .todayvid .vplay::after{width:38px;height:27px;font-size:13px}
+  .todayvid.playing{grid-template-columns:1fr}
+  .todayvid .vid{border:0;background:none}
 </style>
 </head>
 <body>
@@ -437,40 +465,41 @@
             <p id="pNowW"></p>
             <button class="startbtn" id="pNowGo">Start</button>
           </div>
+          <div id="pVid"></div>
           <div class="ptiles">
             <button id="pTileCall"><b>📞 Take a call</b><span id="pTileCallS">A tough owner. Get them to try it.</span></button>
             <button id="pTileGaunt"><b>🎯 Gauntlet</b><span>10 fast objections. Works offline.</span></button>
             <button id="pTileCards"><b>🔁 Replay misses</b><span id="pTileCardsS">Lines you fumbled, back for another go.</span></button>
             <button id="pTileBack"><b>✅ Real calls</b><span>Back to the call list.</span></button>
           </div>
-          <details class="school" id="pSchool">
-            <summary>Full school<em>stats · my lines · modules · videos · quick-think · test · research</em></summary>
-            <div class="pstats">
-              <div class="pstat"><div class="l">OWNERS WON</div><div class="v" id="psWon">0</div></div>
-              <div class="pstat"><div class="l">BEST TEST</div><div class="v" id="psQuiz">—</div></div>
-              <div class="pstat"><div class="l">QUICK-THINK AVG</div><div class="v" id="psDrill">—</div></div>
-              <div class="pstat"><div class="l">GAUNTLET BEST</div><div class="v" id="psGaunt">—</div></div>
+          <div class="glabel">SCHOOL</div>
+          <div class="snav">
+            <button data-s="learn"><b>📚 Learn</b><span>6 steps, short videos</span></button>
+            <button data-s="drill"><b>⚡ Drill</b><span>Quick-think, my lines</span></button>
+            <button data-s="test"><b>📝 Test</b><span>10 questions</span></button>
+            <button data-s="progress"><b>📈 Progress</b><span>Skills and scores</span></button>
+          </div>
+        </div>
+
+        <div id="pSch" class="hide">
+          <div class="ghead"><button id="sHome">← Home</button><div class="t">School</div></div>
+          <div class="seg" id="sSeg">
+            <button data-s="learn">Learn</button><button data-s="drill">Drill</button><button data-s="test">Test</button><button data-s="progress">Progress</button>
+          </div>
+          <div data-sp="learn">
+            <div class="psec" id="pMods">
+              <div class="stepper" id="mSteps"></div>
+              <div class="card" id="mCard"></div>
             </div>
-            <div class="pgrid" id="pSkills" style="margin-bottom:22px"></div>
-
-            <div class="psec" id="pLines"><h3>My lines</h3>
-              <p class="hint">Write each part of the call in your own words. Claude tightens it without making it sound canned. Saved lines appear on the practice home.</p>
-              <div class="card">
-                <select id="lSkill" style="width:auto;margin-bottom:8px"><option value="opener">Opener</option><option value="discovery">Discovery question</option><option value="objections">Objection answer</option><option value="ask">The ask</option></select>
-                <textarea id="lDraft" placeholder="How you'd actually say it…"></textarea>
-                <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="go" id="lCoach">Tighten it</button><button id="lSave">Save as mine</button></div>
-                <div class="pgrade hide" id="lOut"></div>
-                <div id="lMine" style="margin-top:12px"></div>
-              </div></div>
-
-            <div class="psec" id="pMods"><h3>Modules <span class="muted" id="pModN">0 / 6</span></h3>
-              <p class="hint">The call, in the order it happens. This rotation's focus is highlighted. Tick one when you can do it without reading.</p>
-              <div class="pgrid" id="pModList"></div></div>
-
             <div class="psec"><h3>Videos <span class="muted">· this rotation</span></h3>
-              <p class="hint">Each opens a YouTube search pinned to the coach and topic, so you get their newest uploads rather than a link that's gone stale.</p>
-              <div class="films" id="pFilms"></div></div>
+              <p class="hint">Hand-picked, all under 21 minutes. Tap to play right here.</p>
+              <div class="vgrid" id="pFilms"></div></div>
 
+            <div class="psec"><h3>Why it works <span class="muted">· this rotation</span></h3>
+              <p class="hint">What recorded-call data and the coaches who study it say, and what it means for a bar owner.</p>
+              <div id="pFinds"></div></div>
+          </div>
+          <div data-sp="drill" class="hide">
             <div class="psec" id="pDrill"><h3>Quick-Think</h3>
               <p class="hint">An owner throws a curveball. You get 25 seconds to answer, typed or spoken. Claude scores it, gives you a better line, and saves any miss for replay.</p>
               <div class="card">
@@ -488,16 +517,35 @@
                 <div class="pgrade hide" id="dGrade"></div>
               </div></div>
 
+            <div class="psec" id="pLines"><h3>My lines</h3>
+              <p class="hint">Write each part of the call in your own words. Claude tightens it without making it sound canned. Your saved lines show underneath.</p>
+              <div class="card">
+                <select id="lSkill" style="width:auto;margin-bottom:8px"><option value="opener">Opener</option><option value="discovery">Discovery question</option><option value="objections">Objection answer</option><option value="ask">The ask</option></select>
+                <textarea id="lDraft" placeholder="How you'd actually say it…"></textarea>
+                <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="go" id="lCoach">Tighten it</button><button id="lSave">Save as mine</button></div>
+                <div class="pgrade hide" id="lOut"></div>
+                <div id="lMine" style="margin-top:12px"></div>
+              </div></div>
+
+          </div>
+          <div data-sp="test" class="hide">
             <div class="psec" id="pTest"><h3>Test <span class="muted" id="tScore">0 / 10</span></h3>
               <p class="hint">Ten questions, drawn fresh each rotation from a bank of 30. Your best score is saved.</p>
               <div id="tQs"></div><button id="tReset">Retake</button></div>
 
-            <div class="psec"><h3>Research <span class="muted">· this rotation</span></h3>
-              <p class="hint">What recorded-call data and the coaches who study it say, and what it means for a bar owner.</p>
-              <div id="pFinds"></div></div>
-          </details>
-        </div>
+          </div>
+          <div data-sp="progress" class="hide">
+            <div class="pstats">
+              <div class="pstat"><div class="l">OWNERS WON</div><div class="v" id="psWon">0</div></div>
+              <div class="pstat"><div class="l">BEST TEST</div><div class="v" id="psQuiz">—</div></div>
+              <div class="pstat"><div class="l">QUICK-THINK AVG</div><div class="v" id="psDrill">—</div></div>
+              <div class="pstat"><div class="l">GAUNTLET BEST</div><div class="v" id="psGaunt">—</div></div>
+            </div>
+            <div class="pgrid" id="pSkills" style="margin-bottom:22px"></div>
 
+            <div class="psec"><h3>Watched</h3><p class="hint" id="pWatched"></p></div>
+          </div>
+        </div>
         <div id="pGame" class="hide">
           <div class="ghead">
             <button id="gLeave">← Leave</button>
@@ -2243,11 +2291,11 @@ $('recheckBtn').onclick=startRecheck;
    path, every speech API is optional, and storage failures only cost the
    scoreboard. Scores live in this browser, like the key does. */
 const PR_STORE='crmPractice', ROT_DAYS=3;
-let PR={scores:[],mods:{},cards:[],lines:{},v:2};
+let PR={scores:[],mods:{},cards:[],lines:{},watched:{},mi:0,stab:'learn',v:3};
 try{ const saved=JSON.parse(localStorage.getItem(PR_STORE)||'{}');
   if(saved&&typeof saved==='object') PR=Object.assign(PR,saved);
   ['scores','cards'].forEach(k=>{ if(!Array.isArray(PR[k])) PR[k]=[]; });
-  ['mods','lines'].forEach(k=>{ if(!PR[k]||typeof PR[k]!=='object') PR[k]={}; });
+  ['mods','lines','watched'].forEach(k=>{ if(!PR[k]||typeof PR[k]!=='object') PR[k]={}; });
   PR.scores=PR.scores.filter(s=>s&&typeof s.at==='string');
 }catch{}
 const prSave=()=>{ try{ localStorage.setItem(PR_STORE, JSON.stringify(PR)); }catch{} };
@@ -2267,7 +2315,7 @@ function showPractice(on){
   $('callMain').classList.toggle('hide',on);
   if(on){ prView('pHome'); prRender(); window.scrollTo(0,0); } else { gQuit(); xQuit(); speechCancel(); }
 }
-function prView(id){ ['pHome','pGame','pGaunt','pCards'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
+function prView(id){ ['pHome','pSch','pGame','pGaunt','pCards'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
 $('practiceBtn').onclick=()=>showPractice(true);
 $('pTileBack').onclick=()=>showPractice(false);
 
@@ -2280,20 +2328,55 @@ const P_MODS=[
   ['The ask','Small and specific: 15 minutes, on their own iPhone, before service.','“Worth 15 minutes Tuesday around 2, before you open? I\'ll put your actual price list on your phone so you can see it working.”','booking+meeting+on+cold+call','ask'],
   ['Gatekeepers & voicemail','Whoever answers is on your side. Get the owner\'s name and when they\'re in.','“Quick one: who handles the liquor orders there? … Perfect. When\'s Maria usually in before service?”','cold+call+gatekeeper+voicemail+script','opener']
 ];
-const P_FILMS=[
-  ['30 Minutes to President\'s Club','Cold calls broken down line by line','30+minutes+to+presidents+club+cold+call'],
-  ['Josh Braun','Low-pressure selling, not sounding pushy','josh+braun+cold+calling'],
-  ['Jason Bay, Outbound Squad','Short openers, and what to do with “just email me”','jason+bay+outbound+squad+cold+call'],
-  ['Kevin “KD” Dorsey','Mindset, tone of voice, call volume','kevin+dorsey+kd+cold+calling'],
-  ['Live recorded cold calls','Hearing the bad ones is how you learn','live+cold+calls+recorded+sdr'],
-  ['Selling to restaurant & bar owners','Closest match to your buyer','how+to+sell+to+restaurant+owners+cold+call'],
-  ['Tone & pacing','Sounding certain in a noisy back-of-house','cold+call+tonality+tips'],
-  ['Chris Voss: labels & mirrors','“It sounds like…”: calming a tense owner','chris+voss+labeling+mirroring'],
-  ['Chris Voss: no-oriented questions','“Would it be crazy to…?”','chris+voss+no+oriented+questions'],
-  ['Becc Holland: pattern interrupts','Openers that don\'t sound like every other sales call','becc+holland+cold+call+opener'],
-  ['Belal Batrawy: death to fluff','Cut every word that sounds like a salesperson','belal+batrawy+death+to+fluff'],
-  ['Morgan J Ingram','Energy and consistency on the phones','morgan+j+ingram+cold+calling']
+/* Every video is embeddable, under 21 minutes, and checked by hand: [id, title, channel, length, topic].
+   Topics tie videos to modules (0-5) or to the rotating pool ('x'). */
+const VIDS=[
+  ['EKr0bYFsNrU','Nailing the first 30 seconds of a cold call','Josh Braun','3:19',0],
+  ['MRJS6nEKjcI','The best way to open a cold call','30 Minutes to President\'s Club','8:01',0],
+  ['vkj_1-NB8YQ','The permission-based opener (with a twist)','30 Minutes to President\'s Club','4:42',0],
+  ['1HXk7_GJLdQ','How to nail the first 45 seconds','Josh Braun','7:16',0],
+  ['Z6EYVb6S2m0','5 cold call openers to try now','Jason Bay','3:11',0],
+  ['k_msAHwnCCY','Stop “pitching” in a cold call','Josh Braun','9:03',1],
+  ['MoYqLh5mGL4','How to give a compelling “pitch” on cold calls','30 Minutes to President\'s Club','11:10',1],
+  ['aJghGuzNpGg','How to do discovery on a cold call','Tom Alaimo','3:06',2],
+  ['dDGX95UkV10','What questions to ask prospects','Jeremy Miner','4:35',2],
+  ['wEUFjneQRos','5 sales questions that don\'t sound salesy','Patrick Dang','12:39',2],
+  ['z_JohGi_i7k','How I handle “not interested”','30 Minutes to President\'s Club','4:59',3],
+  ['DWQEb5znmzg','“I\'m not interested”: 4 ways to respond','Matt Macnamara','3:58',3],
+  ['VH1DBC6n42Q','3 ways to overcome “I\'m not interested”','Trent Dressel','10:47',3],
+  ['mQ68FJYL8Lg','Book the meeting on the 2nd ask','Matt Macnamara','3:52',4],
+  ['A_881tlXXa0','Copy this script to book more meetings','Sell Better','10:48',4],
+  ['ThE3yXiNX4o','How to get past the gatekeeper','30 Minutes to President\'s Club','7:47',5],
+  ['0wEbj5cbuyM','The 15-second voicemail script','30 Minutes to President\'s Club','5:36',5],
+  ['AvhjgZ5mLhY','Watch me cold call','Josh Braun','3:23','x'],
+  ['OKHozLLCt8o','Live role play: cold call objections','Matt Macnamara','6:08','x'],
+  ['36ZjwDVCaxU','Live cold call role play','Patrick Dang','9:00','x'],
+  ['iafo36ZWwWA','How to make a cold call in 2025 (live role play)','Connor Murray','9:05','x'],
+  ['MZN5FXvsNFo','Live cold calls: can this grouchy CRO book a meeting?','30 Minutes to President\'s Club','18:04','x'],
+  ['guU2kWvqwwo','Sound confident using this tone','Connor Murray','3:16','x'],
+  ['m382DI0rmoM','5 tonalities to master','Jeremy Miner','10:45','x'],
+  ['ThQ8xPGg-QQ','Labeling emotions changes how they see you','Chris Voss','3:30','x'],
+  ['XuMsG-PoIPE','Labels, mirrors and questions','Chris Voss','3:39','x'],
+  ['4OweikRF7bg','Cold calling for beginners, step by step','Sales Feed','12:27','x'],
+  ['m2z1tgfv8Kc','Full 18-minute cold calling course','Sell Better','17:22','x']
 ];
+const vSecs=v=>{ const [m,x]=v[3].split(':').map(Number); return m*60+x; };
+function vidHTML(v){
+  const w=PR.watched[v[0]];
+  return `<div class="vid" data-v="${v[0]}"><button class="vplay" data-play="${v[0]}" aria-label="Play ${esc(v[1])}" style="background-image:url(https://i.ytimg.com/vi/${v[0]}/mqdefault.jpg)"><span class="vlen">${v[3]}</span></button>
+    <div class="vmeta">${esc(v[1])}<span>${esc(v[2])}${w?' · <b class="w">✓ watched</b>':''}</span></div></div>`;
+}
+/* Tap to play: the real player only loads on a tap, so the page stays fast
+   and nothing starts making noise on its own. */
+document.addEventListener('click',e=>{
+  const b=e.target.closest('[data-play]'); if(!b) return;
+  const id=b.dataset.play, f=document.createElement('iframe');
+  f.src=`https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0&modestbranding=1`;
+  f.allow='autoplay; encrypted-media; picture-in-picture; fullscreen'; f.allowFullscreen=true; f.title='Video';
+  const tv=b.closest('.todayvid'); if(tv) tv.classList.add('playing');
+  b.replaceWith(f);
+  if(!PR.watched[id]){ PR.watched[id]=todayKey(); prSave(); }
+});
 const P_QUIZ=[
   ['Which opener does Gong\'s data say hurts booking rates most?',['“How have you been?”','“Did I catch you at a bad time?”','“The reason I\'m calling is…”','“I know this is out of the blue.”'],1,'Asking if it\'s a bad time invites “yes, bye.” It cost about 40% in Gong\'s data.'],
   ['A bar opened 5 weeks ago. Call now?',['Yes, get in early','No: under 2 months, no settled distributors or prices yet','Only in California','Only by email'],1,'The window is 2–9 months open, or an ownership change.'],
@@ -2370,27 +2453,55 @@ const GAUNT=[
 /* this rotation */
 const ROT={
   mods:pick(P_MODS.map((_,i)=>i),1,1)[0],
-  films:pick(P_FILMS,4,2), quiz:pick(P_QUIZ,10,3), finds:pick(P_FINDS,4,4),
+  films:null, quiz:pick(P_QUIZ,10,3), finds:pick(P_FINDS,4,4),
   gaunt:pick(GAUNT,10,5), guests:null, rule:null
 };
 const RULE_KEYS=['short_fuse','price_first','speed','storm','gatekeeper','callback'];
 ROT.rule=pick(RULE_KEYS,1,6)[0];
+{ const inSteps=new Set(); for(let i=0;i<6;i++) VIDS.filter(v=>v[4]===i).sort((a,b)=>vSecs(a)-vSecs(b)).slice(0,2).forEach(v=>inSteps.add(v[0]));
+  ROT.films=pick(VIDS.filter(v=>!inSteps.has(v[0])),4,2); }
 const RULE_TXT={short_fuse:'Short fuse: owners start less patient.',price_first:'Price first: they\'ll demand the price early.',speed:'Speed round: win in 10 lines or fewer.',storm:'Interruption storm: expect a chaotic back-of-house.',gatekeeper:'Wrong person: a bartender answers first.',callback:'The callback: you spoke last week. Do you remember them?'};
 
 $('pRot').innerHTML=`Rotation <b>#${BLOCK%1000}</b> · ${esc(RULE_TXT[ROT.rule])} · new stuff in ${daysLeft()} day${daysLeft()===1?'':'s'}`;
-$('pFilms').innerHTML=ROT.films.map(f=>`<a href="https://www.youtube.com/results?search_query=${f[2]}" target="_blank" rel="noopener"><b>${esc(f[0])}</b> <span>${esc(f[1])} ↗</span></a>`).join('');
 $('pFinds').innerHTML=ROT.finds.map(f=>`<div class="find"><div class="v">${esc(f[0])}<small>${esc(f[1])}</small></div><p>${f[2]}</p></div>`).join('');
 
 function prMods(){
-  let done=0;
-  $('pModList').innerHTML=P_MODS.map((m,i)=>{ const on=!!PR.mods['m'+i]; if(on)done++;
-    const feat=i===ROT.mods;
-    return `<div class="pmod${feat?' feat':''}">${feat?'<div class="feat-tag">THIS ROTATION\'S FOCUS</div>':''}<div class="n">Step ${i+1} of 6</div><b>${esc(m[0])}</b><p>${esc(m[1])}</p><div class="say">${esc(m[2])}</div>
-      <a class="plink" href="https://www.youtube.com/results?search_query=${m[3]}" target="_blank" rel="noopener">Watch examples ↗</a>
-      <label><input type="checkbox" data-m="${i}" ${on?'checked':''}> I can do this without reading</label></div>`; }).join('');
-  $('pModN').textContent=done+' / 6';
+  const i=Math.max(0,Math.min(5,PR.mi|0)), m=P_MODS[i], on=!!PR.mods['m'+i];
+  $('mSteps').innerHTML=P_MODS.map((x,j)=>`<button data-mi="${j}" class="${j===i?'on':''} ${PR.mods['m'+j]?'ok':''}" aria-label="Step ${j+1}: ${esc(x[0])}">${PR.mods['m'+j]?'✓':j+1}</button>`).join('');
+  // Two per step, shortest first. The rest rotate through the video shelf.
+  const vids=VIDS.filter(v=>v[4]===i).sort((a,b)=>vSecs(a)-vSecs(b)).slice(0,2);
+  $('mCard').innerHTML=`${i===ROT.mods?'<div class="feat-tag" style="font-size:10px;font-weight:800;letter-spacing:.8px;color:var(--accent)">THIS ROTATION\'S FOCUS</div>':''}
+    <div class="muted" style="font-size:12px">Step ${i+1} of 6</div><h3>${esc(m[0])}</h3><p>${esc(m[1])}</p>
+    <div class="say" style="margin-bottom:12px">${esc(m[2])}</div>
+    <div class="vgrid">${vids.map(vidHTML).join('')}</div>
+    <div class="mnav"><button data-mstep="-1" ${i?'':'disabled'}>← Back</button>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13px;cursor:pointer"><input type="checkbox" id="mDone" style="width:auto" ${on?'checked':''}> I can do this without reading</label>
+      <button class="go" data-mstep="1">${i<5?'Next step →':'Finish'}</button></div>`;
 }
-$('pModList').onchange=e=>{ const c=e.target.closest('input[data-m]'); if(!c) return; PR.mods['m'+c.dataset.m]=c.checked; prSave(); prRender(); };
+$('pMods').onclick=e=>{
+  const j=e.target.closest('[data-mi]'), st=e.target.closest('[data-mstep]');
+  if(j){ PR.mi=+j.dataset.mi; prSave(); prMods(); }
+  else if(st){ const d=+st.dataset.mstep; if(d>0&&PR.mi>=5){ sOpen('drill'); return; } PR.mi=Math.max(0,Math.min(5,(PR.mi|0)+d)); prSave(); prMods(); $('pMods').scrollIntoView({block:'start'}); }
+};
+$('pMods').onchange=e=>{ if(e.target.id!=='mDone') return; PR.mods['m'+(PR.mi|0)]=e.target.checked; prSave(); prRender(); };
+function prVids(){
+  $('pFilms').innerHTML=ROT.films.map(vidHTML).join('');
+  // One short video a day, 10 minutes or less, rotating through the whole library.
+  const short=VIDS.filter(v=>vSecs(v)<=630), v=short[dayNum()%short.length];
+  $('pVid').innerHTML=`<div class="todayvid">${vidHTML(v).replace('<div class="vmeta">','<div class="vmeta hide">')}<div><div class="glabel" style="margin:0 0 4px">TODAY'S VIDEO · ${v[3]}</div><b>${esc(v[1])}</b><div class="muted" style="font-size:12px">${esc(v[2])}${PR.watched[v[0]]?' · ✓ watched':''}</div></div></div>`;
+  const n=Object.keys(PR.watched).length;
+  $('pWatched').textContent=`${n} of ${VIDS.length} videos watched.`+(n<VIDS.length?' Unwatched ones keep rotating in.':' All of them. Nice.');
+}
+function sOpen(tab){
+  if(!['learn','drill','test','progress'].includes(tab)) tab='learn';
+  PR.stab=tab; prSave(); prView('pSch');
+  document.querySelectorAll('#sSeg button').forEach(b=>b.classList.toggle('on',b.dataset.s===tab));
+  document.querySelectorAll('[data-sp]').forEach(p=>p.classList.toggle('hide',p.dataset.sp!==tab));
+  prRender();
+}
+$('sSeg').onclick=e=>{ const b=e.target.closest('[data-s]'); if(b) sOpen(b.dataset.s); };
+document.querySelector('.snav').onclick=e=>{ const b=e.target.closest('[data-s]'); if(b) sOpen(b.dataset.s); };
+$('sHome').onclick=()=>{ prView('pHome'); prRender(); };
 
 /* ── replay misses: spaced repetition of your own fumbles ── */
 const BOX_DAYS=[0,1,3,7,14];
@@ -2433,7 +2544,7 @@ function skillLevels(){
 }
 const RANKS=[[0,'Barback'],[60,'Bartender'],[200,'Head Bartender'],[450,'Bar Manager'],[900,'Beverage Director'],[2000,'Closer']];
 function xp(){ return PR.scores.reduce((a,s)=>a+(s.kind==='game'?(s.pts||0):s.kind==='quiz'?s.score*5:s.kind==='gaunt'?Math.round((s.pts||0)/5):s.kind==='cards'?10:(s.score||0)*3),0)
-  + Object.values(PR.mods).filter(Boolean).length*20 + Object.keys(PR.lines).length*15; }
+  + Object.values(PR.mods).filter(Boolean).length*20 + Object.keys(PR.lines).length*15 + Object.keys(PR.watched).length*5; }
 function streak(){
   const days=new Set(PR.scores.map(s=>s.day||s.at.slice(0,10))); let n=0; const d=new Date();
   const key=x=>x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');
@@ -2479,7 +2590,7 @@ function prRender(){
   $('psDrill').textContent=drill.length? (drill.reduce((a,b)=>a+b.score,0)/drill.length).toFixed(1) : '—';
   $('psGaunt').textContent=gaunt.length? Math.max(...gaunt.map(g=>g.pts||0)) : '—';
   $('pSkills').innerHTML=SKILLS.map(([k,l])=>`<div class="pstat"><div class="l">${l.toUpperCase()}</div><div class="v">${lv[k]==null?'—':lv[k].toFixed(1)}</div><div class="mtrack"><div class="mfill" style="width:${(lv[k]||0)*10}%"></div></div></div>`).join('');
-  prMods(); prLinesMine();
+  prMods(); prVids(); prLinesMine();
   const due=dueCards().length;
   $('pTileCardsS').textContent=due?`${due} due today.`:'Nothing due. Misses land here.';
   $('pTileCallS').textContent=`Guests: ${ROT.guests.map(g=>GUEST_META[g][0]).join(' & ')}.`;
@@ -2493,7 +2604,7 @@ function prRender(){
   $('pNowGo').textContent=i<0?'Go to the call list':'Start';
   if(!$('gPick').classList.contains('hide')) gBossList();
 }
-function openSchool(id){ $('pSchool').open=true; prView('pHome'); $(id).scrollIntoView({block:'start'}); }
+function openSchool(id){ sOpen({pDrill:'drill',pLines:'drill',pTest:'test',pMods:'learn'}[id]||'learn'); }
 $('pNowGo').onclick=()=>{ try{ PNOW&&PNOW.go(); }catch(e){ toast('That didn\'t start. Try the tiles below.'); } };
 $('pTileCall').onclick=()=>gOpen();
 $('pTileGaunt').onclick=()=>xOpen();
