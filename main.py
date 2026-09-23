@@ -585,6 +585,7 @@ def create_product(product_data: ProductCreate, user_id: str = Depends(get_curre
                 "name": product_data.name,
                 "brand": product_data.brand,
                 "category": product_data.category,
+                "product_type": None,
                 "size": product_data.size,
                 "upc": product_data.upc,
                 "image_url": None,
@@ -912,14 +913,14 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
             })
         
         cursor.execute("""
-            SELECT pl.*, p.id as product_id, p.name, p.brand, p.category, p.size, p.upc, 
-                   p.image_url, p.scan_count, p.verified, p.created_at as product_created_at, 
+            SELECT pl.*, p.id as product_id, p.name, p.brand, p.category, p.product_type, p.size, p.upc,
+                   p.image_url, p.scan_count, p.verified, p.created_at as product_created_at,
                    p.updated_at as product_updated_at
             FROM par_levels pl
             JOIN products p ON pl.product_id = p.id
             WHERE pl.location_id = %s
         """, (location_id,))
-        
+
         rows = cursor.fetchall()
         par_levels = []
         for row in rows:
@@ -937,6 +938,7 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
                     "name": row["name"],
                     "brand": row["brand"],
                     "category": row["category"],
+                    "product_type": row["product_type"],
                     "size": row["size"],
                     "upc": row["upc"],
                     "image_url": row["image_url"],
@@ -1244,7 +1246,7 @@ def get_inventory_session(session_id: str, user_id: str = Depends(get_current_us
         
         # Get scans with product info
         cursor.execute("""
-            SELECT sc.*, p.id as product_id, p.name, p.brand, p.category, p.size, p.upc,
+            SELECT sc.*, p.id as product_id, p.name, p.brand, p.category, p.product_type, p.size, p.upc,
                    p.image_url, p.scan_count, p.verified, p.created_at as product_created_at,
                    p.updated_at as product_updated_at
             FROM scans sc
@@ -1276,6 +1278,7 @@ def get_inventory_session(session_id: str, user_id: str = Depends(get_current_us
                     "name": row["name"],
                     "brand": row["brand"],
                     "category": row["category"],
+                    "product_type": row["product_type"],
                     "size": row["size"],
                     "upc": row["upc"],
                     "image_url": row["image_url"],
@@ -2113,14 +2116,14 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
         
         # Get par levels
         cursor.execute("""
-            SELECT pl.*, p.id as product_id, p.name, p.brand, p.category, p.size, p.upc,
+            SELECT pl.*, p.id as product_id, p.name, p.brand, p.category, p.product_type, p.size, p.upc,
                    p.image_url, p.scan_count, p.verified, p.created_at as product_created_at,
                    p.updated_at as product_updated_at
             FROM par_levels pl
             JOIN products p ON pl.product_id = p.id
             WHERE pl.location_id = %s
         """, (location_id,))
-        
+
         par_levels = []
         for row in cursor.fetchall():
             pl = {
@@ -2137,6 +2140,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
                     "name": row["name"],
                     "brand": row["brand"],
                     "category": row["category"],
+                    "product_type": row["product_type"],
                     "size": row["size"],
                     "upc": row["upc"],
                     "image_url": row["image_url"],
@@ -2310,7 +2314,7 @@ def list_product_distributors(location_id: str, user_id: str = Depends(get_curre
             raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied"})
         cursor.execute("""
             SELECT lpd.*, d.name as distributor_name, d.email as distributor_email,
-                   p.name as product_name, p.brand as product_brand, p.size as product_size
+                   p.name as product_name, p.brand as product_brand, p.product_type as product_product_type, p.size as product_size
             FROM location_product_distributors lpd
             JOIN distributors d ON lpd.distributor_id = d.id
             JOIN products p ON lpd.product_id = p.id
@@ -2324,7 +2328,7 @@ def list_product_distributors(location_id: str, user_id: str = Depends(get_curre
                 "product_id": row["product_id"],
                 "distributor_id": row["distributor_id"],
                 "distributor": {"id": row["distributor_id"], "name": row["distributor_name"], "email": row["distributor_email"]},
-                "product": {"id": row["product_id"], "name": row["product_name"], "brand": row["product_brand"], "size": row["product_size"]},
+                "product": {"id": row["product_id"], "name": row["product_name"], "brand": row["product_brand"], "product_type": row["product_product_type"], "size": row["product_size"]},
                 "created_at": row["created_at"]
             })
         return {"assignments": assignments}
@@ -3627,6 +3631,7 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
     name = result.get("name", "").strip()
     brand = result.get("brand", "").strip() or None
     confidence = result.get("confidence", 0.0)
+    product_type = result.get("product_type", "").strip() or None
 
     if not name:
         return (None, False, "none")
@@ -3645,6 +3650,12 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
                     "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
                     (now_iso(), product_id)
                 )
+                if product_type:
+                    cursor.execute(
+                        "UPDATE products SET product_type = %s, updated_at = %s "
+                        "WHERE id = %s AND (product_type IS NULL OR product_type = '')",
+                        (product_type, now_iso(), product_id)
+                    )
                 conn.commit()
                 return (product_id, False, method)
 
@@ -3729,10 +3740,10 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
                 now = now_iso()
                 cursor.execute("""
                     INSERT INTO products
-                        (id, name, brand, category, size, upc, image_url,
+                        (id, name, brand, category, size, upc, image_url, product_type,
                          scan_count, verified, source, created_by_user_id, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, NULL, NULL, NULL, 1, 0, 'scan_auto', %s, %s, %s)
-                """, (new_id, name, brand, category, user_id, now, now))
+                    VALUES (%s, %s, %s, %s, NULL, NULL, NULL, %s, 1, 0, 'scan_auto', %s, %s, %s)
+                """, (new_id, name, brand, category, product_type, user_id, now, now))
                 conn.commit()
                 print(f"[match_product] auto-created product id={new_id} name={name!r} brand={brand!r}", flush=True)
                 return (new_id, True, "auto_created")
