@@ -817,8 +817,32 @@ async function undoTouch(id){
    above the table explains or decides anything; there's nothing to do but
    press the button and start dialing the first row. */
 let NOWDATA=null, nowTimer=null;
+// Skip is NOT delete: the lead stays exactly as it is in the database — still
+// bankable, still promotable, nothing about it changes server-side. It just
+// stops showing up in THIS session's list, because the operator looked at it
+// and decided "not this one, not right now" rather than "never call this
+// place again." Clears on page reload, and never survives a real refresh of
+// the underlying data — it's a filter over what /now returns, not a status.
+let SKIPPED=new Set();
 
-$('startBtn').onclick=()=>loadCalls();
+// Silent success reads as broken: if the list happens to come back looking
+// identical to what was already on screen (same "nobody's in a window"
+// message, or the same names in the same order), a click that does nothing
+// visible is indistinguishable from a click that did nothing at all. Say
+// what happened every time, and surface a real failure instead of it
+// vanishing into an unhandled rejection.
+$('startBtn').onclick=async()=>{
+  const btn=$('startBtn');
+  btn.disabled=true; const was=btn.textContent; btn.textContent='Checking…';
+  try{
+    const d=await loadCalls();
+    toast(d.ready_count ? `${d.ready_count} ready to call now`
+        : d.list_empty ? 'List is empty — filling it now'
+        : !d.dialable_total ? 'Nothing on the list has a dialable number'
+        : `Nobody's in a window right now — ${d.soon_count} coming up`);
+  }catch(err){ toast(err.message); }
+  finally{ btn.disabled=false; btn.textContent=was; }
+};
 
 /* The compose box. Say what the email needs to say and Claude writes it; say
    what's wrong with it and Claude changes that bit rather than starting over.
@@ -953,6 +977,8 @@ function stopNowTimer(){ if(nowTimer){ clearInterval(nowTimer); nowTimer=null; }
 
 async function loadNow(){
   const d=await api('/now'); NOWDATA=d;
+  d.ready=d.ready.filter(l=>!SKIPPED.has(l.id));
+  d.ready_count=d.ready.length;
 
   if(!d.ready.length){
     stopNowTimer();
@@ -977,7 +1003,7 @@ async function loadNow(){
     }
     // Windows open and shut on the clock — keep checking even while empty.
     if(!nowTimer) nowTimer=setInterval(()=>{ if(TAB==='calls') loadNow(); }, 60000);
-    return;
+    return d;
   }
 
   $('zones').innerHTML=`
@@ -998,10 +1024,11 @@ async function loadNow(){
 
   // Windows open and shut on the clock, so a list left sitting goes stale.
   if(!nowTimer) nowTimer=setInterval(()=>{ if(TAB==='calls') loadNow(); }, 60000);
+  return d;
 }
 
 async function loadCalls(){
-  await loadNow();
+  return loadNow();
 }
 
 /* Why this row is where it is. The list reorders itself for reasons the
@@ -1056,6 +1083,7 @@ function row(l,n,calling){
       <button class="go" data-act="log">Log call</button>
       <button data-act="mail">Email</button>
       <button class="del" data-act="del">Delete</button>
+      <button data-act="skip">Skip</button>
     </div></td>
   </tr>`;
 }
@@ -1149,6 +1177,23 @@ $('zones').onclick=async e=>{
     if(!confirm('Delete this lead? It will not come back.')) return;
     try{ await api('/leads/'+id,{method:'DELETE'}); toast('Deleted'); await loadCalls(); }
     catch(err){ toast(err.message); }
+    return;
+  }
+  if(btn.dataset.act==='skip'){
+    // No API call — skip touches nothing about the lead. It stays 'new',
+    // still shows up for anyone else pulling the list, still gets called
+    // tomorrow if nobody skips it again. This just removes it from THIS
+    // screen for the rest of the session, so the row disappears without
+    // any round trip to wait on.
+    SKIPPED.add(id);
+    const row=$('zones').querySelector('.zbar .when');
+    tr.remove();
+    if(row && NOWDATA){
+      NOWDATA.ready_count=Math.max(0,(NOWDATA.ready_count||1)-1);
+      row.textContent=`${NOWDATA.ready_count} in their window right now · best first`;
+    }
+    if(!$('zones').querySelector('tbody tr')) loadCalls();
+    toast('Skipped for this session');
     return;
   }
   if(btn.dataset.act==='mail'){
