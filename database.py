@@ -552,6 +552,7 @@ def init_db():
             ("source", "TEXT DEFAULT 'manual'"),
             ("created_by_user_id", "TEXT"),
             ("deleted_at", "TEXT"),
+            ("product_type", "TEXT"),
         ]
         for col, col_def in products_migrations:
             cursor.execute("""
