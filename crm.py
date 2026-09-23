@@ -3047,7 +3047,8 @@ ANTHROPIC_VERSION = "2023-06-01"
 DEBRIEF_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 
-def _ask_claude(system: str, user: str, max_tokens: int = 400) -> dict:
+def _ask_claude(system: str, user: str, max_tokens: int = 400,
+                temperature: float = 0) -> dict:
     """One JSON answer from Claude. Raises HTTPException when unusable.
 
     Shared by the call-notes reader and the email drafter — one place that
@@ -3074,7 +3075,7 @@ def _ask_claude(system: str, user: str, max_tokens: int = 400) -> dict:
             json={
                 "model": DEBRIEF_MODEL,
                 "max_tokens": max_tokens,
-                "temperature": 0,
+                "temperature": temperature,
                 "system": system,
                 "messages": [
                     {"role": "user", "content": user},
@@ -3513,3 +3514,94 @@ def dial_stats(_: bool = Depends(require_crm_key)):
 
     return {"total_dials": dials, "connect_pct": overall, "by_hour": by_hour,
             "by_day": by_day, "by_attempt": by_attempt, "advice": advice}
+
+
+# ── cold-call practice ────────────────────────────────────────────────────────
+# The practice screen inside the Call list tab. Prompts and the referee live in
+# coach.py (pure, tested); these routes only carry them to Claude and back.
+# Nothing here reads or writes a lead: practice scores stay in the operator's
+# browser, because they're about the caller, not the pipeline.
+
+import coach as _coach
+
+
+class CurveballRequest(BaseModel):
+    level: Literal["warm", "busy", "hostile"] = "busy"
+
+
+class GradeRequest(BaseModel):
+    who: str = Field(max_length=120)
+    line: str = Field(max_length=400)
+    answer: str = Field(min_length=1, max_length=1500)
+    seconds: int = Field(default=0, ge=0, le=600)
+    timed_out: bool = False
+
+
+class CoachLine(BaseModel):
+    role: Literal["rep", "owner"]
+    text: str = Field(max_length=1500)
+
+
+class TurnRequest(BaseModel):
+    boss: Literal["dale", "priya", "nguyen", "marco"]
+    transcript: list[CoachLine] = Field(default_factory=list, max_length=80)
+    said: str = Field(min_length=1, max_length=1500)
+    patience: int = Field(ge=0, le=100)
+    trust: int = Field(ge=0, le=100)
+    found: list[str] = Field(default_factory=list, max_length=3)
+    interrupt: Optional[str] = Field(default=None, max_length=160)
+
+
+class ReviewRequest(BaseModel):
+    boss: Literal["dale", "priya", "nguyen", "marco"]
+    transcript: list[CoachLine] = Field(max_length=80)
+    result: Literal["won", "lost"]
+
+
+@crm_router.get("/coach/bosses", response_model=dict)
+def coach_bosses(_: bool = Depends(require_crm_key)):
+    """Who you can call. Names and openers only — the pains stay hidden."""
+    return {"bosses": [
+        {"id": k, "name": b["name"], "level": b["level"], "patience": b["patience"],
+         "opening": b["opening"], "pains": len(b["pains"])}
+        for k, b in sorted(_coach.BOSSES.items(), key=lambda kv: kv[1]["level"])],
+        "win_trust": _coach.WIN_TRUST, "win_pains": _coach.WIN_PAINS,
+        "ai": bool(os.getenv("ANTHROPIC_API_KEY"))}
+
+
+@crm_router.post("/coach/curveball", response_model=dict)
+def coach_curveball(data: CurveballRequest, _: bool = Depends(require_crm_key)):
+    system, user = _coach.curveball_prompt(data.level)
+    out = _ask_claude(system, user, max_tokens=200, temperature=1)
+    return {"who": str(out.get("who") or "Bar owner")[:120],
+            "line": str(out.get("line") or "")[:400]}
+
+
+@crm_router.post("/coach/grade", response_model=dict)
+def coach_grade(data: GradeRequest, _: bool = Depends(require_crm_key)):
+    system, user = _coach.grade_prompt(data.who, data.line, data.answer,
+                                       data.seconds, data.timed_out)
+    out = _ask_claude(system, user, max_tokens=400)
+    skill = out.get("skill") if out.get("skill") in ("opener", "discovery", "objections", "ask") else None
+    return {"score": _coach.clamp(out.get("score"), 0, 10), "skill": skill,
+            "worked": str(out.get("worked") or "")[:300], "fix": str(out.get("fix") or "")[:300],
+            "better": str(out.get("better") or "")[:400]}
+
+
+@crm_router.post("/coach/turn", response_model=dict)
+def coach_turn(data: TurnRequest, _: bool = Depends(require_crm_key)):
+    system, user = _coach.turn_prompt(
+        data.boss, [t.model_dump() for t in data.transcript], data.said,
+        data.patience, data.trust, data.found, data.interrupt)
+    out = _ask_claude(system, user, max_tokens=400, temperature=0.8)
+    return _coach.apply_turn(data.boss, data.patience, data.trust, data.found, out)
+
+
+@crm_router.post("/coach/review", response_model=dict)
+def coach_review(data: ReviewRequest, _: bool = Depends(require_crm_key)):
+    system, user = _coach.review_prompt(data.boss, [t.model_dump() for t in data.transcript],
+                                        data.result)
+    out = _ask_claude(system, user, max_tokens=500)
+    scores = {k: _coach.clamp(out.get(k), 0, 10) for k in ("opener", "discovery", "objections", "ask")}
+    return {**scores, "turning_point": str(out.get("turning_point") or "")[:400],
+            "redo": str(out.get("redo") or "")[:400]}

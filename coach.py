@@ -1,0 +1,188 @@
+"""Cold-call practice — the owners you spar with, and the rules of the game.
+
+Pure on purpose: prompts in, numbers out, no database, no network, no clock.
+crm.py owns the routes and the one call to Claude; everything that decides who
+won lives here so test_coach.py can check it without either.
+
+The game ("The Holdout") is a call to a tough independent bar owner who has to
+end up agreeing to try 86'd. The model plays the owner AND proposes how the
+meters move, but it never gets the final say on winning: `apply_turn()` clamps
+every number and only honours "yes, I'll try it" once trust and discovered
+pains actually clear the bar. Left to itself a model agrees too easily — being
+agreeable is the thing it's best at — and a game you can't lose teaches nothing.
+"""
+
+from typing import Optional
+
+WIN_TRUST = 70
+WIN_PAINS = 2
+PAIN_BONUS = 8          # patience back when you find what's actually hurting them
+
+BOSSES = {
+    "dale": {
+        "name": "Dale", "level": 1, "patience": 70,
+        "opening": "Yeah, this is Dale. Who's this?",
+        "brief": ("Dale, 58, has run the same independent dive bar in Sacramento, CA for 22 "
+                  "years. Gruff, funny, hates salespeople, got burned by a POS company that "
+                  "locked him into a contract. Counts bottles himself on paper on Sunday "
+                  "nights. Has an iPhone his daughter set up."),
+        "pains": {
+            "sunday": "Sunday-night counts take him about three hours",
+            "shorted": "his distributor shorts or substitutes orders and he only notices days later",
+            "prices": "he never notices when a rep quietly raises a price",
+        },
+    },
+    "priya": {
+        "name": "Priya", "level": 2, "patience": 60,
+        "opening": "This is Priya.",
+        "brief": ("Priya, 34, is GM of an eight-month-old independent craft cocktail bar in "
+                  "Oakland, CA. Sharp, proud of her Google Sheet system, allergic to "
+                  "buzzwords, asks pointed questions back. The team uses iPhones."),
+        "pains": {
+            "skus": "about 400 SKUs make the sheet slow and error-prone",
+            "turnover": "new bartenders never learn the sheet, so counts are inconsistent",
+            "texts": "price changes arrive as texts from three different reps and get lost",
+        },
+    },
+    "nguyen": {
+        "name": "The Nguyen siblings", "level": 3, "patience": 55,
+        "opening": "Hello? — Tuan, I've got it — hello?",
+        "brief": ("Linh and Tuan Nguyen bought an existing neighbourhood bar in Reno, NV four "
+                  "months ago. They talk over each other. Cash is tight. Tuan uses Android and "
+                  "will bring it up; Linh uses an iPhone and does the ordering. They inherited "
+                  "the old owner's distributor contacts and no price records at all."),
+        "pains": {
+            "noprices": "they have no record of what the old owner paid for anything",
+            "cash": "over-ordering is burning cash they don't have",
+            "chaos": "nobody knows which rep to call for which product",
+        },
+    },
+    "marco": {
+        "name": "Marco", "level": 4, "patience": 45,
+        "opening": "Marco.",
+        "brief": ("Marco, 45, owns two independent bars in Seattle, WA. Former enterprise "
+                  "software salesman who names your technique out loud ('nice permission "
+                  "opener'), tests you, and respects only directness and real numbers. "
+                  "Washington has no tip credit, so his labour is expensive. Uses an iPhone."),
+        "pains": {
+            "labor": "his managers spend about five paid hours a week on counts at full WA wage",
+            "twobars": "he can't compare costs between his two bars",
+            "leak": "he suspects pour-cost leakage but can't prove it",
+        },
+    },
+}
+
+PRODUCT = ("86'd: an iPhone-only app (there is NO Android version) for independent bars. "
+           "A permanent price book of every product and what they pay, fast bottle counts, "
+           "and one-tap ordering to their distributors. There is a free trial.")
+
+LEVELS = {"warm": "curious but guarded", "busy": "short and distracted",
+          "hostile": "annoyed, with a tricky objection"}
+
+
+def clamp(n, lo: int, hi: int) -> int:
+    try:
+        n = round(float(n))
+    except (TypeError, ValueError):
+        n = 0
+    return max(lo, min(hi, int(n)))
+
+
+def curveball_prompt(level: str) -> tuple[str, str]:
+    feel = LEVELS.get(level, LEVELS["busy"])
+    system = ("You write cold-call practice prompts for a rep selling " + PRODUCT +
+              " Reply with JSON only.")
+    user = ("Invent ONE thing an independent US bar owner or GM might say on a cold call. "
+            f"Mood: {feel}. Vary it widely: objections, odd questions, tests, interruptions, "
+            "price, trust, an existing app, Android staff, a new owner, loyalty to a "
+            "distributor rep. Return {\"who\": \"role + situation, max 8 words\", "
+            "\"line\": \"what they say, max 30 words\"}.")
+    return system, user
+
+
+def grade_prompt(who: str, line: str, answer: str, seconds: int, timed_out: bool) -> tuple[str, str]:
+    system = ("You are a tough but fair cold-call coach. The rep sells " + PRODUCT +
+              " Reply with JSON only.")
+    user = (f"Prospect ({who}) said: {line}\n"
+            f"Rep replied{' (ran out of time)' if timed_out else ''} after {seconds}s: {answer}\n\n"
+            "Score 0-10 on: acknowledging them, staying calm, asking a question that keeps "
+            "the call alive, brevity, no feature-dumping, honesty (never claim Android "
+            "support), sounding like a person. Return {\"score\": n, \"skill\": one of "
+            "\"opener\",\"discovery\",\"objections\",\"ask\" (the skill this moment tested), "
+            "\"worked\": \"one sentence\", \"fix\": \"one sentence\", "
+            "\"better\": \"a stronger line to say, max 35 words\"}.")
+    return system, user
+
+
+def turn_prompt(boss_id: str, transcript: list[dict], said: str, patience: int,
+                trust: int, found: list[str], interrupt: Optional[str]) -> tuple[str, str]:
+    b = BOSSES[boss_id]
+    pains = "\n".join(f"- {k}: {v}" + (" (ALREADY FOUND)" if k in found else "")
+                      for k, v in b["pains"].items())
+    system = (
+        "You are playing a character in a cold-call training game. Stay fully in character "
+        "and never mention the game, meters or rules out loud.\n\n"
+        f"CHARACTER: {b['brief']}\n\nTHE CALLER SELLS: {PRODUCT}\n\n"
+        "HIDDEN PAINS — never volunteer these. Reveal one only when the rep asks a good, "
+        f"specific question that gets near it:\n{pains}\n\n"
+        f"Difficulty {b['level']} of 4 (higher = tougher, stingier with trust).\n"
+        "Pushy, vague, feature-dumping, 'is this a bad time', fake flattery or a lie (like "
+        "claiming Android support) costs patience and trust. Empathy, a clear reason for "
+        "calling, sharp specific questions, honesty and handling your objection well earn "
+        "trust. Raise at least one real objection before you can be won. You may agree to "
+        f"try 86'd only if trust would be at least {WIN_TRUST} and at least {WIN_PAINS} pains "
+        "have been found; otherwise you are not convinced yet. Reply with JSON only.")
+    lines = "\n".join(("REP: " if t.get("role") == "rep" else "OWNER: ") + str(t.get("text", ""))[:600]
+                      for t in transcript[-30:])
+    user = (f"Meters right now: patience {patience}/100, trust {trust}/100.\n"
+            + (f"INTERRUPTION happening right now: {interrupt} React to it naturally.\n" if interrupt else "")
+            + f"\nCall so far:\n{lines}\nREP: {said}\n\n"
+            "Return {\"reply\": \"your spoken words, 1-3 short sentences, no stage directions\", "
+            "\"patience_delta\": integer -30..10, \"trust_delta\": integer -20..25, "
+            f"\"pain_found\": one of {sorted(b['pains'])} or null, \"agreed_to_trial\": bool, "
+            "\"hung_up\": bool, \"coach_tag\": \"2-4 words on what the rep just did\"}")
+    return system, user
+
+
+def apply_turn(boss_id: str, patience: int, trust: int, found: list[str], out: dict) -> dict:
+    """The referee. Turns the model's proposal into the game's actual state."""
+    b = BOSSES[boss_id]
+    found = [f for f in found if f in b["pains"]]
+    patience = clamp(patience, 0, 100) + clamp(out.get("patience_delta"), -30, 10)
+    trust = clamp(clamp(trust, 0, 100) + clamp(out.get("trust_delta"), -20, 25), 0, 100)
+    new_pain = out.get("pain_found")
+    if new_pain in b["pains"] and new_pain not in found:
+        found = found + [new_pain]
+        patience += PAIN_BONUS
+    else:
+        new_pain = None
+    patience = clamp(patience, 0, 100)
+    won = bool(out.get("agreed_to_trial")) and trust >= WIN_TRUST and len(found) >= WIN_PAINS
+    lost = not won and (bool(out.get("hung_up")) or patience <= 0)
+    return {
+        "reply": str(out.get("reply") or "…")[:600],
+        "coach_tag": str(out.get("coach_tag") or "")[:60],
+        "patience": patience, "trust": trust, "found": found, "new_pain": new_pain,
+        "result": "won" if won else ("lost" if lost else None),
+    }
+
+
+def review_prompt(boss_id: str, transcript: list[dict], result: str) -> tuple[str, str]:
+    b = BOSSES[boss_id]
+    system = "You are a tough cold-call coach. The rep sells " + PRODUCT + " Reply with JSON only."
+    lines = "\n".join(("REP: " if t.get("role") == "rep" else "OWNER: ") + str(t.get("text", ""))[:600]
+                      for t in transcript[-40:])
+    user = (f"Practice call to {b['name']}. Outcome: {result}.\n\n{lines}\n\n"
+            "Score 0-10 each. Return {\"opener\": n, \"discovery\": n, \"objections\": n, "
+            "\"ask\": n, \"turning_point\": \"the moment the call turned, quoted, one sentence\", "
+            "\"redo\": \"one line to say differently next time, max 30 words\"}.")
+    return system, user
+
+
+def points(won: bool, level: int, trust: int, patience: int, pains: int, lines: int) -> tuple[int, int]:
+    """(points, stars). Winning fast with every pain found is the 3-star run."""
+    if not won:
+        return pains * 15 + trust // 2, 0
+    pts = max(0, 100 + level * 50 + trust + patience * 2 + pains * 25 - lines * 3)
+    stars = 3 if (lines <= 8 and pains == 3) else (2 if lines <= 12 else 1)
+    return pts, stars

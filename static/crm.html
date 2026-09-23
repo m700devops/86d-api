@@ -277,6 +277,74 @@
          transition:opacity .18s;pointer-events:none;z-index:50;font-weight:600}
   #toast.show{opacity:1}
   @media (max-width:700px){ .em{display:none} }
+
+  /* ── practice (inside the Call list tab) ─────────────────────────────────
+     Same rule as the rest of the page: one headline saying the single next
+     thing, one big button, and everything else folded away until asked for. */
+  .practicebtn{font-weight:700;padding:11px 16px;border-radius:12px}
+  .pnow{border:1px solid var(--line2);background:var(--surface);border-radius:14px;padding:18px 20px;margin-bottom:12px}
+  .pnow .meta{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--text3);margin-bottom:12px}
+  .pnow .meta b{color:var(--wait);font-weight:700}
+  .pnow .k{font-size:11px;font-weight:800;letter-spacing:1px;color:var(--accent)}
+  .pnow h2{margin:4px 0 4px;font-size:22px;letter-spacing:-0.5px}
+  .pnow p{margin:0 0 14px;color:var(--text2)}
+  .ptiles{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+  @media (max-width:640px){.ptiles{grid-template-columns:1fr}}
+  .ptiles button{text-align:left;padding:14px 15px;border-radius:12px;line-height:1.3}
+  .ptiles b{display:block;font-size:15px} .ptiles span{font-size:12px;color:var(--text3)}
+  .school>summary{cursor:pointer;list-style:none;padding:12px 15px;border:1px dashed var(--line2);border-radius:12px;font-weight:700}
+  .school>summary::-webkit-details-marker{display:none}
+  .school>summary em{display:block;font-style:normal;font-weight:400;font-size:12px;color:var(--text3)}
+  .school[open]>summary{margin-bottom:14px}
+  .psec{margin-bottom:26px}
+  .psec h3{margin:0 0 4px;font-size:16px} .psec>.hint{color:var(--text3);font-size:12px;margin:0 0 12px}
+  .pgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
+  .pmod{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 15px;display:flex;flex-direction:column;gap:7px}
+  .pmod .n{font-size:11px;color:var(--text3)} .pmod p{margin:0;font-size:12.5px;color:var(--text2)}
+  .pmod label{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text3);margin-top:auto;cursor:pointer}
+  .pmod label input{width:auto}
+  .say{font-size:13px;line-height:1.5;background:var(--surface2);border-radius:8px;padding:9px 11px}
+  .plink{color:var(--accent);font-size:12px;text-decoration:none}
+  .plink:hover{text-decoration:underline}
+  .films a{display:block;padding:10px 13px;background:var(--surface);border:1px solid var(--line);border-radius:10px;margin-bottom:6px;color:var(--text);text-decoration:none}
+  .films a:hover{border-color:var(--accent)} .films a span{display:block;font-size:12px;color:var(--text3)}
+  .pstats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:14px}
+  .pstat{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .pstat .l{font-size:10px;letter-spacing:.8px;font-weight:700;color:var(--text3)}
+  .pstat .v{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums}
+  .mtrack{height:9px;background:var(--surface2);border-radius:5px;overflow:hidden;margin-top:4px}
+  .mfill{height:100%;width:0;background:var(--go);transition:width .4s}
+  .mfill.pat{background:var(--wait)} .mfill.pat.low{background:var(--stop)}
+  .ptimer{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;margin-left:auto}
+  .ptimer.low{color:var(--stop)}
+  .pline{font-size:17px;line-height:1.5;border-left:2px solid var(--wait);padding-left:12px;margin:10px 0}
+  .pgrade{margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:grid;gap:6px;font-size:13px;color:var(--text2)}
+  .pgrade .big{font-size:30px;font-weight:800;color:var(--text)}
+  .pgrade strong{color:var(--text)}
+  .opt{display:block;width:100%;text-align:left;margin-bottom:6px}
+  .opt.right{border-color:var(--go);background:#3DD68C14} .opt.wrong{border-color:var(--stop);background:#F0616D10}
+  .find{display:grid;grid-template-columns:86px 1fr;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px}
+  .find .v{font-size:21px;font-weight:800;color:var(--wait)} .find .v small{display:block;font-size:10px;color:var(--text3);font-weight:600}
+  .find p{margin:0;font-size:13px;color:var(--text2)} .find p b{color:var(--text)}
+  @media (max-width:520px){.find{grid-template-columns:1fr}}
+  .boss{display:grid;grid-template-columns:40px 1fr auto;gap:12px;align-items:center;width:100%;text-align:left;padding:13px 15px;border-radius:12px;margin-bottom:8px}
+  .boss .lv{font-size:20px;font-weight:800;color:var(--accent);text-align:center}
+  .boss b{display:block;font-size:15px} .boss span{font-size:12px;color:var(--text3)}
+  .boss .st{color:var(--wait);white-space:nowrap}
+  .gmeters{display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end;margin-bottom:10px}
+  .gmeters .l{font-size:10px;letter-spacing:.8px;font-weight:700;color:var(--text3)}
+  .gchat{display:flex;flex-direction:column;gap:8px;min-height:180px;max-height:52vh;overflow-y:auto;margin:8px 0 12px}
+  .gmsg{max-width:85%;padding:9px 12px;border-radius:12px;font-size:15px;line-height:1.45}
+  .gmsg.me{align-self:flex-end;background:#FF6B3526} .gmsg.them{align-self:flex-start;background:var(--surface2)}
+  .gmsg.ev{align-self:center;background:none;color:var(--wait);font-size:12px}
+  .gbar{display:flex;gap:8px;align-items:stretch}
+  .gbar textarea{min-height:52px;flex:1}
+  .mic{font-size:14px;font-weight:800;padding:0 18px;border-radius:12px;white-space:nowrap}
+  .mic.live{background:var(--stop);border-color:var(--stop);color:#fff}
+  .ghead{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+  .ghead .t{font-weight:800;font-size:16px;margin-right:auto}
+  .ghead label{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text2)}
+  .ghead label input{width:auto}
 </style>
 </head>
 <body>
@@ -330,9 +398,11 @@
     </div>
 
     <section data-panel="calls">
+      <div id="callMain">
       <div id="focus" class="focus"><h2>Loading…</h2></div>
       <div class="startbar">
         <button class="startbtn" id="startBtn">Ready to start calling</button>
+        <button class="practicebtn" id="practiceBtn">Warm up first</button>
         <div class="clock" id="clock"></div>
       </div>
       <div id="queueBar"></div>
@@ -340,6 +410,102 @@
       <div class="svc" id="svcTabs"></div>
       <div class="zt" id="zoneTabs"></div>
       <div id="zones"></div>
+      </div>
+      <!-- Practice lives here, not in its own tab: warming up is the first
+           five minutes of a calling session, and a fourth tab would be one
+           more thing competing for attention on every other minute. -->
+      <div id="practice" class="hide">
+        <div id="pHome">
+          <div class="pnow">
+            <div class="meta"><b id="pStreak">0-day streak</b><span id="pRank">Barback · 0 XP</span></div>
+            <div class="k">DO THIS ONE THING</div>
+            <h2 id="pNowT">Win your first call against Dale.</h2>
+            <p id="pNowW">He's the easiest owner in the game. Five minutes.</p>
+            <button class="startbtn" id="pNowGo">Start</button>
+          </div>
+          <div class="ptiles">
+            <button id="pTileCall"><b>📞 Take a call</b><span>A tough owner. Get them to try it.</span></button>
+            <button id="pTileRep"><b>⚡ 25-second rep</b><span>One curveball, one answer.</span></button>
+            <button id="pTileBack"><b>✅ Real calls</b><span>Back to the call list.</span></button>
+          </div>
+          <details class="school" id="pSchool">
+            <summary>Full school<em>stats · modules · videos · quick-think · test · research</em></summary>
+            <div class="pstats">
+              <div class="pstat"><div class="l">OWNERS WON</div><div class="v" id="psWon">0 / 4</div></div>
+              <div class="pstat"><div class="l">BEST TEST</div><div class="v" id="psQuiz">—</div></div>
+              <div class="pstat"><div class="l">QUICK-THINK AVG</div><div class="v" id="psDrill">—</div></div>
+              <div class="pstat"><div class="l">CALLS PLAYED</div><div class="v" id="psGames">0</div></div>
+            </div>
+            <div class="pgrid" id="pSkills" style="margin-bottom:22px"></div>
+
+            <div class="psec" id="pMods"><h3>Modules <span class="muted" id="pModN">0 / 6</span></h3>
+              <p class="hint">The call, in the order it happens. Tick one when you can do it without reading.</p>
+              <div class="pgrid" id="pModList"></div></div>
+
+            <div class="psec"><h3>Videos</h3>
+              <p class="hint">Each opens a YouTube search pinned to the coach and topic, so you get their newest uploads rather than a link that's gone stale.</p>
+              <div class="films" id="pFilms"></div></div>
+
+            <div class="psec" id="pDrill"><h3>Quick-Think</h3>
+              <p class="hint">An owner throws a curveball. You get 25 seconds to answer, typed or spoken. Claude scores it and gives you a better line.</p>
+              <div class="card">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                  <button class="go" id="dNew">Throw me one</button>
+                  <select id="dLevel" style="width:auto"><option value="warm">Curious owner</option><option value="busy" selected>Busy &amp; short</option><option value="hostile">Hostile</option></select>
+                  <div class="ptimer" id="dTimer">0:25</div>
+                </div>
+                <div class="mtrack"><div class="mfill pat" id="dBar" style="width:100%"></div></div>
+                <div class="muted" id="dWho" style="margin-top:10px;font-size:12px">Press “Throw me one”.</div>
+                <div class="pline" id="dLine">“Yeah, who is this? I've got a delivery at the back door.”</div>
+                <div class="gbar"><textarea id="dAns" placeholder="What you'd say…" disabled></textarea>
+                  <button class="mic" id="dMic" disabled>🎙 Talk</button></div>
+                <div style="margin-top:8px"><button id="dSend" disabled>Grade it</button></div>
+                <div class="pgrade hide" id="dGrade"></div>
+              </div></div>
+
+            <div class="psec" id="pTest"><h3>Test <span class="muted" id="tScore">0 / 10</span></h3>
+              <p class="hint">Ten questions. Your best score is saved.</p>
+              <div id="tQs"></div><button id="tReset">Retake</button></div>
+
+            <div class="psec"><h3>Research</h3>
+              <p class="hint">What recorded-call data and the coaches who study it say, and what it means for a bar owner.</p>
+              <div id="pFinds"></div></div>
+          </details>
+        </div>
+
+        <div id="pGame" class="hide">
+          <div class="ghead">
+            <button id="gLeave">← Leave</button>
+            <div class="t" id="gTitle">Pick an owner</div>
+            <label><input type="checkbox" id="gVoice" checked> Owner speaks</label>
+            <label><input type="checkbox" id="gHands" checked> Hands-free</label>
+          </div>
+          <div id="gPick">
+            <p style="font-size:15px;color:var(--text2);margin:0 0 12px">Get them to <b style="color:var(--text)">agree to try 86'd</b>. Their patience drains while you hesitate. Each owner hides three problems, and they won't say yes until you've found two.</p>
+            <div id="gBosses"></div>
+            <p class="muted" style="font-size:12px">Hands-free: the owner talks, then the mic opens by itself. Talk like you're on the phone and pause when you're done. Chrome and Safari only.</p>
+          </div>
+          <div id="gPlay" class="hide">
+            <div class="gmeters">
+              <div><div class="l">PATIENCE</div><div class="mtrack"><div class="mfill pat" id="gPat"></div></div></div>
+              <div><div class="l">TRUST</div><div class="mtrack"><div class="mfill" id="gTru"></div></div></div>
+              <div id="gPains" title="Problems found" style="font-size:18px;letter-spacing:2px"></div>
+            </div>
+            <div class="gchat" id="gChat" aria-live="polite"></div>
+            <div class="gbar"><textarea id="gIn" placeholder="Say something…"></textarea>
+              <button class="mic" id="gMic">🎙 Talk</button>
+              <button class="go" id="gSend">Say it</button></div>
+            <div class="muted" id="gNote" style="font-size:12px;margin-top:8px"></div>
+          </div>
+          <div id="gEnd" class="hide">
+            <h2 id="eVerdict" style="margin:0;font-size:26px;letter-spacing:-.5px"></h2>
+            <div id="eStars" style="font-size:28px;color:var(--wait);margin:4px 0"></div>
+            <div class="muted" id="ePts" style="font-size:13px"></div>
+            <div class="pgrade" id="eTape"></div>
+            <div style="display:flex;gap:8px;margin-top:14px"><button class="go" id="eAgain">Call again</button><button id="ePick">Different owner</button></div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section data-panel="pipeline" class="hide">
@@ -2004,6 +2170,294 @@ async function startRecheck(){
   }, 4000);
 }
 $('recheckBtn').onclick=startRecheck;
+
+
+/* ── practice ─────────────────────────────────────────────────────────────
+   Warm-up inside the Call list tab. The surface is one headline and one
+   button; the depth (a skill model, owners with hidden problems, a referee on
+   the server that won't let the AI cave) stays underneath. Scores live in this
+   browser, like the key does: they're about the caller, not the pipeline. */
+const PR_STORE='crmPractice';
+let PR={scores:[],mods:{}};
+try{ PR=Object.assign(PR, JSON.parse(localStorage.getItem(PR_STORE)||'{}')); }catch{}
+const prSave=()=>{ try{ localStorage.setItem(PR_STORE, JSON.stringify(PR)); }catch{} };
+function prScore(rec){ PR.scores.push({...rec, at:new Date().toISOString()}); PR.scores=PR.scores.slice(-400); prSave(); prRender(); }
+
+function showPractice(on){
+  $('practice').classList.toggle('hide',!on);
+  $('callMain').classList.toggle('hide',on);
+  if(on){ prHome(); prRender(); window.scrollTo(0,0); } else { gStop(); speechCancel(); }
+}
+$('practiceBtn').onclick=()=>showPractice(true);
+$('pTileBack').onclick=()=>showPractice(false);
+
+const P_MODS=[
+  ['The opener','Buy 30 seconds. Name the interruption, then ask permission. Never ask if it\'s a bad time.','“Hey, it\'s [your name] with 86\'d. I know I\'m catching you during prep, so can I take 30 seconds on why I called, and you tell me if it\'s worth another minute?”','permission+based+cold+call+opener'],
+  ['The reason, as a problem','One sentence naming a problem they already have. No features.','“Most bar owners I talk to lose a couple of hours a week counting bottles and retyping it into orders, and the order still comes in wrong. Is that you, or have you got it handled?”','30+minutes+to+presidents+club+problem+proposition'],
+  ['Discovery','Ask, then stop talking. Find out about prices, distributors, and who does the counts.','“Who does your counts, and when?” · “How many distributors?” · “When a price changes, where does that get written down?”','sales+discovery+questions+cold+call'],
+  ['Objections','Acknowledge, ask about it, then answer. Don\'t argue with the first no.','“Totally fair, most people have a system. Out of curiosity, what does yours look like on a Sunday night?”','handling+cold+call+objections+josh+braun'],
+  ['The ask','Small and specific: 15 minutes, on their own iPhone, before service.','“Worth 15 minutes Tuesday around 2, before you open? I\'ll put your actual price list on your phone so you can see it working.”','booking+meeting+on+cold+call'],
+  ['Gatekeepers & voicemail','Whoever answers is on your side. Get the owner\'s name and when they\'re in.','“Quick one: who handles the liquor orders there? … Perfect. When\'s Maria usually in before service?”','cold+call+gatekeeper+voicemail+script']
+];
+const P_FILMS=[
+  ['30 Minutes to President\'s Club','Cold calls broken down line by line','30+minutes+to+presidents+club+cold+call'],
+  ['Josh Braun','Low-pressure selling, not sounding pushy','josh+braun+cold+calling'],
+  ['Jason Bay, Outbound Squad','Short openers, and what to do with “just email me”','jason+bay+outbound+squad+cold+call'],
+  ['Kevin “KD” Dorsey','Mindset, tone of voice, call volume','kevin+dorsey+kd+cold+calling'],
+  ['Live recorded cold calls','Hearing the bad ones is how you learn','live+cold+calls+recorded+sdr'],
+  ['Selling to restaurant & bar owners','Closest match to your buyer','how+to+sell+to+restaurant+owners+cold+call'],
+  ['Tone & pacing','Sounding certain in a noisy back-of-house','cold+call+tonality+tips']
+];
+const P_QUIZ=[
+  ['Which opener does Gong\'s data say hurts booking rates most?',['“How have you been?”','“Did I catch you at a bad time?”','“The reason I\'m calling is…”','“I know this is out of the blue.”'],1,'Asking if it\'s a bad time invites “yes, bye.” It cost about 40% in Gong\'s data.'],
+  ['A bar opened 5 weeks ago. Call now?',['Yes, get in early','No: under 2 months, no settled distributors or prices yet','Only in California','Only by email'],1,'The window is 2–9 months open, or an ownership change.'],
+  ['Owner: “We already have a system.” First move?',['Explain why 86\'d is better','Offer a discount','Acknowledge it, then ask what it looks like on a busy night','Call back next month'],2,'Acknowledge and ask. Their answer shows you where it hurts.'],
+  ['Strongest pitch in Nevada?',['Labour cost: no tip credit, so every counting hour is full wage','Time savings only','Android support','Chain-wide rollout'],0,'NV, like CA, WA and OR, has no tip credit, so the labour maths works for you.'],
+  ['“My staff use Android.” You say…',['It works fine','Be straight: it\'s iPhone-only. Does the owner or manager have an iPhone?','Change the subject','Android is coming soon'],1,'It\'s iOS-only. Find out who has an iPhone, and never promise what doesn\'t exist.'],
+  ['Where do you verify a full spirits licence?',['The cocktail menu','Instagram','The state\'s own licence records','Yelp'],2,'Never go by a menu or photos. Always check the state\'s own records.'],
+  ['Strongest way to end the call?',['“Can I send you some info?”','“Let me know if you\'re interested.”','“15 minutes Tuesday at 2, before you open, on your own price list?”','“What\'s your budget?”'],2,'Small, specific, and about their own data.'],
+  ['A bartender picks up. Best move?',['Pitch them','Ask who handles liquor orders and when they\'re in','Hang up','Leave a long message'],1,'Get a name and a time to call back.'],
+  ['What\'s the pause after a question for?',['Filling silence','Letting them think and answer. The silence does the work','Sounding friendly','Keeping it short'],1,'Ask, then stop talking.'],
+  ['A “problem proposition” is…',['A list of features','A pain they already feel, said in their words','A discount','A case study'],1,'Name the problem, not the product.']
+];
+const P_FINDS=[
+  ['−40%','Gong Labs','<b>“Did I catch you at a bad time?” sinks the call.</b> It cut booking rates by about 40% across roughly 90,000 recorded calls. Say “I know I\'m catching you during prep” instead.'],
+  ['2.1×','Gong Labs','<b>Say why you\'re calling, early.</b> Openers that said “The reason I\'m calling is…” worked about twice as often. Being clear buys you time.'],
+  ['6.6×','Gong Labs','<b>“How have you been?” breaks the pattern.</b> It\'s odd from a stranger, so people stop and listen. Use it only if it sounds like you, and give your reason straight after.'],
+  ['Problem','30MPC','<b>Pitch a problem, not a product.</b> “Sunday-night counts eating two hours, and the rep still gets the order wrong” beats any list of features.'],
+  ['Ask','Permission','<b>Ask permission to take 30 seconds.</b> Most people say yes, and that yes gives you control of the call.'],
+  ['1–4pm','Rule of thumb','<b>Bars keep different hours from offices.</b> Owners are in before service doing prep and orders. This is a field rule, not a study, so check it against the dial stats under Numbers.'],
+  ['$$','86\'d','<b>In CA, NV, WA and OR every counting hour is paid at full wage</b> (no tip credit). In AZ, TX and CO, lead with time saved and fewer ordering mistakes.']
+];
+$('pFilms').innerHTML=P_FILMS.map(f=>`<a href="https://www.youtube.com/results?search_query=${f[2]}" target="_blank" rel="noopener"><b>${esc(f[0])}</b> <span>${esc(f[1])} ↗</span></a>`).join('');
+$('pFinds').innerHTML=P_FINDS.map(f=>`<div class="find"><div class="v">${esc(f[0])}<small>${esc(f[1])}</small></div><p>${f[2]}</p></div>`).join('');
+
+function prMods(){
+  let done=0;
+  $('pModList').innerHTML=P_MODS.map((m,i)=>{ const on=!!PR.mods['m'+i]; if(on)done++;
+    return `<div class="pmod"><div class="n">Step ${i+1} of 6</div><b>${esc(m[0])}</b><p>${esc(m[1])}</p><div class="say">${esc(m[2])}</div>
+      <a class="plink" href="https://www.youtube.com/results?search_query=${m[3]}" target="_blank" rel="noopener">Watch examples ↗</a>
+      <label><input type="checkbox" data-m="${i}" ${on?'checked':''}> I can do this without reading</label></div>`; }).join('');
+  $('pModN').textContent=done+' / 6';
+}
+$('pModList').onchange=e=>{ const c=e.target.closest('input[data-m]'); if(!c) return; PR.mods['m'+c.dataset.m]=c.checked; prSave(); prRender(); };
+
+/* ── skill model + the one thing ── */
+const SKILLS=[['opener','Opener'],['discovery','Discovery'],['objections','Objections'],['ask','The ask']];
+function skillLevels(){
+  const out={};
+  SKILLS.forEach(([k])=>{
+    // Recency-weighted: the last 8 graded moments, newer ones count more.
+    const xs=PR.scores.filter(s=>s[k]!=null).slice(-8); let w=0,t=0;
+    xs.forEach((x,i)=>{ w+=i+1; t+=(i+1)*x[k]; });
+    out[k]=xs.length? t/w : null;
+  });
+  return out;
+}
+const RANKS=[[0,'Barback'],[60,'Bartender'],[200,'Head Bartender'],[450,'Bar Manager'],[900,'Beverage Director'],[2000,'Closer']];
+function xp(){ return PR.scores.reduce((a,s)=>a+(s.kind==='game'?(s.pts||0):s.kind==='quiz'?s.score*5:s.score*3),0)
+  + Object.values(PR.mods).filter(Boolean).length*20; }
+function streak(){
+  const days=new Set(PR.scores.map(s=>s.at.slice(0,10))); let n=0; const d=new Date();
+  const key=x=>x.toISOString().slice(0,10);
+  if(!days.has(key(d))) d.setDate(d.getDate()-1);
+  while(days.has(key(d))){ n++; d.setDate(d.getDate()-1); }
+  return n;
+}
+const wins=id=>PR.scores.filter(s=>s.kind==='game'&&s.boss===id&&s.won);
+let BOSSES=[
+  {id:'dale',name:'Dale',level:1,tag:'Dive bar, 22 years. Burned by a POS company.'},
+  {id:'priya',name:'Priya',level:2,tag:'Craft cocktail GM. Loves her spreadsheet.'},
+  {id:'nguyen',name:'The Nguyen siblings',level:3,tag:'Just bought a bar. Broke and overwhelmed.'},
+  {id:'marco',name:'Marco',level:4,tag:'Ex-salesman. Names every technique you use.'}];
+const unlocked=b=>b.level===1||wins(BOSSES[b.level-2].id).length>0;
+let PNOW=null;
+function prRender(){
+  const lv=skillLevels(), x=xp();
+  let rank=RANKS[0][1], next=null; RANKS.forEach((r,i)=>{ if(x>=r[0]){ rank=r[1]; next=RANKS[i+1]; } });
+  $('pRank').textContent=`${rank} · ${x} XP`+(next?` · ${next[0]-x} to ${next[1]}`:'');
+  const s=streak(); $('pStreak').textContent=`🔥 ${s}-day streak`;
+  const games=PR.scores.filter(z=>z.kind==='game'), quiz=PR.scores.filter(z=>z.kind==='quiz'), drill=PR.scores.filter(z=>z.kind==='drill');
+  $('psWon').textContent=new Set(games.filter(g=>g.won).map(g=>g.boss)).size+' / 4';
+  $('psGames').textContent=games.length;
+  $('psQuiz').textContent=quiz.length? Math.max(...quiz.map(q=>q.score))+'/10' : '—';
+  $('psDrill').textContent=drill.length? (drill.reduce((a,b)=>a+b.score,0)/drill.length).toFixed(1) : '—';
+  $('pSkills').innerHTML=SKILLS.map(([k,l])=>`<div class="pstat"><div class="l">${l.toUpperCase()}</div><div class="v">${lv[k]==null?'—':lv[k].toFixed(1)}</div><div class="mtrack"><div class="mfill" style="width:${(lv[k]||0)*10}%"></div></div></div>`).join('');
+  prMods();
+  let weakest=null; SKILLS.forEach(s2=>{ if(lv[s2[0]]!=null&&(!weakest||lv[s2[0]]<lv[weakest[0]])) weakest=s2; });
+  const nextBoss=BOSSES.find(b=>unlocked(b)&&!wins(b.id).length);
+  if(!games.length) PNOW={t:'Win your first call against Dale.',w:'He\'s the easiest owner in the game. Five minutes.',go:()=>gStart('dale')};
+  else if(weakest&&lv[weakest[0]]<6) PNOW={t:`Fix your ${weakest[1].toLowerCase()}.`,w:`Your weakest skill (${lv[weakest[0]].toFixed(1)}/10). One 25-second rep.`,go:()=>{ openSchool('pDrill'); $('dNew').click(); }};
+  else if(nextBoss) PNOW={t:`Beat ${nextBoss.name}.`,w:`Level ${nextBoss.level}. ${nextBoss.tag}`,go:()=>gStart(nextBoss.id)};
+  else PNOW={t:'Go for 3 stars on Marco.',w:'You\'ve beaten every owner. Now win in 8 lines or fewer.',go:()=>gStart('marco')};
+  $('pNowT').textContent=PNOW.t; $('pNowW').textContent=PNOW.w;
+  if(!$('gPick').classList.contains('hide')) gBossList();
+}
+function openSchool(id){ $('pSchool').open=true; $(id).scrollIntoView({block:'start'}); }
+$('pNowGo').onclick=()=>PNOW&&PNOW.go();
+$('pTileCall').onclick=()=>gOpen();
+$('pTileRep').onclick=()=>{ openSchool('pDrill'); $('dNew').click(); };
+
+/* ── voice: the owner speaks, and the mic listens ── */
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let rec=null, recTarget=null, recOnDone=null;
+function speechCancel(){ try{ speechSynthesis.cancel(); }catch{} try{ rec&&rec.abort(); }catch{} }
+function listen(target, micBtn, onDone){
+  if(!SR){ toast('Voice input needs Chrome or Safari. Type instead.'); return; }
+  try{ rec&&rec.abort(); }catch{}
+  rec=new SR(); rec.lang='en-US'; rec.interimResults=true; rec.continuous=false;
+  const base=target.value?target.value+' ':'';
+  recTarget=target; recOnDone=onDone;
+  rec.onresult=e=>{ let t=''; for(const r of e.results) t+=r[0].transcript; target.value=base+t; };
+  rec.onend=()=>{ micBtn.classList.remove('live'); micBtn.textContent='🎙 Talk'; rec=null;
+    if(recOnDone&&target.value.trim()) recOnDone(); };
+  rec.onerror=e=>{ if(e.error==='not-allowed') toast('Microphone blocked. Allow it in the browser to talk.'); };
+  micBtn.classList.add('live'); micBtn.textContent='● Listening';
+  try{ rec.start(); }catch{}
+}
+const VOICES={dale:[0.75,0.95],priya:[1.15,1.05],nguyen:[1.0,1.12],marco:[0.9,1.15]};
+function say(text, bossId, then){
+  if(!$('gVoice').checked||!window.speechSynthesis){ then&&then(); return; }
+  try{ speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(text); const v=VOICES[bossId]||[1,1];
+    u.pitch=v[0]; u.rate=v[1]; u.onend=()=>then&&then(); speechSynthesis.speak(u);
+  }catch{ then&&then(); }
+}
+function ring(){ // two short rings before they pick up
+  try{ const a=new (window.AudioContext||window.webkitAudioContext)();
+    [0,0.5].forEach(t=>{ const o=a.createOscillator(), g=a.createGain(); o.frequency.value=440; o.connect(g); g.connect(a.destination);
+      g.gain.setValueAtTime(0.08,a.currentTime+t); g.gain.setValueAtTime(0,a.currentTime+t+0.35); o.start(a.currentTime+t); o.stop(a.currentTime+t+0.4); });
+  }catch{}
+}
+
+/* ── quick-think ── */
+const OFFLINE=[['Owner, mid-delivery','“Yeah, who is this? I\'ve got a delivery at the back door.”'],['GM, skeptical','“We tried an inventory app two years ago. Nobody used it.”'],['Owner, price-first','“How much is it? Just give me the number.”'],['Owner, brush-off','“Just email me something.”'],['Owner, loyal to rep','“My Southern Glazer\'s rep handles my orders. Why would I change that?”']];
+let dT=null, dLeft=25, dCur=null, dStart=0;
+function dStop(){ clearInterval(dT); dT=null; }
+$('dNew').onclick=async()=>{
+  $('dNew').disabled=true;
+  try{ dCur=await api('/coach/curveball',{method:'POST',body:JSON.stringify({level:$('dLevel').value})}); if(!dCur.line) throw 0; }
+  catch{ const o=OFFLINE[Math.floor(Math.random()*OFFLINE.length)]; dCur={who:o[0],line:o[1]}; }
+  $('dNew').disabled=false;
+  $('dWho').textContent=dCur.who; $('dLine').textContent=dCur.line;
+  $('dAns').value=''; $('dAns').disabled=false; $('dSend').disabled=false; $('dMic').disabled=false; $('dGrade').classList.add('hide');
+  dLeft=25; dStart=Date.now(); dStop(); $('dAns').focus();
+  dT=setInterval(()=>{ dLeft--; $('dTimer').textContent='0:'+String(Math.max(0,dLeft)).padStart(2,'0');
+    $('dTimer').classList.toggle('low',dLeft<=7); $('dBar').style.width=Math.max(0,dLeft/25*100)+'%';
+    if(dLeft<=0){ dStop(); dGrade(true); } },1000);
+};
+$('dMic').onclick=()=>listen($('dAns'),$('dMic'),null);
+$('dSend').onclick=()=>dGrade(false);
+async function dGrade(timedOut){
+  dStop(); try{ rec&&rec.stop(); }catch{}
+  const ans=$('dAns').value.trim(); $('dAns').disabled=true; $('dSend').disabled=true; $('dMic').disabled=true;
+  const g=$('dGrade'); g.classList.remove('hide');
+  if(!ans){ g.innerHTML='<div class="big">0</div><div>Dead air. On a real call, that\'s a hang-up. Say <i>something</i>, even “Fair question, I\'ll be quick.”</div>'; prScore({kind:'drill',score:0}); return; }
+  g.innerHTML='<div class="muted">Grading…</div>';
+  try{
+    const r=await api('/coach/grade',{method:'POST',body:JSON.stringify({who:dCur.who,line:dCur.line,answer:ans,seconds:Math.round((Date.now()-dStart)/1000),timed_out:timedOut})});
+    const rec2={kind:'drill',score:r.score}; if(r.skill) rec2[r.skill]=r.score; prScore(rec2);
+    g.innerHTML=`<div class="big">${r.score}<span class="muted" style="font-size:14px"> / 10</span></div><div><strong>Worked:</strong> ${esc(r.worked)}</div><div><strong>Fix:</strong> ${esc(r.fix)}</div><div class="say">${esc(r.better)}</div>`;
+  }catch(e){ g.innerHTML='<div>'+esc(e.message)+'</div>'; }
+}
+
+/* ── test ── */
+function tRender(){
+  let answered=0, right=0; $('tScore').textContent='0 / 10';
+  $('tQs').innerHTML=P_QUIZ.map((q,i)=>`<div class="card"><b>${i+1}. ${esc(q[0])}</b><div style="margin-top:8px">${q[1].map((o,j)=>`<button class="opt" data-q="${i}" data-o="${j}">${esc(o)}</button>`).join('')}</div><div class="muted hide" id="tx${i}" style="font-size:12px">${esc(q[3])}</div></div>`).join('');
+  $('tQs').onclick=e=>{ const b=e.target.closest('.opt'); if(!b||b.disabled) return;
+    const q=+b.dataset.q, ok=P_QUIZ[q][2];
+    document.querySelectorAll(`.opt[data-q="${q}"]`).forEach(x=>{ x.disabled=true; if(+x.dataset.o===ok) x.classList.add('right'); });
+    if(+b.dataset.o!==ok) b.classList.add('wrong'); else right++;
+    answered++; $('tx'+q).classList.remove('hide'); $('tScore').textContent=right+' / 10';
+    if(answered===P_QUIZ.length) prScore({kind:'quiz',score:right}); };
+}
+$('tReset').onclick=tRender;
+
+/* ── The Holdout ── */
+const INTERRUPTS=['A delivery driver walks in and needs a signature.','A bartender shouts that the ice machine is leaking.','Their other phone starts ringing.','A regular walks in early and says hi.','The distributor rep texts them mid-call.'];
+let G=null, gTick=null;
+try{ $('gVoice').checked=localStorage.getItem('crmVoice')!=='0'; $('gHands').checked=localStorage.getItem('crmHands')!=='0'; }catch{}
+$('gVoice').onchange=()=>{ try{ localStorage.setItem('crmVoice',$('gVoice').checked?'1':'0'); }catch{} if(!$('gVoice').checked) speechCancel(); };
+$('gHands').onchange=()=>{ try{ localStorage.setItem('crmHands',$('gHands').checked?'1':'0'); }catch{} };
+function gView(v){ ['gPick','gPlay','gEnd'].forEach(id=>$(id).classList.toggle('hide',id!==v)); }
+function prHome(){ $('pHome').classList.remove('hide'); $('pGame').classList.add('hide'); }
+function gOpen(){ $('pHome').classList.add('hide'); $('pGame').classList.remove('hide'); gView('gPick'); $('gTitle').textContent='Pick an owner'; gBossList(); window.scrollTo(0,0); }
+function gBossList(){
+  $('gBosses').innerHTML=BOSSES.map(b=>{ const ok=unlocked(b), st=Math.max(0,...wins(b.id).map(w=>w.stars||0));
+    return `<button class="boss" data-b="${b.id}" ${ok?'':'disabled'}><div class="lv">${b.level}</div><div><b>${esc(b.name)}</b><span>${ok?esc(b.tag):'🔒 Beat level '+(b.level-1)+' to unlock'}</span></div><div class="st">${'★'.repeat(st)}${'☆'.repeat(3-st)}</div></button>`; }).join('');
+}
+$('gBosses').onclick=e=>{ const b=e.target.closest('.boss'); if(b&&!b.disabled) gStart(b.dataset.b); };
+function gStop(){ clearInterval(gTick); gTick=null; }
+function gMeters(){ $('gPat').style.width=G.patience+'%'; $('gPat').classList.toggle('low',G.patience<25);
+  $('gTru').style.width=G.trust+'%'; $('gPains').textContent=[0,1,2].map(i=>i<G.found.length?'💡':'·').join(' '); }
+function gMsg(cls,t){ const d=document.createElement('div'); d.className='gmsg '+cls; d.textContent=t; $('gChat').appendChild(d); $('gChat').scrollTop=1e9; return d; }
+function gYourTurn(){ // hands-free: the mic opens the moment they stop talking
+  if(!G||G.over) return; G.busy=false; $('gSend').disabled=false;
+  if($('gHands').checked&&SR) listen($('gIn'),$('gMic'),gSend); else $('gIn').focus();
+}
+async function gStart(id){
+  const meta=BOSSES.find(b=>b.id===id);
+  $('pHome').classList.add('hide'); $('pGame').classList.remove('hide');
+  let info=null; try{ info=await api('/coach/bosses'); }catch{}
+  const b=(info&&info.bosses.find(x=>x.id===id))||{patience:60,opening:'Hello?'};
+  G={id, name:meta.name, level:meta.level, patience:b.patience, trust:10, found:[], log:[], busy:true, over:false, interrupts:0};
+  $('gTitle').textContent=`Level ${meta.level} · ${meta.name}`; $('gChat').innerHTML=''; $('gNote').textContent='';
+  gView('gPlay'); gMeters();
+  if(info&&!info.ai){ $('gNote').textContent='No ANTHROPIC_API_KEY on the server, so the owners can\'t talk yet.'; }
+  ring(); gMsg('ev','— ringing —');
+  setTimeout(()=>{ if(!G||G.id!==id) return; gMsg('them',b.opening); G.log.push({role:'owner',text:b.opening}); say(b.opening,id,gYourTurn); },1100);
+  gStop();
+  // Patience leaks while it's your turn: hesitate and they're gone.
+  gTick=setInterval(()=>{ if(!G||G.busy||G.over) return; G.patience=Math.max(0,G.patience-1); gMeters();
+    if(G.patience<=0) gEnd('lost','You went quiet too long. Click.'); },2500);
+}
+$('gMic').onclick=()=>{ if(rec){ try{ rec.stop(); }catch{} return; } listen($('gIn'),$('gMic'),null); };
+$('gSend').onclick=()=>gSend();
+$('gIn').onkeydown=e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); gSend(); } };
+async function gSend(){
+  if(!G||G.over) return; const t=$('gIn').value.trim(); if(!t) return;
+  if(G.busy) return;
+  $('gIn').value=''; gMsg('me',t); G.busy=true; $('gSend').disabled=true;
+  let interrupt=null;
+  if(G.log.length>2&&G.interrupts<2&&Math.random()<0.28){ interrupt=INTERRUPTS[Math.floor(Math.random()*INTERRUPTS.length)]; G.interrupts++; gMsg('ev','— '+interrupt+' —'); }
+  const bubble=gMsg('them','…');
+  try{
+    const r=await api('/coach/turn',{method:'POST',body:JSON.stringify({boss:G.id,transcript:G.log,said:t,patience:G.patience,trust:G.trust,found:G.found,interrupt})});
+    G.log.push({role:'rep',text:t},{role:'owner',text:r.reply});
+    G.patience=r.patience; G.trust=r.trust; G.found=r.found; gMeters();
+    bubble.textContent=r.reply;
+    $('gNote').textContent=(r.coach_tag?'Coach: '+r.coach_tag:'')+(r.new_pain?' · 💡 found a problem':'');
+    if(r.result){ say(r.reply,G.id); return gEnd(r.result, r.result==='won'?`${G.name} said yes to a trial.`:`${G.name} hung up.`); }
+    say(r.reply,G.id,gYourTurn);
+  }catch(e){
+    bubble.remove(); $('gIn').value=t; $('gNote').textContent=e.message; G.busy=false; $('gSend').disabled=false;
+  }
+}
+async function gEnd(result, why){
+  G.over=true; G.busy=true; gStop(); try{ rec&&rec.abort(); }catch{}
+  const lines=G.log.filter(l=>l.role==='rep').length, won=result==='won';
+  const pts=won?Math.max(0,100+G.level*50+G.trust+G.patience*2+G.found.length*25-lines*3):G.found.length*15+Math.floor(G.trust/2);
+  const stars=won?(lines<=8&&G.found.length===3?3:lines<=12?2:1):0;
+  setTimeout(()=>{ gView('gEnd');
+    $('eVerdict').textContent=(won?'Trial booked. ':'Lost them. ')+why;
+    $('eStars').textContent=won?'★'.repeat(stars)+'☆'.repeat(3-stars):'';
+    $('ePts').textContent=`${pts} pts · ${lines} lines · ${G.found.length}/3 problems found · trust ${G.trust} · patience ${G.patience}`; },1200);
+  const rec3={kind:'game',boss:G.id,won,stars,pts,score:Math.min(10,Math.round(pts/40))};
+  $('eTape').innerHTML='<div class="muted">Reviewing the tape…</div>';
+  if(G.log.length>1){
+    try{ const r=await api('/coach/review',{method:'POST',body:JSON.stringify({boss:G.id,transcript:G.log,result})});
+      Object.assign(rec3,{opener:r.opener,discovery:r.discovery,objections:r.objections,ask:r.ask});
+      $('eTape').innerHTML=`<div>Opener ${r.opener} · Discovery ${r.discovery} · Objections ${r.objections} · Ask ${r.ask}</div><div><strong>Turning point:</strong> ${esc(r.turning_point)}</div><div class="say">${esc(r.redo)}</div>`;
+    }catch{ $('eTape').innerHTML='<div class="muted">No tape review this time.</div>'; }
+  } else $('eTape').innerHTML='';
+  prScore(rec3);
+}
+$('eAgain').onclick=()=>gStart(G.id);
+$('ePick').onclick=()=>{ gView('gPick'); $('gTitle').textContent='Pick an owner'; gBossList(); };
+$('gLeave').onclick=()=>{ gStop(); speechCancel(); G=null; prHome(); prRender(); };
+
+tRender(); prRender();
 
 (function(){let k=null;try{k=localStorage.getItem(KEY_STORE)}catch{}
   if(k) unlock(k); else lock(null);})();
