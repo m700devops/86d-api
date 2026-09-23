@@ -52,3 +52,25 @@ def test_points_and_stars():
     pts, stars = points(True, 4, 80, 20, 3, 7)
     assert stars == 3 and pts > 0
     assert points(True, 1, 70, 10, 2, 15)[1] == 1
+
+
+def test_guest_owners_play_by_the_same_rules():
+    from coach import GUESTS, get_boss
+    for gid in GUESTS:
+        b = get_boss(gid)
+        assert b["level"] and len(b["pains"]) == 3
+        out = apply_turn(gid, 50, 60, [], {"agreed_to_trial": True, "trust_delta": 25})
+        assert out["result"] is None          # trust ok, but no problems found yet
+
+
+def test_unknown_owner_is_none():
+    from coach import get_boss
+    assert get_boss("nobody") is None
+
+
+def test_challenge_twist_reaches_prompt():
+    from coach import CHALLENGES
+    system, _ = turn_prompt("dale", [], "hi", 50, 10, [], None, "price_first")
+    assert CHALLENGES["price_first"]["prompt"] in system
+    system, _ = turn_prompt("dale", [], "hi", 50, 10, [], None, "made_up")
+    assert "TODAY'S TWIST" not in system

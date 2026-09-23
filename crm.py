@@ -3543,19 +3543,39 @@ class CoachLine(BaseModel):
 
 
 class TurnRequest(BaseModel):
-    boss: Literal["dale", "priya", "nguyen", "marco"]
-    transcript: list[CoachLine] = Field(default_factory=list, max_length=80)
+    boss: str = Field(max_length=20)
+    challenge: str = Field(default="none", max_length=20)
+    transcript: list[CoachLine] = Field(default_factory=list, max_length=200)
     said: str = Field(min_length=1, max_length=1500)
     patience: int = Field(ge=0, le=100)
     trust: int = Field(ge=0, le=100)
-    found: list[str] = Field(default_factory=list, max_length=3)
+    found: list[str] = Field(default_factory=list, max_length=10)
     interrupt: Optional[str] = Field(default=None, max_length=160)
 
 
 class ReviewRequest(BaseModel):
-    boss: Literal["dale", "priya", "nguyen", "marco"]
-    transcript: list[CoachLine] = Field(max_length=80)
+    boss: str = Field(max_length=20)
+    transcript: list[CoachLine] = Field(max_length=200)
     result: Literal["won", "lost"]
+
+
+def _known_boss(boss_id: str) -> None:
+    if not _coach.get_boss(boss_id):
+        raise HTTPException(status_code=422, detail={
+            "error": "unknown_owner", "message": "That owner isn't in the game any more — pick another."})
+
+
+class ScriptRequest(BaseModel):
+    skill: Literal["opener", "discovery", "objections", "ask"]
+    draft: str = Field(min_length=1, max_length=1000)
+
+
+@crm_router.post("/coach/script", response_model=dict)
+def coach_script(data: ScriptRequest, _: bool = Depends(require_crm_key)):
+    system, user = _coach.script_prompt(data.skill, data.draft)
+    out = _ask_claude(system, user, max_tokens=400)
+    return {"score": _coach.clamp(out.get("score"), 0, 10), "keep": str(out.get("keep") or "")[:300],
+            "change": str(out.get("change") or "")[:300], "tight": str(out.get("tight") or "")[:400]}
 
 
 @crm_router.get("/coach/bosses", response_model=dict)
@@ -3565,6 +3585,10 @@ def coach_bosses(_: bool = Depends(require_crm_key)):
         {"id": k, "name": b["name"], "level": b["level"], "patience": b["patience"],
          "opening": b["opening"], "pains": len(b["pains"])}
         for k, b in sorted(_coach.BOSSES.items(), key=lambda kv: kv[1]["level"])],
+        "guests": [{"id": k, "name": g["name"], "patience": g["patience"],
+                    "opening": g["opening"]} for k, g in _coach.GUESTS.items()],
+        "challenges": {k: {"label": c["label"], "patience": c["patience"]}
+                       for k, c in _coach.CHALLENGES.items()},
         "win_trust": _coach.WIN_TRUST, "win_pains": _coach.WIN_PAINS,
         "ai": bool(os.getenv("ANTHROPIC_API_KEY"))}
 
@@ -3590,15 +3614,17 @@ def coach_grade(data: GradeRequest, _: bool = Depends(require_crm_key)):
 
 @crm_router.post("/coach/turn", response_model=dict)
 def coach_turn(data: TurnRequest, _: bool = Depends(require_crm_key)):
+    _known_boss(data.boss)
     system, user = _coach.turn_prompt(
         data.boss, [t.model_dump() for t in data.transcript], data.said,
-        data.patience, data.trust, data.found, data.interrupt)
+        data.patience, data.trust, data.found, data.interrupt, data.challenge)
     out = _ask_claude(system, user, max_tokens=400, temperature=0.8)
     return _coach.apply_turn(data.boss, data.patience, data.trust, data.found, out)
 
 
 @crm_router.post("/coach/review", response_model=dict)
 def coach_review(data: ReviewRequest, _: bool = Depends(require_crm_key)):
+    _known_boss(data.boss)
     system, user = _coach.review_prompt(data.boss, [t.model_dump() for t in data.transcript],
                                         data.result)
     out = _ask_claude(system, user, max_tokens=500)

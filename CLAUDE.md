@@ -82,7 +82,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   problems have been found. Left to itself the model agrees far too easily. Routes are
   `/v1/crm/coach/*` in crm.py, using the same `_ask_claude()` helper. Practice scores
   live in the operator's browser (localStorage `crmPractice`), not the database. See
-  test_coach.py
+  test_coach.py. Content ROTATES every 3 days, seeded from the local date in the page
+  (guests from `coach.GUESTS`, a house rule from `coach.CHALLENGES`, 10 of 30 test
+  questions, research, videos, Gauntlet rounds). Every AI path has an offline fallback:
+  the Gauntlet game and the drill's offline deck need no server at all
 - seed_data.py — default product catalog
 - test_level_classifier.py — unit tests for helpers.py level logic
 - test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone

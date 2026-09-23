@@ -345,6 +345,18 @@
   .ghead .t{font-weight:800;font-size:16px;margin-right:auto}
   .ghead label{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text2)}
   .ghead label input{width:auto}
+  .rot{font-size:12px;color:var(--text2);border:1px solid var(--line);border-radius:999px;padding:5px 12px;display:inline-block;margin-bottom:10px}
+  .rot b{color:var(--accent)}
+  .dots{display:flex;gap:6px;margin:8px 0 2px}
+  .dots i{width:26px;height:6px;border-radius:3px;background:var(--surface2)}
+  .dots i.done{background:var(--go)} .dots i.cur{background:var(--accent)}
+  .ptiles{grid-template-columns:repeat(2,1fr)}
+  .pmod.feat{border-color:var(--accent)}
+  .pmod .feat-tag{font-size:10px;font-weight:800;letter-spacing:.8px;color:var(--accent)}
+  .glabel{font-size:10px;letter-spacing:.8px;font-weight:700;color:var(--text3);margin:14px 0 6px}
+  .boss.guest .lv{color:var(--wait)}
+  .mine{display:grid;gap:6px}
+  .mine div{font-size:13px} .mine b{font-size:10px;letter-spacing:.8px;color:var(--text3);display:block}
 </style>
 </head>
 <body>
@@ -416,38 +428,51 @@
            more thing competing for attention on every other minute. -->
       <div id="practice" class="hide">
         <div id="pHome">
+          <div class="rot" id="pRot"></div>
           <div class="pnow">
             <div class="meta"><b id="pStreak">0-day streak</b><span id="pRank">Barback · 0 XP</span></div>
-            <div class="k">DO THIS ONE THING</div>
-            <h2 id="pNowT">Win your first call against Dale.</h2>
-            <p id="pNowW">He's the easiest owner in the game. Five minutes.</p>
+            <div class="k" id="pNowK">TODAY'S SET · 1 OF 3</div>
+            <div class="dots" id="pDots"></div>
+            <h2 id="pNowT">Loading…</h2>
+            <p id="pNowW"></p>
             <button class="startbtn" id="pNowGo">Start</button>
           </div>
           <div class="ptiles">
-            <button id="pTileCall"><b>📞 Take a call</b><span>A tough owner. Get them to try it.</span></button>
-            <button id="pTileRep"><b>⚡ 25-second rep</b><span>One curveball, one answer.</span></button>
+            <button id="pTileCall"><b>📞 Take a call</b><span id="pTileCallS">A tough owner. Get them to try it.</span></button>
+            <button id="pTileGaunt"><b>🎯 Gauntlet</b><span>10 fast objections. Works offline.</span></button>
+            <button id="pTileCards"><b>🔁 Replay misses</b><span id="pTileCardsS">Lines you fumbled, back for another go.</span></button>
             <button id="pTileBack"><b>✅ Real calls</b><span>Back to the call list.</span></button>
           </div>
           <details class="school" id="pSchool">
-            <summary>Full school<em>stats · modules · videos · quick-think · test · research</em></summary>
+            <summary>Full school<em>stats · my lines · modules · videos · quick-think · test · research</em></summary>
             <div class="pstats">
-              <div class="pstat"><div class="l">OWNERS WON</div><div class="v" id="psWon">0 / 4</div></div>
+              <div class="pstat"><div class="l">OWNERS WON</div><div class="v" id="psWon">0</div></div>
               <div class="pstat"><div class="l">BEST TEST</div><div class="v" id="psQuiz">—</div></div>
               <div class="pstat"><div class="l">QUICK-THINK AVG</div><div class="v" id="psDrill">—</div></div>
-              <div class="pstat"><div class="l">CALLS PLAYED</div><div class="v" id="psGames">0</div></div>
+              <div class="pstat"><div class="l">GAUNTLET BEST</div><div class="v" id="psGaunt">—</div></div>
             </div>
             <div class="pgrid" id="pSkills" style="margin-bottom:22px"></div>
 
+            <div class="psec" id="pLines"><h3>My lines</h3>
+              <p class="hint">Write each part of the call in your own words. Claude tightens it without making it sound canned. Saved lines appear on the practice home.</p>
+              <div class="card">
+                <select id="lSkill" style="width:auto;margin-bottom:8px"><option value="opener">Opener</option><option value="discovery">Discovery question</option><option value="objections">Objection answer</option><option value="ask">The ask</option></select>
+                <textarea id="lDraft" placeholder="How you'd actually say it…"></textarea>
+                <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="go" id="lCoach">Tighten it</button><button id="lSave">Save as mine</button></div>
+                <div class="pgrade hide" id="lOut"></div>
+                <div id="lMine" style="margin-top:12px"></div>
+              </div></div>
+
             <div class="psec" id="pMods"><h3>Modules <span class="muted" id="pModN">0 / 6</span></h3>
-              <p class="hint">The call, in the order it happens. Tick one when you can do it without reading.</p>
+              <p class="hint">The call, in the order it happens. This rotation's focus is highlighted. Tick one when you can do it without reading.</p>
               <div class="pgrid" id="pModList"></div></div>
 
-            <div class="psec"><h3>Videos</h3>
+            <div class="psec"><h3>Videos <span class="muted">· this rotation</span></h3>
               <p class="hint">Each opens a YouTube search pinned to the coach and topic, so you get their newest uploads rather than a link that's gone stale.</p>
               <div class="films" id="pFilms"></div></div>
 
             <div class="psec" id="pDrill"><h3>Quick-Think</h3>
-              <p class="hint">An owner throws a curveball. You get 25 seconds to answer, typed or spoken. Claude scores it and gives you a better line.</p>
+              <p class="hint">An owner throws a curveball. You get 25 seconds to answer, typed or spoken. Claude scores it, gives you a better line, and saves any miss for replay.</p>
               <div class="card">
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                   <button class="go" id="dNew">Throw me one</button>
@@ -464,10 +489,10 @@
               </div></div>
 
             <div class="psec" id="pTest"><h3>Test <span class="muted" id="tScore">0 / 10</span></h3>
-              <p class="hint">Ten questions. Your best score is saved.</p>
+              <p class="hint">Ten questions, drawn fresh each rotation from a bank of 30. Your best score is saved.</p>
               <div id="tQs"></div><button id="tReset">Retake</button></div>
 
-            <div class="psec"><h3>Research</h3>
+            <div class="psec"><h3>Research <span class="muted">· this rotation</span></h3>
               <p class="hint">What recorded-call data and the coaches who study it say, and what it means for a bar owner.</p>
               <div id="pFinds"></div></div>
           </details>
@@ -482,8 +507,12 @@
           </div>
           <div id="gPick">
             <p style="font-size:15px;color:var(--text2);margin:0 0 12px">Get them to <b style="color:var(--text)">agree to try 86'd</b>. Their patience drains while you hesitate. Each owner hides three problems, and they won't say yes until you've found two.</p>
+            <div class="rot" id="gRule"></div>
+            <div class="glabel">GUESTS THIS ROTATION</div>
+            <div id="gGuests"></div>
+            <div class="glabel">THE LADDER</div>
             <div id="gBosses"></div>
-            <p class="muted" style="font-size:12px">Hands-free: the owner talks, then the mic opens by itself. Talk like you're on the phone and pause when you're done. Chrome and Safari only.</p>
+            <p class="muted" style="font-size:12px">Hands-free: the owner talks, then the mic opens by itself. Talk like you're on the phone and pause when you're done. Chrome and Safari only; type any time.</p>
           </div>
           <div id="gPlay" class="hide">
             <div class="gmeters">
@@ -491,6 +520,7 @@
               <div><div class="l">TRUST</div><div class="mtrack"><div class="mfill" id="gTru"></div></div></div>
               <div id="gPains" title="Problems found" style="font-size:18px;letter-spacing:2px"></div>
             </div>
+            <div class="muted" id="gLines" style="font-size:11px;margin-bottom:4px"></div>
             <div class="gchat" id="gChat" aria-live="polite"></div>
             <div class="gbar"><textarea id="gIn" placeholder="Say something…"></textarea>
               <button class="mic" id="gMic">🎙 Talk</button>
@@ -502,8 +532,35 @@
             <div id="eStars" style="font-size:28px;color:var(--wait);margin:4px 0"></div>
             <div class="muted" id="ePts" style="font-size:13px"></div>
             <div class="pgrade" id="eTape"></div>
-            <div style="display:flex;gap:8px;margin-top:14px"><button class="go" id="eAgain">Call again</button><button id="ePick">Different owner</button></div>
+            <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="go" id="eNext">Next</button><button id="eAgain">Call again</button><button id="ePick">Different owner</button></div>
           </div>
+        </div>
+
+        <div id="pGaunt" class="hide">
+          <div class="ghead"><button id="xLeave">← Leave</button><div class="t">Gauntlet</div><div id="xLives" style="font-size:18px"></div></div>
+          <div class="gmeters" style="grid-template-columns:1fr auto">
+            <div><div class="l" id="xRound">ROUND 1 OF 10</div><div class="mtrack"><div class="mfill pat" id="xBar" style="width:100%"></div></div></div>
+            <div style="text-align:right"><div class="l">SCORE</div><div style="font-size:22px;font-weight:800" id="xScore">0</div></div>
+          </div>
+          <div class="muted" id="xWho" style="font-size:12px;margin-top:12px"></div>
+          <div class="pline" id="xLine"></div>
+          <div id="xOpts"></div>
+          <div class="pgrade hide" id="xWhy"></div>
+          <div id="xEnd" class="hide"><h2 id="xVerdict" style="margin:0 0 6px;font-size:24px"></h2><div class="muted" id="xSum"></div>
+            <div style="display:flex;gap:8px;margin-top:14px"><button class="go" id="xNext">Next</button><button id="xAgain">Play again</button></div></div>
+        </div>
+
+        <div id="pCards" class="hide">
+          <div class="ghead"><button id="cLeave">← Leave</button><div class="t">Replay misses</div><div class="muted" id="cLeft"></div></div>
+          <div class="card" id="cCard">
+            <div class="muted" id="cCtx" style="font-size:12px"></div>
+            <div class="pline" id="cFront"></div>
+            <p class="muted" style="font-size:12px;margin:0 0 10px">Say your answer out loud, then flip.</p>
+            <button class="go" id="cFlip">Flip</button>
+            <div id="cBack" class="hide"><div class="say" id="cBackT" style="margin:12px 0"></div>
+              <div style="display:flex;gap:8px"><button class="go" id="cGot">I had it</button><button id="cMiss">Not yet</button></div></div>
+          </div>
+          <div id="cDone" class="hide card"><b>All caught up.</b><p class="muted" style="margin:6px 0 10px">Lines you miss in drills, calls and the Gauntlet come back here: tomorrow, then in 3 days, then a week, then two weeks.</p><button class="go" id="cNext">Next</button></div>
         </div>
       </div>
     </section>
@@ -2173,31 +2230,55 @@ $('recheckBtn').onclick=startRecheck;
 
 
 /* ── practice ─────────────────────────────────────────────────────────────
-   Warm-up inside the Call list tab. The surface is one headline and one
-   button; the depth (a skill model, owners with hidden problems, a referee on
-   the server that won't let the AI cave) stays underneath. Scores live in this
-   browser, like the key does: they're about the caller, not the pipeline. */
-const PR_STORE='crmPractice';
-let PR={scores:[],mods:{}};
-try{ PR=Object.assign(PR, JSON.parse(localStorage.getItem(PR_STORE)||'{}')); }catch{}
+   Warm-up inside the Call list tab. The surface is one headline, one button
+   and a three-step daily set; the depth (a skill model, spaced replay of your
+   own misses, owners with hidden problems, a server-side referee that won't
+   let the AI cave) stays underneath.
+
+   Content ROTATES every 3 days, seeded from the date, so the same day always
+   shows the same set and a new block brings new owners, a new house rule,
+   new test questions, new research and new Gauntlet rounds.
+
+   Nothing here may take the Call list down: every AI call has an offline
+   path, every speech API is optional, and storage failures only cost the
+   scoreboard. Scores live in this browser, like the key does. */
+const PR_STORE='crmPractice', ROT_DAYS=3;
+let PR={scores:[],mods:{},cards:[],lines:{},v:2};
+try{ const saved=JSON.parse(localStorage.getItem(PR_STORE)||'{}');
+  if(saved&&typeof saved==='object') PR=Object.assign(PR,saved);
+  ['scores','cards'].forEach(k=>{ if(!Array.isArray(PR[k])) PR[k]=[]; });
+  ['mods','lines'].forEach(k=>{ if(!PR[k]||typeof PR[k]!=='object') PR[k]={}; });
+  PR.scores=PR.scores.filter(s=>s&&typeof s.at==='string');
+}catch{}
 const prSave=()=>{ try{ localStorage.setItem(PR_STORE, JSON.stringify(PR)); }catch{} };
-function prScore(rec){ PR.scores.push({...rec, at:new Date().toISOString()}); PR.scores=PR.scores.slice(-400); prSave(); prRender(); }
+const todayKey=()=>{ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+function prScore(rec){ PR.scores.push({...rec, at:new Date().toISOString(), day:todayKey()}); PR.scores=PR.scores.slice(-600); prSave(); prRender(); }
+
+/* rotation: a block number from the local date, and a seeded shuffle */
+const dayNum=()=>{ const d=new Date(); return Math.floor(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())/864e5); };
+const BLOCK=Math.floor(dayNum()/ROT_DAYS);
+const daysLeft=()=>ROT_DAYS-(dayNum()%ROT_DAYS);
+function rng(seed){ return ()=>{ seed|=0; seed=seed+0x6D2B79F5|0; let t=Math.imul(seed^seed>>>15,1|seed); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+function pick(arr,n,salt){ const r=rng(BLOCK*97+salt), a=arr.slice();
+  for(let i=a.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a.slice(0,n); }
 
 function showPractice(on){
   $('practice').classList.toggle('hide',!on);
   $('callMain').classList.toggle('hide',on);
-  if(on){ prHome(); prRender(); window.scrollTo(0,0); } else { gStop(); speechCancel(); }
+  if(on){ prView('pHome'); prRender(); window.scrollTo(0,0); } else { gQuit(); xQuit(); speechCancel(); }
 }
+function prView(id){ ['pHome','pGame','pGaunt','pCards'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
 $('practiceBtn').onclick=()=>showPractice(true);
 $('pTileBack').onclick=()=>showPractice(false);
 
+/* ── content banks ── */
 const P_MODS=[
-  ['The opener','Buy 30 seconds. Name the interruption, then ask permission. Never ask if it\'s a bad time.','“Hey, it\'s [your name] with 86\'d. I know I\'m catching you during prep, so can I take 30 seconds on why I called, and you tell me if it\'s worth another minute?”','permission+based+cold+call+opener'],
-  ['The reason, as a problem','One sentence naming a problem they already have. No features.','“Most bar owners I talk to lose a couple of hours a week counting bottles and retyping it into orders, and the order still comes in wrong. Is that you, or have you got it handled?”','30+minutes+to+presidents+club+problem+proposition'],
-  ['Discovery','Ask, then stop talking. Find out about prices, distributors, and who does the counts.','“Who does your counts, and when?” · “How many distributors?” · “When a price changes, where does that get written down?”','sales+discovery+questions+cold+call'],
-  ['Objections','Acknowledge, ask about it, then answer. Don\'t argue with the first no.','“Totally fair, most people have a system. Out of curiosity, what does yours look like on a Sunday night?”','handling+cold+call+objections+josh+braun'],
-  ['The ask','Small and specific: 15 minutes, on their own iPhone, before service.','“Worth 15 minutes Tuesday around 2, before you open? I\'ll put your actual price list on your phone so you can see it working.”','booking+meeting+on+cold+call'],
-  ['Gatekeepers & voicemail','Whoever answers is on your side. Get the owner\'s name and when they\'re in.','“Quick one: who handles the liquor orders there? … Perfect. When\'s Maria usually in before service?”','cold+call+gatekeeper+voicemail+script']
+  ['The opener','Buy 30 seconds. Name the interruption, then ask permission. Never ask if it\'s a bad time.','“Hey, it\'s [your name] with 86\'d. I know I\'m catching you during prep, so can I take 30 seconds on why I called, and you tell me if it\'s worth another minute?”','permission+based+cold+call+opener','opener'],
+  ['The reason, as a problem','One sentence naming a problem they already have. No features.','“Most bar owners I talk to lose a couple of hours a week counting bottles and retyping it into orders, and the order still comes in wrong. Is that you, or have you got it handled?”','30+minutes+to+presidents+club+problem+proposition','opener'],
+  ['Discovery','Ask, then stop talking. Find out about prices, distributors, and who does the counts.','“Who does your counts, and when?” · “How many distributors?” · “When a price changes, where does that get written down?”','sales+discovery+questions+cold+call','discovery'],
+  ['Objections','Acknowledge, ask about it, then answer. Don\'t argue with the first no.','“Totally fair, most people have a system. Out of curiosity, what does yours look like on a Sunday night?”','handling+cold+call+objections+josh+braun','objections'],
+  ['The ask','Small and specific: 15 minutes, on their own iPhone, before service.','“Worth 15 minutes Tuesday around 2, before you open? I\'ll put your actual price list on your phone so you can see it working.”','booking+meeting+on+cold+call','ask'],
+  ['Gatekeepers & voicemail','Whoever answers is on your side. Get the owner\'s name and when they\'re in.','“Quick one: who handles the liquor orders there? … Perfect. When\'s Maria usually in before service?”','cold+call+gatekeeper+voicemail+script','opener']
 ];
 const P_FILMS=[
   ['30 Minutes to President\'s Club','Cold calls broken down line by line','30+minutes+to+presidents+club+cold+call'],
@@ -2206,7 +2287,12 @@ const P_FILMS=[
   ['Kevin “KD” Dorsey','Mindset, tone of voice, call volume','kevin+dorsey+kd+cold+calling'],
   ['Live recorded cold calls','Hearing the bad ones is how you learn','live+cold+calls+recorded+sdr'],
   ['Selling to restaurant & bar owners','Closest match to your buyer','how+to+sell+to+restaurant+owners+cold+call'],
-  ['Tone & pacing','Sounding certain in a noisy back-of-house','cold+call+tonality+tips']
+  ['Tone & pacing','Sounding certain in a noisy back-of-house','cold+call+tonality+tips'],
+  ['Chris Voss: labels & mirrors','“It sounds like…”: calming a tense owner','chris+voss+labeling+mirroring'],
+  ['Chris Voss: no-oriented questions','“Would it be crazy to…?”','chris+voss+no+oriented+questions'],
+  ['Becc Holland: pattern interrupts','Openers that don\'t sound like every other sales call','becc+holland+cold+call+opener'],
+  ['Belal Batrawy: death to fluff','Cut every word that sounds like a salesperson','belal+batrawy+death+to+fluff'],
+  ['Morgan J Ingram','Energy and consistency on the phones','morgan+j+ingram+cold+calling']
 ];
 const P_QUIZ=[
   ['Which opener does Gong\'s data say hurts booking rates most?',['“How have you been?”','“Did I catch you at a bad time?”','“The reason I\'m calling is…”','“I know this is out of the blue.”'],1,'Asking if it\'s a bad time invites “yes, bye.” It cost about 40% in Gong\'s data.'],
@@ -2218,7 +2304,27 @@ const P_QUIZ=[
   ['Strongest way to end the call?',['“Can I send you some info?”','“Let me know if you\'re interested.”','“15 minutes Tuesday at 2, before you open, on your own price list?”','“What\'s your budget?”'],2,'Small, specific, and about their own data.'],
   ['A bartender picks up. Best move?',['Pitch them','Ask who handles liquor orders and when they\'re in','Hang up','Leave a long message'],1,'Get a name and a time to call back.'],
   ['What\'s the pause after a question for?',['Filling silence','Letting them think and answer. The silence does the work','Sounding friendly','Keeping it short'],1,'Ask, then stop talking.'],
-  ['A “problem proposition” is…',['A list of features','A pain they already feel, said in their words','A discount','A case study'],1,'Name the problem, not the product.']
+  ['A “problem proposition” is…',['A list of features','A pain they already feel, said in their words','A discount','A case study'],1,'Name the problem, not the product.'],
+  ['Strongest pitch in Arizona?',['Full-wage labour cost','Time saved and fewer ordering mistakes','Android support','Tax savings'],1,'AZ has a tip credit, so lead with time and accuracy, not labour cost.'],
+  ['A bar changed hands 3 months ago. Good lead?',['No, too new','Yes: ownership transfers count, and new owners inherit messy processes','Only if it\'s a chain','Only in Nevada'],1,'An ownership change of an operating bar is in the window.'],
+  ['Why skip bars open longer than 9 months?',['They\'re closing','They usually have an entrenched process already','They can\'t afford it','Licence rules'],1,'Past 9 months, habits are set and the pain feels normal.'],
+  ['A Las Vegas Strip casino bar calls you back. Qualified?',['Yes, big volume','No: casino-operated venues buy centrally','Only on weekends','Only with a manager'],1,'Strip and casino venues are corporate. Independents cluster off-Strip.'],
+  ['In Washington, a “Tavern” licence means…',['Full spirits','Beer and wine only','Nightclub','Restaurant'],1,'In WA, Tavern means beer and wine only. Always check that state\'s definition.'],
+  ['“How much is it?” in the first 20 seconds. Best reply?',['Give the full price breakdown','“Fair question. Depends on how many bottles. Roughly how many do you carry?”','Dodge it','“It\'s cheap”'],1,'Answer honestly and turn it into a discovery question.'],
+  ['“Just email me.” Best reply?',['“Sure, what\'s your email?” and hang up','“Happy to. So I send the right thing, is counting or ordering the bigger headache?”','Argue','Ignore it'],1,'Agree, then earn one more answer so the email is worth opening.'],
+  ['The best time to label an emotion is…',['Never','When they sound stressed or annoyed: “Sounds like it\'s been a long week”','After the close','Only by email'],1,'Labels lower tension so they can keep listening.'],
+  ['A no-oriented question looks like…',['“Do you want to save time?”','“Would it be crazy to look at this for 15 minutes?”','“Can I show you a demo?”','“Is now good?”'],1,'People feel safe saying no, and “no, not crazy” is a yes.'],
+  ['On a discovery call, who should talk more?',['You','The owner','Equal','Doesn\'t matter'],1,'Top reps listen more than they talk.'],
+  ['Your voice at the end of a statement should…',['Go up, like a question','Go down, sounding certain','Get faster','Get louder'],1,'Downward inflection sounds confident. Upward sounds unsure.'],
+  ['Most meetings from cold outreach come…',['On the first dial','After several attempts','Only by email','Never'],1,'Persistence wins. Check your own attempt numbers under Numbers.'],
+  ['What does 86\'d replace?',['The POS','Manual bottle counts and texting reps for orders','Payroll','The bartender'],1,'Permanent price book, fast counts, one-tap ordering.'],
+  ['The owner mentions three reps texting price changes. That\'s…',['Small talk','A pain to dig into: “What happens when one gets missed?”','An objection','A reason to hang up'],1,'Dig into the pain with a follow-up question.'],
+  ['The best way to find the decision-maker is…',['Guess','Ask whoever answers who handles liquor orders','Email everyone','Ask for “the manager”'],1,'Ask about the job (ordering), not the title.'],
+  ['You got a “not interested.” Best reply?',['“OK, bye”','“Totally fair. Is that because you\'ve got counting handled, or it\'s just a bad week?”','Keep pitching','Offer a discount'],1,'One respectful question to find out if it\'s a real no.'],
+  ['An owner says “we use a spreadsheet.” What do you ask?',['“Why not an app?”','“Who keeps it up to date when prices change?”','“Can I replace it?”','Nothing'],1,'Find the weak spot in the system they\'re proud of.'],
+  ['You made a feature list. On the call, you should…',['Read it all','Use one feature, tied to the pain they just told you','Email it','Skip features entirely'],1,'One feature, their problem, their words.'],
+  ['After a no, a good call is…',['Wasted','Useful: log why, so your next opener is better','Something to forget','A reason to quit'],1,'Every no teaches you something. Log it in the CRM.'],
+  ['What\'s the trial ask?',['“Want to buy?”','“Try it free on your next count and tell me if it saved time”','“Sign here”','“Think about it”'],1,'Low risk, their own data, a clear finish line.']
 ];
 const P_FINDS=[
   ['−40%','Gong Labs','<b>“Did I catch you at a bad time?” sinks the call.</b> It cut booking rates by about 40% across roughly 90,000 recorded calls. Say “I know I\'m catching you during prep” instead.'],
@@ -2227,121 +2333,239 @@ const P_FINDS=[
   ['Problem','30MPC','<b>Pitch a problem, not a product.</b> “Sunday-night counts eating two hours, and the rep still gets the order wrong” beats any list of features.'],
   ['Ask','Permission','<b>Ask permission to take 30 seconds.</b> Most people say yes, and that yes gives you control of the call.'],
   ['1–4pm','Rule of thumb','<b>Bars keep different hours from offices.</b> Owners are in before service doing prep and orders. This is a field rule, not a study, so check it against the dial stats under Numbers.'],
-  ['$$','86\'d','<b>In CA, NV, WA and OR every counting hour is paid at full wage</b> (no tip credit). In AZ, TX and CO, lead with time saved and fewer ordering mistakes.']
+  ['$$','86\'d','<b>In CA, NV, WA and OR every counting hour is paid at full wage</b> (no tip credit). In AZ, TX and CO, lead with time saved and fewer ordering mistakes.'],
+  ['Listen','Gong Labs','<b>Top reps listen more than they talk.</b> Gong\'s discovery-call data has winners talking well under half the time. Ask, then let the owner fill the silence.'],
+  ['Label','Chris Voss','<b>Name the emotion.</b> “Sounds like it\'s been a long week” lowers a stressed owner\'s guard faster than any pitch.'],
+  ['No','Chris Voss','<b>Ask for a no.</b> “Would it be crazy to look at this before your next count?” People feel safe saying no, and “no, not crazy” is a yes.'],
+  ['↓','Tone','<b>End statements on a downward note.</b> Rising at the end makes everything sound like a question, and uncertain reps don\'t get meetings.'],
+  ['2–9 mo','86\'d','<b>Timing is the silent qualifier.</b> Newer than 2 months, they have no prices or reps to organise yet. Older than 9, the pain feels normal.']
 ];
-$('pFilms').innerHTML=P_FILMS.map(f=>`<a href="https://www.youtube.com/results?search_query=${f[2]}" target="_blank" rel="noopener"><b>${esc(f[0])}</b> <span>${esc(f[1])} ↗</span></a>`).join('');
-$('pFinds').innerHTML=P_FINDS.map(f=>`<div class="find"><div class="v">${esc(f[0])}<small>${esc(f[1])}</small></div><p>${f[2]}</p></div>`).join('');
+const GAUNT=[
+  ['Owner, mid-delivery','“Who is this? I\'ve got a truck at the back.”',['“Did I catch you at a bad time?”','“It\'s [name] with 86\'d. Sounds like a bad moment. 20 seconds now, or call back at 2?”','Launch into the pitch'],1,'Name the moment and give them control.'],
+  ['Owner, price-first','“How much is it?”',['“It\'s really affordable!”','“Depends on size. Roughly how many bottles do you carry?”','Hang up'],1,'Honest, then turn it into discovery.'],
+  ['GM, burned before','“We tried an inventory app. Nobody used it.”',['“Ours is better.”','“What made people stop using it?”','“That\'s their fault.”'],1,'Find out why it failed. That\'s your pitch.'],
+  ['Owner, brush-off','“Just email me.”',['“Sure, bye.”','“Will do. So it\'s worth opening, is counting or ordering the bigger headache?”','“Emails don\'t work.”'],1,'Agree, then earn one more answer.'],
+  ['Owner, loyal','“My rep handles all my ordering.”',['“Your rep is ripping you off.”','“Nice. How do you check what he charged against last month?”','“You need us instead.”'],1,'Never attack the rep. Ask how they check.'],
+  ['Owner, Android','“My whole staff is on Android.”',['“It works on Android.”','“It\'s iPhone-only, honestly. Who does the counting and ordering, and what phone do they use?”','“Android is coming soon.”'],1,'Be honest and find the iPhone user.'],
+  ['Owner, suspicious','“How did you get this number?”',['“I can\'t say.”','“It\'s your public listing. I call independent bars about inventory. Fair to ask why?”','“Doesn\'t matter.”'],1,'Tell the truth and move on.'],
+  ['Owner, busy','“I\'ve got 30 seconds.”',['Talk fast for 30 seconds','“Then one question: how long do your counts take?”','“I\'ll call back.”'],1,'Use the time to ask, not to pitch.'],
+  ['Owner, satisfied','“We\'re fine with our spreadsheet.”',['“Spreadsheets are outdated.”','“Makes sense. Who updates it when a rep changes a price?”','“OK, bye.”'],1,'Find the gap in the system they like.'],
+  ['Owner, not the buyer','“I don\'t do the ordering.”',['“Who does?”','“Got it. Who handles the liquor orders, and when are they usually in?”','Pitch anyway'],1,'Get a name and a time.'],
+  ['Owner, annoyed','“You\'re the fifth sales call today.”',['“This one\'s different!”','“Ugh, sounds exhausting. I\'ll be the shortest one. Can I have 20 seconds?”','“Sorry, bye.”'],1,'Label it, then keep it short.'],
+  ['Owner, curious','“So what does it actually do?”',['List every feature','“Short version: it remembers every price you pay and turns your count into an order. What\'s the worse part for you, counting or ordering?”','“It\'s complicated.”'],1,'One sentence, then back to them.'],
+  ['Owner, no time','“I don\'t have time to learn new software.”',['“It\'s easy!”','“Fair. How long does counting take you now?”','“Make time.”'],1,'Compare against the time they already lose.'],
+  ['Owner, cost','“I can\'t afford another subscription.”',['“It pays for itself!”','“Understood. What does a missed or wrong order cost you in a week?”','Offer a discount straight away'],1,'Put a number on their current cost first.'],
+  ['Owner, trust','“Where\'s my data going?”',['“Don\'t worry about it.”','“It\'s your price list, it stays yours, and you can export it. What would you need to feel OK with it?”','“The cloud.”'],1,'Take the concern seriously and ask what they need.'],
+  ['Owner, maybe','“Call me next month.”',['“OK!”','“Will do. What changes next month? Just so I call at the right time.”','“Why wait?”'],1,'Find out what really changes.'],
+  ['New owner','“I just bought the place, it\'s chaos.”',['“Congrats, want a demo?”','“Congrats. Did the old owner leave you any price records?”','“Call when it\'s calm.”'],1,'Ownership changes often come with no records. Ask.'],
+  ['Owner, testing you','“Why should I trust a startup?”',['“We\'re the best.”','“Fair. You shouldn\'t on my word. Try it on one count and judge it on that.”','“Everyone trusts us.”'],1,'Lower the risk instead of arguing.'],
+  ['Bartender','“Owner\'s not here.”',['“OK, bye.”','“No worries. When\'s the best time to catch them before service?”','Pitch the bartender'],1,'Get a time and a name.'],
+  ['Owner, voicemail','(voicemail beep)',['Leave a 60-second pitch','“Hi, it\'s [name], about the Sunday counts. I\'ll try you Tuesday at 2.”','Hang up without a message'],1,'Short, specific, with a promised time.'],
+  ['Owner, positive','“Actually, counts do kill my Sundays.”',['Start the pitch','“How long do they take, start to finish?”','“Great, sign up!”'],1,'Dig deeper before you pitch.'],
+  ['Owner, comparing','“How are you different from BevSpot?”',['Trash BevSpot','“What do you like or not like about what you\'re using now?”','“We\'re cheaper.”'],1,'Let them tell you the gap.'],
+  ['Owner, ready','“OK, what\'s the next step?”',['“I\'ll send info.”','“15 minutes Tuesday at 2, before you open, on your real price list. That work?”','“Whenever you want.”'],1,'Specific time, their data.'],
+  ['Owner, hesitant','“I need to talk to my partner.”',['“Can\'t you decide?”','“Makes sense. What will your partner ask that I can answer now?”','“OK, bye.”'],1,'Prepare them to sell it for you.']
+];
+
+/* this rotation */
+const ROT={
+  mods:pick(P_MODS.map((_,i)=>i),1,1)[0],
+  films:pick(P_FILMS,4,2), quiz:pick(P_QUIZ,10,3), finds:pick(P_FINDS,4,4),
+  gaunt:pick(GAUNT,10,5), guests:null, rule:null
+};
+const RULE_KEYS=['short_fuse','price_first','speed','storm','gatekeeper','callback'];
+ROT.rule=pick(RULE_KEYS,1,6)[0];
+const RULE_TXT={short_fuse:'Short fuse: owners start less patient.',price_first:'Price first: they\'ll demand the price early.',speed:'Speed round: win in 10 lines or fewer.',storm:'Interruption storm: expect a chaotic back-of-house.',gatekeeper:'Wrong person: a bartender answers first.',callback:'The callback: you spoke last week. Do you remember them?'};
+
+$('pRot').innerHTML=`Rotation <b>#${BLOCK%1000}</b> · ${esc(RULE_TXT[ROT.rule])} · new stuff in ${daysLeft()} day${daysLeft()===1?'':'s'}`;
+$('pFilms').innerHTML=ROT.films.map(f=>`<a href="https://www.youtube.com/results?search_query=${f[2]}" target="_blank" rel="noopener"><b>${esc(f[0])}</b> <span>${esc(f[1])} ↗</span></a>`).join('');
+$('pFinds').innerHTML=ROT.finds.map(f=>`<div class="find"><div class="v">${esc(f[0])}<small>${esc(f[1])}</small></div><p>${f[2]}</p></div>`).join('');
 
 function prMods(){
   let done=0;
   $('pModList').innerHTML=P_MODS.map((m,i)=>{ const on=!!PR.mods['m'+i]; if(on)done++;
-    return `<div class="pmod"><div class="n">Step ${i+1} of 6</div><b>${esc(m[0])}</b><p>${esc(m[1])}</p><div class="say">${esc(m[2])}</div>
+    const feat=i===ROT.mods;
+    return `<div class="pmod${feat?' feat':''}">${feat?'<div class="feat-tag">THIS ROTATION\'S FOCUS</div>':''}<div class="n">Step ${i+1} of 6</div><b>${esc(m[0])}</b><p>${esc(m[1])}</p><div class="say">${esc(m[2])}</div>
       <a class="plink" href="https://www.youtube.com/results?search_query=${m[3]}" target="_blank" rel="noopener">Watch examples ↗</a>
       <label><input type="checkbox" data-m="${i}" ${on?'checked':''}> I can do this without reading</label></div>`; }).join('');
   $('pModN').textContent=done+' / 6';
 }
 $('pModList').onchange=e=>{ const c=e.target.closest('input[data-m]'); if(!c) return; PR.mods['m'+c.dataset.m]=c.checked; prSave(); prRender(); };
 
-/* ── skill model + the one thing ── */
+/* ── replay misses: spaced repetition of your own fumbles ── */
+const BOX_DAYS=[0,1,3,7,14];
+function addCard(ctx,front,back){
+  if(!front||!back) return;
+  if(PR.cards.some(c=>c.front===front&&c.back===back)) return;
+  PR.cards.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),ctx,front,back,box:1,due:dayNum()+1});
+  PR.cards=PR.cards.slice(-150); prSave();
+}
+const dueCards=()=>PR.cards.filter(c=>c.box<BOX_DAYS.length&&c.due<=dayNum());
+let CQ=[], CUR=null, CSEEN=0;
+function cOpen(){ CQ=dueCards().slice(0,12); CSEEN=0; prView('pCards'); cShow(); }
+function cShow(){
+  CUR=CQ.shift();
+  $('cCard').classList.toggle('hide',!CUR); $('cDone').classList.toggle('hide',!!CUR);
+  $('cLeft').textContent=CUR?(CQ.length+1)+' left':'';
+  if(!CUR){ if(CSEEN){ CSEEN=0; prScore({kind:'cards',score:10}); } return; }
+  CSEEN++;
+  $('cCtx').textContent=CUR.ctx; $('cFront').textContent=CUR.front; $('cBackT').textContent=CUR.back;
+  $('cBack').classList.add('hide'); $('cFlip').classList.remove('hide');
+}
+$('cFlip').onclick=()=>{ $('cBack').classList.remove('hide'); $('cFlip').classList.add('hide'); };
+function cRate(got){ if(!CUR) return; const c=PR.cards.find(x=>x.id===CUR.id);
+  if(c){ c.box=got?c.box+1:1; c.due=dayNum()+(BOX_DAYS[c.box]||30); prSave(); } cShow(); }
+$('cGot').onclick=()=>cRate(true); $('cMiss').onclick=()=>cRate(false);
+$('cLeave').onclick=()=>{ prView('pHome'); prRender(); };
+$('cNext').onclick=()=>{ prView('pHome'); prRender(); };
+
+/* ── skill model, rank, and today's set ── */
 const SKILLS=[['opener','Opener'],['discovery','Discovery'],['objections','Objections'],['ask','The ask']];
 function skillLevels(){
   const out={};
   SKILLS.forEach(([k])=>{
     // Recency-weighted: the last 8 graded moments, newer ones count more.
-    const xs=PR.scores.filter(s=>s[k]!=null).slice(-8); let w=0,t=0;
+    const xs=PR.scores.filter(s=>typeof s[k]==='number').slice(-8); let w=0,t=0;
     xs.forEach((x,i)=>{ w+=i+1; t+=(i+1)*x[k]; });
     out[k]=xs.length? t/w : null;
   });
   return out;
 }
 const RANKS=[[0,'Barback'],[60,'Bartender'],[200,'Head Bartender'],[450,'Bar Manager'],[900,'Beverage Director'],[2000,'Closer']];
-function xp(){ return PR.scores.reduce((a,s)=>a+(s.kind==='game'?(s.pts||0):s.kind==='quiz'?s.score*5:s.score*3),0)
-  + Object.values(PR.mods).filter(Boolean).length*20; }
+function xp(){ return PR.scores.reduce((a,s)=>a+(s.kind==='game'?(s.pts||0):s.kind==='quiz'?s.score*5:s.kind==='gaunt'?Math.round((s.pts||0)/5):s.kind==='cards'?10:(s.score||0)*3),0)
+  + Object.values(PR.mods).filter(Boolean).length*20 + Object.keys(PR.lines).length*15; }
 function streak(){
-  const days=new Set(PR.scores.map(s=>s.at.slice(0,10))); let n=0; const d=new Date();
-  const key=x=>x.toISOString().slice(0,10);
+  const days=new Set(PR.scores.map(s=>s.day||s.at.slice(0,10))); let n=0; const d=new Date();
+  const key=x=>x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');
   if(!days.has(key(d))) d.setDate(d.getDate()-1);
   while(days.has(key(d))){ n++; d.setDate(d.getDate()-1); }
   return n;
 }
+const doneToday=kind=>PR.scores.some(s=>s.day===todayKey()&&s.kind===kind);
 const wins=id=>PR.scores.filter(s=>s.kind==='game'&&s.boss===id&&s.won);
-let BOSSES=[
+const LADDER=[
   {id:'dale',name:'Dale',level:1,tag:'Dive bar, 22 years. Burned by a POS company.'},
   {id:'priya',name:'Priya',level:2,tag:'Craft cocktail GM. Loves her spreadsheet.'},
   {id:'nguyen',name:'The Nguyen siblings',level:3,tag:'Just bought a bar. Broke and overwhelmed.'},
   {id:'marco',name:'Marco',level:4,tag:'Ex-salesman. Names every technique you use.'}];
-const unlocked=b=>b.level===1||wins(BOSSES[b.level-2].id).length>0;
+const GUEST_META={rosa:['Rosa','Chef-owner, San Diego. Mid-lunch rush, tequila list.'],mike:['Big Mike','Sports bar, Phoenix. Game day, loyal to his reps.'],hannah:['Hannah','Wine bar, Portland. Already trialling a competitor.'],earl:['Earl','35-year tavern, Fresno. Hates being rushed.'],jess:['Jess (bar manager)','Off-Strip Vegas. Not the owner, does all the work.'],dev:['Dev','600-bottle speakeasy, Austin. Hates subscriptions.']};
+ROT.guests=pick(Object.keys(GUEST_META),2,7);
+const unlocked=b=>b.level===1||wins(LADDER[b.level-2].id).length>0;
+const nextLadder=()=>LADDER.find(b=>unlocked(b)&&!wins(b.id).length);
+
+function dailySet(){
+  const lv=skillLevels(); let weakest=null;
+  SKILLS.forEach(s=>{ if(lv[s[0]]!=null&&(!weakest||lv[s[0]]<lv[weakest[0]])) weakest=s; });
+  const due=dueCards().length;
+  const warm=due?{kind:'cards',t:`Replay ${due} line${due===1?'':'s'} you fumbled.`,w:'Say each one out loud before you flip. Takes 2 minutes.',go:cOpen}
+                :{kind:'gaunt',t:'Run the Gauntlet.',w:'10 fast objections, 12 seconds each. Wakes your brain up.',go:xOpen};
+  const drill={kind:'drill',t:weakest&&lv[weakest[0]]<7?`One rep on your ${weakest[1].toLowerCase()}.`:'One 25-second curveball.',
+    w:weakest?`Weakest skill right now: ${weakest[1]} (${lv[weakest[0]].toFixed(1)}/10).`:'Claude throws a line, you answer before the clock runs out.',
+    go:()=>{ openSchool('pDrill'); $('dNew').click(); }};
+  const nb=nextLadder(), gid=nb?nb.id:ROT.guests[0], gname=nb?nb.name:GUEST_META[gid][0];
+  const call={kind:'game',t:`Win a call against ${gname}.`,w:nb?`Level ${nb.level}. ${nb.tag}`:`Guest this rotation. ${GUEST_META[gid][1]}`,go:()=>gStart(gid)};
+  return [warm,drill,call];
+}
 let PNOW=null;
 function prRender(){
   const lv=skillLevels(), x=xp();
   let rank=RANKS[0][1], next=null; RANKS.forEach((r,i)=>{ if(x>=r[0]){ rank=r[1]; next=RANKS[i+1]; } });
   $('pRank').textContent=`${rank} · ${x} XP`+(next?` · ${next[0]-x} to ${next[1]}`:'');
-  const s=streak(); $('pStreak').textContent=`🔥 ${s}-day streak`;
-  const games=PR.scores.filter(z=>z.kind==='game'), quiz=PR.scores.filter(z=>z.kind==='quiz'), drill=PR.scores.filter(z=>z.kind==='drill');
-  $('psWon').textContent=new Set(games.filter(g=>g.won).map(g=>g.boss)).size+' / 4';
-  $('psGames').textContent=games.length;
+  $('pStreak').textContent=`🔥 ${streak()}-day streak`;
+  const games=PR.scores.filter(z=>z.kind==='game'), quiz=PR.scores.filter(z=>z.kind==='quiz'),
+        drill=PR.scores.filter(z=>z.kind==='drill'), gaunt=PR.scores.filter(z=>z.kind==='gaunt');
+  $('psWon').textContent=new Set(games.filter(g=>g.won).map(g=>g.boss)).size;
   $('psQuiz').textContent=quiz.length? Math.max(...quiz.map(q=>q.score))+'/10' : '—';
   $('psDrill').textContent=drill.length? (drill.reduce((a,b)=>a+b.score,0)/drill.length).toFixed(1) : '—';
+  $('psGaunt').textContent=gaunt.length? Math.max(...gaunt.map(g=>g.pts||0)) : '—';
   $('pSkills').innerHTML=SKILLS.map(([k,l])=>`<div class="pstat"><div class="l">${l.toUpperCase()}</div><div class="v">${lv[k]==null?'—':lv[k].toFixed(1)}</div><div class="mtrack"><div class="mfill" style="width:${(lv[k]||0)*10}%"></div></div></div>`).join('');
-  prMods();
-  let weakest=null; SKILLS.forEach(s2=>{ if(lv[s2[0]]!=null&&(!weakest||lv[s2[0]]<lv[weakest[0]])) weakest=s2; });
-  const nextBoss=BOSSES.find(b=>unlocked(b)&&!wins(b.id).length);
-  if(!games.length) PNOW={t:'Win your first call against Dale.',w:'He\'s the easiest owner in the game. Five minutes.',go:()=>gStart('dale')};
-  else if(weakest&&lv[weakest[0]]<6) PNOW={t:`Fix your ${weakest[1].toLowerCase()}.`,w:`Your weakest skill (${lv[weakest[0]].toFixed(1)}/10). One 25-second rep.`,go:()=>{ openSchool('pDrill'); $('dNew').click(); }};
-  else if(nextBoss) PNOW={t:`Beat ${nextBoss.name}.`,w:`Level ${nextBoss.level}. ${nextBoss.tag}`,go:()=>gStart(nextBoss.id)};
-  else PNOW={t:'Go for 3 stars on Marco.',w:'You\'ve beaten every owner. Now win in 8 lines or fewer.',go:()=>gStart('marco')};
+  prMods(); prLinesMine();
+  const due=dueCards().length;
+  $('pTileCardsS').textContent=due?`${due} due today.`:'Nothing due. Misses land here.';
+  $('pTileCallS').textContent=`Guests: ${ROT.guests.map(g=>GUEST_META[g][0]).join(' & ')}.`;
+  // Today's set: three steps, each ticks itself off when its activity is done.
+  const set=dailySet(), state=set.map(s=>doneToday(s.kind)), i=state.indexOf(false);
+  $('pDots').innerHTML=state.map((d,j)=>`<i class="${d?'done':(j===i?'cur':'')}"></i>`).join('');
+  if(i<0){ $('pNowK').textContent='TODAY\'S SET · DONE';
+    PNOW={t:'Warmed up. Go make real calls.',w:'Everything after this is bonus. The call list is waiting.',go:()=>showPractice(false)};
+  } else { $('pNowK').textContent=`TODAY'S SET · ${i+1} OF 3`; PNOW=set[i]; }
   $('pNowT').textContent=PNOW.t; $('pNowW').textContent=PNOW.w;
+  $('pNowGo').textContent=i<0?'Go to the call list':'Start';
   if(!$('gPick').classList.contains('hide')) gBossList();
 }
-function openSchool(id){ $('pSchool').open=true; $(id).scrollIntoView({block:'start'}); }
-$('pNowGo').onclick=()=>PNOW&&PNOW.go();
+function openSchool(id){ $('pSchool').open=true; prView('pHome'); $(id).scrollIntoView({block:'start'}); }
+$('pNowGo').onclick=()=>{ try{ PNOW&&PNOW.go(); }catch(e){ toast('That didn\'t start. Try the tiles below.'); } };
 $('pTileCall').onclick=()=>gOpen();
-$('pTileRep').onclick=()=>{ openSchool('pDrill'); $('dNew').click(); };
+$('pTileGaunt').onclick=()=>xOpen();
+$('pTileCards').onclick=()=>cOpen();
 
-/* ── voice: the owner speaks, and the mic listens ── */
-const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-let rec=null, recTarget=null, recOnDone=null;
-function speechCancel(){ try{ speechSynthesis.cancel(); }catch{} try{ rec&&rec.abort(); }catch{} }
-function listen(target, micBtn, onDone){
-  if(!SR){ toast('Voice input needs Chrome or Safari. Type instead.'); return; }
-  try{ rec&&rec.abort(); }catch{}
-  rec=new SR(); rec.lang='en-US'; rec.interimResults=true; rec.continuous=false;
-  const base=target.value?target.value+' ':'';
-  recTarget=target; recOnDone=onDone;
-  rec.onresult=e=>{ let t=''; for(const r of e.results) t+=r[0].transcript; target.value=base+t; };
-  rec.onend=()=>{ micBtn.classList.remove('live'); micBtn.textContent='🎙 Talk'; rec=null;
-    if(recOnDone&&target.value.trim()) recOnDone(); };
-  rec.onerror=e=>{ if(e.error==='not-allowed') toast('Microphone blocked. Allow it in the browser to talk.'); };
-  micBtn.classList.add('live'); micBtn.textContent='● Listening';
-  try{ rec.start(); }catch{}
+/* ── my lines ── */
+const LINE_LBL={opener:'OPENER',discovery:'DISCOVERY',objections:'OBJECTION ANSWER',ask:'THE ASK'};
+function prLinesMine(){
+  const ks=Object.keys(PR.lines);
+  $('lMine').innerHTML=ks.length?'<div class="mine">'+ks.map(k=>`<div><b>MY ${LINE_LBL[k]||k.toUpperCase()}</b>${esc(PR.lines[k])}</div>`).join('')+'</div>':'';
 }
-const VOICES={dale:[0.75,0.95],priya:[1.15,1.05],nguyen:[1.0,1.12],marco:[0.9,1.15]};
+$('lCoach').onclick=async()=>{
+  const draft=$('lDraft').value.trim(); if(!draft) return toast('Write a line first.');
+  const o=$('lOut'); o.classList.remove('hide'); o.innerHTML='<div class="muted">Tightening…</div>'; $('lCoach').disabled=true;
+  try{ const r=await api('/coach/script',{method:'POST',body:JSON.stringify({skill:$('lSkill').value,draft})});
+    o.innerHTML=`<div class="big">${r.score}<span class="muted" style="font-size:14px"> / 10</span></div><div><strong>Keep:</strong> ${esc(r.keep)}</div><div><strong>Change:</strong> ${esc(r.change)}</div><div class="say" id="lTight">${esc(r.tight)}</div><div><button id="lUse">Use this version</button></div>`;
+    $('lUse').onclick=()=>{ $('lDraft').value=r.tight; };
+  }catch(e){ o.innerHTML='<div>'+esc(e.message)+' You can still save your line as it is.</div>'; }
+  $('lCoach').disabled=false;
+};
+$('lSave').onclick=()=>{ const d=$('lDraft').value.trim(); if(!d) return toast('Write a line first.');
+  PR.lines[$('lSkill').value]=d.slice(0,600); prSave(); prRender(); toast('Saved'); };
+
+/* ── voice: the owner speaks, and the mic listens. Both optional. ── */
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let rec=null, micBlocked=false;
+function speechCancel(){ try{ window.speechSynthesis&&speechSynthesis.cancel(); }catch{} try{ rec&&rec.abort(); }catch{} rec=null; }
+function listen(target, micBtn, onDone){
+  if(!SR||micBlocked){ if(!SR) toast('Voice input needs Chrome or Safari. Type instead.'); target.focus(); return; }
+  try{ rec&&rec.abort(); }catch{}
+  const r=new SR(); rec=r; r.lang='en-US'; r.interimResults=true; r.continuous=false;
+  const base=target.value?target.value+' ':'';
+  r.onresult=e=>{ let t=''; for(const x of e.results) t+=x[0].transcript; target.value=base+t; };
+  r.onend=()=>{ micBtn.classList.remove('live'); micBtn.textContent='🎙 Talk'; if(rec===r) rec=null;
+    if(onDone&&target.value.trim()) onDone(); };
+  r.onerror=e=>{ if(e.error==='not-allowed'||e.error==='service-not-allowed'){ micBlocked=true; $('gHands').checked=false;
+      toast('Microphone is blocked, so hands-free is off. Type your answers, or allow the mic and reload.'); } };
+  micBtn.classList.add('live'); micBtn.textContent='● Listening';
+  try{ r.start(); }catch{ micBtn.classList.remove('live'); micBtn.textContent='🎙 Talk'; rec=null; }
+}
+const VOICES={dale:[0.75,0.95],priya:[1.15,1.05],nguyen:[1.0,1.12],marco:[0.9,1.15],rosa:[1.1,1.1],mike:[0.7,1.05],hannah:[1.2,1.0],earl:[0.7,0.85],jess:[1.25,1.1],dev:[0.95,1.05]};
+/* Some browsers never fire `onend` for speech, so `then` also runs on a timer
+   sized to the sentence. Whichever comes first wins; it can't run twice. */
 function say(text, bossId, then){
-  if(!$('gVoice').checked||!window.speechSynthesis){ then&&then(); return; }
+  let fired=false; const go=()=>{ if(fired) return; fired=true; then&&then(); };
+  if(!$('gVoice').checked||!window.speechSynthesis||!text){ go(); return; }
   try{ speechSynthesis.cancel();
     const u=new SpeechSynthesisUtterance(text); const v=VOICES[bossId]||[1,1];
-    u.pitch=v[0]; u.rate=v[1]; u.onend=()=>then&&then(); speechSynthesis.speak(u);
-  }catch{ then&&then(); }
+    u.pitch=v[0]; u.rate=v[1]; u.onend=go; u.onerror=go; speechSynthesis.speak(u);
+    setTimeout(go, 1500+text.split(/\s+/).length*420/v[1]);
+  }catch{ go(); }
 }
-function ring(){ // two short rings before they pick up
+function ring(){
   try{ const a=new (window.AudioContext||window.webkitAudioContext)();
     [0,0.5].forEach(t=>{ const o=a.createOscillator(), g=a.createGain(); o.frequency.value=440; o.connect(g); g.connect(a.destination);
       g.gain.setValueAtTime(0.08,a.currentTime+t); g.gain.setValueAtTime(0,a.currentTime+t+0.35); o.start(a.currentTime+t); o.stop(a.currentTime+t+0.4); });
+    setTimeout(()=>{ try{ a.close(); }catch{} },1500);
   }catch{}
 }
 
 /* ── quick-think ── */
-const OFFLINE=[['Owner, mid-delivery','“Yeah, who is this? I\'ve got a delivery at the back door.”'],['GM, skeptical','“We tried an inventory app two years ago. Nobody used it.”'],['Owner, price-first','“How much is it? Just give me the number.”'],['Owner, brush-off','“Just email me something.”'],['Owner, loyal to rep','“My Southern Glazer\'s rep handles my orders. Why would I change that?”']];
-let dT=null, dLeft=25, dCur=null, dStart=0;
+let dT=null, dLeft=25, dCur=null, dStart=0, dBusy=false;
 function dStop(){ clearInterval(dT); dT=null; }
 $('dNew').onclick=async()=>{
-  $('dNew').disabled=true;
-  try{ dCur=await api('/coach/curveball',{method:'POST',body:JSON.stringify({level:$('dLevel').value})}); if(!dCur.line) throw 0; }
-  catch{ const o=OFFLINE[Math.floor(Math.random()*OFFLINE.length)]; dCur={who:o[0],line:o[1]}; }
-  $('dNew').disabled=false;
-  $('dWho').textContent=dCur.who; $('dLine').textContent=dCur.line;
+  if(dBusy) return; dBusy=true; $('dNew').disabled=true; dStop();
+  try{ dCur=await api('/coach/curveball',{method:'POST',body:JSON.stringify({level:$('dLevel').value})});
+       if(!dCur||!dCur.line) throw new Error('empty'); dCur.ai=true; }
+  catch{ const o=pick(GAUNT,GAUNT.length,Date.now()%997)[0]; dCur={who:o[0],line:o[1],ai:false,best:o[2][o[3]]}; }
+  dBusy=false; $('dNew').disabled=false;
+  $('dWho').textContent=dCur.who+(dCur.ai?'':' · offline deck'); $('dLine').textContent=dCur.line;
   $('dAns').value=''; $('dAns').disabled=false; $('dSend').disabled=false; $('dMic').disabled=false; $('dGrade').classList.add('hide');
-  dLeft=25; dStart=Date.now(); dStop(); $('dAns').focus();
+  dLeft=25; dStart=Date.now(); $('dTimer').textContent='0:25'; $('dTimer').classList.remove('low'); $('dBar').style.width='100%'; $('dAns').focus();
   dT=setInterval(()=>{ dLeft--; $('dTimer').textContent='0:'+String(Math.max(0,dLeft)).padStart(2,'0');
     $('dTimer').classList.toggle('low',dLeft<=7); $('dBar').style.width=Math.max(0,dLeft/25*100)+'%';
     if(dLeft<=0){ dStop(); dGrade(true); } },1000);
@@ -2349,113 +2573,185 @@ $('dNew').onclick=async()=>{
 $('dMic').onclick=()=>listen($('dAns'),$('dMic'),null);
 $('dSend').onclick=()=>dGrade(false);
 async function dGrade(timedOut){
+  if(!dCur||$('dSend').disabled&&!timedOut) return;
   dStop(); try{ rec&&rec.stop(); }catch{}
   const ans=$('dAns').value.trim(); $('dAns').disabled=true; $('dSend').disabled=true; $('dMic').disabled=true;
   const g=$('dGrade'); g.classList.remove('hide');
   if(!ans){ g.innerHTML='<div class="big">0</div><div>Dead air. On a real call, that\'s a hang-up. Say <i>something</i>, even “Fair question, I\'ll be quick.”</div>'; prScore({kind:'drill',score:0}); return; }
+  const selfGrade=(msg,best)=>{
+    g.innerHTML=`<div>${msg}</div>`+(best?`<div class="say">${esc(best)}</div>`:'')+'<div><strong>Grade yourself:</strong> did you acknowledge them, ask a question back, keep it short, and skip the features?</div><div style="display:flex;gap:6px;flex-wrap:wrap">'+[0,3,5,7,10].map(n=>`<button data-self="${n}">${n}</button>`).join('')+'</div>';
+    g.querySelectorAll('[data-self]').forEach(b=>b.onclick=()=>{ const n=+b.dataset.self; prScore({kind:'drill',score:n}); if(n<7&&best) addCard('Quick-Think · '+dCur.who,dCur.line,best); g.innerHTML=`<div>Logged ${n}/10.</div>`; });
+  };
+  if(!dCur.ai) return selfGrade('Offline deck. A strong answer looks like this:',dCur.best);
   g.innerHTML='<div class="muted">Grading…</div>';
   try{
     const r=await api('/coach/grade',{method:'POST',body:JSON.stringify({who:dCur.who,line:dCur.line,answer:ans,seconds:Math.round((Date.now()-dStart)/1000),timed_out:timedOut})});
     const rec2={kind:'drill',score:r.score}; if(r.skill) rec2[r.skill]=r.score; prScore(rec2);
-    g.innerHTML=`<div class="big">${r.score}<span class="muted" style="font-size:14px"> / 10</span></div><div><strong>Worked:</strong> ${esc(r.worked)}</div><div><strong>Fix:</strong> ${esc(r.fix)}</div><div class="say">${esc(r.better)}</div>`;
-  }catch(e){ g.innerHTML='<div>'+esc(e.message)+'</div>'; }
+    if(r.score<7) addCard('Quick-Think · '+dCur.who,dCur.line,r.better);
+    g.innerHTML=`<div class="big">${r.score}<span class="muted" style="font-size:14px"> / 10</span></div><div><strong>Worked:</strong> ${esc(r.worked)}</div><div><strong>Fix:</strong> ${esc(r.fix)}</div><div class="say">${esc(r.better)}</div>`+(r.score<7?'<div class="muted">Saved to Replay misses.</div>':'');
+  }catch(e){ selfGrade('Claude couldn\'t grade this one ('+esc(e.message)+').',null); }
 }
 
-/* ── test ── */
+/* ── test: 10 of 30, reshuffled each rotation ── */
 function tRender(){
   let answered=0, right=0; $('tScore').textContent='0 / 10';
-  $('tQs').innerHTML=P_QUIZ.map((q,i)=>`<div class="card"><b>${i+1}. ${esc(q[0])}</b><div style="margin-top:8px">${q[1].map((o,j)=>`<button class="opt" data-q="${i}" data-o="${j}">${esc(o)}</button>`).join('')}</div><div class="muted hide" id="tx${i}" style="font-size:12px">${esc(q[3])}</div></div>`).join('');
+  $('tQs').innerHTML=ROT.quiz.map((q,i)=>`<div class="card"><b>${i+1}. ${esc(q[0])}</b><div style="margin-top:8px">${q[1].map((o,j)=>`<button class="opt" data-q="${i}" data-o="${j}">${esc(o)}</button>`).join('')}</div><div class="muted hide" id="tx${i}" style="font-size:12px">${esc(q[3])}</div></div>`).join('');
   $('tQs').onclick=e=>{ const b=e.target.closest('.opt'); if(!b||b.disabled) return;
-    const q=+b.dataset.q, ok=P_QUIZ[q][2];
+    const q=+b.dataset.q, ok=ROT.quiz[q][2];
     document.querySelectorAll(`.opt[data-q="${q}"]`).forEach(x=>{ x.disabled=true; if(+x.dataset.o===ok) x.classList.add('right'); });
     if(+b.dataset.o!==ok) b.classList.add('wrong'); else right++;
     answered++; $('tx'+q).classList.remove('hide'); $('tScore').textContent=right+' / 10';
-    if(answered===P_QUIZ.length) prScore({kind:'quiz',score:right}); };
+    if(answered===ROT.quiz.length) prScore({kind:'quiz',score:right}); };
 }
 $('tReset').onclick=tRender;
 
+/* ── Gauntlet: offline, 10 rounds, 12 seconds each, 3 lives ── */
+let X=null, xT=null;
+function xQuit(){ clearInterval(xT); xT=null; X=null; }
+function xOpen(){ xQuit(); prView('pGaunt');
+  // Rounds from this rotation, options shuffled per round so the right answer isn't always in the middle.
+  const r=rng(Date.now()%100000);
+  X={i:0,pts:0,lives:3,combo:0,rounds:ROT.gaunt.map(g=>{ const o=g[2].map((t,j)=>({t,best:j===g[3]})); o.sort(()=>r()-0.5); return {who:g[0],line:g[1],opts:o,why:g[4]}; })};
+  $('xEnd').classList.add('hide'); xRound(); }
+function xRound(){
+  if(!X) return;
+  if(X.i>=X.rounds.length||X.lives<=0) return xFinish();
+  const R=X.rounds[X.i]; let left=12;
+  $('xRound').textContent=`ROUND ${X.i+1} OF ${X.rounds.length}`+(X.combo>1?` · COMBO ×${X.combo}`:'');
+  $('xLives').textContent='❤️'.repeat(X.lives)+'🖤'.repeat(3-X.lives);
+  $('xScore').textContent=X.pts; $('xWho').textContent=R.who; $('xLine').textContent=R.line;
+  $('xWhy').classList.add('hide'); $('xBar').style.width='100%';
+  $('xOpts').innerHTML=R.opts.map((o,j)=>`<button class="opt" data-x="${j}">${esc(o.t)}</button>`).join('');
+  clearInterval(xT);
+  xT=setInterval(()=>{ left--; $('xBar').style.width=Math.max(0,left/12*100)+'%'; if(left<=0) xPick(-1); },1000);
+}
+function xPick(j){
+  if(!X) return; clearInterval(xT);
+  const R=X.rounds[X.i]; if(!R||R.done) return; R.done=true;
+  const best=R.opts.findIndex(o=>o.best), ok=j===best;
+  document.querySelectorAll('#xOpts .opt').forEach((b,k)=>{ b.disabled=true; if(k===best) b.classList.add('right'); if(k===j&&!ok) b.classList.add('wrong'); });
+  if(ok){ X.combo++; X.pts+=10*Math.min(X.combo,4); } else { X.combo=0; X.lives--; addCard('Gauntlet · '+R.who,R.line,R.opts[best].t); }
+  $('xWhy').innerHTML=(ok?'<strong>Yes.</strong> ':(j<0?'<strong>Too slow.</strong> ':'<strong>Not quite.</strong> '))+esc(R.why);
+  $('xWhy').classList.remove('hide'); $('xScore').textContent=X.pts;
+  setTimeout(()=>{ if(!X) return; X.i++; xRound(); }, ok?1300:2600);
+}
+$('xOpts').onclick=e=>{ const b=e.target.closest('[data-x]'); if(b&&!b.disabled) xPick(+b.dataset.x); };
+function xFinish(){
+  clearInterval(xT); const survived=X.lives>0;
+  $('xOpts').innerHTML=''; $('xWhy').classList.add('hide'); $('xLine').textContent=''; $('xWho').textContent='';
+  $('xEnd').classList.remove('hide');
+  $('xVerdict').textContent=survived?`Survived. ${X.pts} points.`:`Out of lives at round ${X.i}. ${X.pts} points.`;
+  $('xSum').textContent='Anything you missed is saved to Replay misses.';
+  prScore({kind:'gaunt',score:Math.min(10,Math.round(X.pts/40)),pts:X.pts});
+}
+$('xAgain').onclick=xOpen;
+$('xNext').onclick=()=>{ xQuit(); prView('pHome'); prRender(); };
+$('xLeave').onclick=()=>{ xQuit(); prView('pHome'); prRender(); };
+
 /* ── The Holdout ── */
-const INTERRUPTS=['A delivery driver walks in and needs a signature.','A bartender shouts that the ice machine is leaking.','Their other phone starts ringing.','A regular walks in early and says hi.','The distributor rep texts them mid-call.'];
-let G=null, gTick=null;
+const INTERRUPTS=['A delivery driver walks in and needs a signature.','A bartender shouts that the ice machine is leaking.','Their other phone starts ringing.','A regular walks in early and says hi.','The distributor rep texts them mid-call.','The health inspector just walked in.','A keg blows mid-sentence.'];
+const MAX_LINES=20;
+let G=null, gTick=null, gToken=0, BINFO=null;
 try{ $('gVoice').checked=localStorage.getItem('crmVoice')!=='0'; $('gHands').checked=localStorage.getItem('crmHands')!=='0'; }catch{}
-$('gVoice').onchange=()=>{ try{ localStorage.setItem('crmVoice',$('gVoice').checked?'1':'0'); }catch{} if(!$('gVoice').checked) speechCancel(); };
+$('gVoice').onchange=()=>{ try{ localStorage.setItem('crmVoice',$('gVoice').checked?'1':'0'); }catch{} if(!$('gVoice').checked){ try{ speechSynthesis.cancel(); }catch{} } };
 $('gHands').onchange=()=>{ try{ localStorage.setItem('crmHands',$('gHands').checked?'1':'0'); }catch{} };
 function gView(v){ ['gPick','gPlay','gEnd'].forEach(id=>$(id).classList.toggle('hide',id!==v)); }
-function prHome(){ $('pHome').classList.remove('hide'); $('pGame').classList.add('hide'); }
-function gOpen(){ $('pHome').classList.add('hide'); $('pGame').classList.remove('hide'); gView('gPick'); $('gTitle').textContent='Pick an owner'; gBossList(); window.scrollTo(0,0); }
+function gOpen(){ gQuit(); prView('pGame'); gView('gPick'); $('gTitle').textContent='Pick an owner';
+  $('gRule').innerHTML='This rotation: <b>'+esc(RULE_TXT[ROT.rule])+'</b>'; gBossList(); }
 function gBossList(){
-  $('gBosses').innerHTML=BOSSES.map(b=>{ const ok=unlocked(b), st=Math.max(0,...wins(b.id).map(w=>w.stars||0));
-    return `<button class="boss" data-b="${b.id}" ${ok?'':'disabled'}><div class="lv">${b.level}</div><div><b>${esc(b.name)}</b><span>${ok?esc(b.tag):'🔒 Beat level '+(b.level-1)+' to unlock'}</span></div><div class="st">${'★'.repeat(st)}${'☆'.repeat(3-st)}</div></button>`; }).join('');
+  const stars=id=>Math.max(0,...wins(id).map(w=>w.stars||0));
+  $('gGuests').innerHTML=ROT.guests.map(id=>`<button class="boss guest" data-b="${id}"><div class="lv">★</div><div><b>${esc(GUEST_META[id][0])}</b><span>${esc(GUEST_META[id][1])}</span></div><div class="st">${'★'.repeat(stars(id))}${'☆'.repeat(3-stars(id))}</div></button>`).join('');
+  $('gBosses').innerHTML=LADDER.map(b=>{ const ok=unlocked(b);
+    return `<button class="boss" data-b="${b.id}" ${ok?'':'disabled'}><div class="lv">${b.level}</div><div><b>${esc(b.name)}</b><span>${ok?esc(b.tag):'🔒 Beat level '+(b.level-1)+' to unlock'}</span></div><div class="st">${'★'.repeat(stars(b.id))}${'☆'.repeat(3-stars(b.id))}</div></button>`; }).join('');
 }
-$('gBosses').onclick=e=>{ const b=e.target.closest('.boss'); if(b&&!b.disabled) gStart(b.dataset.b); };
-function gStop(){ clearInterval(gTick); gTick=null; }
-function gMeters(){ $('gPat').style.width=G.patience+'%'; $('gPat').classList.toggle('low',G.patience<25);
-  $('gTru').style.width=G.trust+'%'; $('gPains').textContent=[0,1,2].map(i=>i<G.found.length?'💡':'·').join(' '); }
+$('gGuests').onclick=$('gBosses').onclick=e=>{ const b=e.target.closest('.boss'); if(b&&!b.disabled) gStart(b.dataset.b); };
+function gQuit(){ clearInterval(gTick); gTick=null; gToken++; G=null; try{ rec&&rec.abort(); }catch{} try{ window.speechSynthesis&&speechSynthesis.cancel(); }catch{} }
+function gMeters(){ if(!G) return; $('gPat').style.width=G.patience+'%'; $('gPat').classList.toggle('low',G.patience<25);
+  $('gTru').style.width=G.trust+'%'; $('gPains').textContent=[0,1,2].map(i=>i<G.found.length?'💡':'·').join(' ');
+  const n=G.log.filter(l=>l.role==='rep').length; $('gLines').textContent=`${n} of ${G.maxLines} lines`; }
 function gMsg(cls,t){ const d=document.createElement('div'); d.className='gmsg '+cls; d.textContent=t; $('gChat').appendChild(d); $('gChat').scrollTop=1e9; return d; }
-function gYourTurn(){ // hands-free: the mic opens the moment they stop talking
-  if(!G||G.over) return; G.busy=false; $('gSend').disabled=false;
-  if($('gHands').checked&&SR) listen($('gIn'),$('gMic'),gSend); else $('gIn').focus();
+function gYourTurn(tok){ // the owner has stopped talking
+  if(!G||G.over||tok!==gToken) return; G.speaking=false;
+  if($('gHands').checked&&SR&&!micBlocked) listen($('gIn'),$('gMic'),()=>gSend()); else $('gIn').focus();
 }
 async function gStart(id){
-  const meta=BOSSES.find(b=>b.id===id);
-  $('pHome').classList.add('hide'); $('pGame').classList.remove('hide');
-  let info=null; try{ info=await api('/coach/bosses'); }catch{}
-  const b=(info&&info.bosses.find(x=>x.id===id))||{patience:60,opening:'Hello?'};
-  G={id, name:meta.name, level:meta.level, patience:b.patience, trust:10, found:[], log:[], busy:true, over:false, interrupts:0};
-  $('gTitle').textContent=`Level ${meta.level} · ${meta.name}`; $('gChat').innerHTML=''; $('gNote').textContent='';
-  gView('gPlay'); gMeters();
-  if(info&&!info.ai){ $('gNote').textContent='No ANTHROPIC_API_KEY on the server, so the owners can\'t talk yet.'; }
+  gQuit(); const tok=gToken;
+  prView('pGame'); gView('gPlay'); $('gChat').innerHTML=''; $('gNote').textContent=''; $('gIn').value='';
+  const meta=LADDER.find(b=>b.id===id), name=meta?meta.name:GUEST_META[id][0];
+  $('gTitle').textContent=(meta?`Level ${meta.level} · `:'Guest · ')+name;
+  if(!BINFO){ try{ BINFO=await api('/coach/bosses'); }catch{ BINFO=null; } }
+  if(tok!==gToken) return;
+  const b=BINFO&&[...(BINFO.bosses||[]),...(BINFO.guests||[])].find(x=>x.id===id);
+  if(!BINFO||!BINFO.ai||!b){
+    gMsg('ev', !BINFO?'— can\'t reach the server —':'— the owners can\'t talk: no AI key on the server —');
+    $('gNote').innerHTML='The Gauntlet works without AI. <button id="gToGaunt">Play the Gauntlet instead</button>';
+    $('gToGaunt').onclick=xOpen; $('gSend').disabled=true; return;
+  }
+  const rule=ROT.rule, rmod=(BINFO.challenges&&BINFO.challenges[rule]&&BINFO.challenges[rule].patience)||0;
+  G={id,name,level:meta?meta.level:2,guest:!meta,rule,patience:Math.max(20,Math.min(100,b.patience+rmod)),trust:10,found:[],log:[],
+     busy:false,speaking:true,over:false,interrupts:0,maxLines:rule==='speed'?10:MAX_LINES,ints:rule==='storm'?4:2,intP:rule==='storm'?0.55:0.28};
+  $('gSend').disabled=false; gMeters();
   ring(); gMsg('ev','— ringing —');
-  setTimeout(()=>{ if(!G||G.id!==id) return; gMsg('them',b.opening); G.log.push({role:'owner',text:b.opening}); say(b.opening,id,gYourTurn); },1100);
-  gStop();
-  // Patience leaks while it's your turn: hesitate and they're gone.
-  gTick=setInterval(()=>{ if(!G||G.busy||G.over) return; G.patience=Math.max(0,G.patience-1); gMeters();
+  const opening=rule==='gatekeeper'?'Hey, this is the bar — who\'s calling?':b.opening;
+  setTimeout(()=>{ if(tok!==gToken||!G) return; gMsg('them',opening); G.log.push({role:'owner',text:opening}); gMeters(); say(opening,id,()=>gYourTurn(tok)); },1100);
+  // Patience leaks only while it's your turn to talk. Hesitate and they're gone.
+  gTick=setInterval(()=>{ if(!G||G.busy||G.speaking||G.over) return; G.patience=Math.max(0,G.patience-1); gMeters();
     if(G.patience<=0) gEnd('lost','You went quiet too long. Click.'); },2500);
 }
-$('gMic').onclick=()=>{ if(rec){ try{ rec.stop(); }catch{} return; } listen($('gIn'),$('gMic'),null); };
+$('gMic').onclick=()=>{ if(rec){ try{ rec.stop(); }catch{} return; } try{ speechSynthesis.cancel(); }catch{} listen($('gIn'),$('gMic'),null); };
 $('gSend').onclick=()=>gSend();
 $('gIn').onkeydown=e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); gSend(); } };
 async function gSend(){
-  if(!G||G.over) return; const t=$('gIn').value.trim(); if(!t) return;
-  if(G.busy) return;
-  $('gIn').value=''; gMsg('me',t); G.busy=true; $('gSend').disabled=true;
+  if(!G||G.over||G.busy) return; const t=$('gIn').value.trim(); if(!t) return;
+  const tok=gToken; try{ rec&&rec.abort(); }catch{} try{ speechSynthesis.cancel(); }catch{}
+  $('gIn').value=''; gMsg('me',t); G.busy=true; G.speaking=false; $('gSend').disabled=true;
   let interrupt=null;
-  if(G.log.length>2&&G.interrupts<2&&Math.random()<0.28){ interrupt=INTERRUPTS[Math.floor(Math.random()*INTERRUPTS.length)]; G.interrupts++; gMsg('ev','— '+interrupt+' —'); }
+  if(G.log.length>2&&G.interrupts<G.ints&&Math.random()<G.intP){ interrupt=INTERRUPTS[Math.floor(Math.random()*INTERRUPTS.length)]; G.interrupts++; gMsg('ev','— '+interrupt+' —'); }
   const bubble=gMsg('them','…');
+  let r;
   try{
-    const r=await api('/coach/turn',{method:'POST',body:JSON.stringify({boss:G.id,transcript:G.log,said:t,patience:G.patience,trust:G.trust,found:G.found,interrupt})});
-    G.log.push({role:'rep',text:t},{role:'owner',text:r.reply});
-    G.patience=r.patience; G.trust=r.trust; G.found=r.found; gMeters();
-    bubble.textContent=r.reply;
-    $('gNote').textContent=(r.coach_tag?'Coach: '+r.coach_tag:'')+(r.new_pain?' · 💡 found a problem':'');
-    if(r.result){ say(r.reply,G.id); return gEnd(r.result, r.result==='won'?`${G.name} said yes to a trial.`:`${G.name} hung up.`); }
-    say(r.reply,G.id,gYourTurn);
+    r=await api('/coach/turn',{method:'POST',body:JSON.stringify({boss:G.id,challenge:G.rule,transcript:G.log.slice(-40),said:t,patience:G.patience,trust:G.trust,found:G.found,interrupt})});
   }catch(e){
-    bubble.remove(); $('gIn').value=t; $('gNote').textContent=e.message; G.busy=false; $('gSend').disabled=false;
+    if(tok!==gToken||!G) return;
+    bubble.remove(); $('gIn').value=t; $('gNote').textContent=e.message+' Your line is back in the box. Send it again.';
+    G.busy=false; $('gSend').disabled=false; return;
   }
+  if(tok!==gToken||!G) return;           // left or restarted while waiting
+  G.log.push({role:'rep',text:t},{role:'owner',text:r.reply});
+  G.patience=r.patience; G.trust=r.trust; G.found=Array.isArray(r.found)?r.found:G.found; gMeters();
+  bubble.textContent=r.reply;
+  $('gNote').textContent=(r.coach_tag?'Coach: '+r.coach_tag:'')+(r.new_pain?' · 💡 found a problem':'');
+  G.busy=false; $('gSend').disabled=false;
+  const lines=G.log.filter(l=>l.role==='rep').length;
+  if(r.result){ say(r.reply,G.id); return gEnd(r.result, r.result==='won'?`${G.name} said yes to a trial.`:`${G.name} hung up.`); }
+  if(lines>=G.maxLines){ say(r.reply,G.id); return gEnd('lost',`Out of time: ${G.maxLines} lines and no yes.`); }
+  G.speaking=true; say(r.reply,G.id,()=>gYourTurn(tok));
 }
 async function gEnd(result, why){
-  G.over=true; G.busy=true; gStop(); try{ rec&&rec.abort(); }catch{}
-  const lines=G.log.filter(l=>l.role==='rep').length, won=result==='won';
-  const pts=won?Math.max(0,100+G.level*50+G.trust+G.patience*2+G.found.length*25-lines*3):G.found.length*15+Math.floor(G.trust/2);
-  const stars=won?(lines<=8&&G.found.length===3?3:lines<=12?2:1):0;
-  setTimeout(()=>{ gView('gEnd');
+  if(!G||G.over) return;
+  const g=G, tok=gToken; g.over=true; clearInterval(gTick); try{ rec&&rec.abort(); }catch{}
+  const lines=g.log.filter(l=>l.role==='rep').length, won=result==='won';
+  const pts=won?Math.max(0,100+g.level*50+g.trust+g.patience*2+g.found.length*25-lines*3):g.found.length*15+Math.floor(g.trust/2);
+  const stars=won?(lines<=8&&g.found.length===3?3:lines<=12?2:1):0;
+  const rec3={kind:'game',boss:g.id,won,stars,pts,score:Math.min(10,Math.round(pts/40))};
+  setTimeout(()=>{ if(tok!==gToken) return; gView('gEnd');
     $('eVerdict').textContent=(won?'Trial booked. ':'Lost them. ')+why;
     $('eStars').textContent=won?'★'.repeat(stars)+'☆'.repeat(3-stars):'';
-    $('ePts').textContent=`${pts} pts · ${lines} lines · ${G.found.length}/3 problems found · trust ${G.trust} · patience ${G.patience}`; },1200);
-  const rec3={kind:'game',boss:G.id,won,stars,pts,score:Math.min(10,Math.round(pts/40))};
+    $('ePts').textContent=`${pts} pts · ${lines} lines · ${g.found.length}/3 problems found · trust ${g.trust} · patience ${g.patience}`; },1200);
   $('eTape').innerHTML='<div class="muted">Reviewing the tape…</div>';
-  if(G.log.length>1){
-    try{ const r=await api('/coach/review',{method:'POST',body:JSON.stringify({boss:G.id,transcript:G.log,result})});
+  if(lines>0){
+    try{ const r=await api('/coach/review',{method:'POST',body:JSON.stringify({boss:g.id,transcript:g.log.slice(-60),result})});
       Object.assign(rec3,{opener:r.opener,discovery:r.discovery,objections:r.objections,ask:r.ask});
-      $('eTape').innerHTML=`<div>Opener ${r.opener} · Discovery ${r.discovery} · Objections ${r.objections} · Ask ${r.ask}</div><div><strong>Turning point:</strong> ${esc(r.turning_point)}</div><div class="say">${esc(r.redo)}</div>`;
-    }catch{ $('eTape').innerHTML='<div class="muted">No tape review this time.</div>'; }
+      if(!won||Math.min(r.opener,r.discovery,r.objections,r.ask)<6) addCard('Call with '+g.name+' · '+(r.turning_point||'').slice(0,140),'What would you say differently next time?',r.redo);
+      if(tok===gToken) $('eTape').innerHTML=`<div>Opener ${r.opener} · Discovery ${r.discovery} · Objections ${r.objections} · Ask ${r.ask}</div><div><strong>Turning point:</strong> ${esc(r.turning_point)}</div><div class="say">${esc(r.redo)}</div>`;
+    }catch{ if(tok===gToken) $('eTape').innerHTML='<div class="muted">No tape review this time. Your score still counts.</div>'; }
   } else $('eTape').innerHTML='';
   prScore(rec3);
 }
-$('eAgain').onclick=()=>gStart(G.id);
-$('ePick').onclick=()=>{ gView('gPick'); $('gTitle').textContent='Pick an owner'; gBossList(); };
-$('gLeave').onclick=()=>{ gStop(); speechCancel(); G=null; prHome(); prRender(); };
+$('eAgain').onclick=()=>{ const id=G&&G.id; if(id) gStart(id); else gOpen(); };
+$('ePick').onclick=()=>gOpen();
+$('eNext').onclick=()=>{ gQuit(); prView('pHome'); prRender(); };
+$('gLeave').onclick=()=>{ gQuit(); prView('pHome'); prRender(); };
 
 tRender(); prRender();
 
