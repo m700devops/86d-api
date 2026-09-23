@@ -116,6 +116,24 @@
   .tries{display:inline-block;min-width:20px;text-align:center;font-weight:700;
          font-size:11px;color:var(--wait);border:1px solid #FFB02044;border-radius:5px;
          padding:1px 5px}
+  /* The address, expandable for more about the venue, plus a straight link out
+     to Google Maps — a name and a town aren't enough to find the place. */
+  .whereBtn{background:none;border:none;padding:0;color:inherit;font:inherit;
+            cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px}
+  .whereBtn:hover{color:var(--text)}
+  .maplink{margin-left:7px;font-size:11px;color:var(--text3);text-decoration:none;
+           border-bottom:1px dotted var(--text3)}
+  .maplink:hover{color:var(--accent);border-color:var(--accent)}
+  .wherebox .pts{display:flex;flex-direction:column;gap:5px;margin-bottom:9px}
+  .wherebox .pt{font-size:14px;color:var(--text);line-height:1.45;
+                padding-left:14px;position:relative}
+  .wherebox .pt::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;
+                        border-radius:50%;background:var(--accent)}
+  .wherebox .fx{display:flex;gap:7px;flex-wrap:wrap}
+  .wherebox .fx span{font-size:11px;color:var(--text2);background:var(--surface2);
+                     border:1px solid var(--line);border-radius:999px;padding:3px 9px}
+  .wherebox .fx span i{color:var(--text3);font-style:normal;font-size:10px}
+  .wherebox .none{font-size:12px;color:var(--text3)}
   .acts{display:flex;gap:6px;white-space:nowrap}
   button{font:inherit;background:var(--surface2);color:var(--text);border:1px solid var(--line2);
          border-radius:7px;padding:6px 11px;cursor:pointer}
@@ -1053,6 +1071,22 @@ function ask(l){
        + (age?` <span class="age">— ${esc(age)}</span>`:'') + '</div>';
 }
 
+/* venue_facts is a JSON blob of {key: {value, source}} written at promote
+   time from OSM tags (see venue.py) — the street half of the address lives
+   in there as "address"; loc is always just "City, ST". Parsed defensively:
+   an older row or a hand-entered lead may carry no venue_facts at all. */
+function venueFacts(l){
+  try{ return JSON.parse(l.venue_facts||'{}')||{}; }catch{ return {}; }
+}
+function fullAddress(l){
+  const street=(venueFacts(l).address||{}).value;
+  return street ? `${street}, ${l.loc||''}` : (l.loc||'—');
+}
+function mapsUrl(l){
+  return 'https://www.google.com/maps/search/?api=1&query='
+       + encodeURIComponent(`${l.name} ${fullAddress(l)}`);
+}
+
 function row(l,n,calling){
   const w=l.call_window||{};
   // A closed venue says so rather than showing a bare dash.
@@ -1077,8 +1111,11 @@ function row(l,n,calling){
       : when}</td>
     <td>${tries?`<span class="tries">${tries}</span>`:'<span class="muted">—</span>'}</td>
     <td><span class="em" title="${esc(l.email||'')}">${esc(l.email||'')}</span></td>
-    <td class="muted">${esc(l.loc||'')}${calling&&l.zone
-      ? `<div class="opener" style="color:var(--text3)">${esc(l.zone)}</div>`:''}</td>
+    <td class="muted">
+      <button class="whereBtn" data-act="where" title="Show more about this venue">${esc(fullAddress(l))}</button>
+      <a class="maplink" href="${esc(mapsUrl(l))}" target="_blank" rel="noopener">Map</a>
+      ${calling&&l.zone
+        ? `<div class="opener" style="color:var(--text3)">${esc(l.zone)}</div>`:''}</td>
     <td><div class="acts">
       <button class="go" data-act="log">Log call</button>
       <button data-act="mail">Email</button>
@@ -1086,6 +1123,34 @@ function row(l,n,calling){
       <button data-act="skip">Skip</button>
     </div></td>
   </tr>`;
+}
+
+/* What's actually known about the venue, expanded on click from the WHERE
+   cell. Facts are extracted and attributable (see venue.py) — never
+   generated — so this can't assert something wrong about a place the
+   operator is about to call. Cached client-side per lead: it's the same
+   data on every click, and the server itself caches the model-written
+   points, so this just avoids a redundant round trip within one session. */
+const WHERE_INFO={};
+async function loadWhereInfo(id, box){
+  if(WHERE_INFO[id]) return renderWhereInfo(box, WHERE_INFO[id]);
+  try{
+    const d=await api(`/leads/${id}/brief`);
+    WHERE_INFO[id]=d;
+    renderWhereInfo(box, d);
+  }catch(err){ box.innerHTML=`<div class="none">${esc(err.message)}</div>`; }
+}
+function renderWhereInfo(box, d){
+  if(!d.facts.length && !d.points.length){
+    box.innerHTML='<div class="none">Nothing on file beyond the address — '
+      +'the map entry is bare and their site gave nothing up.</div>';
+    return;
+  }
+  box.innerHTML=
+    (d.points.length?`<div class="pts">${d.points.map(p=>
+      `<div class="pt">${esc(p)}</div>`).join('')}</div>`:'')
+    +`<div class="fx">${d.facts.map(f=>
+      `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`;
 }
 
 const MAIL_SUBJECT = "Following up — 86'd bar inventory";
@@ -1194,6 +1259,17 @@ $('zones').onclick=async e=>{
     }
     if(!$('zones').querySelector('tbody tr')) loadCalls();
     toast('Skipped for this session');
+    return;
+  }
+  if(btn.dataset.act==='where'){
+    if(tr.nextElementSibling?.classList.contains('drawer')){
+      tr.nextElementSibling.remove(); return;
+    }
+    const d=document.createElement('tr');
+    d.className='drawer info';
+    d.innerHTML=`<td colspan="8"><div class="wherebox"><div class="none">Reading up on them…</div></div></td>`;
+    tr.after(d);
+    loadWhereInfo(id, d.querySelector('.wherebox'));
     return;
   }
   if(btn.dataset.act==='mail'){
