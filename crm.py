@@ -489,6 +489,43 @@ def zone_state(offset: Optional[int]) -> dict:
             "state": state, "headline": headline, "rank": rank, "callable": ok}
 
 
+TRY_KINDS = ("call", "email", "fb")
+
+
+def _tries(kind_counts) -> dict:
+    """Every attempt to sell a lead — calls, emails and Facebook messages —
+    from (kind, count) pairs off `crm_touches`.
+
+    NOT the lead's `attempts` column. That one counts CALLS only, because it
+    paces the call-retry ladder (`_cadence`, `MAX_ATTEMPTS`): an email must not
+    use up a bar's six tries at being rung. The screen's "tries" is this —
+    a bar called once and emailed twice has been tried three times.
+    """
+    out = {"total": 0, "call": 0, "email": 0, "fb": 0}
+    for kind, n in kind_counts:
+        out["total"] += n
+        if kind in TRY_KINDS:
+            out[kind] += n
+    return out
+
+
+def _touch_counts(cursor, lead_ids) -> dict:
+    """`_tries()` for many leads in one query. Undone touches don't count —
+    the undo button exists to make a misclick not have happened."""
+    ids = [i for i in lead_ids if i]
+    if not ids:
+        return {}
+    cursor.execute("""
+        SELECT lead_id, kind, COUNT(*) AS n FROM crm_touches
+         WHERE lead_id = ANY(%s) AND outcome IS DISTINCT FROM 'undone'
+         GROUP BY lead_id, kind
+    """, (ids,))
+    pairs: dict = {}
+    for r in cursor.fetchall():
+        pairs.setdefault(r["lead_id"], []).append((r["kind"], int(r["n"] or 0)))
+    return {lead_id: _tries(kc) for lead_id, kc in pairs.items()}
+
+
 def _record_touch(cursor, lead, kind: str, outcome: Optional[str], attempt: int,
                   tz_offset: Optional[int]) -> str:
     """Log one dial with the local hour, so connect rates can be read by hour.
@@ -718,12 +755,23 @@ def get_lead(lead_id: str, _: bool = Depends(require_crm_key)):
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
         row = cursor.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail={
-            "error": "not_found", "message": "Lead not found"})
+        if not row:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "Lead not found"})
+        # Every attempt to sell them, for the details drawer — undone ones
+        # excluded, same as the tally.
+        cursor.execute("""
+            SELECT kind, outcome, at FROM crm_touches
+             WHERE lead_id = %s AND outcome IS DISTINCT FROM 'undone'
+             ORDER BY at ASC
+        """, (lead_id,))
+        touches = [{"kind": t["kind"], "outcome": t["outcome"], "at": t["at"]}
+                   for t in cursor.fetchall()]
     lead = _lead_row(row)
     lead["window"] = _call_window(row.get("tz_offset_hours"),
                                   row.get("opening_hours"), row.get("tz_name"))
+    lead["touches"] = touches
+    lead["tries"] = _tries((t["kind"], 1) for t in touches)
     return {"lead": lead}
 
 
@@ -1498,10 +1546,13 @@ def call_queue(limit: int = 50, _: bool = Depends(require_crm_key)):
                 f"SELECT * FROM crm_leads WHERE {where} ORDER BY {order} LIMIT %s",
                 params + (limit,),
             )
+            rows = cursor.fetchall()
+            tries = _touch_counts(cursor, [r["id"] for r in rows])
             out = []
-            for row in cursor.fetchall():
+            for row in rows:
                 lead = _lead_row(row)
                 lead["call_window"] = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"))
+                lead["tries"] = tries.get(row["id"]) or _tries([])
                 out.append(lead)
             return out
 

@@ -22,8 +22,12 @@
   header h1{font-size:20px;margin:0;letter-spacing:-0.4px}
   header .sub{color:var(--text3);font-size:12px}
 
-  #pipeBody tr[data-id],#yetBody tr[data-id]{cursor:pointer}
-  #pipeBody tr[data-id]:hover td,#yetBody tr[data-id]:hover td{background:#ffffff08}
+  #pipeBody tr[data-id],#yetBody tr[data-id],#fOverdue tr[data-id],#fToday tr[data-id]{cursor:pointer}
+  #pipeBody tr[data-id]:hover td,#yetBody tr[data-id]:hover td,
+  #fOverdue tr[data-id]:hover td,#fToday tr[data-id]:hover td{background:#ffffff08}
+  .attempts{border-collapse:collapse;font-size:13px;margin:0 0 4px}
+  .attempts td{padding:3px 14px 3px 0;border:0;background:none !important;vertical-align:top}
+  .attempts td:first-child{color:var(--text3)}
   .card.muted .hint{margin-top:8px}
   .card.muted button.go{margin-top:4px}
 
@@ -1526,9 +1530,52 @@ const OUTCOME_LABEL = {
   answered: 'Answered', voicemail: 'Voicemail', no_answer: 'No answer',
   gatekeeper: 'Manager out',
   not_interested: 'Not interested', callback: 'Asked for a callback',
-  logged: 'Logged',
+  logged: 'Logged', emailed: 'Emailed',
 };
 const outcomeLabel = o => o ? (OUTCOME_LABEL[o] || o) : '';
+
+/* Tries = every attempt to sell them — calls, emails, Facebook messages —
+   counted from the touch log. Not `attempts`: that counts calls only, because
+   it paces the call-retry ladder, and an email must not use up a bar's six
+   tries at being rung. */
+const TRY_WORDS = {call:['call','calls'], email:['email','emails'], fb:['message','messages']};
+function triesText(t){
+  if(!t) return '';
+  return Object.keys(TRY_WORDS).filter(k=>t[k])
+    .map(k=>`${t[k]} ${TRY_WORDS[k][t[k]===1?0:1]}`).join(' · ');
+}
+const TOUCH_KIND = {call:'Call', email:'Email', fb:'Facebook message'};
+// In this device's clock, which is the operator's.
+function touchWhen(at){
+  const d=new Date(at);
+  return isNaN(d) ? String(at||'').slice(0,16)
+    : d.toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',
+                                hour:'numeric',minute:'2-digit'});
+}
+
+/* The full record: every field, every attempt, and the notes. Shared by the
+   CRM tab, Yet to Contact and Follow-ups so the three can't drift apart. */
+function leadDetailsCell(l, cols){
+  const f=(k,v)=>v?`<div class="mailrow"><label>${k}</label><div>${esc(String(v))}</div></div>`:'';
+  const t=l.tries||{total:l.attempts||0};
+  const why=triesText(l.tries);
+  const touches=l.touches||[];
+  return `<td colspan="${cols}">
+    ${f('Bar',l.name)}${f('Where',l.loc)}${f('Stage',l.status)}
+    ${f('Last touch',[outcomeLabel(l.last_outcome),(l.last_touch_at||'').slice(0,10)].filter(Boolean).join(' · '))}
+    ${f('Tries',t.total?`${t.total}${why?' ('+why+')':''}`:'')}${f('Call back',l.followup_date)}
+    ${f('Spoke to',l.contact)}${f('Phone',l.phone_dial||l.phone)}${f('Email',l.email)}
+    ${f('Manager',l.manager_name&&`${l.manager_name}${l.manager_role?' ('+l.manager_role+')':''}`)}
+    <p class="hint" style="margin:10px 0 4px">Every attempt <span class="muted">(your time)</span></p>
+    ${touches.length?`<table class="attempts">${touches.map((x,i)=>`<tr>
+        <td>${i+1}</td><td>${esc(touchWhen(x.at))}</td>
+        <td><strong>${esc(TOUCH_KIND[x.kind]||x.kind)}</strong></td>
+        <td>${esc(x.kind==='email'?'Sent':outcomeLabel(x.outcome))}</td></tr>`).join('')}</table>`
+      :'<p class="muted" style="margin:0;font-size:13px">None logged yet.</p>'}
+    <p class="hint" style="margin:10px 0 4px">Notes &amp; history</p>
+    <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
+    <div class="row" style="margin-top:10px"><button data-cancel>Close</button></div></td>`;
+}
 
 /* WHERE THINGS STAND, as two plain lines: what happened last, and what's next.
    It used to be one line like "call back 2026-09-25 — Answered · 1 try": a raw
@@ -1712,16 +1759,7 @@ $('pipeBody').onclick=async e=>{
     let l;
     try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
     d.dataset.mode='view';
-    const f=(k,v)=>v?`<div class="mailrow"><label>${k}</label><div>${esc(String(v))}</div></div>`:'';
-    d.innerHTML=`<td colspan="6">
-      ${f('Bar',l.name)}${f('Where',l.loc)}${f('Stage',l.status)}
-      ${f('Last call',[outcomeLabel(l.last_outcome),(l.last_touch_at||'').slice(0,10)].filter(Boolean).join(' · '))}
-      ${f('Tries',l.attempts)}${f('Call back',l.followup_date)}
-      ${f('Spoke to',l.contact)}${f('Phone',l.phone_dial||l.phone)}${f('Email',l.email)}
-      ${f('Manager',l.manager_name&&`${l.manager_name}${l.manager_role?' ('+l.manager_role+')':''}`)}
-      <p class="hint" style="margin:10px 0 4px">Notes &amp; history</p>
-      <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
-      <div class="row" style="margin-top:10px"><button data-cancel>Close</button></div></td>`;
+    d.innerHTML=leadDetailsCell(l, 6);
   } else if(btn.dataset.act==='edit'){
     let l;
     try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
@@ -1881,6 +1919,12 @@ $('pipeAddSave').onclick=async()=>{
 };
 
 /* ── follow-ups ───────────────────────────────────────────────────────── */
+function tryCell(l){
+  const n=l.tries?l.tries.total:(l.attempts||0);
+  if(!n) return '<span class="muted">—</span>';
+  const why=triesText(l.tries);
+  return `<span class="tries">${n}</span>${why?`<div class="sub">${esc(why)}</div>`:''}`;
+}
 function miniTable(list){
   if(!list.length) return '<p class="muted">Nothing here.</p>';
   return `<div class="sheetwrap"><table class="sheet">
@@ -1891,7 +1935,7 @@ function miniTable(list){
       <td class="nm">${esc(l.name)}
         ${l.last_outcome?`<div class="sub">${esc(outcomeLabel(l.last_outcome))}</div>`:''}</td>
       <td><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span></td>
-      <td>${l.attempts?`<span class="tries">${l.attempts}</span>`:'<span class="muted">—</span>'}</td>
+      <td>${tryCell(l)}</td>
       <td class="muted">${esc(l.followup_date||'')}</td>
       <td><div class="acts"><button class="go" data-act="log">Log call</button>
           <button data-act="email">Email</button>
@@ -1930,7 +1974,9 @@ async function loadFollowups(){
   el.onclick=async e=>{
     const dr=e.target.closest('.drawer'); if(dr) return followupDrawer(dr,e);
     const dig=e.target.closest('.digits'); if(dig) return copyDigits(dig);
-    const btn=e.target.closest('button[data-act]'); if(!btn) return;
+    const btn=e.target.closest('button[data-act]');
+    if(!btn){ const row=e.target.closest('tr[data-id]');
+              return row ? openFollowupDetails(row) : undefined; }
     const tr=btn.closest('tr'); const leadId=tr.dataset.id;
     if(btn.dataset.act==='email') return openFollowupEmail(tr);
     if(btn.dataset.act==='del'){
@@ -1952,9 +1998,27 @@ async function loadFollowups(){
    summaries and the operator's own words) and drafts from that straight
    away. Same compose box as the other tabs — edit it, ask for a change, or
    pick a time — and nothing goes until Send is pressed. */
+/* Anywhere on a row that isn't a button: the full record, same as the CRM
+   tab — every field, every attempt (call, email, message), and the notes. */
+async function openFollowupDetails(tr){
+  const next=tr.nextElementSibling;
+  if(next && next.classList.contains('drawer')){
+    const was=next.dataset.mode; next.remove(); if(was==='view') return;
+  }
+  let l;
+  try{ l=(await api('/leads/'+tr.dataset.id)).lead; }catch(err){ return toast(err.message); }
+  if(tr.nextElementSibling?.classList.contains('drawer')) return;  // a double click
+  const d=document.createElement('tr');
+  d.className='drawer'; d.dataset.mode='view';
+  d.innerHTML=leadDetailsCell(l, 6);
+  tr.after(d);
+}
+
 async function openFollowupEmail(tr){
   const next=tr.nextElementSibling;
-  if(next && next.classList.contains('drawer')){ next.remove(); return; }
+  if(next && next.classList.contains('drawer')){
+    const was=next.dataset.mode; next.remove(); if(was==='mail') return;
+  }
   const addr=tr.dataset.email;
   if(!addr) return toast(`No email on file for ${tr.dataset.name} — add one with Edit on the CRM tab`);
   if(!MAIL.configured) return toast('No mailbox is set up on the server, so this can\u2019t send');
