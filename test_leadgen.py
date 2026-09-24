@@ -24,7 +24,9 @@ if "database" not in sys.modules:
     stub.get_db = lambda: None
     sys.modules["database"] = stub
 
-from leadgen import _restaurant_pours, _on_tourist_strip, score_candidate  # noqa: E402
+from leadgen import (  # noqa: E402
+    _restaurant_pours, _on_tourist_strip, score_candidate, ASIAN_CUISINE_HINTS,
+)
 
 
 def _rejected(html="", tags=None):
@@ -184,6 +186,31 @@ def test_tourist_strip_lowers_score_but_does_not_zero_it():
     off = score_candidate(tags_off_strip, None, "", None, "Las Vegas")
     on = score_candidate(tags_on_strip, None, "", None, "Las Vegas")
     assert on == off - 4   # a penalty, not a rejection — no exception, no zeroing
+
+
+# ── Asian-cuisine scoring penalty (read off the OSM `cuisine` tag directly) ──
+# Same "probably already has a system" idea as UPSCALE_HINTS/POS_STACK_HINTS,
+# just from a third signal (what kind of restaurant, not words or location).
+
+def test_flags_sushi_cuisine_tag():
+    assert ASIAN_CUISINE_HINTS.search("sushi") is not None
+
+
+def test_flags_semicolon_joined_cuisine_list():
+    # OSM cuisine values are often ';'-joined, e.g. "asian;noodle;ramen"
+    assert ASIAN_CUISINE_HINTS.search("noodle;ramen;asian") is not None
+
+
+def test_does_not_flag_unrelated_cuisine():
+    assert ASIAN_CUISINE_HINTS.search("italian;pizza") is None
+
+
+def test_asian_cuisine_lowers_score_but_does_not_zero_it():
+    tags_western = {"amenity": "restaurant", "cuisine": "american"}
+    tags_asian = {"amenity": "restaurant", "cuisine": "japanese;sushi"}
+    western = score_candidate(tags_western, None, "")
+    asian = score_candidate(tags_asian, None, "")
+    assert asian == western - 2   # a penalty, not a rejection
 
 
 if __name__ == "__main__":

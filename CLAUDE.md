@@ -308,10 +308,17 @@ capture. Don't reintroduce them or describe them as current.)
 - **Scoring favours venues LIKELY TO STILL COUNT BY HAND.** `POS_STACK_HINTS` (Resy,
   OpenTable, Tock, SevenRooms, Toast) is the strongest negative: a venue taking bookings
   through a platform is running a stack that probably came with something claiming to do
-  inventory. `UPSCALE_HINTS` (tasting menu, sommelier) is a gentler one.
+  inventory. `UPSCALE_HINTS` (tasting menu, sommelier) is a gentler one, same as
+  `ASIAN_CUISINE_HINTS` (read straight off the OSM `cuisine` tag, no crawl needed) — per
+  Stephan's own sales experience, an Asian restaurant runs a materially higher rate of
+  already having some system in place. `_on_tourist_strip()` is the same idea again, from a
+  fourth signal: an address on a curated list of tourist strips (Las Vegas Blvd, Lower
+  Broadway, Bourbon St, ...) keyed by `(city, street)` so "Broadway" only counts against
+  Nashville, not the dozen other seeded metros with an ordinary street by that name.
   `NEIGHBOURHOOD_HINTS` (pool table, happy hour, dive, tavern) is the positive. None of them
-  EXCLUDE anything — a fine-dining room can still be on a clipboard and stays on the list;
-  they only decide order, which is what matters when fifty names are in front of you
+  EXCLUDE anything — a fine-dining room, a sushi bar, or a Broadway honky-tonk can still be
+  on a clipboard and stays on the list; they only decide order, which is what matters when
+  fifty names are in front of you
 - A personal mailbox (`dave@divebar.com`) scores +4 and a named manager +5: both mean the
   call has somewhere to land, and both are rare enough to be worth putting first
 - **An email with no recorded `email_source` is never promoted, whatever it looks like.**

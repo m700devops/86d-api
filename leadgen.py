@@ -908,6 +908,20 @@ UPSCALE_HINTS = re.compile(
     r"|wine pairing|dress code|jacket required|omakase|degustation",
     re.I,
 )
+# Same idea again, read straight off the OSM `cuisine` tag instead of crawled
+# text — no site fetch needed, it's already on the harvested candidate. Per
+# Stephan's own sales experience: an Asian restaurant (sushi bar, ramen shop,
+# izakaya, hot pot, ...) runs a materially higher rate of already having SOME
+# system in place — POS-bundled inventory, a supplier relationship through a
+# restaurant group — than an ordinary neighbourhood bar does. Gentler weight,
+# same as UPSCALE_HINTS: plenty still count sake and well liquor by hand, and
+# they stay on the list, just lower.
+ASIAN_CUISINE_HINTS = re.compile(
+    r"\basian\b|\bchinese\b|\bjapanese\b|\bsushi\b|\bthai\b|\bvietnamese\b"
+    r"|\bkorean\b|\bkorean_bbq\b|\bdim_sum\b|\bramen\b|\bteppanyaki\b|\bhibachi\b"
+    r"|\bpho\b|\bhot_pot\b|\bhotpot\b|\bizakaya\b|\bdumpling\b|\bpan_asian\b",
+    re.I,
+)
 # The opposite end, and the sweet spot for this product: a room with a real
 # liquor inventory and nobody to count it but the manager, after close, by
 # hand. These are the calls that go well.
@@ -998,7 +1012,9 @@ def score_candidate(tags: dict, email: Optional[str], site_html: str,
     fancy rooms still count by hand, and they stay on the list — but when
     there are fifty names in front of you, order matters more than inclusion.
     A tourist-strip address is the same idea from a different signal: not the
-    venue's own words, but WHERE it is.
+    venue's own words, but WHERE it is. Asian cuisine (OSM `cuisine` tag) is
+    the same idea from a THIRD signal — not words, not location, but what
+    kind of restaurant it is.
 
     REACH. A name to ask for and a human's mailbox both mean the call has
     somewhere to land, and both are rare enough to be worth putting first.
@@ -1038,6 +1054,8 @@ def score_candidate(tags: dict, email: Optional[str], site_html: str,
     if site_html and NEIGHBOURHOOD_HINTS.search(site_html):
         score += 2
     if site_html and UPSCALE_HINTS.search(site_html):
+        score -= 2
+    if ASIAN_CUISINE_HINTS.search(tags.get("cuisine") or ""):
         score -= 2
     if site_html and POS_STACK_HINTS.search(site_html):
         score -= 3
