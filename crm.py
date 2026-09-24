@@ -1660,7 +1660,13 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
 # A cold email with a made-up link is worse than no email.
 COMPANY_NAME = os.getenv("COMPANY_NAME", "86'd")
 COMPANY_WEBSITE = os.getenv("COMPANY_WEBSITE", "https://my86d.com")
-COMPANY_APP_URL = os.getenv("COMPANY_APP_URL", "")
+# The live listing (bundle com.my86d.app, looked up on Apple's own iTunes
+# lookup API). It defaulted to empty, so asking the drafter for "the link to
+# the app" got the website only: rule 1 below forbids a link it wasn't given.
+# `or`, not a getenv default, so a blank COMPANY_APP_URL on Render can't
+# silently switch it back off.
+COMPANY_APP_URL = (os.getenv("COMPANY_APP_URL")
+                   or "https://apps.apple.com/us/app/86d-bar-inventory/id6798359825")
 COMPANY_BLURB = os.getenv("COMPANY_BLURB", "").strip()
 
 DEFAULT_BLURB = (

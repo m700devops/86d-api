@@ -98,6 +98,14 @@ def test_a_redraft_edits_the_draft_on_screen(drafted):
     assert "shorter" in drafted["ask"]
 
 
+def test_the_drafter_is_given_the_app_store_link(drafted):
+    # It defaulted to empty, and "include the link to the app" got the website
+    # only: the drafter may not use a link it wasn't handed.
+    assert crm.COMPANY_APP_URL.startswith("https://apps.apple.com/")
+    crm.draft_lead_email("L1", crm.DraftRequest(brief="include the app store link"))
+    assert f"App Store listing: {crm.COMPANY_APP_URL}" in drafted["system"]
+
+
 def test_a_plain_draft_still_needs_a_brief(drafted):
     with pytest.raises(HTTPException) as e:
         crm.draft_lead_email("L1", crm.DraftRequest(brief="   "))
