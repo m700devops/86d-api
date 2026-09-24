@@ -232,6 +232,33 @@ def test_a_real_callback_is_not_overridden_by_no_answer_wording():
     assert updated["last_outcome"] == "callback"
 
 
+def test_the_operators_own_words_are_kept_verbatim_under_the_summary():
+    # The Barrel House: the summary kept "spoke with Laura for 40 minutes" and
+    # lost the cat, the $800 vet bill and the patent comment — the details a
+    # callback opens with. The raw notes now always ride along.
+    cur = _FakeCursor()
+    lead = _lead()
+    text = ("Talked to Laura the manager for 40 min. She just paid $800 at the vet\n"
+            "for her cat yesterday. Thinks I should get a patent on the tech. Passing to her boss.")
+    extracted = {"status": "warm", "outcome": "callback",
+                 "summary": "Spoke with Laura, the manager, who will pass info to her boss."}
+    updated, applied, _, _ = crm._apply_call_notes(
+        cur, lead, extracted, text, "call", "2026-09-24", "2026-09-24T12:00:00Z")
+    note = updated["notes"].splitlines()[-1]          # still ONE line per call
+    assert "will pass info to her boss" in note
+    assert "$800 at the vet for her cat" in note
+    assert "patent" in note
+    assert applied["note"] == note
+
+
+def test_raw_notes_are_not_repeated_when_they_are_the_summary():
+    cur = _FakeCursor()
+    lead = _lead()
+    updated, _, _, _ = crm._apply_call_notes(
+        cur, lead, {}, "left a voicemail", "call", "2026-09-24", "2026-09-24T12:00:00Z")
+    assert "Your notes" not in updated["notes"]
+
+
 def test_left_a_voicemail_stays_voicemail():
     assert crm._no_answer_outcome("left a voicemail, no answer") == "voicemail"
     assert crm._no_answer_outcome("rang out, mailbox full") == "no_answer"

@@ -734,6 +734,12 @@ capture. Don't reintroduce them or describe them as current.)
   `leadgen.find_email_on_site()` reads it the same way `enrich_candidate` does — homepage,
   the site's own contact links, then the guessed paths, capped at 4 pages so the click
   stays a few seconds. Where it was found is echoed in `applied.email_found_on` and noted
+- **The operator's own words are saved verbatim on every logged call** (`— Your notes: …`
+  after the summary, flattened to one line so each call stays one note entry). The summary
+  is a model's rewrite and drops whatever doesn't fit a field: The Barrel House lost "Laura
+  just paid $800 at the vet for her cat" and "she thinks I should patent it" — the details a
+  callback opens with. Skipped only when the raw text IS the summary. The prompts also now
+  ask the summary to keep personal details, but the verbatim copy is the guarantee
 - **Everything the model finds is kept, labelled, in the notes** — decision makers, who
   was spoken to, next step, address, other phones, website, where the email came from.
   crm_leads has no columns for most of these, and "CONTACTED" alone tells the operator

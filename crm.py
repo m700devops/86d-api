@@ -3106,7 +3106,9 @@ Return ONLY a JSON object with these keys (omit any you cannot determine — nev
   "email": a corrected or newly learned email address
   "phone": a corrected or newly learned phone number
   "followup_in_days": integer number of days until the agreed follow-up
-  "summary": one clean sentence recording what happened
+  "summary": one or two sentences recording what happened. Keep personal details the
+    person shared (their pets, family, plans, what they said about the product) — the
+    salesperson opens the next call with those
 
 Rules:
 - "not interested", "hung up", "don't call again", "no thanks" -> status "dead", outcome "not_interested"
@@ -3322,6 +3324,14 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
     if kind == "call":
         stamp += f" · attempt {attempt}"
     note = f"{stamp}: {summary}"
+    # The operator's OWN words, verbatim, every time. The summary is a
+    # model's one-or-two-sentence rewrite and it drops whatever doesn't fit a
+    # field — The Barrel House lost "Laura just paid $800 at the vet for her
+    # cat" and "she thinks I should patent it", which are exactly what a
+    # callback opens with. Flattened to one line so each call stays one entry.
+    said = re.sub(r"\s+", " ", raw_text or "").strip()[:4000]
+    if said and said.lower() != summary.lower():
+        note += f" — Your notes: {said}"
     sets.append("notes = COALESCE(notes || E'\\n', '') || %s"); params.append(note)
     applied["note"] = note
 
@@ -3448,7 +3458,7 @@ def _ask_snapshot(leads: list, touches: list, now: datetime, tz) -> tuple[str, d
             lead.get("status") or "", lead.get("last_outcome") or "",
             str(lead.get("attempts") or 0), _ask_when(lead.get("last_touch_at"), tz),
             lead.get("followup_date") or "", clip(lead.get("contact"), 40),
-            clip(lead.get("email"), 60), clip(notes[-1] if notes else "", 160),
+            clip(lead.get("email"), 60), clip(notes[-1] if notes else "", 700),
         ]))
     lines += ["", "TOUCHES (when | lead | kind | outcome | attempt #)"]
     for t in touches:
@@ -3784,7 +3794,9 @@ Return ONLY a JSON object with these keys (omit any you truly cannot find):
   "outcome": one of "answered","voicemail","no_answer","gatekeeper","not_interested","callback"
   "followup_in_days": integer number of days until the agreed follow-up
   "next_step": the concrete next action, one short sentence (e.g. "Email the owners")
-  "summary": one or two clean sentences recording what happened, keeping every useful detail
+  "summary": one or two clean sentences recording what happened, keeping every useful detail —
+    including personal details the person shared (pets, family, plans, what they said about
+    the product), which the salesperson opens the next call with
 
 Rules:
 - "not interested", "hung up", "don't call again" -> status "dead", outcome "not_interested"
