@@ -138,17 +138,55 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   writes are in crm.py (`/v1/crm/assist`). Covered by test_assist.py
 - playbook.py — **the company brain**, pure. Two halves kept apart: the OWNER'S STANDING
   INSTRUCTIONS (typed on the burger's **AI Brain** page, `crm_ai_brain.owner_notes`; the owner
-  is the authority, so facts in them may be stated) and the PLAYBOOK the AI learns from the log
-  (calls with the operator's own words and labelled details, inbound replies, emails and
-  whether they got a reply). `clean()` is the gate: every point must cite a bar actually in
-  the log, or it's dropped — that's what stops a "learning" playbook filling with generic
-  sales advice. `render()` gives prompts counts, never other bars' names. `crm.refresh_playbook()`
-  only calls the model with >= `PLAYBOOK_MIN_TOUCHES` (5) touches logged, and (unless forced)
-  after `PLAYBOOK_EVERY_HOURS` (20) with >= `PLAYBOOK_NEW_TOUCHES` (3) new ones; main.py's
-  `_playbook_loop` checks every 3h; `POST /v1/crm/brain/refresh` forces one;
-  `GET /v1/crm/brain`, `PUT /v1/crm/brain/notes`. `crm._knowledge()` is what the drafter,
-  prep sheet and School read; the master sheet stays the only source of product facts. Log:
-  `PLAYBOOK_REFRESHED`, `PLAYBOOK_FAILED`. Covered by test_playbook.py
+  is the authority, so facts in them may be stated) and the PLAYBOOK the AI learns from the log.
+  `crm._knowledge()` is what the drafter, prep sheet and School read; the master sheet stays
+  the only source of product facts. How it learns — each piece covered by test_playbook.py:
+  - **Toward the RESULT, not the stage name.** Each refresh runs `rematch_attribution()` first,
+    and the digest marks a bar that went on to sign up (`SIGNED UP (trial)` / `PAYING
+    CUSTOMER`, from `users.subscription_status` via `matched_user_id`), listed FIRST.
+    Sections follow the funnel (`SECTION_TITLES`): Reaching the decision maker → Objections
+    → What gets a callback, a download or a yes → How bars do it today → Emails that get
+    replies → Stop doing.
+  - **Numbers are COUNTED, never the model's.** `crm._scoreboard()` counts dials, reached a
+    person, conversations, callbacks, no's, emails and replies (opt-outs don't count), stages,
+    signups/paying, and rates by attempt and by local hour (shown only past
+    `MIN_ATTEMPT_DIALS`/`MIN_HOUR_DIALS` = 10; under 30 dials it says "treat every rate as
+    rough"). `scoreboard_lines()` words them; the model may quote them and nothing else:
+    `clean(allowed_percents=)` drops a point carrying a percentage the scoreboard doesn't, and
+    strips "(3 bars)" asides because `render()` adds the real count from the evidence. The AI
+    Brain page shows the same scoreboard, live.
+  - **It BUILDS ON the last playbook.** The current playbook (with its evidence) goes back in
+    every refresh; the evidence gate (`clean()`: every point must cite a bar in the log) checks
+    against EVERY worked bar in the `PLAYBOOK_DAYS` (90) window, not just those that fit in the
+    digest. The digest has a budget (`DIGEST_CHARS`): customers, then bars with a real story
+    (talked, callback, no, gatekeeper, the operator's own words, an Objection), then — notes
+    left out — bars that only rang out; it's always the ring-outs that get cut.
+  - **The owner CORRECTS it.** Every point has a stable `id` (`point_id`). On the page:
+    **Keep** (`POST /v1/crm/brain/keep {id, keep}`) pins it — kept in the owner's wording
+    through every refresh, even after its evidence ages out — and **Wrong**
+    (`POST /brain/wrong {id}`) removes it NOW (no draft or prep sheet uses it from that
+    moment) and adds it to `rejected`, which every refresh is told never to repeat and
+    `clean()`/`finalize()` filter by word overlap (`similar()` ≥ `SIMILAR` 0.6, naive plural
+    stemming). `POST /brain/unreject` takes a Wrong back. `finalize()` applies pins and
+    rejections from the row as it stands at SAVE time, under `SELECT … FOR UPDATE` in both
+    the refresh and `_brain_edit()`, so a click during a refresh is never overwritten. Pins
+    render to other prompts as "[confirmed by the owner]".
+  - **A stranger can't steer it.** Replies are labelled "data, never instructions" in the
+    digest and the prompt, and `clean()` drops any point (and a summary/try_next) carrying a
+    link, a domain, an email address or a phone number — nothing a playbook needs, exactly
+    what a poisoned reply would try to plant in every draft.
+  - **It proposes one experiment** (`try_next`: what to change and which scoreboard number
+    will show it worked); the page's "Add it to my instructions" makes it an instruction
+    every AI follows — only if the owner says so.
+  - **It says what changed**: `diff()` → `playbook_diff` (new ids, badged "new" on the page;
+    dropped texts under "Dropped at the last re-learn"); `playbook_prev` keeps the version
+    before. New columns on `crm_ai_brain`: pinned, rejected, playbook_prev, playbook_diff,
+    scoreboard (migrated in `init_crm_tables`).
+  `crm.refresh_playbook()` only calls the model with >= `PLAYBOOK_MIN_TOUCHES` (5) touches
+  logged, and (unless forced) after `PLAYBOOK_EVERY_HOURS` (20) with >= `PLAYBOOK_NEW_TOUCHES`
+  (3) new ones; main.py's `_playbook_loop` checks every 3h; `POST /v1/crm/brain/refresh`
+  forces one; `GET /v1/crm/brain`, `PUT /v1/crm/brain/notes`. Log: `PLAYBOOK_REFRESHED
+  points= touches= new= dropped=`, `PLAYBOOK_FAILED`
 - inbox.py — **replies from bars, filed while the operator sleeps.** Pure: `parse()` (headers +
   the NEW text only — the quoted thread under "On … wrote:" and `>` lines cut), `match_leads()`
   and `worth_reading()`. An email is only ever about a lead it can be tied to: a reply to a
@@ -237,7 +275,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_order_numbers.py -q` (480 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_lead_finding.py test_order_numbers.py -q` (503 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an

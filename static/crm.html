@@ -245,6 +245,22 @@
   .applied{margin-top:10px;font-size:12px;color:var(--go)}
 
   .muted{color:var(--text3)} .err{color:var(--stop)}
+  /* AI Brain: the scoreboard it learns from, and a Keep / Wrong on every lesson. */
+  .bboard{border:1px solid var(--line);background:var(--surface2);border-radius:10px;
+          padding:10px 12px;margin:0 0 12px;font-size:13px;line-height:1.55;color:var(--text2)}
+  .bboard b{color:var(--text);font-weight:600}
+  .btry{border:1px solid #FFB02055;background:#FFB02010;border-radius:10px;padding:10px 12px;
+        margin:0 0 12px;font-size:13px;line-height:1.5}
+  .btry button{margin-top:8px;padding:3px 10px;font-size:12px}
+  .bpoint{margin:6px 0;font-size:13px;line-height:1.5}
+  .bpoint .acts{display:inline-flex;gap:4px;margin-left:6px;vertical-align:1px}
+  .bpoint .acts button{padding:1px 8px;font-size:11px;border-radius:6px}
+  .bpoint .acts button.on{border-color:var(--go);color:var(--go)}
+  .btag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;
+        padding:1px 6px;border-radius:5px;margin-left:6px;vertical-align:1px}
+  .btag.new{color:var(--accent);border:1px solid #FF6B3555;background:#FF6B3512}
+  .bmore{margin-top:10px;font-size:13px} .bmore summary{cursor:pointer;color:var(--text2)}
+  .bmore li{margin:4px 0;line-height:1.5} .bmore button{padding:1px 8px;font-size:11px;margin-left:6px}
   .hide{display:none !important}
   .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
         padding:16px;margin-bottom:14px}
@@ -769,6 +785,7 @@
           <strong>What it has learned from your calls</strong>
           <button id="brainRefresh">Re-learn now</button></div>
         <p class="hint" style="margin:4px 0 8px" id="brainWhen"></p>
+        <div id="brainBoard"></div>
         <div id="brainPlaybook"></div>
       </div>
       <details class="card" style="margin-top:12px">
@@ -2465,8 +2482,10 @@ const USER_STAGES=[['','All'],['trial','Trial'],['active','Paying'],['canceled',
 
 /* ── AI Brain ─────────────────────────────────────────────────────────── */
 let brainPoll=null, brainWait=null;   // brainWait: {from, until} after "Re-learn now"
+let brainData=null;
 async function loadBrain(){
   const d=await api('/brain');
+  brainData=d;
   if(brainWait && (d.playbook_refreshed_at!==brainWait.from || d.playbook_error!==brainWait.err
                    || Date.now()>brainWait.until)) brainWait=null;
   if(brainWait) d.refreshing=true;
@@ -2476,22 +2495,71 @@ async function loadBrain(){
   $('brainSheet').textContent=d.master_sheet||'';
   const pb=d.playbook;
   $('brainWhen').textContent = d.refreshing ? 'Learning from the log now — this takes a minute…'
-    : d.playbook_refreshed_at ? `Learned ${touchWhen(d.playbook_refreshed_at)} from your calls, emails and replies. It re-learns about once a day when there's something new.`
+    : d.playbook_refreshed_at ? `Learned ${touchWhen(d.playbook_refreshed_at)} from your calls, emails, replies and signups. It re-learns about once a day when there's something new, building on what it already knows.`
     : `It starts learning once ${d.min_touches} calls and emails are logged, then keeps learning about once a day.`;
   $('brainRefresh').disabled=!!d.refreshing;
+  // The numbers it learns from — counted by the server, never by the AI.
+  const board=d.scoreboard||[];
+  $('brainBoard').innerHTML = board.length
+    ? `<div class="bboard"><b>The numbers it learns from</b>${board.map(l=>`<div>${esc(l)}</div>`).join('')}</div>` : '';
+  const fresh=new Set((d.diff&&d.diff.new)||[]);
+  const point=p=>`<li class="bpoint" data-pid="${esc(p.id||'')}">${esc(p.text)}`
+    + (!p.pinned&&fresh.has(p.id)?'<span class="btag new">new</span>':'')
+    + `<span class="muted"> — ${esc((p.evidence||[]).join(', ')||'kept by you')}</span>`
+    + `<span class="acts"><button data-keep="${p.pinned?0:1}" class="${p.pinned?'on':''}"
+         title="${p.pinned?'Stop keeping it no matter what':'Keep this lesson through every re-learn, in these words'}">${p.pinned?'Kept ✓':'Keep'}</button>`
+    + `<button data-wrong title="Take it out now, and never let it be learned again">Wrong</button></span></li>`;
+  const dropped=(d.diff&&d.diff.dropped)||[], rejected=d.rejected||[];
   $('brainPlaybook').innerHTML =
     (d.playbook_error?`<p class="err" style="font-size:13px">Last try failed: ${esc(d.playbook_error)}</p>`:'')
     + (pb&&pb.sections&&pb.sections.length
       ? (pb.summary?`<p style="margin:0 0 10px">${esc(pb.summary)}</p>`:'')
+        + (pb.try_next?`<div class="btry"><strong>Try next:</strong> ${esc(pb.try_next)}<br>
+            <button id="brainTryAdd">Add it to my instructions</button></div>`:'')
         + pb.sections.map(sec=>`<div style="margin:10px 0">
             <div style="font-weight:600;font-size:14px">${esc(sec.title)}</div>
-            <ul style="margin:4px 0 0;padding-left:18px">${sec.points.map(p=>`
-              <li style="margin:4px 0;font-size:13px;line-height:1.5">${esc(p.text)}
-                <span class="muted"> — ${esc(p.evidence.join(', '))}</span></li>`).join('')}</ul></div>`).join('')
-      : '<p class="muted" style="margin:0;font-size:13px">Nothing learned yet.</p>');
+            <ul style="margin:4px 0 0;padding-left:18px">${sec.points.map(point).join('')}</ul></div>`).join('')
+      : '<p class="muted" style="margin:0;font-size:13px">Nothing learned yet.</p>')
+    + (dropped.length?`<details class="bmore"><summary>Dropped at the last re-learn (${dropped.length})</summary>
+        <ul>${dropped.map(t=>`<li class="muted">${esc(t)}</li>`).join('')}</ul></details>`:'')
+    + (rejected.length?`<details class="bmore"><summary>You marked wrong (${rejected.length}) — it will never say these</summary>
+        <ul>${rejected.slice().reverse().map(r=>`<li>${esc(r.text)}<button data-unreject="${esc(r.id)}"
+          title="It may learn this again if the log backs it">Allow again</button></li>`).join('')}</ul></details>`:'');
   clearTimeout(brainPoll);
   if(d.refreshing && TAB==='brain') brainPoll=setTimeout(()=>loadBrain().catch(()=>{}),8000);
 }
+$('brainPlaybook').addEventListener('click',async e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  if(b.id==='brainTryAdd'){
+    const t=(brainData&&brainData.playbook&&brainData.playbook.try_next)||''; if(!t) return;
+    const notes=$('brainNotes'); const cur=notes.value.trim();
+    if(cur.includes(t)){ toast('Already in your instructions'); return; }
+    b.disabled=true;
+    try{
+      const r=await api('/brain/notes',{method:'PUT',body:JSON.stringify({text:(cur?cur+'\n':'')+t})});
+      notes.value=(cur?cur+'\n':'')+t;
+      $('brainSaved').textContent=`Saved ${touchWhen(r.owner_notes_updated_at)}`;
+      toast('Added — every AI follows it from now on');
+    }catch(err){ toast(err.message); b.disabled=false; }
+    return;
+  }
+  const li=b.closest('[data-pid]');
+  try{
+    b.disabled=true;
+    if(b.dataset.unreject){
+      await api('/brain/unreject',{method:'POST',body:JSON.stringify({id:b.dataset.unreject})});
+      toast('It can learn that again if your calls back it');
+    }else if(li && b.dataset.keep!==undefined){
+      const keep=b.dataset.keep==='1';
+      await api('/brain/keep',{method:'POST',body:JSON.stringify({id:li.dataset.pid,keep})});
+      toast(keep?'Kept — it stays through every re-learn':'No longer kept — it stays while your calls back it');
+    }else if(li && b.hasAttribute('data-wrong')){
+      await api('/brain/wrong',{method:'POST',body:JSON.stringify({id:li.dataset.pid})});
+      toast('Removed — no email, prep sheet or practice will use it, and it won’t be learned again');
+    }
+    await loadBrain();
+  }catch(err){ toast(err.message); b.disabled=false; }
+});
 $('brainSave').onclick=async()=>{
   const b=$('brainSave'); b.disabled=true;
   try{

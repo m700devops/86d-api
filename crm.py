@@ -316,10 +316,25 @@ def init_crm_tables():
                 playbook_refreshed_at TEXT,
                 playbook_touches INTEGER,
                 playbook_error TEXT,
+                pinned TEXT,
+                rejected TEXT,
+                playbook_prev TEXT,
+                playbook_diff TEXT,
+                scoreboard TEXT,
                 CONSTRAINT crm_ai_brain_single_row CHECK (id = 1)
             )
         """)
         cursor.execute("INSERT INTO crm_ai_brain (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
+        # The owner's corrections (pinned / rejected lessons), the playbook
+        # before the last refresh and what changed, and the scoreboard the
+        # model was shown. See playbook.py.
+        for col in ("pinned", "rejected", "playbook_prev", "playbook_diff", "scoreboard"):
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'crm_ai_brain' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE crm_ai_brain ADD COLUMN {col} TEXT")
 
         conn.commit()
 
@@ -1099,6 +1114,11 @@ def _load_counters_locked(cursor) -> dict:
                 playbook_refreshed_at TEXT,
                 playbook_touches INTEGER,
                 playbook_error TEXT,
+                pinned TEXT,
+                rejected TEXT,
+                playbook_prev TEXT,
+                playbook_diff TEXT,
+                scoreboard TEXT,
                 CONSTRAINT crm_ai_brain_single_row CHECK (id = 1)
             )
         """)
@@ -2023,19 +2043,98 @@ def _knowledge(playbook: bool = True) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
-def _playbook_inputs(cursor, today: str) -> tuple[str, list, int]:
-    """(the digest the model reads, the bar names it may cite, touch count)."""
+def _json_list(value) -> list:
+    try:
+        v = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+
+
+def _scoreboard(cursor, cutoff: str) -> dict:
+    """The log's counts over the window, for playbook.scoreboard_lines():
+    dials and what they reached, emails and replies, where the worked bars
+    stand, and how many became app signups. Undone touches never count."""
+    cursor.execute("""
+        SELECT COUNT(*) FILTER (WHERE kind = 'call') AS dials,
+               COUNT(*) FILTER (WHERE kind = 'call' AND connected) AS connects,
+               COUNT(*) FILTER (WHERE kind = 'call'
+                                AND outcome IN ('answered', 'callback', 'not_interested')) AS conversations,
+               COUNT(*) FILTER (WHERE kind = 'call' AND outcome = 'gatekeeper') AS gatekeepers,
+               COUNT(*) FILTER (WHERE kind = 'call' AND outcome = 'callback') AS callbacks,
+               COUNT(*) FILTER (WHERE kind = 'call' AND outcome = 'not_interested') AS not_interested
+          FROM crm_touches
+         WHERE outcome IS DISTINCT FROM 'undone' AND at >= %s
+    """, (cutoff,))
+    s = dict(cursor.fetchone() or {})
+    cursor.execute("""
+        SELECT COUNT(*) AS emails,
+               COUNT(*) FILTER (WHERE EXISTS (
+                   SELECT 1 FROM crm_inbox i
+                    WHERE i.lead_ids LIKE '%%' || t.lead_id || '%%'
+                      AND i.processed_at > t.at
+                      AND i.status IN ('updated', 'no_change')
+                      AND COALESCE(i.opt_out, FALSE) = FALSE)) AS email_replies
+          FROM crm_touches t
+         WHERE t.kind = 'email' AND t.outcome IS DISTINCT FROM 'undone' AND t.at >= %s
+    """, (cutoff,))
+    s.update(dict(cursor.fetchone() or {}))
+    cursor.execute("""
+        SELECT attempt, COUNT(*) AS dials, COUNT(*) FILTER (WHERE connected) AS connects
+          FROM crm_touches
+         WHERE kind = 'call' AND outcome IS DISTINCT FROM 'undone'
+           AND attempt IS NOT NULL AND at >= %s
+         GROUP BY attempt ORDER BY attempt
+    """, (cutoff,))
+    s["by_attempt"] = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("""
+        SELECT local_hour AS hour, COUNT(*) AS dials, COUNT(*) FILTER (WHERE connected) AS connects
+          FROM crm_touches
+         WHERE kind = 'call' AND outcome IS DISTINCT FROM 'undone'
+           AND local_hour IS NOT NULL AND at >= %s
+         GROUP BY local_hour
+    """, (cutoff,))
+    s["by_hour"] = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("""
+        SELECT COUNT(*) AS worked,
+               COUNT(*) FILTER (WHERE status = 'warm') AS warm,
+               COUNT(*) FILTER (WHERE status = 'won') AS won,
+               COUNT(*) FILTER (WHERE status = 'dead') AS dead
+          FROM crm_leads WHERE last_touch_at >= %s
+    """, (cutoff,))
+    s.update(dict(cursor.fetchone() or {}))
+    # A signup counts whenever it happened: the few there are matter most.
+    cursor.execute("""
+        SELECT COUNT(*) AS signups,
+               COUNT(*) FILTER (WHERE u.subscription_status = 'active') AS paying
+          FROM crm_leads l JOIN users u ON u.id = l.matched_user_id AND u.deleted_at IS NULL
+         WHERE l.last_touch_at IS NOT NULL
+    """)
+    s.update(dict(cursor.fetchone() or {}))
+    s["days"] = PLAYBOOK_DAYS
+    return s
+
+
+def _playbook_inputs(cursor, today: str, row: Optional[dict] = None) -> dict:
+    """What a refresh reads: the digest, the bar names it may cite (every
+    worked bar in the window, not only the ones that fit in the digest — so a
+    lesson backed by a bar from three weeks ago still validates), the touch
+    count, and the scoreboard with the percentages a point may quote."""
     import playbook as _pb
 
+    row = row or {}
     cutoff = (datetime.now(timezone.utc) - timedelta(days=PLAYBOOK_DAYS)).isoformat()
     cursor.execute("SELECT COUNT(*) AS n FROM crm_touches WHERE outcome IS DISTINCT FROM 'undone'")
     touches = cursor.fetchone()["n"]
     cursor.execute("""
-        SELECT id, name, loc, status, last_outcome, notes FROM crm_leads
-         WHERE last_touch_at IS NOT NULL AND last_touch_at >= %s
-         ORDER BY last_touch_at DESC LIMIT 150
+        SELECT l.id, l.name, l.loc, l.status, l.last_outcome, l.notes,
+               u.subscription_status AS customer
+          FROM crm_leads l
+          LEFT JOIN users u ON u.id = l.matched_user_id AND u.deleted_at IS NULL
+         WHERE l.last_touch_at IS NOT NULL AND (l.last_touch_at >= %s OR u.id IS NOT NULL)
+         ORDER BY l.last_touch_at DESC LIMIT 1500
     """, (cutoff,))
-    leads = cursor.fetchall()
+    leads = [dict(l) for l in cursor.fetchall()]
     names = {l["id"]: l["name"] for l in leads}
     cursor.execute("""
         SELECT from_name, from_addr, subject, lead_ids, result, processed_at FROM crm_inbox
@@ -2065,28 +2164,41 @@ def _playbook_inputs(cursor, today: str) -> tuple[str, list, int]:
                "subject": e["subject"] or "(subject not kept)",
                "replied": replied_at.get(e["lead_id"], "") > (e["at"] or "")}
               for e in cursor.fetchall()]
-    return _pb.digest(leads, replies, emails, today), list(names.values()), touches
+    board = _pb.scoreboard_lines(_scoreboard(cursor, cutoff))
+    digest = _pb.digest(leads, replies, emails, today, scoreboard=board,
+                        current=_playbook_of(row), pinned=_json_list(row.get("pinned")),
+                        rejected=_json_list(row.get("rejected")))
+    return {"digest": digest, "names": list(names.values()), "touches": touches,
+            "scoreboard": board, "percents": _pb.percents_in(board)}
 
 
 def refresh_playbook(force: bool = False) -> dict:
-    """Rewrite the playbook from the log if there's something new to learn.
+    """Re-learn the playbook from the log if there's something new to learn.
 
     Skips (no model call) when fewer than PLAYBOOK_MIN_TOUCHES calls/emails
     are logged at all, or — unless forced — when the last refresh is under
     PLAYBOOK_EVERY_HOURS old or fewer than PLAYBOOK_NEW_TOUCHES touches have
-    been logged since. One refresh at a time.
+    been logged since. One refresh at a time. The owner's pins and rejections
+    are applied from the row as it stands at SAVE time, under a lock, so a
+    click made while the model was thinking isn't overwritten.
     """
     import playbook as _pb
 
     if not _playbook_lock.acquire(blocking=False):
         return {"skipped": "a refresh is already running"}
     try:
+        try:
+            # The newest signups count as results in this refresh, not the next.
+            rematch_attribution()
+        except Exception as exc:
+            print(f"[crm] attribution before the playbook failed: {exc}", flush=True)
         today = _today()
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM crm_ai_brain WHERE id = 1")
             row = dict(cursor.fetchone() or {})
-            digest, names, touches = _playbook_inputs(cursor, today)
+            inputs = _playbook_inputs(cursor, today, row)
+        touches = inputs["touches"]
         if touches < PLAYBOOK_MIN_TOUCHES:
             return {"skipped": f"only {touches} calls and emails logged so far — "
                                f"it starts learning at {PLAYBOOK_MIN_TOUCHES}"}
@@ -2096,28 +2208,41 @@ def refresh_playbook(force: bool = False) -> dict:
         if not force and row.get("playbook") and (fresh or quiet):
             return {"skipped": "nothing new to learn since the last refresh"}
         try:
-            # A background job reading up to 150 bars' notes: give it room.
-            out = _claude_json(_pb.SYSTEM, digest, _pb.SCHEMA, timeout=300.0, purpose="playbook")
-            pb = _pb.clean(out, names)
+            # A background job reading a long log: give it room.
+            out = _claude_json(_pb.SYSTEM, inputs["digest"], _pb.SCHEMA, timeout=300.0,
+                               purpose="playbook")
+            pb = _pb.clean(out, inputs["names"], allowed_percents=inputs["percents"],
+                           rejected=_json_list(row.get("rejected")))
             error = None
         except HTTPException as exc:
             pb, error = None, str((exc.detail or {}).get("message") if isinstance(exc.detail, dict)
                                   else exc.detail)[:300]
+        change = None
         with get_db() as conn:
             cursor = conn.cursor()
             if pb is not None:
+                cursor.execute("SELECT playbook, pinned, rejected FROM crm_ai_brain "
+                               "WHERE id = 1 FOR UPDATE")
+                live = dict(cursor.fetchone() or {})
+                pb = _pb.finalize(pb, _json_list(live.get("pinned")),
+                                  _json_list(live.get("rejected")))
+                change = _pb.diff(_playbook_of(live), pb)
                 cursor.execute("""
-                    UPDATE crm_ai_brain SET playbook = %s, playbook_refreshed_at = %s,
-                           playbook_touches = %s, playbook_error = NULL WHERE id = 1
-                """, (json.dumps(pb), now_iso(), touches))
+                    UPDATE crm_ai_brain SET playbook = %s, playbook_prev = %s, playbook_diff = %s,
+                           scoreboard = %s, playbook_refreshed_at = %s, playbook_touches = %s,
+                           playbook_error = NULL WHERE id = 1
+                """, (json.dumps(pb), live.get("playbook"), json.dumps(change),
+                      json.dumps(inputs["scoreboard"]), now_iso(), touches))
             else:
                 cursor.execute("UPDATE crm_ai_brain SET playbook_error = %s WHERE id = 1",
                                (error,))
             conn.commit()
-        points = sum(len(sec["points"]) for sec in (pb or {}).get("sections", []))
+        points = len(_pb.all_points(pb))
         print(f"[crm] PLAYBOOK_REFRESHED points={points} touches={touches}"
+              + (f" new={len(change['new'])} dropped={len(change['dropped'])}" if change else "")
               + (f" error={error}" if error else ""), flush=True)
-        return {"refreshed": pb is not None, "points": points, "error": error}
+        return {"refreshed": pb is not None, "points": points, "error": error,
+                "new": len(change["new"]) if change else 0}
     finally:
         _playbook_lock.release()
 
@@ -2133,18 +2258,45 @@ class OwnerNotes(BaseModel):
     text: str = Field(default="", max_length=8000)
 
 
+def _live_scoreboard(stored) -> list:
+    """The scoreboard as of now, for the page; the stored one (what the model
+    last saw) if the numbers can't be read."""
+    import playbook as _pb
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=PLAYBOOK_DAYS)).isoformat()
+        with get_db() as conn:
+            return _pb.scoreboard_lines(_scoreboard(conn.cursor(), cutoff))
+    except Exception as exc:
+        print(f"[crm] scoreboard unavailable: {exc}", flush=True)
+        try:
+            v = json.loads(stored or "[]")
+            return v if isinstance(v, list) else []
+        except (TypeError, ValueError):
+            return []
+
+
 @crm_router.get("/brain", response_model=dict)
 def brain(_: bool = Depends(require_crm_key)):
     """Everything the AI works from: the master sheet (fixed, from pitch.py),
-    the owner's standing instructions and the learned playbook."""
+    the owner's standing instructions and the learned playbook — plus the
+    scoreboard it learns from, what changed at the last re-learn, and the
+    lessons the owner kept or marked wrong."""
     import pitch
     row = _brain_row()
+    try:
+        change = json.loads(row.get("playbook_diff") or "null")
+    except (TypeError, ValueError):
+        change = None
     return {"master_sheet": pitch.master_sheet(),
             "owner_notes": row.get("owner_notes") or "",
             "owner_notes_updated_at": row.get("owner_notes_updated_at"),
             "playbook": _playbook_of(row),
             "playbook_refreshed_at": row.get("playbook_refreshed_at"),
             "playbook_error": row.get("playbook_error"),
+            "diff": change if isinstance(change, dict) else None,
+            "pinned": _json_list(row.get("pinned")),
+            "rejected": _json_list(row.get("rejected")),
+            "scoreboard": _live_scoreboard(row.get("scoreboard")),
             "refreshing": _playbook_lock.locked(),
             "min_touches": PLAYBOOK_MIN_TOUCHES}
 
@@ -2161,6 +2313,95 @@ def save_owner_notes(data: OwnerNotes, _: bool = Depends(require_crm_key)):
         """, (data.text.strip(), now))
         conn.commit()
     return {"saved": True, "owner_notes_updated_at": now}
+
+
+class BrainPoint(BaseModel):
+    id: str = Field(min_length=6, max_length=40)
+    keep: bool = True
+
+
+def _brain_edit(fn) -> dict:
+    """Read the brain row under a lock, let `fn` change (playbook, pinned,
+    rejected), write all three back. The owner's clicks and a refresh never
+    interleave: both take this row lock."""
+    import playbook as _pb
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT playbook, pinned, rejected FROM crm_ai_brain WHERE id = 1 FOR UPDATE")
+        row = dict(cursor.fetchone() or {})
+        pb = _playbook_of(row) or {"summary": "", "sections": []}
+        pinned, rejected = _json_list(row.get("pinned")), _json_list(row.get("rejected"))
+        result = fn(pb, pinned, rejected)
+        pb = _pb.finalize(pb, pinned, rejected)
+        cursor.execute("UPDATE crm_ai_brain SET playbook = %s, pinned = %s, rejected = %s "
+                       "WHERE id = 1", (json.dumps(pb), json.dumps(pinned), json.dumps(rejected)))
+        conn.commit()
+    return result
+
+
+def _find_point(pb: dict, pinned: list, pid: str) -> dict:
+    import playbook as _pb
+    point = next((p for p in _pb.all_points(pb) if p.get("id") == pid), None) \
+        or next((p for p in pinned if p.get("id") == pid), None)
+    if point is None:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "That lesson isn't in the playbook any more — reload."})
+    return point
+
+
+@crm_router.post("/brain/keep", response_model=dict)
+def brain_keep(data: BrainPoint, _: bool = Depends(require_crm_key)):
+    """Pin a lesson (keep=true) so every re-learn keeps it, in these words;
+    or unpin it (keep=false), and it lives or goes with the evidence again."""
+    import playbook as _pb
+
+    def edit(pb, pinned, rejected):
+        point = _find_point(pb, pinned, data.id)
+        pinned[:] = [p for p in pinned if p.get("id") != data.id]
+        if data.keep:
+            pinned.append({"id": point["id"], "text": point["text"],
+                           "evidence": list(point.get("evidence") or []),
+                           "section": point.get("section"), "at": now_iso()})
+            del pinned[:-_pb.MAX_PINNED]
+        else:
+            # Unpinned, it goes back to being an ordinary point for now.
+            for sec in pb.get("sections") or []:
+                if (sec.get("title") or "") == (point.get("section") or ""):
+                    if not any(p.get("id") == data.id for p in sec["points"]):
+                        sec["points"].insert(0, {"id": point["id"], "text": point["text"],
+                                                 "evidence": list(point.get("evidence") or [])})
+        return {"kept": data.keep, "pinned": len(pinned)}
+
+    return _brain_edit(edit)
+
+
+@crm_router.post("/brain/wrong", response_model=dict)
+def brain_wrong(data: BrainPoint, _: bool = Depends(require_crm_key)):
+    """The owner says a lesson is wrong: it leaves the playbook now (so no
+    draft or prep sheet uses it from this moment), and every later re-learn
+    is told never to write it or anything like it."""
+    import playbook as _pb
+
+    def edit(pb, pinned, rejected):
+        point = _find_point(pb, pinned, data.id)
+        pinned[:] = [p for p in pinned if p.get("id") != data.id]
+        rejected[:] = [r for r in rejected if r.get("id") != data.id]
+        rejected.append({"id": point["id"], "text": point["text"], "at": now_iso()})
+        del rejected[:-_pb.MAX_REJECTED]
+        return {"rejected": True}
+
+    return _brain_edit(edit)
+
+
+@crm_router.post("/brain/unreject", response_model=dict)
+def brain_unreject(data: BrainPoint, _: bool = Depends(require_crm_key)):
+    """Take back a "wrong": the lesson may be learned again if the log backs it."""
+    def edit(pb, pinned, rejected):
+        before = len(rejected)
+        rejected[:] = [r for r in rejected if r.get("id") != data.id]
+        return {"restored": len(rejected) < before}
+
+    return _brain_edit(edit)
 
 
 @crm_router.post("/brain/refresh", response_model=dict)
