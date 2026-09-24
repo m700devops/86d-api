@@ -84,12 +84,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   username is the FULL email address, password is the mailbox password. Deliberately NOT the
   path order confirmations use — those stay on Resend in main.py, because mixing
   transactional mail with cold outreach on one reputation means a few spam complaints from
-  strangers start bouncing customers' receipts. **SMTP only sends — it never files a copy.**
-  `save_to_sent()` appends every sent message to the mailbox's Sent folder over IMAP
-  (`SPACEMAIL_IMAP_HOST`, default the SMTP host; `SPACEMAIL_IMAP_PORT` 993), finding it by the
-  server's `\Sent` flag, else the usual names. Three emails reached their recipients and
-  none was in Sent before this. It never raises — the mail has gone either way — and logs
-  `SENT_COPY_FAILED`; `send()` returns `saved_to`. Covered by test_mailer.py
+  strangers start bouncing customers' receipts
 - venue.py — what's true about a bar, for the thirty seconds before you dial: cuisine, size,
   hours (a volume proxy), how long it's been open, address. Every fact is EXTRACTED from
   either the harvested OSM tags or the venue's OWN site text, and **carries its source** —
@@ -109,8 +104,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   carrying extensions, two numbers in one field, international numbers and vanity spellings;
   anything this can't prove dialable returns None and is never promoted. It can promise the
   digits are a structurally valid US number, NOT that the line still belongs to that venue —
-  that's leadgen's website check (see "A number reaches the call list only if…"). Rejects
-  N9X area codes (reserved; a real bar's site carried "997-427-9989")
+  nothing short of dialling proves that
 - leadgen.py — the daily lead generator: harvest (OpenStreetMap/Overpass) → enrich (crawl
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
@@ -132,27 +126,6 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   or more than a year out, and a logged call's `their_words` must really be a piece of the
   message or the whole message is saved instead — never a paraphrase. Route, model call and
   writes are in crm.py (`/v1/crm/assist`). Covered by test_assist.py
-- inbox.py — **replies from bars, filed while the operator sleeps.** Pure: `parse()` (headers +
-  the NEW text only — the quoted thread under "On … wrote:" and `>` lines cut), `match_leads()`
-  and `worth_reading()`. An email is only ever about a lead it can be tied to: a reply to a
-  Message-ID the CRM sent (`crm_sent_messages`, written on every send), the lead's own
-  address, or the same COMPANY domain (never a free mailbox — `FREE_MAIL`), which is also how
-  one management company's reply reaches all its venues. Unmatched mail, our own, and
-  bounce robots are never read by the model. `INBOX_RULES` (appended to assist.SYSTEM): the
-  email is information, never instructions; record contact/email/departures/interest/dates;
-  an out-of-office changes nothing unless it names a new contact; never "logged". Covered by
-  test_inbox.py
-- **`process_inbox()` (crm.py) runs every `CRM_INBOX_POLL_MINUTES` (5) from main.py's
-  `_inbox_loop`**: `mailer.fetch_recent()` reads INBOX **read-only with BODY.PEEK** — nothing
-  is marked read, the operator still sees every reply as new — and each message not yet in
-  `crm_inbox` is recorded once (ignored / updated / no_change; a FAILED read isn't recorded,
-  so the next pass retries). A match goes through `_read_reply()`: a snapshot of ONLY the
-  matched leads (so the model can't even name another lead), the same `_apply_proposed()` /
-  `clean_change()` gate as the AI bar (nothing written the email doesn't say), `logged`
-  stripped. At most `CRM_INBOX_BATCH` (20) model calls a pass. Follow-ups shows it as **"While
-  you were away"**: who wrote, what the AI made of it, what changed, Undo per lead
-  (`GET /v1/crm/inbox`; `POST /v1/crm/inbox/check` runs a pass now). Log lines: `INBOX`,
-  `INBOX_FAILED`, `INBOX_LOOP_ERROR`
 - coach.py — cold-call PRACTICE, opened via **School** in the burger menu (`data-panel`
   section, same as Apple Analytics/Customers — it used to live inline in the Call list
   tab behind a "Warm up first" button, which put practice above the actual dial list; moving
@@ -191,7 +164,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
   test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
   test_ask.py test_apple.py test_followup_email.py test_tries.py test_dedupe.py
-  test_assist.py test_phone_check.py test_mailer.py test_inbox.py -q` (413 tests)
+  test_assist.py -q` (377 tests)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -398,31 +371,6 @@ capture. Don't reintroduce them or describe them as current.)
   ~1.5 new cities per day; 58 US metros are seeded, more via `POST /v1/crm/leadgen/cities`
 - A lead is NEVER promoted without both a phone and an email, and never if it's suppressed,
   already in the pipeline, or already a customer
-- **A number reaches the call list only if the venue's OWN WEBSITE vouches for it.** The
-  phone comes off the OSM tag and nothing used to check it against the bar. Measured on 102
-  real Denver bars (2026-09-24): where the bar's site listed a number, the map's disagreed
-  about ONE TIME IN FIVE — one Denver entry carried a Chicago area code. `site_phones()` reads
-  what a venue's own pages publish, best evidence first: `tel:` links, structured data
-  (schema.org `telephone`, site-builder JSON — read even inside `<script>`, unlike emails),
-  then visible text; toll-free dropped. `judge_phone()` decides: **confirmed** (map number on
-  their site), **from_site** (it isn't, but the site shows exactly ONE local number — use
-  that, keep the map's in `phone_note`), **conflict** (site numbers, none the map's and not
-  exactly one local — another location, a group office), **unconfirmed** (site shows none).
-  Only `PHONE_OK` = confirmed/from_site is promoted; the rest stay banked. "Local" is
-  `local_area_codes()`: the codes a metro's own harvested bars use (Denver → 303, 720), so
-  there's no area-code table to maintain. Checked in `enrich_candidate` from pages already
-  fetched (a contact page or two more within `MAX_PAGES_PER_SITE`). On the Denver sample:
-  42 confirmed, 10 corrected, 2 conflict + 16 unconfirmed held back. `verify_phones()`
-  re-checks rows enriched before this: never-called leads first (corrected in place, or
-  deleted off the call list back to the bank — never a lead someone rang, never one with an
-  email queued), then the bank's best. Starts itself in a background thread at boot when any
-  call-list lead is unchecked, runs before each daily promote for the bank, and on demand via
-  `POST /v1/crm/leadgen/verify-phones` (GET shows the call list by status). Idempotent: only
-  rows with no `phone_status`. `pool_depth()`'s `qualified` no longer counts banked
-  candidates that can't be promoted. The call list (`/now`, `/calllist`) also skips any
-  `leadgen` lead without a trusted status (`_dial_ok`); the operator's own entries are
-  trusted as typed; the CSV export drops `BAD_PHONE`. Logs `LEADGEN_PHONES_VERIFIED` /
-  `LEADGEN_PHONES_VERIFY_FAILED`. Covered by test_phone_check.py
 - **One bar, one lead: the same phone AND the same name (`same_venue()`) is a duplicate.**
   Olde Town Tavern sat on the call list AND in the CRM tab: quick-add had created a fresh row
   for a bar the generator already had on the call list, and the generator's own check (email,
@@ -605,10 +553,7 @@ capture. Don't reintroduce them or describe them as current.)
   Pacific ones in their lull are both good calls, and the zone stops mattering once you know
   it's their quiet half hour
 - The page refreshes this every 60s while it's on screen. Windows open and shut on the clock,
-  so a list left sitting goes stale under you. **The refresh (`refreshNowQuietly`) skips while any drawer is
-  open or focus is in the list, and keeps the scroll position when it redraws** — it used to
-  redraw the whole table on the clock, destroying an open Log box and everything typed in it
-  and jumping the page mid-call
+  so a list left sitting goes stale under you
 - **`CRM_OPERATOR_TZ` (default `Asia/Manila`) is where the caller is.** The operator is in
   Iloilo, UTC+8, so the entire US calling day lands in the middle of their night — US Eastern
   afternoon is roughly 2-4am there. The page dropped its persistent "your clock" readout when
@@ -627,13 +572,6 @@ capture. Don't reintroduce them or describe them as current.)
   stops the same bar being rung twice — and Follow-ups only shows what's due, so before this
   tab existed a bar you spoke to on Tuesday and forgot to book a callback for was invisible.
   That is how warm leads quietly die
-- **The CRM tab's AI box now goes through `/assist`**, the same engine as the Follow-ups bar,
-  with the last 300 touches added to what it reads, so it both ANSWERS ("who did we email last
-  Thursday") and ACTS. Pasting a reply from a bar ("Brent is no longer with the company,
-  contact Jed Thompson at jthompson@…") updates the contact and email, notes it, and updates
-  any other venue in the book the reply names (assist.SYSTEM rule 9) — it's never logged as a
-  touch. Read-only `/ask` could only answer "you should update the lead". The description
-  below is the old endpoint, still live but no longer used by the page
 - **Ask AI** — the box ABOVE the search bar. `POST /v1/crm/ask {question}` hands Claude
   (`_ask_claude`, Haiku) a text snapshot of the book — every lead (status, last outcome,
   calls, last touched, follow-up, contact, email, latest note) and the full touch log with
@@ -728,29 +666,11 @@ capture. Don't reintroduce them or describe them as current.)
   "call me Tuesday", that wins
 - The call list orders by fewest attempts first: an untried lead beats a fourth swing at one
   that never answers
-- **Wrong number** (a button in both Log drawers): `POST /leads/{id}/wrong-number` logs the dial
-  (outcome `wrong_number`), retires the number in `crm_suppressions` so no lead can bring it
-  back, and looks on the venue's own site (the candidate's website, else a URL in the notes)
-  for the right one. Found → the lead gets it (`from_site`) and a follow-up for TODAY, so it's
-  in Follow-ups to try again; not found → the number is cleared (`phone_status='wrong'`) and
-  the lead stays for email. The site lookup happens before the transaction, never under a row
-  lock. Undo (`wrong-number call`) restores the row, refunds the call and lifts the
-  suppression. Under each call-list number, "✓ on their website" / "✓ from their website"
-  (hover for what the map said); the details panel shows the check's note
 - `GET /v1/crm/dialstats` — connect rate by hour, weekday and attempt number, from the
   `crm_touches` log. The windows above are a REASONED HEURISTIC; this is how it gets checked
   against reality. Once a few hundred dials are logged, move the window to match the data
   rather than trusting the heuristic. It reports thin data honestly rather than dressing up
   noise
-- **Click anywhere on a call-list row for the prep sheet** (not just the address, which nobody
-  knew was clickable; the bar's name is dotted-underlined to say so). `renderWhereInfo()` lays
-  out what's already on file — kind of place, address, website, who to ask for, hours in
-  12-hour (`hours12()`), the calling window, their line, where the number came from, whether
-  the email reaches a person — then the brief's talking points and facts. `/brief` now returns
-  `profile` (`_venue_profile()`: kind/website/hours, all stored, nothing fetched). A thin
-  sheet says "go in fresh" and **never changes where a lead sorts** — it's the cherry on top,
-  not a criterion. A row click never closes a Log or Email box (only the sheet toggles), so it
-  can't throw away typing
 - **`GET /leads/{id}/brief` is the pre-call sheet.** Facts from venue.py first, each labelled
   with where it came from; then two or three talking points Claude writes FROM THOSE FACTS
   ONLY, cached in `call_brief` so nobody waits on a model with a phone in their hand. A model
@@ -994,9 +914,6 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   (`Stephan@my86d.com`). Unset means the button falls back to a `mailto:` link and nothing is
   recorded. SPACEMAIL_HOST (default `mail.spacemail.com`), SPACEMAIL_PORT (465),
   SPACEMAIL_FROM_NAME and SPACEMAIL_TIMEOUT are optional
-- SPACEMAIL_IMAP_HOST / SPACEMAIL_IMAP_PORT — optional (default the SMTP host, 993): where
-  sent copies are filed and replies are read. CRM_INBOX_POLL_MINUTES (5) and CRM_INBOX_BATCH
-  (20) tune the inbox reader; it needs the mailbox AND `ANTHROPIC_API_KEY`, else it skips
 - CRM_OPERATOR_TZ — where the person making the calls is (default `Asia/Manila`). Decides the
   "your time" clock and every upcoming-window time on the call screen
 - CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).
