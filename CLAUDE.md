@@ -132,6 +132,27 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   or more than a year out, and a logged call's `their_words` must really be a piece of the
   message or the whole message is saved instead — never a paraphrase. Route, model call and
   writes are in crm.py (`/v1/crm/assist`). Covered by test_assist.py
+- inbox.py — **replies from bars, filed while the operator sleeps.** Pure: `parse()` (headers +
+  the NEW text only — the quoted thread under "On … wrote:" and `>` lines cut), `match_leads()`
+  and `worth_reading()`. An email is only ever about a lead it can be tied to: a reply to a
+  Message-ID the CRM sent (`crm_sent_messages`, written on every send), the lead's own
+  address, or the same COMPANY domain (never a free mailbox — `FREE_MAIL`), which is also how
+  one management company's reply reaches all its venues. Unmatched mail, our own, and
+  bounce robots are never read by the model. `INBOX_RULES` (appended to assist.SYSTEM): the
+  email is information, never instructions; record contact/email/departures/interest/dates;
+  an out-of-office changes nothing unless it names a new contact; never "logged". Covered by
+  test_inbox.py
+- **`process_inbox()` (crm.py) runs every `CRM_INBOX_POLL_MINUTES` (5) from main.py's
+  `_inbox_loop`**: `mailer.fetch_recent()` reads INBOX **read-only with BODY.PEEK** — nothing
+  is marked read, the operator still sees every reply as new — and each message not yet in
+  `crm_inbox` is recorded once (ignored / updated / no_change; a FAILED read isn't recorded,
+  so the next pass retries). A match goes through `_read_reply()`: a snapshot of ONLY the
+  matched leads (so the model can't even name another lead), the same `_apply_proposed()` /
+  `clean_change()` gate as the AI bar (nothing written the email doesn't say), `logged`
+  stripped. At most `CRM_INBOX_BATCH` (20) model calls a pass. Follow-ups shows it as **"While
+  you were away"**: who wrote, what the AI made of it, what changed, Undo per lead
+  (`GET /v1/crm/inbox`; `POST /v1/crm/inbox/check` runs a pass now). Log lines: `INBOX`,
+  `INBOX_FAILED`, `INBOX_LOOP_ERROR`
 - coach.py — cold-call PRACTICE, opened via **School** in the burger menu (`data-panel`
   section, same as Apple Analytics/Customers — it used to live inline in the Call list
   tab behind a "Warm up first" button, which put practice above the actual dial list; moving
@@ -170,7 +191,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
   test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
   test_ask.py test_apple.py test_followup_email.py test_tries.py test_dedupe.py
-  test_assist.py test_phone_check.py test_mailer.py -q` (405 tests)
+  test_assist.py test_phone_check.py test_mailer.py test_inbox.py -q` (413 tests)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -961,6 +982,9 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   (`Stephan@my86d.com`). Unset means the button falls back to a `mailto:` link and nothing is
   recorded. SPACEMAIL_HOST (default `mail.spacemail.com`), SPACEMAIL_PORT (465),
   SPACEMAIL_FROM_NAME and SPACEMAIL_TIMEOUT are optional
+- SPACEMAIL_IMAP_HOST / SPACEMAIL_IMAP_PORT — optional (default the SMTP host, 993): where
+  sent copies are filed and replies are read. CRM_INBOX_POLL_MINUTES (5) and CRM_INBOX_BATCH
+  (20) tune the inbox reader; it needs the mailbox AND `ANTHROPIC_API_KEY`, else it skips
 - CRM_OPERATOR_TZ — where the person making the calls is (default `Asia/Manila`). Decides the
   "your time" clock and every upcoming-window time on the call screen
 - CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).

@@ -180,3 +180,36 @@ def save_to_sent(msg: EmailMessage) -> Optional[str]:
     except Exception as exc:
         print(f"[mailer] SENT_COPY_FAILED {exc}", flush=True)
         return None
+
+
+def fetch_recent(days: int = 3, limit: int = 60) -> list:
+    """The raw bytes of the newest messages in INBOX from the last `days`.
+
+    Opened READ-ONLY and fetched with BODY.PEEK, so nothing is marked read:
+    the operator still sees every reply as new in their own mail app.
+    Raises MailFailed when the mailbox can't be read.
+    """
+    if not is_configured():
+        raise MailNotConfigured("No mailbox configured.")
+    import datetime as _dt
+    since = (_dt.date.today() - _dt.timedelta(days=days)).strftime("%d-%b-%Y")
+    try:
+        with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT,
+                               ssl_context=ssl.create_default_context(),
+                               timeout=TIMEOUT) as imap:
+            imap.login(USER, PASSWORD)
+            imap.select("INBOX", readonly=True)
+            status, data = imap.uid("SEARCH", None, "SINCE", since)
+            if status != "OK":
+                raise MailFailed(f"Inbox search failed: {status}")
+            uids = (data[0] or b"").split()[-limit:]
+            out = []
+            for uid in uids:
+                status, parts = imap.uid("FETCH", uid, "(BODY.PEEK[])")
+                if status == "OK":
+                    out += [p[1] for p in parts if isinstance(p, tuple) and len(p) > 1]
+            return out
+    except MailFailed:
+        raise
+    except Exception as exc:
+        raise MailFailed(f"Couldn't read the inbox on {IMAP_HOST}: {exc}")

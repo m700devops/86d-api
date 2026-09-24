@@ -706,6 +706,11 @@
         </div>
         <div id="fAssistOut"></div>
       </div>
+      <div class="card hide" id="fAway">
+        <strong>While you were away</strong>
+        <span class="muted" id="fAwayNote" style="font-size:13px"></span>
+        <div id="fAwayList" style="margin-top:8px"></div>
+      </div>
       <div class="card hide" id="fEmpty">
         <strong>No follow-ups due</strong>
         <p class="muted" id="fEmptyNote" style="margin:8px 0 0;font-size:13px;line-height:1.5"></p>
@@ -2008,7 +2013,27 @@ function miniTable(list){
           <button class="del" data-act="del">Delete</button></div></td>
     </tr>`).join('')}</tbody></table></div>`;
 }
+/* Replies the inbox reader handled on its own (crm.process_inbox): who wrote,
+   what the AI made of it, what it changed — each lead with Undo. */
+async function loadAway(){
+  let d;
+  try{ d=await api('/inbox'); }catch{ return; }
+  const card=$('fAway');
+  card.classList.toggle('hide', !d.items.length && !d.last_processed);
+  $('fAwayNote').textContent = d.last_processed
+    ? ` — replies from bars, read and filed automatically. Last checked ${touchWhen(d.last_processed)}.` : '';
+  $('fAwayList').innerHTML = d.items.length ? d.items.map(it=>`
+    <div style="padding:8px 0;border-top:1px solid var(--line2)">
+      <div style="font-size:13px"><strong>${esc(it.from)}</strong>
+        <span class="muted">· ${esc(it.subject||'')} · ${esc(touchWhen(it.processed_at))}</span></div>
+      ${assistResult({reply:it.reply, question:null, applied:it.applied, skipped:it.skipped})}
+    </div>`).join('')
+    : '<p class="muted" style="margin:0;font-size:13px">No replies from bars yet.</p>';
+}
+$('fAwayList').onclick=e=>$('fAssistOut').onclick(e);   // same Undo handling, looked up at click time
+
 async function loadFollowups(){
+  loadAway();
   const d=await api('/queue');
   // "(50)" when 400 are overdue would be a comforting lie, so when the list is
   // capped the header says so.

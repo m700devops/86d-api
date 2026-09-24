@@ -178,6 +178,34 @@ def init_crm_tables():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sched_lead "
                        "ON crm_scheduled_emails(lead_id)")
 
+        # Every Message-ID the CRM sent, so a reply is tied to its lead even
+        # when it comes back from a different address than it went to.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_sent_messages (
+                message_id TEXT PRIMARY KEY,
+                lead_id TEXT NOT NULL,
+                sent_at TEXT NOT NULL
+            )
+        """)
+        # Every inbox message looked at, once: what it matched and what the AI
+        # did with it. Read-only on the mailbox, so this is the only record of
+        # "already handled".
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_inbox (
+                message_id TEXT PRIMARY KEY,
+                from_addr TEXT,
+                from_name TEXT,
+                subject TEXT,
+                received_at TEXT,
+                lead_ids TEXT,
+                status TEXT NOT NULL,           -- ignored | updated | no_change | failed
+                result TEXT,                    -- JSON: reply, applied (with undo ids), skipped
+                processed_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_inbox_processed "
+                       "ON crm_inbox(processed_at DESC)")
+
         # Undo for a mis-logged call. The whole row as it was, written before a
         # touch changes it, so putting it back is a restore rather than a guess
         # at which fields to unwind.
@@ -2142,6 +2170,7 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
     with get_db() as conn:
         cursor = conn.cursor()
         undo_id = _record_email_sent(cursor, lead_id, to, data.subject, today, now)
+        _remember_sent(cursor, sent.get("message_id"), lead_id, now)
         cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
         updated = cursor.fetchone()
         cursor.execute("SELECT * FROM crm_counters WHERE id = 1")
@@ -2348,7 +2377,7 @@ def run_due_emails(limit: int = 20) -> dict:
             continue
 
         try:
-            mailer.send(job["to_addr"], job["subject"], job["body"])
+            sent_msg = mailer.send(job["to_addr"], job["subject"], job["body"])
         except Exception as exc:
             failed += 1
             # Left as 'failed' rather than retried forever: a bad address or a
@@ -2380,6 +2409,7 @@ def run_due_emails(limit: int = 20) -> dict:
                 "UPDATE crm_scheduled_emails SET status = 'sent', sent_at = %s "
                 " WHERE id = %s", (now_iso(), job["id"]))
             try:
+                _remember_sent(cursor, sent_msg.get("message_id"), job["lead_id"], now_iso())
                 _record_email_sent(cursor, job["lead_id"], job["to_addr"],
                                    job["subject"], _today(), now_iso())
             except Exception as exc:
@@ -2394,6 +2424,12 @@ def run_due_emails(limit: int = 20) -> dict:
         print(f"[crm] SCHEDULED_EMAILS sent={sent} failed={failed} "
               f"window_missed={skipped}", flush=True)
     return {"sent": sent, "failed": failed, "window_missed": skipped}
+
+
+def _remember_sent(cursor, message_id: Optional[str], lead_id: str, now: str) -> None:
+    if message_id:
+        cursor.execute("INSERT INTO crm_sent_messages (message_id, lead_id, sent_at) "
+                       "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (message_id, lead_id, now))
 
 
 def _record_email_sent(cursor, lead_id: str, to: str, subject: str,
@@ -3989,6 +4025,19 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
     question = str(question).strip()[:1000] if question else None
     proposed = out.get("changes") if isinstance(out.get("changes"), list) else []
 
+    applied, skipped = _apply_proposed(proposed, back, text, today)
+    return {"reply": reply, "question": question, "applied": applied, "skipped": skipped}
+
+
+def _apply_proposed(proposed: list, back: dict, text: str, today: str,
+                    allow_logged: bool = True) -> tuple[list, list]:
+    """Check each proposed change against `text` (assist.clean_change) and
+    write what passes, one undo per lead. Only aliases in `back` can be
+    touched — for the inbox that's the leads the email is about, and nothing
+    else in the book."""
+    import assist as _assist
+
+    today_d = date.fromisoformat(today)
     now = now_iso()
     applied: list = []
     skipped: list = []
@@ -4008,6 +4057,8 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
                 skipped.append({"lead": None, "why": "that lead has since been deleted"})
                 continue
             clean, problems = _assist.clean_change(change, lead, text, today_d)
+            if not allow_logged:
+                clean.pop("logged", None)
             skipped += [{"lead": lead["name"], "why": p} for p in problems]
             if not clean:
                 continue
@@ -4015,8 +4066,143 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
             applied.append({"lead_id": lead_id, "name": lead["name"],
                             "changed": _assist.describe(clean), "undo_id": undo_id})
         conn.commit()
+    return applied, skipped
 
-    return {"reply": reply, "question": question, "applied": applied, "skipped": skipped}
+
+# ============== THE INBOX, WHILE YOU SLEEP ==============
+#
+# Every few minutes (main.py's _inbox_loop) the mailbox is read — read-only,
+# nothing marked as read — and each new email from a bar in the book goes
+# through the AI bar's engine: a new contact, a "no thanks", "call me
+# Tuesday" land on the lead without anyone typing them in. Same gate as the
+# bar (nothing written that the email doesn't say), and an email can only
+# change the leads it's about. Everything it did shows under Follow-ups,
+# "While you were away", each with Undo. See inbox.py.
+
+INBOX_BATCH = int(os.getenv("CRM_INBOX_BATCH", "20"))   # emails handled per pass, max
+
+
+def process_inbox(days: int = 3) -> dict:
+    import assist as _assist
+    import inbox as _inbox
+    import mailer
+
+    if not mailer.is_configured() or not os.getenv("ANTHROPIC_API_KEY"):
+        return {"skipped": "no mailbox or no AI key"}
+    raws = mailer.fetch_recent(days=days)
+    mails = [m for m in (_inbox.parse(r) for r in raws) if m.get("message_id")]
+    if not mails:
+        return {"read": 0}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT message_id FROM crm_inbox WHERE message_id = ANY(%s)",
+                       ([m["message_id"] for m in mails],))
+        done = {r["message_id"] for r in cursor.fetchall()}
+        cursor.execute("SELECT id, email FROM crm_leads WHERE email IS NOT NULL")
+        book = cursor.fetchall()
+        cursor.execute("SELECT message_id, lead_id FROM crm_sent_messages")
+        sent = {r["message_id"]: r["lead_id"] for r in cursor.fetchall()}
+
+    tally = {"updated": 0, "no_change": 0, "ignored": 0, "failed": 0}
+    handled = 0
+    for mail in mails:
+        if mail["message_id"] in done or handled >= INBOX_BATCH:
+            continue
+        lead_ids = (_inbox.match_leads(mail, book, sent)
+                    if _inbox.worth_reading(mail, mailer.sender()) else [])
+        result, status = None, "ignored"
+        if lead_ids:
+            handled += 1
+            try:
+                result = _read_reply(mail, lead_ids)
+                status = "updated" if result["applied"] else "no_change"
+            except Exception as exc:
+                print(f"[crm] INBOX_FAILED {mail.get('subject')!r}: {exc}", flush=True)
+                result, status = {"error": str(exc)[:300]}, "failed"
+        tally[status] += 1
+        if status == "failed":
+            continue          # not recorded, so the next pass tries it again
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO crm_inbox (message_id, from_addr, from_name, subject,
+                                       received_at, lead_ids, status, result, processed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+            """, (mail["message_id"], mail["from_addr"], mail["from_name"], mail["subject"],
+                  mail["date"], ",".join(lead_ids), status,
+                  json.dumps(result) if result else None, now_iso()))
+            conn.commit()
+    if tally["updated"] or tally["no_change"] or tally["failed"]:
+        print(f"[crm] INBOX {tally}", flush=True)
+    return tally
+
+
+def _read_reply(mail: dict, lead_ids: list) -> dict:
+    """One email through the AI bar's engine, able to touch only `lead_ids`."""
+    import assist as _assist
+    import inbox as _inbox
+
+    today = _today()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, name, loc, status, contact, phone, email, followup_date,
+                   last_outcome, last_touch_at, notes, manager_name
+              FROM crm_leads WHERE id = ANY(%s)
+        """, (lead_ids,))
+        leads = cursor.fetchall()
+        tries = _touch_counts(cursor, lead_ids)
+    book, back = _assist.snapshot(leads, tries, today, lead_ids[0])
+    text = (f"From: {mail['from_name']} <{mail['from_addr']}>\n"
+            f"Subject: {mail['subject']}\n\n{mail['text']}")
+    out = _claude_json(_assist.SYSTEM + _inbox.INBOX_RULES,
+                       _assist.user_message(book, _assist.dates_table(date.fromisoformat(today)),
+                                            text, []),
+                       _assist.SCHEMA)
+    proposed = out.get("changes") if isinstance(out.get("changes"), list) else []
+    applied, skipped = _apply_proposed(proposed, back, text, today, allow_logged=False)
+    return {"reply": str(out.get("reply") or "").strip()[:1000],
+            "applied": applied, "skipped": skipped}
+
+
+@crm_router.get("/inbox", response_model=dict)
+def inbox_feed(hours: int = 72, _: bool = Depends(require_crm_key)):
+    """What the inbox reader did lately — Follow-ups' "While you were away"."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 720)))).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT message_id, from_addr, from_name, subject, received_at, status,
+                   result, processed_at
+              FROM crm_inbox
+             WHERE status IN ('updated', 'no_change') AND processed_at >= %s
+             ORDER BY processed_at DESC LIMIT 50
+        """, (since,))
+        rows = cursor.fetchall()
+        cursor.execute("SELECT MAX(processed_at) AS last FROM crm_inbox")
+        last = cursor.fetchone()["last"]
+    items = []
+    for r in rows:
+        try:
+            result = json.loads(r["result"] or "{}")
+        except ValueError:
+            result = {}
+        items.append({"from": r["from_name"] or r["from_addr"], "from_addr": r["from_addr"],
+                      "subject": r["subject"], "received_at": r["received_at"],
+                      "processed_at": r["processed_at"], "status": r["status"],
+                      "reply": result.get("reply"), "applied": result.get("applied") or [],
+                      "skipped": result.get("skipped") or []})
+    return {"items": items, "last_processed": last}
+
+
+@crm_router.post("/inbox/check", response_model=dict)
+def inbox_check(_: bool = Depends(require_crm_key)):
+    """Read the inbox now instead of waiting for the next pass."""
+    import mailer
+    try:
+        return process_inbox()
+    except mailer.MailFailed as exc:
+        raise HTTPException(status_code=502, detail={"error": "inbox_failed", "message": str(exc)})
 
 
 # ============== ASK AI ==============
