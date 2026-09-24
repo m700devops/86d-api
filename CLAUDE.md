@@ -116,6 +116,16 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   left unset in production and quietly disable the check. The algorithm is pinned to RS256
   from the header before decoding — accepting the header's own `alg` is how an `alg=none`
   or an HS256-signed-with-the-public-key forgery gets in. Covered by test_apple_auth.py
+- assist.py — the Follow-ups tab's **AI bar** ("Tell the AI"), pure: the prompt, the
+  structured-output `SCHEMA`, `dates_table()` (today + two weeks spelled out, so "Friday" is a
+  lookup, not weekday arithmetic), `snapshot()` of the book (follow-ups first, the open row
+  marked `OPEN ON SCREEN`, never-called leads without their bookkeeping note), and
+  `clean_change()` — **the gate between what the model proposed and what gets written.**
+  Every name, town, phone and email must appear in what the operator typed (phones compared
+  as digits; a contact may also come from that lead's own notes), dates can't be in the past
+  or more than a year out, and a logged call's `their_words` must really be a piece of the
+  message or the whole message is saved instead — never a paraphrase. Route, model call and
+  writes are in crm.py (`/v1/crm/assist`). Covered by test_assist.py
 - coach.py — cold-call PRACTICE, opened via **School** in the burger menu (`data-panel`
   section, same as Apple Analytics/Customers — it used to live inline in the Call list
   tab behind a "Warm up first" button, which put practice above the actual dial list; moving
@@ -153,7 +163,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
   test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
-  test_ask.py test_apple.py test_followup_email.py test_tries.py -q` (351 tests)
+  test_ask.py test_apple.py test_followup_email.py test_tries.py test_dedupe.py
+  test_assist.py -q` (377 tests)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -360,6 +371,22 @@ capture. Don't reintroduce them or describe them as current.)
   ~1.5 new cities per day; 58 US metros are seeded, more via `POST /v1/crm/leadgen/cities`
 - A lead is NEVER promoted without both a phone and an email, and never if it's suppressed,
   already in the pipeline, or already a customer
+- **One bar, one lead: the same phone AND the same name (`same_venue()`) is a duplicate.**
+  Olde Town Tavern sat on the call list AND in the CRM tab: quick-add had created a fresh row
+  for a bar the generator already had on the call list, and the generator's own check (email,
+  or exact name + town) never compared phones, so the map's "Olde Town Tavern" and the logged
+  "Olde Town Tavern & Grill" were two leads. `same_venue()` compares the distinctive words
+  only (generic ones — tavern, grill, bar, the… — dropped; one set inside the other matches).
+  A shared phone ALONE is never a duplicate: one owner can run two bars off one number.
+  `_promote_one` now rejects a candidate matching a lead by phone + `same_venue`;
+  quick-add's `_find_existing_lead()` logs the call onto the bar already in the book instead
+  of inserting a second row; and `_reconcile_duplicate_leads()` runs every boot (a phone written in a worked lead's notes counts
+  too, and quick-add tries every number in the paste — Olde Town's notes named two), folding a
+  never-called, auto-sourced copy into the lead in play (worked, else oldest): the keeper's
+  empty columns are filled from the copy, the candidate and any queued email re-pointed to
+  the keeper, then the copy deleted. Worked rows and the operator's own entries are never
+  folded. Logs `LEADGEN_DEDUPED` (or `LEADGEN_DEDUPE_FAILED`, in its own transaction so a failure
+  costs only the cleanup). Covered by test_dedupe.py and test_quick_add.py
 - **The name+city duplicate check compares against `loc` ("City, ST"), not `city`.** It used
   to pass the bare city, so `'portland' = 'portland, or'` never matched and the name half of
   the check never fired once — only the email half did any work, and a venue whose published
@@ -670,6 +697,26 @@ capture. Don't reintroduce them or describe them as current.)
   `crm_touches`, undone touches excluded), and `GET /leads/{id}` also returns `touches`, every
   attempt oldest first. Follow-ups' TRY column shows the total with "1 call · 2 emails" under
   it. Covered by test_tries.py
+- **Follow-ups has an AI bar above Overdue** ("Tell the AI"): "Barrel House — Laura's cell is
+  720-242-9667, call her back Friday", "Olde Town said no", "push everything overdue to
+  Monday". `POST /v1/crm/assist {text, history, focus_lead_id}` hands the model the whole book
+  (assist.py's snapshot), the calendar and the last four exchanges (kept by the page, so
+  "her" and "yes, the Denver one" resolve); a message naming no bar is about the row whose
+  panel is open. It returns `{reply, question, applied, skipped}`: ambiguous → a question and
+  no change; every proposed change goes through `clean_change()` first; each lead changed
+  gets its own undo. A contact that HAPPENED ("left a voicemail") goes through
+  `_apply_call_notes()`, so it counts as a try and books the ladder exactly as Log call does;
+  anything else is an EDIT — no touch, no counters, undo action `edit (AI bar)`, and one dated
+  "updated: …" line in the notes. Runs on `ANTHROPIC_ASSIST_MODEL` (default `claude-opus-5`)
+  through `_claude_json()`, not `_ask_claude()`: current models reject the `{` prefill and
+  `temperature` with a 400, so it uses structured outputs (`output_config.format`) instead,
+  `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) on Opus 5 / Fable 5.1, and
+  retries a 400 once as a plain request with the schema in the prompt. Roughly 10¢ a message
+  on Opus 5 (the whole book is ~15-25k tokens); set the env var to `claude-sonnet-5` to
+  halve it
+- **Follow-ups rows have an Edit button** (between Email and Delete), and the details panel
+  has one beside Close. Both open `leadEditCell()` — one form shared with the CRM tab, now
+  with Bar and Where as well — saving through `PATCH /leads/{id}`
 - **Follow-ups rows are clickable too**, opening the same full record as the CRM tab —
   `leadDetailsCell()` in crm.html, shared by CRM, Yet to Contact and Follow-ups so they can't
   drift: every field, an "Every attempt" list (each call/email in the operator's own clock,
@@ -725,6 +772,11 @@ capture. Don't reintroduce them or describe them as current.)
 - **Everything on this screen is 12-hour.** Venue clocks, the operator's clock, call windows,
   and the connect-rate-by-hour table (`hour_label`). "13:45 there" is a small tax on every
   glance and this screen is glanced at constantly
+- **An AI-bar edit's undo never touches `crm_touches`.** Undo used to fall back to marking the
+  lead's NEWEST touch undone whenever the undo row had no `touch_id` — right for rows written
+  before `touch_id` existed, wrong for an edit, where it would un-count somebody's real call.
+  Rows whose action starts with `edit` skip that. `UNDO_COLUMNS` also gained `name`/`loc`,
+  which the AI bar can change
 - **Every touch is reversible.** `_snapshot()` stores the whole row before a touch changes
   it, `GET /v1/crm/undo` lists what was just worked, `POST /v1/crm/undo/{id}` puts it back
   exactly — status, attempts, notes, follow-up date — and refunds the counters, because a
@@ -808,6 +860,10 @@ capture. Don't reintroduce them or describe them as current.)
   a listing plus a sentence and walk away. The real input that drove this — "Olde Town
   Tavern & Grill at (720) 242-9667 ... Website: Olde Town Tavern & Grill, Called this
   place..." — is a test in test_quick_add.py
+- **Quick-add never creates a second row for a bar already in the book.** It looks first
+  (`_find_existing_lead()`: same phone + `same_venue`, else same email, else the same name in
+  the same town) and logs the call onto the existing lead, worked one first — the page says
+  "was already in your book — logged the call on it". See One bar, one lead above
 - **Quick-add finds the email itself.** When the notes carry no address (or say "it's on
   their website"), `leadgen.find_venue_website()` looks the venue up on Nominatim by name +
   town for its OSM `website` tag (unless the notes gave a URL), and
@@ -845,6 +901,9 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   Without it that endpoint 503s with "type the fields in by hand" and everything else,
   including the quick-outcome buttons, works normally. Not used by the mobile app
 - ANTHROPIC_MODEL — optional, default `claude-haiku-4-5-20251001`
+- ANTHROPIC_ASSIST_MODEL — optional, the Follow-ups AI bar's model, default `claude-opus-5`
+  (`claude-sonnet-5` is about half the cost). Any current model works: `_claude_json()`
+  sends no prefill and no temperature
 - COMPANY_WEBSITE (default `https://my86d.com`), COMPANY_APP_URL (default the live listing,
   `https://apps.apple.com/us/app/86d-bar-inventory/id6798359825`), COMPANY_NAME,
   COMPANY_BLURB — the only facts the email drafter may state. COMPANY_APP_URL used to

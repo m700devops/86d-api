@@ -25,6 +25,11 @@
   #pipeBody tr[data-id],#yetBody tr[data-id],#fOverdue tr[data-id],#fToday tr[data-id]{cursor:pointer}
   #pipeBody tr[data-id]:hover td,#yetBody tr[data-id]:hover td,
   #fOverdue tr[data-id]:hover td,#fToday tr[data-id]:hover td{background:#ffffff08}
+  .assist-q{margin:8px 0 4px;padding:8px 11px;border-radius:9px;font-size:13px;
+            background:#ffd70012;border:1px solid #ffd70044}
+  .assist-list{margin:8px 0 0;padding-left:18px;font-size:13px;line-height:1.8}
+  .assist-list li.undone{opacity:.45;text-decoration:line-through}
+  .assist-list button{margin-left:8px;padding:2px 9px;font-size:12px}
   .attempts{border-collapse:collapse;font-size:13px;margin:0 0 4px}
   .attempts td{padding:3px 14px 3px 0;border:0;background:none !important;vertical-align:top}
   .attempts td:first-child{color:var(--text3)}
@@ -690,6 +695,16 @@
     </section>
 
     <section data-panel="followups" class="hide">
+      <div class="card" id="fAssist">
+        <strong>Tell the AI</strong>
+        <span class="muted" style="font-size:13px"> — what happened or what to change. It finds
+          the bar and updates it, and every change can be undone.</span>
+        <div class="aibox" style="margin:10px 0 0">
+          <textarea id="fAssistText" rows="2" placeholder="e.g. Barrel House: Laura's cell is 720-242-9667, call her back Friday · Olde Town said no · push everything overdue to Monday"></textarea>
+          <button id="fAssistGo">Update</button>
+        </div>
+        <div id="fAssistOut"></div>
+      </div>
       <div class="card hide" id="fEmpty">
         <strong>No follow-ups due</strong>
         <p class="muted" id="fEmptyNote" style="margin:8px 0 0;font-size:13px;line-height:1.5"></p>
@@ -1553,6 +1568,24 @@ function touchWhen(at){
                                 hour:'numeric',minute:'2-digit'});
 }
 
+/* The edit form, shared the same way. Saves through PATCH /leads/{id}. */
+function leadEditCell(l, cols){
+  const inp=(label,f,v,ph)=>`<div class="mailrow"><label>${label}</label>
+    <input data-f="${f}" value="${esc(v||'')}"${ph?` placeholder="${ph}"`:''}></div>`;
+  return `<td colspan="${cols}">
+    ${inp('Bar','name',l.name)}${inp('Where','loc',l.loc,'City, ST')}
+    <div class="mailrow"><label>Stage</label>
+      <select data-f="status">${STATUSES.filter(x=>x[0]).map(([k,v])=>
+        `<option value="${k}" ${k===l.status?'selected':''}>${v}</option>`).join('')}</select></div>
+    ${inp('Contact','contact',l.contact)}${inp('Phone','phone',l.phone)}${inp('Email','email',l.email)}
+    ${inp('Callback','followup_date',l.followup_date,'YYYY-MM-DD')}
+    <p class="hint" style="margin:10px 0 4px">Notes</p>
+    <textarea data-f="notes" rows="5">${esc(l.notes||'')}</textarea>
+    <div class="row"><button class="go" data-save-lead>Save</button>
+      <button data-cancel>Cancel</button></div>
+    <div class="applied hide"></div></td>`;
+}
+
 /* The full record: every field, every attempt, and the notes. Shared by the
    CRM tab, Yet to Contact and Follow-ups so the three can't drift apart. */
 function leadDetailsCell(l, cols){
@@ -1574,7 +1607,8 @@ function leadDetailsCell(l, cols){
       :'<p class="muted" style="margin:0;font-size:13px">None logged yet.</p>'}
     <p class="hint" style="margin:10px 0 4px">Notes &amp; history</p>
     <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
-    <div class="row" style="margin-top:10px"><button data-cancel>Close</button></div></td>`;
+    <div class="row" style="margin-top:10px"><button data-edit>Edit</button>
+      <button data-cancel>Close</button></div></td>`;
 }
 
 /* WHERE THINGS STAND, as two plain lines: what happened last, and what's next.
@@ -1764,19 +1798,7 @@ $('pipeBody').onclick=async e=>{
     let l;
     try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
     d.dataset.mode='edit';
-    d.innerHTML=`<td colspan="6">
-      <div class="mailrow"><label>Stage</label>
-        <select data-f="status">${STATUSES.filter(x=>x[0]).map(([k,v])=>
-          `<option value="${k}" ${k===l.status?'selected':''}>${v}</option>`).join('')}</select></div>
-      <div class="mailrow"><label>Contact</label><input data-f="contact" value="${esc(l.contact||'')}"></div>
-      <div class="mailrow"><label>Phone</label><input data-f="phone" value="${esc(l.phone||'')}"></div>
-      <div class="mailrow"><label>Email</label><input data-f="email" value="${esc(l.email||'')}"></div>
-      <div class="mailrow"><label>Callback</label><input data-f="followup_date" placeholder="YYYY-MM-DD" value="${esc(l.followup_date||'')}"></div>
-      <p class="hint" style="margin:10px 0 4px">Notes</p>
-      <textarea data-f="notes" rows="5">${esc(l.notes||'')}</textarea>
-      <div class="row"><button class="go" data-save-lead>Save</button>
-        <button data-cancel>Cancel</button></div>
-      <div class="applied hide"></div></td>`;
+    d.innerHTML=leadEditCell(l, 6);
   } else if(btn.dataset.act==='log'){
     d.dataset.mode='log';
     d.innerHTML=`<td colspan="6">
@@ -1820,6 +1842,7 @@ $('yetSearch').oninput=e=>{
 async function pipeDrawer(dr,e){
   const tr=dr.previousElementSibling; const id=tr.dataset.id;
   if(e.target.closest('[data-cancel]')) return dr.remove();
+  if(dr.dataset.mode==='view' && e.target.closest('[data-edit]')) return swapToEdit(dr, id);
   const fail=msg=>{ const b=dr.querySelector('.applied');
                     b.className='applied err'; b.textContent=msg; };
 
@@ -1905,11 +1928,16 @@ $('pipeAddSave').onclick=async()=>{
   try{
     const r=await api('/leads/quick-add',{method:'POST',body:JSON.stringify({text})});
     box.className='applied';
-    box.textContent=`Added ${r.lead.name}${r.applied.status?' — '+r.applied.status:''}.`
+    // A bar already in the book gets the call on its existing row, and the
+    // message says so — otherwise "Added" would read like a second copy.
+    box.textContent=(r.applied.matched_existing
+        ? `${r.lead.name} was already in your book — logged the call on it`
+        : `Added ${r.lead.name}`)
+      +`${r.applied.status?' — '+r.applied.status:''}.`
       +(r.applied.followup_date?` Follow up ${r.applied.followup_date}.`:'')
       +(r.applied.email_found_on?` Found ${r.lead.email} on their site.`:'')
       +(r.applied.email_lookup?` Email: ${r.applied.email_lookup}.`:'');
-    toast('Lead added', r.undo_id);
+    toast(r.applied.matched_existing?'Call logged':'Lead added', r.undo_id);
     $('pipeAddText').value='';
     PIPE.q=''; $('pipeSearch').value=''; PIPE.offset=0;
     await loadPipeline();
@@ -1939,6 +1967,7 @@ function miniTable(list){
       <td class="muted">${esc(l.followup_date||'')}</td>
       <td><div class="acts"><button class="go" data-act="log">Log call</button>
           <button data-act="email">Email</button>
+          <button data-act="edit">Edit</button>
           <button class="del" data-act="del">Delete</button></div></td>
     </tr>`).join('')}</tbody></table></div>`;
 }
@@ -1979,6 +2008,7 @@ async function loadFollowups(){
               return row ? openFollowupDetails(row) : undefined; }
     const tr=btn.closest('tr'); const leadId=tr.dataset.id;
     if(btn.dataset.act==='email') return openFollowupEmail(tr);
+    if(btn.dataset.act==='edit') return openFollowupEdit(tr);
     if(btn.dataset.act==='del'){
       if(!confirm('Delete this lead?')) return;
       try{await api('/leads/'+leadId,{method:'DELETE'});toast('Deleted');await loadFollowups();}
@@ -1993,6 +2023,56 @@ async function loadFollowups(){
     catch(err){ toast(err.message); }
   };
 });
+
+/* The AI bar above Overdue. Plain English in; the server finds the bars,
+   checks every change (no name, phone or email you didn't type) and returns
+   what it did, each lead with its own Undo. The last few exchanges ride
+   along so "her" and "yes, the Denver one" resolve; a message naming no bar
+   is about whichever row's panel is open. */
+let ASSIST_HISTORY=[];
+function assistFocus(){
+  const dr=document.querySelector('#fOverdue tr.drawer, #fToday tr.drawer');
+  return dr?.previousElementSibling?.dataset.id || null;
+}
+function assistResult(r){
+  const rows=r.applied.map(a=>`<li data-undo="${esc(a.undo_id)}">
+      <strong>${esc(a.name)}</strong> — ${esc(a.changed.join(' · '))}
+      <button data-assist-undo>Undo</button></li>`).join('');
+  const skipped=r.skipped.map(x=>(x.lead?x.lead+': ':'')+x.why);
+  return `${r.reply?`<p style="margin:10px 0 0;font-size:14px">${esc(r.reply)}</p>`:''}
+    ${r.question?`<p class="assist-q">${esc(r.question)}</p>`:''}
+    ${rows?`<ul class="assist-list">${rows}</ul>`:''}
+    ${skipped.length?`<p class="muted" style="font-size:12px;margin:6px 0 0">Didn't change: ${esc(skipped.join('; '))}</p>`:''}`;
+}
+async function runAssist(){
+  const box=$('fAssistText'), btn=$('fAssistGo'), out=$('fAssistOut');
+  const text=box.value.trim();
+  if(!text) return toast('Type what happened or what to change');
+  btn.disabled=true; btn.textContent='Thinking…';
+  out.innerHTML='<p class="muted" style="margin:10px 0 0;font-size:13px">Reading your book…</p>';
+  try{
+    const r=await api('/assist',{method:'POST',body:JSON.stringify({
+      text, history:ASSIST_HISTORY.slice(-4), focus_lead_id:assistFocus()})});
+    ASSIST_HISTORY.push({you:text, ai:[r.reply,r.question].filter(Boolean).join(' ')});
+    ASSIST_HISTORY=ASSIST_HISTORY.slice(-4);
+    box.value='';
+    out.innerHTML=assistResult(r);
+    if(r.applied.length) await loadFollowups();
+  }catch(err){
+    out.innerHTML=`<div class="applied err" style="margin-top:10px">${esc(err.message)}</div>`;
+  }finally{ btn.disabled=false; btn.textContent='Update'; }
+}
+$('fAssistGo').onclick=runAssist;
+// Enter sends, Shift+Enter is a new line — same as any chat box.
+$('fAssistText').onkeydown=e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); runAssist(); } };
+$('fAssistOut').onclick=async e=>{
+  const b=e.target.closest('[data-assist-undo]'); if(!b) return;
+  const li=b.closest('li'); b.disabled=true;
+  try{ await api('/undo/'+li.dataset.undo,{method:'POST'});
+       li.classList.add('undone'); b.textContent='Undone'; toast('Put back');
+       await loadFollowups(); }
+  catch(err){ b.disabled=false; toast(err.message); }
+};
 
 /* Follow-up email: Claude reads what's been logged on this lead (the call
    summaries and the operator's own words) and drafts from that straight
@@ -2012,6 +2092,27 @@ async function openFollowupDetails(tr){
   d.className='drawer'; d.dataset.mode='view';
   d.innerHTML=leadDetailsCell(l, 6);
   tr.after(d);
+}
+
+/* Edit from the row's button, or from Edit inside the details panel. */
+async function openFollowupEdit(tr){
+  const next=tr.nextElementSibling;
+  if(next && next.classList.contains('drawer')){
+    const was=next.dataset.mode; next.remove(); if(was==='edit') return;
+  }
+  let l;
+  try{ l=(await api('/leads/'+tr.dataset.id)).lead; }catch(err){ return toast(err.message); }
+  if(tr.nextElementSibling?.classList.contains('drawer')) return;  // a double click
+  const d=document.createElement('tr');
+  d.className='drawer'; d.dataset.mode='edit';
+  d.innerHTML=leadEditCell(l, 6);
+  tr.after(d);
+}
+async function swapToEdit(dr, id){
+  let l;
+  try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
+  dr.dataset.mode='edit';
+  dr.innerHTML=leadEditCell(l, dr.firstElementChild?.colSpan||6);
 }
 
 async function openFollowupEmail(tr){
@@ -2048,6 +2149,16 @@ async function openFollowupEmail(tr){
 async function followupDrawer(dr,e){
   const id=dr.previousElementSibling.dataset.id;
   if(e.target.closest('[data-cancel]')) return dr.remove();
+  if(dr.dataset.mode==='view' && e.target.closest('[data-edit]')) return swapToEdit(dr, id);
+  if(dr.dataset.mode==='edit'){
+    if(!e.target.closest('[data-save-lead]')) return;
+    const body={};
+    dr.querySelectorAll('[data-f]').forEach(el=>body[el.dataset.f]=el.value);
+    try{ await api('/leads/'+id,{method:'PATCH',body:JSON.stringify(body)});
+         toast('Saved'); await loadFollowups(); }
+    catch(err){ const b=dr.querySelector('.applied'); b.className='applied err'; b.textContent=err.message; }
+    return;
+  }
   if(e.target.closest('[data-draft]')) return runDraft(dr, id);
   if(!e.target.closest('[data-send]')) return;
   const b=dr.querySelector('[data-send]'); b.disabled=true;

@@ -62,9 +62,12 @@ class _FakeCursor:
     a running row so RETURNING-style fetches reflect what was written.
     """
 
-    def __init__(self, initial_row=None):
+    def __init__(self, initial_row=None, existing=None):
         self.row = dict(initial_row) if initial_row else {}
+        # Leads already in the book, for quick-add's "is this bar here?" lookups.
+        self.existing = [dict(r) for r in (existing or [])]
         self._last = None
+        self._rows = []
         self.executed = []
 
     def execute(self, sql, params=None):
@@ -104,6 +107,22 @@ class _FakeCursor:
                 else:
                     self.row[col] = val
             self._last = dict(self.row)
+        elif s.startswith("SELECT * FROM crm_leads"):
+            if "FOR UPDATE" in s:
+                hit = next((r for r in self.existing if r["id"] == params[0]), None)
+                self.row = dict(hit) if hit else {}
+                self._last = dict(hit) if hit else None
+            else:
+                if "regexp_replace" in s:
+                    keep = lambda r: re.sub(r"\D", "", r.get("phone") or "")[-10:] == params[0]
+                elif "LOWER(email)" in s:
+                    keep = lambda r: (r.get("email") or "").lower() == params[0].lower()
+                elif "split_part" in s:
+                    keep = lambda r: (r.get("loc") or "").split(",")[0].strip().lower() == params[0]
+                else:
+                    raise AssertionError(f"unexpected lookup in test: {s[:80]}")
+                self._rows = [dict(r) for r in self.existing if keep(r)]
+                self._last = self._rows[0] if self._rows else None
         elif s.startswith("UPDATE crm_counters"):
             self._last = {k: 0 for k in crm.COUNTER_COLUMNS}
             self._last.update(id=1, daily_calls_remaining=24,
@@ -118,6 +137,9 @@ class _FakeCursor:
 
     def fetchone(self):
         return self._last
+
+    def fetchall(self):
+        return list(self._rows)
 
 
 def _lead(**kw):
@@ -358,3 +380,54 @@ def test_quick_add_refuses_only_when_no_name_anywhere(monkeypatch):
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_quick_add_logs_onto_the_bar_already_on_the_call_list(monkeypatch):
+    # The real duplicate: the generator had "Olde Town Tavern" on the call
+    # list; quick-adding "Olde Town Tavern & Grill" made a second row, and the
+    # never-called copy stayed on the call list.
+    on_list = _lead(id="GEN1", name="Olde Town Tavern", loc="Arvada, CO",
+                    phone="720-242-9667", source="leadgen", last_touch_at=None,
+                    created_at="2026-09-18T00:00:00Z")
+    cur = _FakeCursor(existing=[on_list])
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
+    _no_lookup(monkeypatch)
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
+        "name": "Olde Town Tavern & Grill", "loc": "Arvada, CO", "phone": "(720) 242-9667",
+        "outcome": "gatekeeper", "contact": "Taylor", "summary": "Taylor the bartender picked up.",
+        "decision_makers": "Mike (owner)",
+    })
+    result = crm.quick_add_lead(crm.QuickAdd(text="Olde Town Tavern & Grill at (720) 242-9667 ..."), True)
+    assert not any(sql.startswith("INSERT INTO crm_leads") for sql, _ in cur.executed)
+    assert result["lead"]["id"] == "GEN1"                 # the call is on the existing row
+    assert result["applied"]["matched_existing"] == "Olde Town Tavern"
+    assert result["lead"]["last_touch_at"]               # so it has left the call list
+    assert "Decision makers: Mike (owner)" in result["lead"]["notes"]
+
+
+def test_quick_add_still_creates_a_lead_for_a_different_bar_on_the_same_phone(monkeypatch):
+    # One owner, two bars, one number: a shared phone alone is not a duplicate.
+    sister = _lead(id="GEN2", name="Blue Room", loc="Arvada, CO", phone="720-242-9667",
+                   source="leadgen", created_at="2026-09-18T00:00:00Z")
+    cur = _FakeCursor(existing=[sister])
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
+    _no_lookup(monkeypatch)
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
+        "name": "The Monkey Bar", "phone": "720-242-9667", "outcome": "voicemail"})
+    result = crm.quick_add_lead(crm.QuickAdd(text="The Monkey Bar, 720-242-9667, voicemail"), True)
+    assert any(sql.startswith("INSERT INTO crm_leads") for sql, _ in cur.executed)
+    assert result["lead"]["name"] == "The Monkey Bar"
+    assert "matched_existing" not in result["applied"]
+
+
+def test_quick_add_matches_on_any_number_in_the_paste(monkeypatch):
+    on_list = _lead(id="GEN3", name="Olde Town Tavern", loc="Arvada, CO",
+                    phone="303-467-1472", source="leadgen", created_at="2026-09-18T00:00:00Z")
+    cur = _FakeCursor(existing=[on_list])
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
+    _no_lookup(monkeypatch)
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
+        "name": "Olde Town Tavern & Grill", "phone": "(720) 242-9667", "outcome": "gatekeeper"})
+    result = crm.quick_add_lead(crm.QuickAdd(
+        text="Olde Town Tavern & Grill at (720) 242-9667 or (303) 467-1472. Taylor picked up"), True)
+    assert result["lead"]["id"] == "GEN3"
