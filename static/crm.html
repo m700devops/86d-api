@@ -1309,9 +1309,14 @@ const WHERE_INFO={};
 async function loadWhereInfo(id, box, lead){
   if(WHERE_INFO[id]) return renderWhereInfo(box, WHERE_INFO[id], lead);
   try{
-    const d=await api(`/leads/${id}/brief`);
-    WHERE_INFO[id]=d;
+    // Two steps: what's on file at once (no model), then the AI's opener and
+    // talking points when they're written — a few seconds on a strong model.
+    const d=await api(`/leads/${id}/brief?quick=1`);
     renderWhereInfo(box, d, lead);
+    if(!d.pending){ WHERE_INFO[id]=d; return; }
+    const full=await api(`/leads/${id}/brief`);
+    WHERE_INFO[id]=full;
+    if(box.isConnected) renderWhereInfo(box, full, lead);
   }catch(err){ box.innerHTML=`<div class="none">${esc(err.message)}</div>`; }
 }
 const KIND_LABEL={bar:'Bar', pub:'Pub', restaurant:'Restaurant with a bar', nightclub:'Nightclub'};
@@ -1335,19 +1340,24 @@ function renderWhereInfo(box, d, l){
   const rows=[
     ['What', [KIND_LABEL[p.kind]||'', l.name?fullAddress(l):''].filter(Boolean).join(' · ')],
     ['Website', site],
-    ['Ask for', l.manager_name?`${esc(l.manager_name)}${l.manager_role?' ('+esc(l.manager_role)+')':''} — check they're still there`:''],
+    ['Say first', d.opener?`“${esc(d.opener)}”`:''],
+    ['Ask for', l.manager_name?`${esc(l.manager_name)}${l.manager_role?' ('+esc(l.manager_role)+')':''} — check they're still there`
+      : d.ask_for?esc(d.ask_for):''],
     ['Hours', esc(hours12(p.hours))],
     ['Call window', esc([w.window, w.local_time&&`it's ${w.local_time} there`].filter(Boolean).join(' · '))],
     ['Their line', esc(l.opener||'')],
     ['Number', esc(l.phone_note||phoneCheck(l)||'')],
     ['Email', l.email?`${esc(l.email)}${l.email_kind==='personal'?' — a person, not a front desk':''}`:''],
   ].filter(([,v])=>v);
-  const thin = !d.points.length && !d.facts.length && !l.opener && !l.manager_name;
+  const thin = !d.pending && !d.points.length && !d.facts.length && !l.opener && !l.manager_name
+    && !d.opener && !d.watch_for;
   box.innerHTML=
     (rows.length?`<dl class="prep">${rows.map(([k,v])=>`<dt>${k}</dt><dd>${
       k==='What'?esc(v):v}</dd>`).join('')}</dl>`:'')
+    +(d.pending?'<div class="none">Writing your opener and talking points…</div>':'')
     +(d.points.length?`<div class="pts">${d.points.map(pt=>
       `<div class="pt">${esc(pt)}</div>`).join('')}</div>`:'')
+    +(d.watch_for?`<div class="pt" style="margin-top:6px"><strong>Watch for:</strong> ${esc(d.watch_for)}</div>`:'')
     +(d.facts.length?`<div class="fx">${d.facts.map(f=>
       `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`:'')
     +(thin?'<div class="none">Not much on file for this one — go in fresh. It doesn\u2019t '
@@ -1778,8 +1788,21 @@ function leadDetailsCell(l, cols){
     <p class="hint" style="margin:10px 0 4px">Notes &amp; history</p>
     <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
     <div class="row" style="margin-top:10px"><button data-edit>Edit</button>
-      <button data-cancel>Close</button></div></td>`;
+      <button data-prep="${esc(l.id)}">Prep me for the call</button>
+      <button data-cancel>Close</button></div>
+    <div class="wherebox hide" data-prepbox style="margin-top:10px"></div></td>`;
 }
+/* Prep for a callback, from the details panel: the same sheet the call list
+   shows, written with everything logged on this lead so far. */
+document.addEventListener('click', e=>{
+  const b=e.target.closest('[data-prep]'); if(!b) return;
+  const box=b.closest('td')?.querySelector('[data-prepbox]'); if(!box) return;
+  if(!box.classList.contains('hide')){ box.classList.add('hide'); return; }
+  box.classList.remove('hide');
+  box.innerHTML='<div class="none">Loading…</div>';
+  delete WHERE_INFO[b.dataset.prep];   // a callback wants the newest history
+  loadWhereInfo(b.dataset.prep, box, {});
+});
 
 /* WHERE THINGS STAND, as two plain lines: what happened last, and what's next.
    It used to be one line like "call back 2026-09-25 — Answered · 1 try": a raw
@@ -2163,14 +2186,62 @@ async function loadAway(){
   $('fAwayNote').textContent = d.last_processed
     ? ` — replies from bars, read and filed automatically. Last checked ${touchWhen(d.last_processed)}.` : '';
   $('fAwayList').innerHTML = d.items.length ? d.items.map(it=>`
-    <div style="padding:8px 0;border-top:1px solid var(--line2)">
+    <div class="awayitem" data-msg="${esc(it.message_id||'')}" data-lead="${esc(it.lead_id||'')}"
+         data-to="${esc(it.from_addr||'')}" style="padding:8px 0;border-top:1px solid var(--line2)">
       <div style="font-size:13px"><strong>${esc(it.from)}</strong>
         <span class="muted">· ${esc(it.subject||'')} · ${esc(touchWhen(it.processed_at))}</span></div>
       ${assistResult({reply:it.reply, question:null, applied:it.applied, skipped:it.skipped})}
+      ${awayReply(it)}
     </div>`).join('')
     : '<p class="muted" style="margin:0;font-size:13px">No replies from bars yet.</p>';
 }
-$('fAwayList').onclick=e=>$('fAssistOut').onclick(e);   // same Undo handling, looked up at click time
+/* What a reply needs from you. An opt-out is final; a question or real
+   interest gets a reply drafted overnight (never sent by itself), ready to
+   edit and send — threaded under their email. */
+function awayReply(it){
+  if(it.opt_out) return `<p class="err" style="margin:6px 0 0;font-size:13px">Asked not to be emailed —
+    ${esc(it.from_addr)} is on the do-not-email list for good.</p>`;
+  if(it.replied_at) return `<p class="muted" style="margin:6px 0 0;font-size:13px">✓ Replied ${esc(touchWhen(it.replied_at))}</p>`;
+  if(it.draft) return replyBox(it.draft);
+  if(it.needs_reply && it.lead_id) return `<p style="margin:6px 0 0;font-size:13px">Needs your reply.
+    <button data-away-draft>Draft a reply</button></p>`;
+  return '';
+}
+function replyBox(dr){
+  return `<div class="replybox" style="margin-top:8px">
+    <div class="hint" style="margin:0 0 4px">Reply drafted — edit it, then send. Nothing goes out until you press Send.</div>
+    <input data-rsubject value="${esc(dr.subject||'')}" style="width:100%;margin-bottom:6px">
+    <textarea data-rbody rows="8" style="width:100%">${esc(dr.body||'')}</textarea>
+    <div class="row" style="margin-top:6px;gap:8px">
+      <button class="go" data-away-send>Send reply</button>
+      <button data-away-draft>Redraft</button></div></div>`;
+}
+$('fAwayList').onclick=async e=>{
+  const item=e.target.closest('.awayitem');
+  const draftBtn=e.target.closest('[data-away-draft]'), sendBtn=e.target.closest('[data-away-send]');
+  if(!item || !(draftBtn||sendBtn)) return $('fAssistOut').onclick(e);  // same Undo handling
+  const lead=item.dataset.lead, msg=item.dataset.msg;
+  if(draftBtn){
+    draftBtn.disabled=true; draftBtn.textContent='Writing…';
+    try{
+      const r=await api(`/leads/${encodeURIComponent(lead)}/draft-email`,
+        {method:'POST',body:JSON.stringify({reply_to:msg})});
+      const old=item.querySelector('.replybox, [data-away-draft]')?.closest('.replybox, p');
+      const box=document.createElement('div'); box.innerHTML=replyBox(r);
+      if(old) old.replaceWith(box.firstElementChild); else item.appendChild(box.firstElementChild);
+    }catch(err){ toast(err.message); draftBtn.disabled=false; draftBtn.textContent='Redraft'; }
+    return;
+  }
+  const box=item.querySelector('.replybox');
+  sendBtn.disabled=true; sendBtn.textContent='Sending…';
+  try{
+    const r=await api(`/leads/${encodeURIComponent(lead)}/send-email`,{method:'POST',body:JSON.stringify({
+      to:item.dataset.to, subject:box.querySelector('[data-rsubject]').value.trim(),
+      body:box.querySelector('[data-rbody]').value, in_reply_to:msg})});
+    toast(sentNote(r.sent), r.undo_id);
+    await loadFollowups();
+  }catch(err){ toast(err.message); sendBtn.disabled=false; sendBtn.textContent='Send reply'; }
+};
 
 async function loadFollowups(){
   loadAway();

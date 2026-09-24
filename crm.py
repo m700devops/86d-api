@@ -215,6 +215,18 @@ def init_crm_tables():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inbox_processed "
                        "ON crm_inbox(processed_at DESC)")
+        # What the reply said (so a reply to it can be written from their own
+        # words), whether it was an opt-out or needs answering, the reply the
+        # AI drafted overnight, and when it was answered.
+        for col, col_type in [("body_text", "TEXT"), ("opt_out", "BOOLEAN"),
+                              ("needs_reply", "BOOLEAN"), ("draft", "TEXT"),
+                              ("replied_at", "TEXT")]:
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'crm_inbox' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE crm_inbox ADD COLUMN {col} {col_type}")
 
         # Undo for a mis-logged call. The whole row as it was, written before a
         # touch changes it, so putting it back is a restore rather than a guess
@@ -1872,27 +1884,96 @@ COMPANY_APP_URL = (os.getenv("COMPANY_APP_URL")
 DRAFT_LOG_CHARS = 4000
 
 
-def _draft_system(row: dict, include_log: bool = True) -> str:
-    """The brief the drafting model works from: the master sheet, the style
-    guide, the owner's example, and WHAT WE KNOW about this bar — its facts
-    with their sources, the prep-sheet points, and (for a first email; a
-    follow-up carries its own) what's been logged."""
+WINNERS_SHOWN = 2
+
+
+def _winning_emails(limit: int = WINNERS_SHOWN) -> list:
+    """Our most recent emails that got a reply (and not a "stop emailing me"):
+    what the drafter learns tone and angle from, beside the owner's example.
+    Bodies are only kept since crm_sent_emails existed, so this starts empty
+    and fills as mail goes out and replies come back."""
+    import pitch
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT e.subject, e.body, MAX(e.sent_at) AS sent_at
+                  FROM crm_sent_emails e
+                  JOIN crm_inbox i ON i.lead_ids LIKE '%%' || e.lead_id || '%%'
+                                  AND i.processed_at > e.sent_at
+                                  AND i.status IN ('updated', 'no_change')
+                                  AND COALESCE(i.opt_out, FALSE) = FALSE
+                 GROUP BY e.subject, e.body
+                 ORDER BY MAX(e.sent_at) DESC LIMIT %s
+            """, (limit,))
+            rows = cursor.fetchall()
+    except Exception as exc:
+        print(f"[crm] winning emails unavailable: {exc}", flush=True)
+        return []
+    return [{"subject": r["subject"], "body": (r["body"] or "")[:pitch.WINNER_CHARS]}
+            for r in rows if r["body"]]
+
+
+def _draft_context(row: dict, include_log: bool = True) -> str:
+    """WHAT WE KNOW about this bar: its facts with their sources, the
+    prep-sheet points and (for a first email or a reply; a follow-up's ask
+    carries its own) what's been logged."""
     import pitch
     import venue
 
     lead = _lead_row(row)
     lines = venue.facts_to_lines(venue.loads(row.get("venue_facts")))
-    try:
-        points = json.loads(row.get("call_brief") or "[]")
-    except (TypeError, ValueError):
-        points = []
+    brief = _brief_of(row)
+    points = [str(p) for p in (brief.get("points") or []) if p][:3]
     log = ""
     if include_log:
         log = (lead.get("notes") or "").strip()
         if len(log) > DRAFT_LOG_CHARS:
             log = "…" + log[-DRAFT_LOG_CHARS:]
-    ctx = pitch.lead_context(lead, lines, [str(p) for p in points if p][:3], log)
-    return pitch.system_prompt(ctx)
+    return pitch.lead_context(lead, lines, points, log)
+
+
+def _draft_system() -> str:
+    import pitch
+    return pitch.system_prompt(_knowledge(), _winning_emails())
+
+
+def _write_draft(row: dict, ask: str, include_log: bool = True) -> dict:
+    """One draft: the cached system (sheet, brain, examples, style), then this
+    bar and what to write. Shared by the Email button and the inbox reader's
+    overnight replies, so both write from the same brain."""
+    import pitch
+    out = _claude_json(_draft_system(), pitch.user_prompt(_draft_context(row, include_log), ask),
+                       pitch.SCHEMA, max_tokens=AI_MIN_TOKENS, timeout=120.0, purpose="draft")
+    subject = str(out.get("subject") or "").strip()[:200]
+    body = str(out.get("body") or "").strip()[:20000]
+    if not subject or not body:
+        raise HTTPException(status_code=502, detail={
+            "error": "draft_incomplete",
+            "message": "The draft came back empty — try saying it a different way."})
+    return {"subject": subject, "body": body}
+
+
+def _reply_ask(mail: dict, brief: str = "") -> str:
+    """Asking for a reply to an email a bar sent us."""
+    subject = (mail.get("subject") or "").strip()
+    re_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}".strip()
+    lines = [
+        "Write a REPLY to the email below, which they sent us. Answer every question in it "
+        "from the MASTER SHEET and the owner's instructions. Anything neither covers: say "
+        "you'll find out, or offer a quick call — never guess. They wrote to you, so keep it "
+        "short: a few lines usually does it, no four-step list unless they asked how it works. "
+        f'Subject: "{re_subject}".',
+        "",
+        "THEIR EMAIL",
+        f"From: {mail.get('from_name') or ''} <{mail.get('from_addr') or ''}>",
+        f"Subject: {subject}",
+        "",
+        (mail.get("body_text") or mail.get("text") or "").strip()[:4000] or "(no text kept)",
+    ]
+    if brief:
+        lines += ["", f"Also: {brief}"]
+    return "\n".join(lines)
 
 
 # ============== THE COMPANY BRAIN ==============
@@ -2091,39 +2172,113 @@ def brain_refresh(_: bool = Depends(require_crm_key)):
     return {"started": True}
 
 
-BRIEF_SYSTEM = """You write two or three short notes for a salesperson about to phone a bar.
+BRIEF_SYSTEM = """You prepare a salesperson for the next phone call to one bar. They sell 86'd; the
+MASTER SHEET below is everything true about it, and the only product facts you may use.
 
-They sell 86'd, an iPhone app that counts bar inventory by camera and builds the distributor order.
+You are given THE BAR: facts about it (each says where it came from), what has happened
+with it so far, and sometimes what the owner has told you and what we've learned from
+other calls.
 
-You will be given a list of FACTS about the venue. Every fact says where it came from.
+Return a JSON object:
+- "opener": the first sentence to say once someone picks up, in plain spoken English. Use
+  one real detail from THE BAR if there is one; otherwise open with the job itself (the
+  count, the orders). No "is this a bad time", no fake compliment. Null if unsure.
+- "ask_for": who to ask for, only if THE BAR names a person (a contact, a manager, someone
+  in the notes), with why ("Brent, the owner, per Lesley"). Otherwise null.
+- "points": two or three short notes to glance at mid-dial. Say what a fact MEANS for the
+  pitch, not the fact again ("open till 2am seven nights: a lot of pours to count by hand").
+  Where it came from a map rather than their own site, make it a question, not a claim.
+- "watch_for": the objection they're most likely to raise and a one-line answer, drawn from
+  the history or what we've learned; null if nothing points to one.
 
-Return ONLY a JSON object: {"points": ["...", "..."]}
+Rules: invent nothing about the bar. Never state a product fact that isn't on the MASTER
+SHEET. Short: every line fits on a phone screen. No greetings, no exclamation marks."""
 
-Rules:
-1. Use ONLY the facts given. Invent nothing — no cuisine, no size, no age, no
-   owner, no claim of any kind that is not in the list. If the facts are thin,
-   return fewer points. Two good notes beat four padded ones.
-2. Each point is one short line a person can glance at mid-dial. No preamble.
-3. Say what a fact MEANS for this pitch, not just the fact again. "Open 7 days
-   until 2am" on its own is already on the screen; "that's a lot of pours to
-   count by hand on a Sunday night" is the note worth having.
-4. Where a fact came from their website, you may say so ("their site says").
-   Where it came from a map, do not state it as certain — make it a question
-   worth asking.
-5. No greeting, no sign-off, no exclamation marks, no sales language."""
+BRIEF_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "opener": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "ask_for": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "points": {"type": "array", "items": {"type": "string"}},
+        "watch_for": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+    },
+    "required": ["opener", "ask_for", "points", "watch_for"],
+    "additionalProperties": False,
+}
+BRIEF_VERSION = 2
+
+
+def _brief_of(row: dict) -> dict:
+    """The stored prep-sheet brief. The first version stored a bare list of
+    points; that reads as a brief with points and no fingerprint (so stale)."""
+    try:
+        raw = json.loads(row.get("call_brief") or "null")
+    except (TypeError, ValueError):
+        raw = None
+    if isinstance(raw, list):
+        return {"points": [str(p) for p in raw]}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _brief_input(row: dict, lines: list, profile: dict, knowledge: str) -> str:
+    about = [f"Venue: {row['name']}" + (f", {row['loc']}" if row.get("loc") else "")]
+    if profile.get("kind"):
+        about.append(f"Kind: {profile['kind']}")
+    if profile.get("hours"):
+        about.append(f"Hours: {profile['hours']}")
+    if row.get("opener"):
+        about.append(f"From their own website: {row['opener']}")
+    if row.get("manager_name"):
+        about.append(f"Named on their website: {row['manager_name']}"
+                     + (f" ({row['manager_role']})" if row.get("manager_role") else ""))
+    if row.get("contact"):
+        about.append(f"We've been asking for: {row['contact']}")
+    if row.get("last_outcome"):
+        about.append(f"Last outcome: {row['last_outcome']}")
+    facts = "\n".join(f"- {l['text']} (from {l['source']})" for l in lines)
+    history = _lead_history(row, lines=6)
+    parts = ["THE BAR\n" + "\n".join(about)]
+    if facts:
+        parts.append("FACTS\n" + facts)
+    if history:
+        parts.append("WHAT HAS HAPPENED (oldest first)\n" + history)
+    if knowledge:
+        parts.append(knowledge)
+    return "\n\n".join(parts)
+
+
+def _brief_fingerprint(text: str) -> str:
+    import hashlib
+    return hashlib.sha1(f"{BRIEF_VERSION}\n{text}".encode()).hexdigest()[:16]
+
+
+def _brief_ask_for(value, row: dict) -> Optional[str]:
+    """Keep a suggested name only if the lead's own record carries it."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    first = re.split(r"[\s,(—-]+", value.strip())[0].lower()
+    known = " ".join(str(row.get(k) or "") for k in ("contact", "manager_name", "notes")).lower()
+    return value.strip()[:200] if len(first) >= 2 and first in known else None
 
 
 @crm_router.get("/leads/{lead_id}/brief", response_model=dict)
-def lead_brief(lead_id: str, refresh: bool = False,
+def lead_brief(lead_id: str, refresh: bool = False, quick: bool = False,
                _: bool = Depends(require_crm_key)):
     """What's worth knowing about this venue before the phone rings.
 
     The facts are extracted, never generated, and each carries its source — a
     brief that asserts something wrong is the moment the person on the other
-    end decides you're reading a script. The talking points on top are written
-    only from those facts, and cached, because they don't change between
-    dials and nobody should wait on a model with a phone in their hand.
+    end decides you're reading a script. On top: an opener, who to ask for,
+    two or three talking points and the objection to watch for, written from
+    those facts, the lead's own history and what we've learned (the brain).
+
+    Cached against a fingerprint of everything it was written from, so it's
+    rewritten when a call is logged or the playbook changes, not before.
+    `quick=1` never calls the model: the page shows the facts at once and
+    asks for the rest in a second request — nobody waits on a model to see a
+    bar's hours with a phone in their hand.
     """
+    import pitch
     import venue
 
     with get_db() as conn:
@@ -2139,43 +2294,43 @@ def lead_brief(lead_id: str, refresh: bool = False,
         raise HTTPException(status_code=404, detail={
             "error": "not_found", "message": "Lead not found"})
     profile = _venue_profile(row)
+    lines = venue.facts_to_lines(venue.loads(row.get("venue_facts")))
+    knowledge = _knowledge()
+    ask = _brief_input(row, lines, profile, knowledge)
+    fp = _brief_fingerprint(ask)
+    stored = _brief_of(row)
 
-    facts = venue.loads(row.get("venue_facts"))
-    lines = venue.facts_to_lines(facts)
+    def answer(brief: dict, cached: bool, pending: bool = False) -> dict:
+        return {"facts": lines, "profile": profile, "cached": cached, "pending": pending,
+                "points": brief.get("points") or [], "opener": brief.get("opener"),
+                "ask_for": brief.get("ask_for"), "watch_for": brief.get("watch_for")}
 
-    cached = row.get("call_brief")
-    if cached and not refresh:
-        try:
-            points = json.loads(cached)
-        except (TypeError, ValueError):
-            points = []
-        return {"facts": lines, "points": points, "cached": True, "profile": profile}
-
-    if not lines or not os.getenv("ANTHROPIC_API_KEY"):
+    if stored.get("fp") == fp and not refresh:
+        return answer(stored, True)
+    if not os.getenv("ANTHROPIC_API_KEY"):
         # Facts alone are still worth showing — they're the part that had to
         # be true anyway.
-        return {"facts": lines, "points": [], "cached": False, "profile": profile}
+        return answer({}, False)
+    if quick:
+        return answer({}, False, pending=True)
 
-    described = "\n".join(f"- {l['text']} (from {l['source']})" for l in lines)
-    where = row.get("loc") or ""
     try:
-        out = _ask_claude(
-            BRIEF_SYSTEM,
-            f"Venue: {row['name']}" + (f", {where}" if where else "")
-            + f"\n\nFacts:\n{described}",
-            max_tokens=350)
-        points = [str(p).strip()[:220] for p in (out.get("points") or [])][:3]
+        out = _claude_json(BRIEF_SYSTEM + "\n\n=== MASTER SHEET ===\n" + pitch.master_sheet(),
+                           ask, BRIEF_SCHEMA, purpose="prep-sheet")
     except HTTPException:
         # A model that's down must not take the facts down with it.
-        return {"facts": lines, "points": [], "cached": False, "profile": profile}
-
-    if points:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE crm_leads SET call_brief = %s WHERE id = %s",
-                           (json.dumps(points)[:4000], lead_id))
-            conn.commit()
-    return {"facts": lines, "points": points, "cached": False, "profile": profile}
+        return answer({}, False)
+    brief = {"v": BRIEF_VERSION, "fp": fp,
+             "points": [str(p).strip()[:220] for p in (out.get("points") or []) if str(p).strip()][:3],
+             "opener": (str(out.get("opener")).strip()[:300] if out.get("opener") else None),
+             "ask_for": _brief_ask_for(out.get("ask_for"), row),
+             "watch_for": (str(out.get("watch_for")).strip()[:300] if out.get("watch_for") else None)}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE crm_leads SET call_brief = %s WHERE id = %s",
+                       (json.dumps(brief)[:6000], lead_id))
+        conn.commit()
+    return answer(brief, False)
 
 
 def _venue_profile(row) -> dict:
@@ -2335,6 +2490,9 @@ class DraftRequest(BaseModel):
     # edits rather than replacing from scratch.
     subject: Optional[str] = Field(default=None, max_length=200)
     body: Optional[str] = Field(default=None, max_length=20000)
+    # A reply to an email they sent (crm_inbox.message_id): drafted from
+    # their own words, answering what they asked.
+    reply_to: Optional[str] = Field(default=None, max_length=500)
 
 
 @crm_router.post("/leads/{lead_id}/draft-email", response_model=dict)
@@ -2357,32 +2515,28 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
             "error": "not_found", "message": "Lead not found"})
     lead = _lead_row(row)
 
-    followup = data.followup and not (data.subject or data.body)
-    system = _draft_system(row, include_log=not followup)
-
+    revising = bool(data.subject or data.body)
+    followup = data.followup and not revising
     brief = data.brief.strip()
-    if not brief and not data.followup:
+    if not brief and not data.followup and not data.reply_to:
         raise HTTPException(status_code=422, detail={
             "error": "brief_required", "message": "Say what the email should cover."})
 
-    if followup:
-        ask = _followup_ask(lead, brief)
-    elif data.subject or data.body:
+    if revising:
         ask = (f"Here is the current draft.\n\nSubject: {data.subject or ''}\n\n"
                f"{data.body or ''}\n\n---\n\nChange it as follows, keeping "
                f"everything else as it is: {brief}")
+    elif data.reply_to:
+        mail = _inbox_mail(data.reply_to)
+        if not mail:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "That email isn't in the inbox log any more."})
+        ask = _reply_ask(mail, brief)
+    elif followup:
+        ask = _followup_ask(lead, brief)
     else:
         ask = f"Write the email. What it needs to say: {brief}"
-
-    import pitch
-    out = _claude_json(system, ask, pitch.SCHEMA, max_tokens=AI_MIN_TOKENS, timeout=120.0)
-    subject = str(out.get("subject") or "").strip()[:200]
-    body = str(out.get("body") or "").strip()[:20000]
-    if not subject or not body:
-        raise HTTPException(status_code=502, detail={
-            "error": "draft_incomplete",
-            "message": "The draft came back empty — try saying it a different way."})
-    return {"subject": subject, "body": body}
+    return _write_draft(row, ask, include_log=not followup)
 
 
 class OutgoingEmail(BaseModel):
@@ -2391,6 +2545,9 @@ class OutgoingEmail(BaseModel):
     to: Optional[str] = Field(default=None, max_length=320)
     # UTC ISO 8601. Present means "hold it until then" rather than send now.
     send_at: Optional[str] = Field(default=None, max_length=40)
+    # Answering an email they sent (its Message-ID): threads the reply under
+    # theirs in both inboxes, and marks it answered on the Follow-ups card.
+    in_reply_to: Optional[str] = Field(default=None, max_length=500)
 
 
 @crm_router.get("/mail/status", response_model=dict)
@@ -2429,21 +2586,29 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
         lead = cursor.fetchone()
+        to = (data.to or (lead or {}).get("email") or "").strip()
+        opted_out = _email_suppressed(cursor, to) if lead else None
     if not lead:
         raise HTTPException(status_code=404, detail={
             "error": "not_found", "message": "Lead not found"})
 
-    to = (data.to or lead["email"] or "").strip()
     if not mailer.valid_address(to):
         raise HTTPException(status_code=422, detail={
             "error": "no_address",
             "message": f"No usable email address for {lead['name']}."})
+    # Checked for a queued send too: an opt-out has to hold for mail already
+    # scheduled, not just what's sent from here on (run_due_emails re-checks).
+    if opted_out:
+        raise HTTPException(status_code=409, detail={
+            "error": "opted_out",
+            "message": f"Not sent — {to} {opted_out}. They can't be emailed again."})
 
     if data.send_at:
         return _queue_email(lead, to, data)
 
+    reply_to = (data.in_reply_to or "").strip() or None
     try:
-        sent = mailer.send(to, data.subject, data.body)
+        sent = mailer.send(to, data.subject, data.body, in_reply_to=reply_to)
     except mailer.MailNotConfigured as exc:
         raise HTTPException(status_code=503, detail={
             "error": "mail_not_configured", "message": str(exc)})
@@ -2458,6 +2623,9 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
         undo_id = _record_email_sent(cursor, lead_id, to, data.subject, today, now,
                                      body=data.body)
         _remember_sent(cursor, sent.get("message_id"), lead_id, now)
+        if reply_to:
+            cursor.execute("UPDATE crm_inbox SET replied_at = %s WHERE message_id = %s",
+                           (now, reply_to))
         cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
         updated = cursor.fetchone()
         cursor.execute("SELECT * FROM crm_counters WHERE id = 1")
@@ -2642,6 +2810,26 @@ def run_due_emails(limit: int = 20) -> dict:
             late_minutes = (now_dt - due).total_seconds() / 60
         except ValueError:
             late_minutes = 0
+        # They may have opted out after this was queued: that wins, always.
+        with get_db() as conn:
+            cursor = conn.cursor()
+            opted_out = _email_suppressed(cursor, job["to_addr"])
+            if opted_out:
+                cursor.execute("""
+                    UPDATE crm_scheduled_emails SET status = 'failed', last_error = %s
+                     WHERE id = %s
+                """, (f"Not sent: {job['to_addr']} {opted_out}.", job["id"]))
+                cursor.execute("""
+                    UPDATE crm_leads SET queued_email_at = NULL
+                     WHERE id = %s AND NOT EXISTS (
+                        SELECT 1 FROM crm_scheduled_emails
+                         WHERE lead_id = %s AND status = 'pending')
+                """, (job["lead_id"], job["lead_id"]))
+                conn.commit()
+        if opted_out:
+            skipped += 1
+            print(f"[crm] held back a queued email to {job['to_addr']} — opted out", flush=True)
+            continue
         if late_minutes > STALE_AFTER_MINUTES:
             skipped += 1
             with get_db() as conn:
@@ -4497,15 +4685,19 @@ def process_inbox(days: int = 3) -> dict:
             continue
         lead_ids = (_inbox.match_leads(mail, book, sent)
                     if _inbox.worth_reading(mail, mailer.sender()) else [])
-        result, status = None, "ignored"
+        result, status, draft = None, "ignored", None
         if lead_ids:
             handled += 1
             try:
                 result = _read_reply(mail, lead_ids)
+                if result.get("opt_out"):
+                    result["applied"] = _record_opt_out(mail, lead_ids) + result["applied"]
                 status = "updated" if result["applied"] else "no_change"
             except Exception as exc:
                 print(f"[crm] INBOX_FAILED {mail.get('subject')!r}: {exc}", flush=True)
                 result, status = {"error": str(exc)[:300]}, "failed"
+            if result and result.get("needs_reply"):
+                draft = _reply_draft_for(mail, lead_ids[0])
         tally[status] += 1
         if status == "failed":
             continue          # not recorded, so the next pass tries it again
@@ -4513,11 +4705,17 @@ def process_inbox(days: int = 3) -> dict:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO crm_inbox (message_id, from_addr, from_name, subject,
-                                       received_at, lead_ids, status, result, processed_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+                                       received_at, lead_ids, status, result, processed_at,
+                                       body_text, opt_out, needs_reply, draft)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
             """, (mail["message_id"], mail["from_addr"], mail["from_name"], mail["subject"],
                   mail["date"], ",".join(lead_ids), status,
-                  json.dumps(result) if result else None, now_iso()))
+                  json.dumps(result) if result else None, now_iso(),
+                  (mail.get("text") or "")[:4000] if lead_ids else None,
+                  bool(result and result.get("opt_out")),
+                  bool(result and result.get("needs_reply")),
+                  json.dumps(draft) if draft else None))
             conn.commit()
     if tally["updated"] or tally["no_change"] or tally["failed"]:
         print(f"[crm] INBOX {tally}", flush=True)
@@ -4542,14 +4740,98 @@ def _read_reply(mail: dict, lead_ids: list) -> dict:
     book, back = _assist.snapshot(leads, tries, today, lead_ids[0])
     text = (f"From: {mail['from_name']} <{mail['from_addr']}>\n"
             f"Subject: {mail['subject']}\n\n{mail['text']}")
-    out = _claude_json(_assist.SYSTEM + _inbox.INBOX_RULES,
-                       _assist.user_message(book, _assist.dates_table(date.fromisoformat(today)),
-                                            text, []),
-                       _assist.SCHEMA)
+    # The rules are the same for every email in a pass, so they're the cached
+    # system prompt; the leads and the email come after them.
+    out = _claude_json(_assist.SYSTEM + _inbox.INBOX_RULES, _assist.message_block(text, []),
+                       _inbox.INBOX_SCHEMA,
+                       context=_assist.context_block(
+                           book, _assist.dates_table(date.fromisoformat(today))),
+                       purpose="inbox")
     proposed = out.get("changes") if isinstance(out.get("changes"), list) else []
+    # An opt-out is honoured whatever the model thought, if the words say so.
+    opt_out = bool(out.get("opt_out")) or _inbox.looks_like_opt_out(mail.get("text"))
+    if opt_out:
+        proposed = []           # _record_opt_out does the writing, and nothing else should
     applied, skipped = _apply_proposed(proposed, back, text, today, allow_logged=False)
     return {"reply": str(out.get("reply") or "").strip()[:1000],
-            "applied": applied, "skipped": skipped}
+            "applied": applied, "skipped": skipped, "opt_out": opt_out,
+            "needs_reply": bool(out.get("needs_reply")) and not opt_out}
+
+
+def _record_opt_out(mail: dict, lead_ids: list) -> list:
+    """They asked not to be emailed again. The address goes on the do-not-
+    contact list for good — every send path checks it, and Undo does NOT lift
+    it (US law requires honouring an opt-out) — and each lead it's about goes
+    dead with its follow-up cleared and a note saying why. The lead changes
+    are undoable in case the AI misread; the suppression stays."""
+    today, now = _today(), now_iso()
+    who = mail.get("from_name") or mail.get("from_addr")
+    applied = []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if mail.get("from_addr"):
+            cursor.execute("""
+                INSERT INTO crm_suppressions (id, kind, value, reason, created_at)
+                VALUES (%s, 'email', %s, %s, %s) ON CONFLICT DO NOTHING
+            """, (generate_id(), mail["from_addr"].lower(),
+                  f"asked not to be emailed ({today}, replying to us)", now))
+        for lead_id in lead_ids:
+            cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (lead_id,))
+            lead = cursor.fetchone()
+            if not lead:
+                continue
+            undo_id = _snapshot(cursor, lead, "edit (opted out by email)")
+            note = (f"[{today}] {who} asked not to be emailed again. {mail.get('from_addr')} "
+                    "is on the do-not-email list; never email it again.")
+            cursor.execute("""
+                UPDATE crm_leads SET status = 'dead', followup_date = NULL, updated_at = %s,
+                       notes = COALESCE(notes || E'\\n', '') || %s
+                 WHERE id = %s
+            """, (now, note, lead_id))
+            applied.append({"lead_id": lead_id, "name": lead["name"], "undo_id": undo_id,
+                            "changed": ["asked not to be emailed", "stage → dead",
+                                        "follow-up cleared", "on the do-not-email list"]})
+        conn.commit()
+    return applied
+
+
+def _reply_draft_for(mail: dict, lead_id: str) -> Optional[dict]:
+    """A reply to their email, drafted overnight for the owner to review and
+    send in the morning. Never sent by itself. None when drafting fails —
+    the email is still recorded, and the page offers to draft it then."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        draft = _write_draft(row, _reply_ask({**mail, "body_text": mail.get("text")}))
+        return {**draft, "to": mail.get("from_addr"), "lead_id": lead_id}
+    except Exception as exc:
+        print(f"[crm] INBOX_DRAFT_FAILED {mail.get('subject')!r}: {exc}", flush=True)
+        return None
+
+
+def _inbox_mail(message_id: str) -> Optional[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT message_id, from_name, from_addr, subject, body_text, lead_ids
+              FROM crm_inbox WHERE message_id = %s
+        """, (message_id,))
+        row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def _email_suppressed(cursor, addr: Optional[str]) -> Optional[str]:
+    """Why this address must not be emailed, or None."""
+    if not addr:
+        return None
+    cursor.execute("SELECT reason FROM crm_suppressions WHERE kind = 'email' "
+                   "AND LOWER(value) = LOWER(%s)", (addr.strip(),))
+    row = cursor.fetchone()
+    return (row["reason"] or "on the do-not-email list") if row else None
 
 
 @crm_router.get("/inbox", response_model=dict)
@@ -4560,7 +4842,7 @@ def inbox_feed(hours: int = 72, _: bool = Depends(require_crm_key)):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT message_id, from_addr, from_name, subject, received_at, status,
-                   result, processed_at
+                   result, processed_at, lead_ids, opt_out, needs_reply, draft, replied_at
               FROM crm_inbox
              WHERE status IN ('updated', 'no_change') AND processed_at >= %s
              ORDER BY processed_at DESC LIMIT 50
@@ -4574,11 +4856,19 @@ def inbox_feed(hours: int = 72, _: bool = Depends(require_crm_key)):
             result = json.loads(r["result"] or "{}")
         except ValueError:
             result = {}
+        try:
+            draft = json.loads(r["draft"]) if r["draft"] else None
+        except ValueError:
+            draft = None
         items.append({"from": r["from_name"] or r["from_addr"], "from_addr": r["from_addr"],
                       "subject": r["subject"], "received_at": r["received_at"],
                       "processed_at": r["processed_at"], "status": r["status"],
                       "reply": result.get("reply"), "applied": result.get("applied") or [],
-                      "skipped": result.get("skipped") or []})
+                      "skipped": result.get("skipped") or [],
+                      "message_id": r["message_id"],
+                      "lead_id": (r["lead_ids"] or "").split(",")[0] or None,
+                      "opt_out": bool(r["opt_out"]), "needs_reply": bool(r["needs_reply"]),
+                      "draft": draft, "replied_at": r["replied_at"]})
     return {"items": items, "last_processed": last}
 
 
@@ -5361,10 +5651,41 @@ def coach_bosses(_: bool = Depends(require_crm_key)):
         "ai": bool(os.getenv("ANTHROPIC_API_KEY"))}
 
 
+_OBJECTION_IN_NOTES = re.compile(r"Objection: ([^·\n]{3,200})")
+
+
+def _real_objections(limit: int = 12) -> list:
+    """What prospects actually pushed back with lately: the "Objection:"
+    detail logged calls now carry, then the playbook's "Objections we hear".
+    Practice runs on these (coach.curveball_prompt)."""
+    found: list = []
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=PLAYBOOK_DAYS)).isoformat()
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT notes FROM crm_leads
+                 WHERE last_touch_at >= %s AND notes LIKE '%%Objection: %%'
+                 ORDER BY last_touch_at DESC LIMIT 60
+            """, (cutoff,))
+            for r in cursor.fetchall():
+                for m in _OBJECTION_IN_NOTES.findall(r["notes"] or ""):
+                    m = m.strip(" .")
+                    if m and m not in found:
+                        found.append(m)
+        pb = _playbook_of(_brain_row()) or {}
+        for sec in pb.get("sections") or []:
+            if "objection" in sec.get("title", "").lower():
+                found += [p["text"] for p in sec.get("points") or [] if p.get("text")]
+    except Exception as exc:
+        print(f"[crm] real objections unavailable: {exc}", flush=True)
+    return found[:limit]
+
+
 @crm_router.post("/coach/curveball", response_model=dict)
 def coach_curveball(data: CurveballRequest, _: bool = Depends(require_crm_key)):
-    system, user = _coach.curveball_prompt(data.level)
-    out = _ask_claude(system, user, max_tokens=200, temperature=1)
+    system, user = _coach.curveball_prompt(data.level, _real_objections())
+    out = _ask_claude(system, user, max_tokens=200, temperature=1, purpose="school")
     return {"who": str(out.get("who") or "Bar owner")[:120],
             "line": str(out.get("line") or "")[:400]}
 

@@ -159,24 +159,40 @@ def lead_context(lead: dict, fact_lines: Optional[list] = None,
     return "\n".join(out)
 
 
-def system_prompt(context: str) -> str:
-    return f"""You write one sales email for {OWNER_NAME}, who owns 86'd, to send from his own
+def system_prompt(knowledge: str = "", winners: Optional[list] = None) -> str:
+    """Everything that's the same for every email this hour: the master sheet,
+    the owner's instructions and the playbook (`knowledge`), the owner's own
+    example, emails of ours that got a reply, and the style guide. Sent as the
+    system prompt and CACHED, so a redraft — or the next bar's draft — reads
+    it at a tenth of the price. What's specific to one bar goes in the user
+    message (`user_prompt`)."""
+    parts = [f"""You write one sales email for {OWNER_NAME}, who owns 86'd, to send from his own
 mailbox to a bar. First person, in his voice, signed as him.
 
 === MASTER SHEET (the only product facts you may use) ===
-{master_sheet()}
-
-=== WHAT WE KNOW ABOUT THIS BAR ===
-{context}
-
-=== AN EMAIL THE OWNER LIKES (match its substance and clarity, not its exact words;
+{master_sheet()}"""]
+    if knowledge:
+        parts.append(f"=== WHAT THE OWNER SAYS AND WHAT WE'VE LEARNED ===\n{knowledge}")
+    parts.append(f"""=== AN EMAIL THE OWNER LIKES (match its substance and clarity, not its exact words;
 be more personal than it where WHAT WE KNOW allows) ===
-{EXAMPLE_EMAIL}
+{EXAMPLE_EMAIL}""")
+    if winners:
+        shown = "\n\n---\n\n".join(f"Subject: {w['subject']}\n\n{w['body']}" for w in winners)
+        parts.append("=== EMAILS OF OURS THAT GOT A REPLY (real and recent: learn from what "
+                     "worked. They were to OTHER bars, so never reuse a venue, name or detail "
+                     f"from them) ===\n{shown}")
+    parts.append(f"=== {STYLE}")
+    parts.append('Return a JSON object with "subject" and "body". The body is the whole email, '
+                 "sign-off included.")
+    return "\n\n".join(parts)
 
-=== {STYLE}
 
-Return a JSON object with "subject" and "body". The body is the whole email, sign-off
-included."""
+def user_prompt(context: str, ask: str) -> str:
+    """The part that changes per draft: who it's to, and what to write."""
+    return f"=== WHAT WE KNOW ABOUT THIS BAR ===\n{context}\n\n=== WHAT TO WRITE ===\n{ask}"
+
+
+WINNER_CHARS = 2500
 
 
 SCHEMA = {

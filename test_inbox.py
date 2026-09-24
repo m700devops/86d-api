@@ -81,7 +81,8 @@ class _Cur:
         elif s.startswith("SELECT message_id, lead_id FROM crm_sent_messages"):
             self._rows = [{"message_id": OURS, "lead_id": "CAT"}]
         elif s.startswith("INSERT INTO crm_inbox"):
-            self.store["recorded"].append({"message_id": params[0], "status": params[6]})
+            self.store["recorded"].append({"message_id": params[0], "status": params[6],
+                                           "params": params})
 
     def fetchall(self):
         return self._rows
@@ -156,9 +157,10 @@ def test_the_reader_only_sees_and_can_only_touch_the_leads_the_email_is_about(mo
     def db():
         yield types.SimpleNamespace(cursor=lambda: Cur(), commit=lambda: None)
 
-    def model(system, user, schema):
-        captured.update(system=system, user=user)
-        return {"reply": "ok", "question": None, "changes": []}
+    def model(system, user, schema, context=None, **kw):
+        captured.update(system=system, user=user, context=context, schema=schema)
+        return {"reply": "ok", "question": None, "changes": [],
+                "opt_out": False, "needs_reply": False}
 
     def apply(proposed, back, text, today, allow_logged=True):
         captured.update(back=back, allow_logged=allow_logged, text=text)

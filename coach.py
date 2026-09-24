@@ -178,9 +178,20 @@ def get_boss(boss_id: str) -> Optional[dict]:
     return b
 
 
-PRODUCT = ("86'd: an iPhone-only app (there is NO Android version) for independent bars. "
-           "A permanent price book of every product and what they pay, fast bottle counts, "
-           "and one-tap ordering to their distributors. There is a free trial.")
+def _product() -> str:
+    """What the rep sells, from the drafter's master sheet (pitch.py) so the
+    School can't drift from the truth: a practice owner who asks the price
+    gets the real one, and the grader can mark a wrong one down."""
+    import pitch
+    return ("86'd: an iPhone-only app (there is NO Android version) for independent bars and "
+            "restaurants. Point the camera at a bottle and AI identifies it, tap in the count, "
+            "and it sorts everything by distributor and emails every distributor its order in "
+            "one tap, with the restaurant's and bar manager's names on it. Each bottle's price, "
+            "par and distributor are set once and remembered, and every order is saved. First "
+            f"month free with no credit card, then {pitch.PRICE}. The rep is the founder.")
+
+
+PRODUCT = _product()
 
 LEVELS = {"warm": "curious but guarded", "busy": "short and distracted",
           "hostile": "annoyed, with a tricky objection"}
@@ -194,15 +205,24 @@ def clamp(n, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(n)))
 
 
-def curveball_prompt(level: str) -> tuple[str, str]:
+def curveball_prompt(level: str, real: Optional[list] = None) -> tuple[str, str]:
+    """`real`: things prospects actually said on this rep's calls (objections
+    logged on calls and the playbook's "Objections we hear"). Practising the
+    exact pushback the week's calls produced beats practising generic ones."""
     feel = LEVELS.get(level, LEVELS["busy"])
     system = ("You write cold-call practice prompts for a rep selling " + PRODUCT +
               " Reply with JSON only.")
     user = ("Invent ONE thing an independent US bar owner or GM might say on a cold call. "
             f"Mood: {feel}. Vary it widely: objections, odd questions, tests, interruptions, "
             "price, trust, an existing app, Android staff, a new owner, loyalty to a "
-            "distributor rep. Return {\"who\": \"role + situation, max 8 words\", "
-            "\"line\": \"what they say, max 30 words\"}.")
+            "distributor rep. ")
+    if real:
+        listed = "\n".join(f"- {r}" for r in real[:12])
+        user += ("\n\nTHINGS PROSPECTS REALLY SAID ON THIS REP'S CALLS LATELY:\n" + listed +
+                 "\nAbout half the time, base the line on one of these, reworded the way a "
+                 "different owner would say it. ")
+    user += ("Return {\"who\": \"role + situation, max 8 words\", "
+             "\"line\": \"what they say, max 30 words\"}.")
     return system, user
 
 
@@ -213,7 +233,7 @@ def grade_prompt(who: str, line: str, answer: str, seconds: int, timed_out: bool
             f"Rep replied{' (ran out of time)' if timed_out else ''} after {seconds}s: {answer}\n\n"
             "Score 0-10 on: acknowledging them, staying calm, asking a question that keeps "
             "the call alive, brevity, no feature-dumping, honesty (never claim Android "
-            "support), sounding like a person. Return {\"score\": n, \"skill\": one of "
+            "support, a wrong price or a feature it doesn't have), sounding like a person. Return {\"score\": n, \"skill\": one of "
             "\"opener\",\"discovery\",\"objections\",\"ask\" (the skill this moment tested), "
             "\"worked\": \"one sentence\", \"fix\": \"one sentence\", "
             "\"better\": \"a stronger line to say, max 35 words\"}.")
