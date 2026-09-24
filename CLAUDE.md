@@ -153,7 +153,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
   test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
-  test_ask.py test_apple.py test_followup_email.py -q` (345 tests)
+  test_ask.py test_apple.py test_followup_email.py test_tries.py -q` (351 tests)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -662,6 +662,18 @@ capture. Don't reintroduce them or describe them as current.)
   ignore bookkeeping lines ("Email found on", attempt numbers). Redraft, scheduling and Send
   are the normal compose-box path; nothing sends until Send. Sending does NOT clear
   `followup_date`, so the row stays until a call is logged. Covered by test_followup_email.py
+- **TRIES on screen count every attempt — calls, emails, Facebook messages — not
+  `attempts`.** `attempts` is the CALL ladder's count (`_cadence`, `MAX_ATTEMPTS`) and emails
+  deliberately don't touch it: an email must not use up a bar's six tries at being rung. But
+  showing it as "TRY" read as broken — a bar called once and emailed twice said 1. `/queue`
+  rows and `GET /leads/{id}` now carry `tries` (`_tries()`/`_touch_counts()` over
+  `crm_touches`, undone touches excluded), and `GET /leads/{id}` also returns `touches`, every
+  attempt oldest first. Follow-ups' TRY column shows the total with "1 call · 2 emails" under
+  it. Covered by test_tries.py
+- **Follow-ups rows are clickable too**, opening the same full record as the CRM tab —
+  `leadDetailsCell()` in crm.html, shared by CRM, Yet to Contact and Follow-ups so they can't
+  drift: every field, an "Every attempt" list (each call/email in the operator's own clock,
+  with its outcome), then the notes. The Email button swaps that panel for the compose box
 - **The drafting prompt is facts-only** (`_draft_system`). It is handed the product
   description, the venue, the contact and the links from `COMPANY_WEBSITE` / `COMPANY_APP_URL`,
   and told in the first rule never to invent a URL, price, percentage, customer count or
@@ -813,7 +825,7 @@ capture. Don't reintroduce them or describe them as current.)
   crm_leads has no columns for most of these, and "CONTACTED" alone tells the operator
   nothing when they come back to it
 - **Pipeline rows are clickable.** Anywhere on a row that isn't a button opens a read-only
-  drawer with every field plus the full notes/history — the row itself only has room for a
+  drawer with every field, every attempt, plus the full notes/history — the row itself only has room for a
   badge and one line
 
 ## Environment Variables Required
@@ -833,9 +845,12 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   Without it that endpoint 503s with "type the fields in by hand" and everything else,
   including the quick-outcome buttons, works normally. Not used by the mobile app
 - ANTHROPIC_MODEL — optional, default `claude-haiku-4-5-20251001`
-- COMPANY_WEBSITE (default `https://my86d.com`), COMPANY_APP_URL (default empty),
-  COMPANY_NAME, COMPANY_BLURB — the only facts the email drafter may state. An unset
-  COMPANY_APP_URL means no App Store link appears, never an invented one
+- COMPANY_WEBSITE (default `https://my86d.com`), COMPANY_APP_URL (default the live listing,
+  `https://apps.apple.com/us/app/86d-bar-inventory/id6798359825`), COMPANY_NAME,
+  COMPANY_BLURB — the only facts the email drafter may state. COMPANY_APP_URL used to
+  default to empty, and asking the drafter for "the link to the app" got the website
+  only, because it may not include a link it wasn't given. A blank env var falls back to
+  the default rather than switching the link off
 - SPACEMAIL_USER / SPACEMAIL_PASSWORD — the mailbox the Email button sends from
   (`Stephan@my86d.com`). Unset means the button falls back to a `mailto:` link and nothing is
   recorded. SPACEMAIL_HOST (default `mail.spacemail.com`), SPACEMAIL_PORT (465),
