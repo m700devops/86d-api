@@ -1958,10 +1958,16 @@ def _draft_system() -> str:
     return pitch.system_prompt(_knowledge(), _winning_emails())
 
 
-def _write_draft(row: dict, ask: str, include_log: bool = True) -> dict:
+def _write_draft(row: dict, ask: str, include_log: bool = True,
+                 to_decision_maker: bool = False) -> dict:
     """One draft: the cached system (sheet, brain, examples, style), then this
     bar and what to write. Shared by the Email button and the inbox reader's
-    overnight replies, so both write from the same brain."""
+    overnight replies, so both write from the same brain.
+
+    Every draft ends with the owner's signature (pitch.sign — in code, not
+    left to the prompt). A fresh outreach draft (`to_decision_maker`) is also
+    made to greet the decision maker by name; a reply answers whoever wrote,
+    and a revision keeps the greeting the draft already has."""
     import pitch
     out = _claude_json(_draft_system(), pitch.user_prompt(_draft_context(row, include_log), ask),
                        pitch.SCHEMA, max_tokens=AI_MIN_TOKENS, timeout=120.0, purpose="draft")
@@ -1971,7 +1977,9 @@ def _write_draft(row: dict, ask: str, include_log: bool = True) -> dict:
         raise HTTPException(status_code=502, detail={
             "error": "draft_incomplete",
             "message": "The draft came back empty — try saying it a different way."})
-    return {"subject": subject, "body": body}
+    if to_decision_maker:
+        body = pitch.address_to(body, pitch.first_name(pitch.decision_maker(dict(row))[0]))
+    return {"subject": subject, "body": pitch.sign(body)}
 
 
 def _reply_ask(mail: dict, brief: str = "") -> str:
@@ -2782,7 +2790,8 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
         ask = _followup_ask(lead, brief)
     else:
         ask = f"Write the email. What it needs to say: {brief}"
-    return _write_draft(row, ask, include_log=not followup)
+    return _write_draft(row, ask, include_log=not followup,
+                        to_decision_maker=not revising and not data.reply_to)
 
 
 class OutgoingEmail(BaseModel):
@@ -2800,8 +2809,9 @@ class OutgoingEmail(BaseModel):
 def mail_status(_: bool = Depends(require_crm_key)):
     """Whether the server can send, so the page knows which button to show."""
     import mailer
+    import pitch
     return {"configured": mailer.is_configured(), "from": mailer.sender(),
-            "host": mailer.HOST, "port": mailer.PORT,
+            "host": mailer.HOST, "port": mailer.PORT, "signature": pitch.SIGNATURE,
             # The page hides the "draft it for me" box rather than offering a
             # button that can only fail.
             "ai": bool(os.getenv("ANTHROPIC_API_KEY"))}

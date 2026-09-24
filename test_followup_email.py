@@ -88,7 +88,9 @@ def drafted(monkeypatch):
 
 def test_followup_draft_needs_no_brief(drafted):
     out = crm.draft_lead_email("L1", crm.DraftRequest(followup=True))
-    assert out == {"subject": "following up", "body": "Hi Laura, ..."}
+    assert out["subject"] == "following up"
+    assert out["body"].startswith("Hi Laura, ...")
+    assert out["body"].endswith("Stephan Khouri\nOwner of 86'd Bar inventory\nWebsite: My86d.com")
     assert "paid $800 at the vet" in drafted["ask"]
     assert "NEVER state a product fact" in drafted["system"]   # same facts-only rules
 
