@@ -179,6 +179,13 @@
                      border:1px solid var(--line);border-radius:999px;padding:3px 9px}
   .wherebox .fx span i{color:var(--text3);font-style:normal;font-size:10px}
   .wherebox .none{font-size:12px;color:var(--text3)}
+  #zones tr[data-id]{cursor:pointer}
+  #zones tr[data-id]:hover td{background:#ffffff08}
+  #zones td.nm .nmtxt{text-decoration:underline dotted var(--text3);text-underline-offset:3px}
+  .prep{display:grid;grid-template-columns:110px 1fr;gap:5px 12px;font-size:13px;margin-bottom:10px}
+  .prep dt{color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding-top:2px}
+  .prep dd{margin:0;color:var(--text)}
+  .prep a{color:var(--accent)}
   .acts{display:flex;gap:6px;white-space:nowrap}
   button{font:inherit;background:var(--surface2);color:var(--text);border:1px solid var(--line2);
          border-radius:7px;padding:6px 11px;cursor:pointer}
@@ -1190,7 +1197,7 @@ function row(l,n,calling){
   const tries = l.attempts||0;
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}" data-contact="${esc(l.contact||'')}">
     <td class="rownum">${n}</td>
-    <td class="nm" title="${esc(w.hint||l.name)}">${esc(l.name)}${whyTag(l)}
+    <td class="nm" title="Click for a quick read on ${esc(l.name)}"><span class="nmtxt">${esc(l.name)}</span>${whyTag(l)}
       ${ask(l)}
       ${l.opener?`<div class="opener">${esc(l.opener)}</div>`:''}</td>
     <td><div class="phcell">
@@ -1225,25 +1232,52 @@ function row(l,n,calling){
    data on every click, and the server itself caches the model-written
    points, so this just avoids a redundant round trip within one session. */
 const WHERE_INFO={};
-async function loadWhereInfo(id, box){
-  if(WHERE_INFO[id]) return renderWhereInfo(box, WHERE_INFO[id]);
+async function loadWhereInfo(id, box, lead){
+  if(WHERE_INFO[id]) return renderWhereInfo(box, WHERE_INFO[id], lead);
   try{
     const d=await api(`/leads/${id}/brief`);
     WHERE_INFO[id]=d;
-    renderWhereInfo(box, d);
+    renderWhereInfo(box, d, lead);
   }catch(err){ box.innerHTML=`<div class="none">${esc(err.message)}</div>`; }
 }
-function renderWhereInfo(box, d){
-  if(!d.facts.length && !d.points.length){
-    box.innerHTML='<div class="none">Nothing on file beyond the address — '
-      +'the map entry is bare and their site gave nothing up.</div>';
-    return;
-  }
+const KIND_LABEL={bar:'Bar', pub:'Pub', restaurant:'Restaurant with a bar', nightclub:'Nightclub'};
+/* OSM hours ("Mo-Th 15:00-24:00; Fr 15:00-26:00") in this screen's 12-hour
+   clock: "Mon-Thu 3pm-12am; Fri 3pm-2am". Past-midnight hours (26:00) wrap. */
+const DAY={Mo:'Mon',Tu:'Tue',We:'Wed',Th:'Thu',Fr:'Fri',Sa:'Sat',Su:'Sun',PH:'holidays'};
+function hours12(h){
+  return (h||'').replace(/\b(Mo|Tu|We|Th|Fr|Sa|Su|PH)\b/g, d=>DAY[d])
+    .replace(/(\d{1,2}):(\d{2})/g, (_,hh,mm)=>{
+      const H=(+hh)%24, ap=H<12?'am':'pm', h12=H%12||12;
+      return mm==='00'?`${h12}${ap}`:`${h12}:${mm}${ap}`;
+    });
+}
+/* The prep sheet: what's on file, a line each, then the talking points and
+   facts. Thin is fine — it never changes where a bar sits on the list; it's
+   only there so the first ten seconds of the call aren't cold. */
+function renderWhereInfo(box, d, l){
+  l=l||{}; const p=d.profile||{}; const w=l.call_window||{};
+  const site=p.website?`<a href="${esc(p.website)}" target="_blank" rel="noopener">${
+    esc(p.website.replace(/^https?:\/\/(www\.)?/,'').replace(/\/$/,''))}</a>`:'';
+  const rows=[
+    ['What', [KIND_LABEL[p.kind]||'', l.name?fullAddress(l):''].filter(Boolean).join(' · ')],
+    ['Website', site],
+    ['Ask for', l.manager_name?`${esc(l.manager_name)}${l.manager_role?' ('+esc(l.manager_role)+')':''} — check they're still there`:''],
+    ['Hours', esc(hours12(p.hours))],
+    ['Call window', esc([w.window, w.local_time&&`it's ${w.local_time} there`].filter(Boolean).join(' · '))],
+    ['Their line', esc(l.opener||'')],
+    ['Number', esc(l.phone_note||phoneCheck(l)||'')],
+    ['Email', l.email?`${esc(l.email)}${l.email_kind==='personal'?' — a person, not a front desk':''}`:''],
+  ].filter(([,v])=>v);
+  const thin = !d.points.length && !d.facts.length && !l.opener && !l.manager_name;
   box.innerHTML=
-    (d.points.length?`<div class="pts">${d.points.map(p=>
-      `<div class="pt">${esc(p)}</div>`).join('')}</div>`:'')
-    +`<div class="fx">${d.facts.map(f=>
-      `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`;
+    (rows.length?`<dl class="prep">${rows.map(([k,v])=>`<dt>${k}</dt><dd>${
+      k==='What'?esc(v):v}</dd>`).join('')}</dl>`:'')
+    +(d.points.length?`<div class="pts">${d.points.map(pt=>
+      `<div class="pt">${esc(pt)}</div>`).join('')}</div>`:'')
+    +(d.facts.length?`<div class="fx">${d.facts.map(f=>
+      `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`:'')
+    +(thin?'<div class="none">Not much on file for this one — go in fresh. It doesn\u2019t '
+      +'change where it sits on the list.</div>':'');
 }
 
 const MAIL_SUBJECT = "Following up — 86'd bar inventory";
@@ -1327,7 +1361,13 @@ $('zones').onclick=async e=>{
   const dr=e.target.closest('.drawer');
   if(dr) return drawerAction(dr,e);
 
-  const btn=e.target.closest('button[data-act]'); if(!btn) return;
+  let btn=e.target.closest('button[data-act]');
+  if(!btn){
+    // Anywhere else on a bar's row: the prep sheet, same as its address.
+    const rowEl=e.target.closest('tr[data-id]');
+    if(!rowEl || e.target.closest('a')) return;
+    btn={dataset:{act:'where'}, closest:()=>rowEl, rowClick:true};
+  }
   if(btn.dataset.act==='fill') return startFill(btn);
   const tr=btn.closest('tr'); const id=tr.dataset.id;
 
@@ -1355,14 +1395,19 @@ $('zones').onclick=async e=>{
     return;
   }
   if(btn.dataset.act==='where'){
-    if(tr.nextElementSibling?.classList.contains('drawer')){
-      tr.nextElementSibling.remove(); return;
+    const open=tr.nextElementSibling;
+    if(open?.classList.contains('drawer')){
+      // A stray click on the row must never close a Log or Email box and
+      // throw away what's typed in it — only the prep sheet toggles.
+      if(btn.rowClick && !open.classList.contains('info')) return;
+      open.remove(); return;
     }
     const d=document.createElement('tr');
     d.className='drawer info';
     d.innerHTML=`<td colspan="8"><div class="wherebox"><div class="none">Reading up on them…</div></div></td>`;
     tr.after(d);
-    loadWhereInfo(id, d.querySelector('.wherebox'));
+    loadWhereInfo(id, d.querySelector('.wherebox'),
+                  (NOWDATA?.ready||[]).find(x=>x.id===id));
     return;
   }
   if(btn.dataset.act==='mail'){

@@ -742,6 +742,15 @@ capture. Don't reintroduce them or describe them as current.)
   against reality. Once a few hundred dials are logged, move the window to match the data
   rather than trusting the heuristic. It reports thin data honestly rather than dressing up
   noise
+- **Click anywhere on a call-list row for the prep sheet** (not just the address, which nobody
+  knew was clickable; the bar's name is dotted-underlined to say so). `renderWhereInfo()` lays
+  out what's already on file — kind of place, address, website, who to ask for, hours in
+  12-hour (`hours12()`), the calling window, their line, where the number came from, whether
+  the email reaches a person — then the brief's talking points and facts. `/brief` now returns
+  `profile` (`_venue_profile()`: kind/website/hours, all stored, nothing fetched). A thin
+  sheet says "go in fresh" and **never changes where a lead sorts** — it's the cherry on top,
+  not a criterion. A row click never closes a Log or Email box (only the sheet toggles), so it
+  can't throw away typing
 - **`GET /leads/{id}/brief` is the pre-call sheet.** Facts from venue.py first, each labelled
   with where it came from; then two or three talking points Claude writes FROM THOSE FACTS
   ONLY, cached in `call_brief` so nobody waits on a model with a phone in their hand. A model

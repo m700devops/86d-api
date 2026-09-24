@@ -179,3 +179,17 @@ def test_only_numbers_their_website_vouches_for_are_offered():
     rows[4]["source"] = "manual"          # the operator's own entry: trusted as typed
     names = {l["name"] for l in _run(rows, states)["ready"]}
     assert names == {"ok", "fixed", "mine"}
+
+
+def test_the_prep_sheet_profile_is_only_whats_on_file():
+    # Kind, website and hours, all already stored: a generated lead's come
+    # from its candidate, a quick-added one's website from its notes.
+    row = {"cand_website": "https://devonspub.example", "cand_amenity": "pub",
+           "opening_hours": "Mo-Th 15:00-24:00", "notes": ""}
+    assert crm._venue_profile(row) == {"kind": "pub", "website": "https://devonspub.example",
+                                       "hours": "Mo-Th 15:00-24:00"}
+    quick = {"cand_website": None, "cand_amenity": None, "opening_hours": None,
+             "notes": "Decision makers: Mike · Website: https://oldetown.example | Next step: call"}
+    assert crm._venue_profile(quick)["website"] == "https://oldetown.example"
+    bare = {"cand_website": None, "cand_amenity": None, "opening_hours": None, "notes": None}
+    assert crm._venue_profile(bare) == {"kind": None, "website": None, "hours": None}

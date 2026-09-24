@@ -1867,11 +1867,17 @@ def lead_brief(lead_id: str, refresh: bool = False,
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+        cursor.execute("""
+            SELECT l.*, c.website AS cand_website, c.amenity AS cand_amenity
+              FROM crm_leads l
+              LEFT JOIN crm_lead_candidates c ON c.promoted_lead_id = l.id
+             WHERE l.id = %s
+        """, (lead_id,))
         row = cursor.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={
             "error": "not_found", "message": "Lead not found"})
+    profile = _venue_profile(row)
 
     facts = venue.loads(row.get("venue_facts"))
     lines = venue.facts_to_lines(facts)
@@ -1882,12 +1888,12 @@ def lead_brief(lead_id: str, refresh: bool = False,
             points = json.loads(cached)
         except (TypeError, ValueError):
             points = []
-        return {"facts": lines, "points": points, "cached": True}
+        return {"facts": lines, "points": points, "cached": True, "profile": profile}
 
     if not lines or not os.getenv("ANTHROPIC_API_KEY"):
         # Facts alone are still worth showing — they're the part that had to
         # be true anyway.
-        return {"facts": lines, "points": [], "cached": False}
+        return {"facts": lines, "points": [], "cached": False, "profile": profile}
 
     described = "\n".join(f"- {l['text']} (from {l['source']})" for l in lines)
     where = row.get("loc") or ""
@@ -1900,7 +1906,7 @@ def lead_brief(lead_id: str, refresh: bool = False,
         points = [str(p).strip()[:220] for p in (out.get("points") or [])][:3]
     except HTTPException:
         # A model that's down must not take the facts down with it.
-        return {"facts": lines, "points": [], "cached": False}
+        return {"facts": lines, "points": [], "cached": False, "profile": profile}
 
     if points:
         with get_db() as conn:
@@ -1908,7 +1914,20 @@ def lead_brief(lead_id: str, refresh: bool = False,
             cursor.execute("UPDATE crm_leads SET call_brief = %s WHERE id = %s",
                            (json.dumps(points)[:4000], lead_id))
             conn.commit()
-    return {"facts": lines, "points": points, "cached": False}
+    return {"facts": lines, "points": points, "cached": False, "profile": profile}
+
+
+def _venue_profile(row) -> dict:
+    """The plain facts on file for the prep sheet, all already stored: what
+    kind of place, their website, the hours the map lists. Nothing here is
+    fetched or generated, and nothing here decides where a lead sorts — a
+    bare profile is just a bare profile."""
+    website = row.get("cand_website")
+    if not website:
+        found = re.search(r"https?://[^\s|,;]+", row.get("notes") or "")
+        website = found.group(0) if found else None
+    return {"kind": row.get("cand_amenity"), "website": website,
+            "hours": row.get("opening_hours")}
 
 
 @crm_router.get("/leads/{lead_id}/send-slots", response_model=dict)
