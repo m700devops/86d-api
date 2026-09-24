@@ -75,12 +75,14 @@ def drafted(monkeypatch):
         conn = types.SimpleNamespace(cursor=lambda: _Cursor(_lead()))
         yield conn
 
-    def fake_claude(system, ask, schema=None, model=None, max_tokens=0, timeout=0):
+    def fake_claude(system, ask, schema=None, model=None, max_tokens=0, timeout=0, **kw):
         sent.update(system=system, ask=ask)
         return {"subject": "following up", "body": "Hi Laura, ..."}
 
     monkeypatch.setattr(crm, "get_db", db)
     monkeypatch.setattr(crm, "_claude_json", fake_claude)
+    monkeypatch.setattr(crm, "_knowledge", lambda *a, **k: "")
+    monkeypatch.setattr(crm, "_winning_emails", lambda *a, **k: [])
     return sent
 
 
@@ -94,7 +96,7 @@ def test_followup_draft_needs_no_brief(drafted):
 def test_a_redraft_edits_the_draft_on_screen(drafted):
     crm.draft_lead_email("L1", crm.DraftRequest(
         followup=True, brief="shorter", subject="following up", body="Hi Laura, ..."))
-    assert drafted["ask"].startswith("Here is the current draft.")
+    assert "=== WHAT TO WRITE ===\nHere is the current draft." in drafted["ask"]
     assert "shorter" in drafted["ask"]
 
 

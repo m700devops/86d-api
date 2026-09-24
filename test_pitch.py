@@ -82,27 +82,34 @@ def drafted(monkeypatch):
     def db():
         yield types.SimpleNamespace(cursor=lambda: _Cur())
 
-    def fake(system, ask, schema, model=None, max_tokens=0, timeout=0):
+    def fake(system, ask, schema, model=None, max_tokens=0, timeout=0, **kw):
         sent.update(system=system, ask=ask, schema=schema, max_tokens=max_tokens)
         return {"subject": "Rioja's Sunday count", "body": "Hi Alex, ..."}
 
     monkeypatch.setattr(crm, "get_db", db)
     monkeypatch.setattr(crm, "_claude_json", fake)
+    monkeypatch.setattr(crm, "_knowledge", lambda *a, **k: "")
+    monkeypatch.setattr(crm, "_winning_emails", lambda *a, **k: [])
     return sent
 
 
 def test_a_first_email_reads_the_log_and_the_prep_sheet(drafted):
     out = crm.draft_lead_email("L1", crm.DraftRequest(brief="first email, mention the free month"))
     assert out["subject"] == "Rioja's Sunday count"
-    assert "spoke with Alex" in drafted["system"]          # the log, for a first email too
-    assert "tapas and a long wine list" in drafted["system"]
+    # The bar goes in the message; the system prompt is the cached, same-for-
+    # everyone part (sheet, brain, examples, style).
+    assert "spoke with Alex" in drafted["ask"]             # the log, for a first email too
+    assert "tapas and a long wine list" in drafted["ask"]
+    assert "MASTER SHEET" in drafted["system"]
+    for detail in ("spoke with Alex", "tapas", "Denver"):
+        assert detail not in drafted["system"], detail
     assert drafted["schema"] == pitch.SCHEMA
     assert drafted["max_tokens"] >= crm.AI_MIN_TOKENS
 
 
 def test_a_follow_up_carries_the_log_once(drafted):
     crm.draft_lead_email("L1", crm.DraftRequest(followup=True))
-    assert "spoke with Alex" in drafted["ask"]
+    assert drafted["ask"].count("spoke with Alex") == 1   # in the follow-up ask, not twice
     assert "spoke with Alex" not in drafted["system"]
 
 
@@ -162,3 +169,40 @@ def test_the_structured_helper_sends_effort_too(monkeypatch):
     crm._claude_json("sys", "msg", pitch.SCHEMA)
     oc = calls[0]["json"]["output_config"]
     assert oc["effort"] == "medium" and oc["format"]["schema"] == pitch.SCHEMA
+
+
+# ── reply mode, and learning from what got replies ──────────────────────────
+
+def test_a_reply_is_drafted_from_the_email_they_sent(drafted, monkeypatch):
+    monkeypatch.setattr(crm, "_inbox_mail", lambda mid: {
+        "message_id": mid, "from_name": "Jed", "from_addr": "jed@fbrmgmt.com",
+        "subject": "following up", "body_text": "Does it work with two locations?"})
+    crm.draft_lead_email("L1", crm.DraftRequest(reply_to="<reply-1@fbrmgmt.com>"))
+    assert "Does it work with two locations?" in drafted["ask"]
+    assert 'Subject: "Re: following up"' in drafted["ask"]
+
+
+def test_a_reply_to_an_email_that_is_gone_is_a_404(drafted, monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+    monkeypatch.setattr(crm, "_inbox_mail", lambda mid: None)
+    with pytest.raises(HTTPException) as e:
+        crm.draft_lead_email("L1", crm.DraftRequest(reply_to="<gone@x>"))
+    assert e.value.status_code == 404
+
+
+def test_emails_that_got_replies_are_shown_as_examples_not_to_copy():
+    p = pitch.system_prompt("OWNER'S STANDING INSTRUCTIONS ...\nDemos Tue/Thu.",
+                            [{"subject": "Workhorse's Sunday count", "body": "Hi Brent, ..."}])
+    assert "Demos Tue/Thu." in p
+    assert "EMAILS OF OURS THAT GOT A REPLY" in p and "Workhorse's Sunday count" in p
+    assert "never reuse a venue, name or detail" in p
+    plain = pitch.system_prompt()
+    assert "GOT A REPLY" not in plain and "WHAT THE OWNER SAYS" not in plain
+
+
+def test_the_system_prompt_is_the_same_for_every_bar():
+    # What makes it cacheable: nothing about one bar is in it.
+    assert pitch.system_prompt("k", []) == pitch.system_prompt("k", [])
+    assert "WHAT WE KNOW ABOUT THIS BAR" not in pitch.system_prompt("k", [])
+    assert pitch.user_prompt("Venue: Rioja", "Write it").startswith("=== WHAT WE KNOW ABOUT THIS BAR")

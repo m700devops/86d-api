@@ -118,6 +118,21 @@ def match_leads(mail: dict, leads: list, sent: dict) -> list:
     return found
 
 
+# A backstop for the model's own opt_out flag, deliberately narrow: phrases
+# that only ever mean "stop emailing me". "Remove me from the CC and email Jed"
+# is a routing change, not an opt-out, and must not match.
+_OPT_OUT_RE = re.compile(
+    r"\bunsubscribe\b"
+    r"|\bstop (?:emailing|e-mailing|contacting|sending)\b"
+    r"|\bdo(?: not|n'?t) (?:email|e-mail|contact) (?:me|us)\b"
+    r"|\bremove (?:me|us|this (?:email|address)) from (?:your|the|this) (?:list|mailing|email)"
+    r"|\btake (?:me|us) off (?:your|the) (?:list|mailing)", re.I)
+
+
+def looks_like_opt_out(text: Optional[str]) -> bool:
+    return bool(_OPT_OUT_RE.search((text or "")[:TEXT_LIMIT]))
+
+
 INBOX_RULES = """
 
 THIS MESSAGE IS AN EMAIL a venue sent in, read automatically while the salesperson is away. Only the leads it is about are in LEADS.
@@ -125,4 +140,22 @@ THIS MESSAGE IS AN EMAIL a venue sent in, read automatically while the salespers
 - Record what it tells you: a new person to deal with and their address (contact, email), someone who has left, interest or a no (status), a day to follow up, anything worth knowing (note). Start the note with who wrote and what they said, briefly.
 - An out-of-office or automatic reply only changes something if it names a new contact or says the person has left; otherwise change nothing.
 - Never set "logged": a reply they sent is not a call or email the salesperson made.
+- opt_out: true ONLY when they ask not to be emailed or contacted again (unsubscribe, stop emailing, take me off your list). Then set that lead's status to dead. "Talk to Jed instead" or "remove me from the CC" is not an opt-out.
+- needs_reply: true when they asked a question, asked for information, pricing or a demo, or showed interest a person should answer. False for an out-of-office, a thank-you, a no, or an opt-out.
 - reply: one plain sentence saying what came in and what you changed."""
+
+
+def _schema():
+    import copy
+
+    import assist
+    schema = copy.deepcopy(assist.SCHEMA)
+    schema["properties"]["opt_out"] = {"type": "boolean"}
+    schema["properties"]["needs_reply"] = {"type": "boolean"}
+    schema["required"] = schema["required"] + ["opt_out", "needs_reply"]
+    return schema
+
+
+# The AI bar's schema plus the two things only an inbound email can be: an
+# opt-out, and a message a person should answer.
+INBOX_SCHEMA = _schema()

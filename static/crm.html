@@ -483,6 +483,8 @@
             <em>warm up and learn before you dial</em></button>
           <button data-tab="yet" role="menuitem">Yet to Contact
             <em>bars on the list nobody has called or emailed yet</em></button>
+          <button data-tab="brain" role="menuitem">AI Brain
+            <em>what the AI knows, your instructions, what it has learned</em></button>
         </div>
       </div>
     </div>
@@ -745,6 +747,38 @@
     <!-- Read-only roster: who actually signed up, not who to work. The
          pipeline tab is the list with actions on it; this one just answers
          "did it work" one account at a time instead of as a funnel total. -->
+    <!-- The company brain (playbook.py): what every AI works from. The
+         master sheet is fixed in code; the instructions are the owner's; the
+         playbook is learned from the log about once a day. -->
+    <section data-panel="brain" class="hide">
+      <div class="card">
+        <strong>Your standing instructions</strong>
+        <p class="hint" style="margin:4px 0 8px">Anything the AI should always know or do when it
+          writes emails, preps a call or coaches you. You're the authority here: facts you put in
+          are treated as true. For example: <em>"I'm free for demos Tuesday and Thursday
+          afternoons." "Don't lead with the price in a first email." "Our Denver customers love
+          the one-tap distributor emails."</em></p>
+        <textarea id="brainNotes" rows="6" maxlength="8000"
+          placeholder="Type instructions for the AI, one per line…"></textarea>
+        <div style="display:flex;margin-top:8px;align-items:center;gap:10px;flex-wrap:wrap">
+          <button class="go" id="brainSave">Save instructions</button>
+          <span class="muted" id="brainSaved" style="font-size:13px"></span></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <strong>What it has learned from your calls</strong>
+          <button id="brainRefresh">Re-learn now</button></div>
+        <p class="hint" style="margin:4px 0 8px" id="brainWhen"></p>
+        <div id="brainPlaybook"></div>
+      </div>
+      <details class="card" style="margin-top:12px">
+        <summary><strong>What it knows about 86'd</strong>
+          <span class="muted" style="font-size:13px"> — the master sheet, the only product facts
+          it may state</span></summary>
+        <pre id="brainSheet" style="white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.5;margin:10px 0 0"></pre>
+      </details>
+    </section>
+
     <section data-panel="users" class="hide">
       <div class="pipebar">
         <input id="usersSearch" placeholder="Search a customer by business, manager, name or email…">
@@ -915,7 +949,7 @@ function switchTab(b){
     .forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
-    apple:loadApple,users:loadUsers,yet:loadPipeline,
+    apple:loadApple,users:loadUsers,yet:loadPipeline,brain:loadBrain,
     school:loadSchoolPanel}[TAB])()
     .catch(e=>toast(e.message));
 }
@@ -1275,9 +1309,14 @@ const WHERE_INFO={};
 async function loadWhereInfo(id, box, lead){
   if(WHERE_INFO[id]) return renderWhereInfo(box, WHERE_INFO[id], lead);
   try{
-    const d=await api(`/leads/${id}/brief`);
-    WHERE_INFO[id]=d;
+    // Two steps: what's on file at once (no model), then the AI's opener and
+    // talking points when they're written — a few seconds on a strong model.
+    const d=await api(`/leads/${id}/brief?quick=1`);
     renderWhereInfo(box, d, lead);
+    if(!d.pending){ WHERE_INFO[id]=d; return; }
+    const full=await api(`/leads/${id}/brief`);
+    WHERE_INFO[id]=full;
+    if(box.isConnected) renderWhereInfo(box, full, lead);
   }catch(err){ box.innerHTML=`<div class="none">${esc(err.message)}</div>`; }
 }
 const KIND_LABEL={bar:'Bar', pub:'Pub', restaurant:'Restaurant with a bar', nightclub:'Nightclub'};
@@ -1301,19 +1340,24 @@ function renderWhereInfo(box, d, l){
   const rows=[
     ['What', [KIND_LABEL[p.kind]||'', l.name?fullAddress(l):''].filter(Boolean).join(' · ')],
     ['Website', site],
-    ['Ask for', l.manager_name?`${esc(l.manager_name)}${l.manager_role?' ('+esc(l.manager_role)+')':''} — check they're still there`:''],
+    ['Say first', d.opener?`“${esc(d.opener)}”`:''],
+    ['Ask for', l.manager_name?`${esc(l.manager_name)}${l.manager_role?' ('+esc(l.manager_role)+')':''} — check they're still there`
+      : d.ask_for?esc(d.ask_for):''],
     ['Hours', esc(hours12(p.hours))],
     ['Call window', esc([w.window, w.local_time&&`it's ${w.local_time} there`].filter(Boolean).join(' · '))],
     ['Their line', esc(l.opener||'')],
     ['Number', esc(l.phone_note||phoneCheck(l)||'')],
     ['Email', l.email?`${esc(l.email)}${l.email_kind==='personal'?' — a person, not a front desk':''}`:''],
   ].filter(([,v])=>v);
-  const thin = !d.points.length && !d.facts.length && !l.opener && !l.manager_name;
+  const thin = !d.pending && !d.points.length && !d.facts.length && !l.opener && !l.manager_name
+    && !d.opener && !d.watch_for;
   box.innerHTML=
     (rows.length?`<dl class="prep">${rows.map(([k,v])=>`<dt>${k}</dt><dd>${
       k==='What'?esc(v):v}</dd>`).join('')}</dl>`:'')
+    +(d.pending?'<div class="none">Writing your opener and talking points…</div>':'')
     +(d.points.length?`<div class="pts">${d.points.map(pt=>
       `<div class="pt">${esc(pt)}</div>`).join('')}</div>`:'')
+    +(d.watch_for?`<div class="pt" style="margin-top:6px"><strong>Watch for:</strong> ${esc(d.watch_for)}</div>`:'')
     +(d.facts.length?`<div class="fx">${d.facts.map(f=>
       `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`:'')
     +(thin?'<div class="none">Not much on file for this one — go in fresh. It doesn\u2019t '
@@ -1563,8 +1607,12 @@ async function drawerAction(dr,e){
   try{
     const r=await api(`/leads/${id}/debrief`,
       {method:'POST',body:JSON.stringify({text,kind:'call'})});
+    // `details` is what the call taught us (objection, best time…): flatten
+    // it into the same line; `contact` reads as who to ask for next time.
     const bits=Object.entries(r.applied).filter(([k])=>k!=='note')
-      .map(([k,v])=>`${k.replace(/_/g,' ')}: ${v}`).join(' · ');
+      .flatMap(([k,v])=> v && typeof v==='object'
+        ? Object.entries(v).map(([a,b])=>`${a}: ${b}`)
+        : [`${k==='contact'?'ask for':k.replace(/_/g,' ')}: ${v}`]).join(' · ');
     toast(bits?('Saved — '+bits):'Saved', r.undo_id);
     await loadCalls();
   }catch(err){
@@ -1726,7 +1774,7 @@ function leadDetailsCell(l, cols){
     ${f('Bar',l.name)}${f('Where',l.loc)}${f('Stage',l.status)}
     ${f('Last touch',[outcomeLabel(l.last_outcome),(l.last_touch_at||'').slice(0,10)].filter(Boolean).join(' · '))}
     ${f('Tries',t.total?`${t.total}${why?' ('+why+')':''}`:'')}${f('Call back',l.followup_date)}
-    ${f('Spoke to',l.contact)}${f('Phone',l.phone_dial||l.phone)}
+    ${f('Ask for',l.contact)}${f('Phone',l.phone_dial||l.phone)}
     ${f('Phone check',l.phone_note||phoneCheck(l))}${f('Email',l.email)}
     ${f('Manager',l.manager_name&&`${l.manager_name}${l.manager_role?' ('+l.manager_role+')':''}`)}
     <p class="hint" style="margin:10px 0 4px">Every attempt <span class="muted">(your time)</span></p>
@@ -1740,8 +1788,21 @@ function leadDetailsCell(l, cols){
     <p class="hint" style="margin:10px 0 4px">Notes &amp; history</p>
     <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
     <div class="row" style="margin-top:10px"><button data-edit>Edit</button>
-      <button data-cancel>Close</button></div></td>`;
+      <button data-prep="${esc(l.id)}">Prep me for the call</button>
+      <button data-cancel>Close</button></div>
+    <div class="wherebox hide" data-prepbox style="margin-top:10px"></div></td>`;
 }
+/* Prep for a callback, from the details panel: the same sheet the call list
+   shows, written with everything logged on this lead so far. */
+document.addEventListener('click', e=>{
+  const b=e.target.closest('[data-prep]'); if(!b) return;
+  const box=b.closest('td')?.querySelector('[data-prepbox]'); if(!box) return;
+  if(!box.classList.contains('hide')){ box.classList.add('hide'); return; }
+  box.classList.remove('hide');
+  box.innerHTML='<div class="none">Loading…</div>';
+  delete WHERE_INFO[b.dataset.prep];   // a callback wants the newest history
+  loadWhereInfo(b.dataset.prep, box, {});
+});
 
 /* WHERE THINGS STAND, as two plain lines: what happened last, and what's next.
    It used to be one line like "call back 2026-09-25 — Answered · 1 try": a raw
@@ -2125,14 +2186,62 @@ async function loadAway(){
   $('fAwayNote').textContent = d.last_processed
     ? ` — replies from bars, read and filed automatically. Last checked ${touchWhen(d.last_processed)}.` : '';
   $('fAwayList').innerHTML = d.items.length ? d.items.map(it=>`
-    <div style="padding:8px 0;border-top:1px solid var(--line2)">
+    <div class="awayitem" data-msg="${esc(it.message_id||'')}" data-lead="${esc(it.lead_id||'')}"
+         data-to="${esc(it.from_addr||'')}" style="padding:8px 0;border-top:1px solid var(--line2)">
       <div style="font-size:13px"><strong>${esc(it.from)}</strong>
         <span class="muted">· ${esc(it.subject||'')} · ${esc(touchWhen(it.processed_at))}</span></div>
       ${assistResult({reply:it.reply, question:null, applied:it.applied, skipped:it.skipped})}
+      ${awayReply(it)}
     </div>`).join('')
     : '<p class="muted" style="margin:0;font-size:13px">No replies from bars yet.</p>';
 }
-$('fAwayList').onclick=e=>$('fAssistOut').onclick(e);   // same Undo handling, looked up at click time
+/* What a reply needs from you. An opt-out is final; a question or real
+   interest gets a reply drafted overnight (never sent by itself), ready to
+   edit and send — threaded under their email. */
+function awayReply(it){
+  if(it.opt_out) return `<p class="err" style="margin:6px 0 0;font-size:13px">Asked not to be emailed —
+    ${esc(it.from_addr)} is on the do-not-email list for good.</p>`;
+  if(it.replied_at) return `<p class="muted" style="margin:6px 0 0;font-size:13px">✓ Replied ${esc(touchWhen(it.replied_at))}</p>`;
+  if(it.draft) return replyBox(it.draft);
+  if(it.needs_reply && it.lead_id) return `<p style="margin:6px 0 0;font-size:13px">Needs your reply.
+    <button data-away-draft>Draft a reply</button></p>`;
+  return '';
+}
+function replyBox(dr){
+  return `<div class="replybox" style="margin-top:8px">
+    <div class="hint" style="margin:0 0 4px">Reply drafted — edit it, then send. Nothing goes out until you press Send.</div>
+    <input data-rsubject value="${esc(dr.subject||'')}" style="width:100%;margin-bottom:6px">
+    <textarea data-rbody rows="8" style="width:100%">${esc(dr.body||'')}</textarea>
+    <div style="display:flex;margin-top:6px;gap:8px;flex-wrap:wrap">
+      <button class="go" data-away-send>Send reply</button>
+      <button data-away-draft>Redraft</button></div></div>`;
+}
+$('fAwayList').onclick=async e=>{
+  const item=e.target.closest('.awayitem');
+  const draftBtn=e.target.closest('[data-away-draft]'), sendBtn=e.target.closest('[data-away-send]');
+  if(!item || !(draftBtn||sendBtn)) return $('fAssistOut').onclick(e);  // same Undo handling
+  const lead=item.dataset.lead, msg=item.dataset.msg;
+  if(draftBtn){
+    draftBtn.disabled=true; draftBtn.textContent='Writing…';
+    try{
+      const r=await api(`/leads/${encodeURIComponent(lead)}/draft-email`,
+        {method:'POST',body:JSON.stringify({reply_to:msg})});
+      const old=item.querySelector('.replybox, [data-away-draft]')?.closest('.replybox, p');
+      const box=document.createElement('div'); box.innerHTML=replyBox(r);
+      if(old) old.replaceWith(box.firstElementChild); else item.appendChild(box.firstElementChild);
+    }catch(err){ toast(err.message); draftBtn.disabled=false; draftBtn.textContent='Redraft'; }
+    return;
+  }
+  const box=item.querySelector('.replybox');
+  sendBtn.disabled=true; sendBtn.textContent='Sending…';
+  try{
+    const r=await api(`/leads/${encodeURIComponent(lead)}/send-email`,{method:'POST',body:JSON.stringify({
+      to:item.dataset.to, subject:box.querySelector('[data-rsubject]').value.trim(),
+      body:box.querySelector('[data-rbody]').value, in_reply_to:msg})});
+    toast(sentNote(r.sent), r.undo_id);
+    await loadFollowups();
+  }catch(err){ toast(err.message); sendBtn.disabled=false; sendBtn.textContent='Send reply'; }
+};
 
 async function loadFollowups(){
   loadAway();
@@ -2353,6 +2462,54 @@ const tile=(n,l)=>`<div class="stat"><div class="n">${esc(n)}</div><div class="l
 let USERS={status:'',q:'',offset:0};
 let usersTimer=null;
 const USER_STAGES=[['','All'],['trial','Trial'],['active','Paying'],['canceled','Canceled']];
+
+/* ── AI Brain ─────────────────────────────────────────────────────────── */
+let brainPoll=null, brainWait=null;   // brainWait: {from, until} after "Re-learn now"
+async function loadBrain(){
+  const d=await api('/brain');
+  if(brainWait && (d.playbook_refreshed_at!==brainWait.from || d.playbook_error!==brainWait.err
+                   || Date.now()>brainWait.until)) brainWait=null;
+  if(brainWait) d.refreshing=true;
+  const notes=$('brainNotes');
+  if(document.activeElement!==notes) notes.value=d.owner_notes||'';
+  $('brainSaved').textContent=d.owner_notes_updated_at?`Saved ${touchWhen(d.owner_notes_updated_at)}`:'';
+  $('brainSheet').textContent=d.master_sheet||'';
+  const pb=d.playbook;
+  $('brainWhen').textContent = d.refreshing ? 'Learning from the log now — this takes a minute…'
+    : d.playbook_refreshed_at ? `Learned ${touchWhen(d.playbook_refreshed_at)} from your calls, emails and replies. It re-learns about once a day when there's something new.`
+    : `It starts learning once ${d.min_touches} calls and emails are logged, then keeps learning about once a day.`;
+  $('brainRefresh').disabled=!!d.refreshing;
+  $('brainPlaybook').innerHTML =
+    (d.playbook_error?`<p class="err" style="font-size:13px">Last try failed: ${esc(d.playbook_error)}</p>`:'')
+    + (pb&&pb.sections&&pb.sections.length
+      ? (pb.summary?`<p style="margin:0 0 10px">${esc(pb.summary)}</p>`:'')
+        + pb.sections.map(sec=>`<div style="margin:10px 0">
+            <div style="font-weight:600;font-size:14px">${esc(sec.title)}</div>
+            <ul style="margin:4px 0 0;padding-left:18px">${sec.points.map(p=>`
+              <li style="margin:4px 0;font-size:13px;line-height:1.5">${esc(p.text)}
+                <span class="muted"> — ${esc(p.evidence.join(', '))}</span></li>`).join('')}</ul></div>`).join('')
+      : '<p class="muted" style="margin:0;font-size:13px">Nothing learned yet.</p>');
+  clearTimeout(brainPoll);
+  if(d.refreshing && TAB==='brain') brainPoll=setTimeout(()=>loadBrain().catch(()=>{}),8000);
+}
+$('brainSave').onclick=async()=>{
+  const b=$('brainSave'); b.disabled=true;
+  try{
+    const r=await api('/brain/notes',{method:'PUT',body:JSON.stringify({text:$('brainNotes').value})});
+    $('brainSaved').textContent=`Saved ${touchWhen(r.owner_notes_updated_at)}`;
+    toast('Instructions saved — every AI uses them from now on');
+  }catch(err){ toast(err.message); }
+  b.disabled=false;
+};
+$('brainRefresh').onclick=async()=>{
+  try{
+    const before=await api('/brain');
+    const r=await api('/brain/refresh',{method:'POST'});
+    if(!r.started) toast(r.message||'Already learning');
+    else brainWait={from:before.playbook_refreshed_at, err:before.playbook_error, until:Date.now()+180000};
+    await loadBrain();
+  }catch(err){ toast(err.message); }
+};
 
 async function loadUsers(){
   const qs=new URLSearchParams();

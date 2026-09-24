@@ -55,6 +55,7 @@ READERS = {
     "venue facts": lambda h: venue.extract_facts({}, h),
     "chain check": lambda h: leadgen.looks_like_chain("Olde Town", "https://x.com", h),
     "reply text": inbox.new_text,
+    "opt-out check": inbox.looks_like_opt_out,
     "html email": lambda h: inbox.parse(_mail("html", h)),
     "plain email": lambda h: inbox.parse(_mail("plain", h)),
 }

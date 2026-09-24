@@ -166,10 +166,9 @@ def test_apply_call_notes_on_an_existing_lead_matches_debrief_shape():
     assert applied["attempt"] == 1
     assert applied["status"] == "warm"
     assert applied["outcome"] == "callback"
-    # +3 days from the real clock in the CRM's zone — this was a hardcoded
-    # date that only passed on the day it was written.
-    expected = (crm.datetime.now(crm._reset_tz()) + crm.timedelta(days=3)).strftime("%Y-%m-%d")
-    assert applied["followup_date"] == expected
+    # +3 days from the day the call is logged — the same "today" the note is
+    # stamped with, never a second read of the clock.
+    assert applied["followup_date"] == "2026-09-25"
     assert counters["daily_calls_remaining"] == 24
     assert undo_id
 
@@ -326,7 +325,7 @@ def test_quick_add_lead_creates_and_logs_in_one_transaction(monkeypatch):
     cur = _FakeCursor()
     monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
     _no_lookup(monkeypatch)
-    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text, *a: {
         "name": "Murphy's Pub", "loc": "Nashville, TN", "status": "warm",
         "outcome": "callback", "contact": "Sarah", "email": "sarah@murphys.com",
         "followup_in_days": 2, "summary": "Sarah wants a callback Thursday.",
@@ -344,7 +343,7 @@ def test_quick_add_falls_back_to_the_leading_text_when_the_model_drops_the_name(
     cur = _FakeCursor()
     monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
     _no_lookup(monkeypatch)
-    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {"outcome": "gatekeeper"})
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text, *a: {"outcome": "gatekeeper"})
     text = ("Olde Town Tavern & Grill at (720) 242-9667 or (303) 467-1472.Location & "
             "ContactAddress: 7355 Ralston Rd, Arvada, CO 80002 ... Taylor the bartender picked up")
     result = crm.quick_add_lead(crm.QuickAdd(text=text), True)
@@ -355,7 +354,7 @@ def test_quick_add_finds_the_email_on_their_website(monkeypatch):
     cur = _FakeCursor()
     monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
     _no_lookup(monkeypatch, website="https://oldetowntavern.com", email="owners@oldetowntavern.com")
-    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text, *a: {
         "name": "Olde Town Tavern & Grill", "loc": "Arvada, CO", "email_on_website": True,
         "decision_makers": "Mallory and Mike (owners)", "contact": "Taylor (bartender)",
         "outcome": "gatekeeper", "status": "contacted",
@@ -371,7 +370,7 @@ def test_quick_add_finds_the_email_on_their_website(monkeypatch):
 def test_quick_add_refuses_only_when_no_name_anywhere(monkeypatch):
     monkeypatch.setattr(crm, "get_db", lambda: _Conn(_FakeCursor()))
     _no_lookup(monkeypatch)
-    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {})
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text, *a: {})
     with pytest.raises(crm.HTTPException) as exc:
         crm.quick_add_lead(crm.QuickAdd(text="(720) 242-9667"), True)
     assert exc.value.detail["error"] == "no_name"
@@ -392,7 +391,7 @@ def test_quick_add_logs_onto_the_bar_already_on_the_call_list(monkeypatch):
     cur = _FakeCursor(existing=[on_list])
     monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
     _no_lookup(monkeypatch)
-    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text, *a: {
         "name": "Olde Town Tavern & Grill", "loc": "Arvada, CO", "phone": "(720) 242-9667",
         "outcome": "gatekeeper", "contact": "Taylor", "summary": "Taylor the bartender picked up.",
         "decision_makers": "Mike (owner)",
@@ -412,7 +411,7 @@ def test_quick_add_still_creates_a_lead_for_a_different_bar_on_the_same_phone(mo
     cur = _FakeCursor(existing=[sister])
     monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
     _no_lookup(monkeypatch)
-    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text, *a: {
         "name": "The Monkey Bar", "phone": "720-242-9667", "outcome": "voicemail"})
     result = crm.quick_add_lead(crm.QuickAdd(text="The Monkey Bar, 720-242-9667, voicemail"), True)
     assert any(sql.startswith("INSERT INTO crm_leads") for sql, _ in cur.executed)
@@ -426,7 +425,7 @@ def test_quick_add_matches_on_any_number_in_the_paste(monkeypatch):
     cur = _FakeCursor(existing=[on_list])
     monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
     _no_lookup(monkeypatch)
-    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text, *a: {
         "name": "Olde Town Tavern & Grill", "phone": "(720) 242-9667", "outcome": "gatekeeper"})
     result = crm.quick_add_lead(crm.QuickAdd(
         text="Olde Town Tavern & Grill at (720) 242-9667 or (303) 467-1472. Taylor picked up"), True)

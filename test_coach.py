@@ -1,5 +1,8 @@
 """The Holdout's referee: the model proposes, apply_turn() decides."""
 
+import json
+
+import coach
 from coach import BOSSES, WIN_TRUST, apply_turn, points, turn_prompt
 
 
@@ -101,3 +104,46 @@ def test_tape_scoring_punishes_false_accusations():
     r = tape_score([0, 2, 4], [0, 2, 6], 50)
     assert r["hits"] == 2 and r["false"] == 1 and r["pts"] == 55 and not r["perfect"]
     assert tape_score([0, 2, 4], [1, 3, 5], 90)["pts"] == 0
+
+
+# ── the School sells the real product, against real objections ──────────────
+
+def test_practice_knows_the_real_price_and_trial():
+    import pitch
+    assert pitch.PRICE in coach.PRODUCT and "First month free with no credit card" in coach.PRODUCT
+    assert "NO Android" in coach.PRODUCT
+
+
+def test_curveballs_can_come_from_what_prospects_really_said():
+    _, user = coach.curveball_prompt("busy", ["already use BevSpot", "the owner does ordering"])
+    assert "REALLY SAID" in user and "- already use BevSpot" in user
+    _, plain = coach.curveball_prompt("busy")
+    assert "REALLY SAID" not in plain
+
+
+def test_logged_objections_are_read_back_for_practice(monkeypatch):
+    import sys
+    import types
+    from contextlib import contextmanager
+    if "database" not in sys.modules:
+        stub = types.ModuleType("database")
+        stub.get_db = lambda: None
+        sys.modules["database"] = stub
+    import crm
+
+    class Cur:
+        def execute(self, sql, params=()):
+            pass
+
+        def fetchall(self):
+            return [{"notes": "[2026-09-24] call · attempt 1: said no · Objection: already use "
+                              "BevSpot · Next: none\n[2026-09-25] call: x · Objection: too busy."}]
+
+    @contextmanager
+    def db():
+        yield types.SimpleNamespace(cursor=lambda: Cur())
+
+    monkeypatch.setattr(crm, "get_db", db)
+    monkeypatch.setattr(crm, "_brain_row", lambda: {"playbook": json.dumps({"sections": [
+        {"title": "Objections we hear", "points": [{"text": "Price, 3 bars", "evidence": ["A"]}]}]})})
+    assert crm._real_objections() == ["already use BevSpot", "too busy", "Price, 3 bars"]

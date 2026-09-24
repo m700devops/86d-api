@@ -72,7 +72,7 @@ def valid_address(addr: Optional[str]) -> bool:
 
 
 def send(to: str, subject: str, body: str,
-         reply_to: Optional[str] = None) -> dict:
+         reply_to: Optional[str] = None, in_reply_to: Optional[str] = None) -> dict:
     """Send one plain-text message. Returns {message_id, to, from}.
 
     Plain text on purpose. A one-to-one note to a bar manager should look like
@@ -100,6 +100,12 @@ def send(to: str, subject: str, body: str,
     # Message-ID is one of the cheapest spam signals there is.
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid(domain=(parseaddr(USER)[1].split("@")[-1] or None))
+    # Answering their email: these two headers are what put the reply under
+    # theirs as one conversation, in their mail app and ours.
+    parent = (in_reply_to or "").strip()
+    if parent and re.fullmatch(r"<[^<>\s]{3,490}>", parent):
+        msg["In-Reply-To"] = parent
+        msg["References"] = parent
     msg.set_content(body)
 
     context = ssl.create_default_context()

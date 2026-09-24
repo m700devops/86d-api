@@ -167,8 +167,9 @@ def _wire(monkeypatch, reply):
 
     monkeypatch.setattr(crm, "get_db", db)
     monkeypatch.setattr(crm, "_today", lambda: "2026-09-24")
-    def fake_model(system, user, schema):
-        cur.sent_to_model = user
+    def fake_model(system, user, schema, context=None, **kw):
+        # What the model reads: the cached book block, then the message.
+        cur.sent_to_model = (context + "\n\n" + user) if context else user
         return reply
 
     monkeypatch.setattr(crm, "_claude_json", fake_model)

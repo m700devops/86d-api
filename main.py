@@ -99,6 +99,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_scheduled_email_loop())
     asyncio.create_task(_inbox_loop())
     asyncio.create_task(_phone_check_loop())
+    asyncio.create_task(_playbook_loop())
     # Cold-call school refresh: every few days at 10am Asia/Manila. Own try,
     # own loop — nothing here may affect the product API or the CRM.
     try:
@@ -3031,6 +3032,21 @@ async def _phone_check_loop():
         except Exception as e:
             print(f"[leadgen] PHONE_CHECK_LOOP_ERROR {e}", flush=True)
         await asyncio.sleep(45 if checked else 1800)
+
+
+async def _playbook_loop():
+    """Re-learn the AI playbook from the log (crm.refresh_playbook) — it only
+    calls the model when there's something new: enough calls logged at all,
+    a day since the last refresh, and some new activity since. Checked every
+    three hours, in a worker thread so the event loop keeps answering."""
+    await asyncio.sleep(300)
+    while True:
+        try:
+            from crm import refresh_playbook
+            await asyncio.to_thread(refresh_playbook)
+        except Exception as e:
+            print(f"[crm] PLAYBOOK_LOOP_ERROR {e}", flush=True)
+        await asyncio.sleep(3 * 3600)
 
 
 async def _school_refresh_loop():
