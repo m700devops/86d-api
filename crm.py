@@ -5848,6 +5848,7 @@ class CoachLine(BaseModel):
 
 class TurnRequest(BaseModel):
     boss: str = Field(max_length=20)
+    lead_id: Optional[str] = Field(default=None, max_length=64)   # a rehearsal of a real call
     challenge: str = Field(default="none", max_length=20)
     transcript: list[CoachLine] = Field(default_factory=list, max_length=200)
     said: str = Field(min_length=1, max_length=1500)
@@ -5859,8 +5860,38 @@ class TurnRequest(BaseModel):
 
 class ReviewRequest(BaseModel):
     boss: str = Field(max_length=20)
+    lead_id: Optional[str] = Field(default=None, max_length=64)
     transcript: list[CoachLine] = Field(max_length=200)
     result: Literal["won", "lost"]
+
+
+def _rehearsal_boss(lead_id: str) -> dict:
+    """The practice character for a REAL lead (coach.lead_boss): what's on
+    file about the bar, its last few note lines, and the playbook's patterns
+    for reaching the decision maker and the objections real bars raise."""
+    import venue
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT l.*, c.website AS cand_website, c.amenity AS cand_amenity
+              FROM crm_leads l
+              LEFT JOIN crm_lead_candidates c ON c.promoted_lead_id = l.id
+             WHERE l.id = %s
+        """, (lead_id,))
+        row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "That lead isn't in the book any more."})
+    row = dict(row)
+    facts = [f"{f.get('text')} ({f.get('source')})" if isinstance(f, dict) else str(f)
+             for f in venue.facts_to_lines(venue.loads(row.get("venue_facts")))]
+    patterns = []
+    for sec in (_playbook_of(_brain_row()) or {}).get("sections") or []:
+        title = (sec.get("title") or "").lower()
+        if "decision maker" in title or "objection" in title:
+            patterns += [p["text"] for p in sec.get("points") or [] if p.get("text")]
+    return _coach.lead_boss(row, facts, _lead_history(row, lines=6), patterns,
+                            kind=row.get("cand_amenity") or "")
 
 
 def _known_boss(boss_id: str) -> None:
@@ -5947,25 +5978,86 @@ def coach_grade(data: GradeRequest, _: bool = Depends(require_crm_key)):
             "better": str(out.get("better") or "")[:400]}
 
 
+@crm_router.get("/coach/rehearse/{lead_id}", response_model=dict)
+def coach_rehearse(lead_id: str, _: bool = Depends(require_crm_key)):
+    """Set up a rehearsal of the real call to this lead: who picks up, who
+    decides, and what's actually on file (shown to the rep up front, so they
+    know which details are real and which the practice owner will invent)."""
+    b = _rehearsal_boss(lead_id)
+    return {"lead_id": lead_id, "name": b["name"], "bar": b["bar"], "opening": b["opening"],
+            "patience": b["patience"], "real": b["real"],
+            "ai": bool(os.getenv("ANTHROPIC_API_KEY"))}
+
+
 @crm_router.post("/coach/turn", response_model=dict)
 def coach_turn(data: TurnRequest, _: bool = Depends(require_crm_key)):
-    _known_boss(data.boss)
+    boss = _rehearsal_boss(data.lead_id) if data.lead_id else None
+    if boss is None:
+        _known_boss(data.boss)
     system, user = _coach.turn_prompt(
         data.boss, [t.model_dump() for t in data.transcript], data.said,
-        data.patience, data.trust, data.found, data.interrupt, data.challenge)
-    out = _ask_claude(system, user, max_tokens=400, temperature=0.8)
-    return _coach.apply_turn(data.boss, data.patience, data.trust, data.found, out)
+        data.patience, data.trust, data.found, data.interrupt,
+        "none" if boss else data.challenge, boss=boss)
+    out = _ask_claude(system, user, max_tokens=400, temperature=0.8, purpose="school")
+    return _coach.apply_turn(data.boss, data.patience, data.trust, data.found, out, boss=boss)
 
 
 @crm_router.post("/coach/review", response_model=dict)
 def coach_review(data: ReviewRequest, _: bool = Depends(require_crm_key)):
-    _known_boss(data.boss)
+    boss = _rehearsal_boss(data.lead_id) if data.lead_id else None
+    if boss is None:
+        _known_boss(data.boss)
     system, user = _coach.review_prompt(data.boss, [t.model_dump() for t in data.transcript],
-                                        data.result)
-    out = _ask_claude(system, user, max_tokens=500)
+                                        data.result, boss=boss)
+    out = _ask_claude(system, user, max_tokens=700, purpose="school")
     scores = {k: _coach.clamp(out.get(k), 0, 10) for k in ("opener", "discovery", "objections", "ask")}
-    return {**scores, "turning_point": str(out.get("turning_point") or "")[:400],
-            "redo": str(out.get("redo") or "")[:400]}
+    result = {**scores, "turning_point": str(out.get("turning_point") or "")[:400],
+              "redo": str(out.get("redo") or "")[:400]}
+    if boss:
+        sheet = out.get("cheat_sheet")
+        result["cheat_sheet"] = [str(x)[:300] for x in (sheet if isinstance(sheet, list) else [])
+                                 if str(x).strip()][:2]
+        result["avoid"] = str(out.get("avoid") or "")[:200]
+        result["real"] = boss["real"]
+    return result
+
+
+FILM_DAYS = 14
+FILM_CALLS = 15
+
+
+def _local_day(at: Optional[str]) -> str:
+    """"Tue Sep 23" in the operator's own clock, for the coach's call list."""
+    t = _parse_utc(at)
+    return t.astimezone(_operator_tz()).strftime("%a %b %d") if t else ""
+
+
+@crm_router.post("/coach/film", response_model=dict)
+def coach_film(_: bool = Depends(require_crm_key)):
+    """Game film: the founder's own recent conversations, read back as
+    coaching — one thing working, the pattern costing the most, and drills
+    built from what prospects actually said (the page files them into
+    Replay). Voicemails and ring-outs aren't film; nothing happened on them."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=FILM_DAYS)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT ON (t.lead_id) t.lead_id, t.at, t.outcome, l.name, l.notes
+              FROM crm_touches t JOIN crm_leads l ON l.id = t.lead_id
+             WHERE t.kind = 'call' AND t.at >= %s
+               AND t.outcome IN ('answered', 'callback', 'not_interested', 'gatekeeper')
+             ORDER BY t.lead_id, t.at DESC
+        """, (cutoff,))
+        rows = sorted(cursor.fetchall(), key=lambda r: r["at"] or "", reverse=True)[:FILM_CALLS]
+    if not rows:
+        return {"working": None, "costing": None, "drills": [], "calls": 0,
+                "note": f"No real conversations logged in the last {FILM_DAYS} days yet — "
+                        "voicemails and missed calls don't count. Make a few calls first."}
+    calls = [{"bar": r["name"], "when": _local_day(r["at"]), "outcome": r["outcome"],
+              "notes": " / ".join(_lead_history(dict(r), lines=2).splitlines())} for r in rows]
+    system, user = _coach.film_prompt(calls)
+    out = _ask_claude(system, user, max_tokens=1200, purpose="school")
+    return {**_coach.validate_film(out, [r["name"] for r in rows]), "calls": len(rows)}
 
 
 class TapeRequest(BaseModel):

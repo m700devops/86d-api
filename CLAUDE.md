@@ -229,6 +229,43 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   Message-ID), which `mailer.send()` turns into `In-Reply-To`/`References` headers (only a
   well-formed `<id>` — no header injection) so it threads in both inboxes, and stamps
   `crm_inbox.replied_at`
+- **The School is tied to the real job (coach.py + crm.html)**, because a fictional owner only
+  goes so far:
+  - **Rehearse a real call** (`GET /v1/crm/coach/rehearse/{lead_id}`, then `/coach/turn` and
+    `/coach/review` with `lead_id`): the Holdout engine and referee against a REAL lead.
+    `coach.lead_boss()` builds the practice character from what's on file — the bar, who we ask
+    for (`contact`/`manager_name`), who picked up last time ("Spoke to:"), the last outcome, the
+    labelled details (`lead_details()`: How they do it now, Objection, Best time, Next step), the
+    venue facts and the state angle — plus the playbook's "Reaching the decision maker" and
+    "Objections we hear" points. Whoever picked up answers first and the rep must earn being put
+    through (a callback is answered by the decision maker). Hidden pains are the real "How they
+    do it now" where logged, else the master sheet's PAINS TO ASK ABOUT. A win is a concrete next
+    step (download to try on the next count, or a set time with the founder), under the same
+    `apply_turn()` referee. The page shows "Real, on file" BEFORE the phone rings; the review adds
+    `cheat_sheet` (two lines for the real call) and `avoid`, written only from the real facts —
+    the rest of the practice call was invented and must never reach the real one. Entry points:
+    🎭 on every call-list prep sheet, "Rehearse this call" in a lead's details (CRM, Follow-ups),
+    and the School's "Rehearse a real call" picker (overdue and due callbacks, then whoever is in a
+    window now — `loadNextLeads()`)
+  - **Game film** (`POST /v1/crm/coach/film`): the last `FILM_DAYS` (14) of real conversations
+    (answered / callback / not interested / gatekeeper — never voicemails), up to `FILM_CALLS`
+    (15), read back by the coach: one thing working, the pattern costing the most, and up to 5
+    drills from what prospects actually said. `validate_film()` drops anything not tied to a bar
+    in that list; the page files each drill into Replay misses, due today
+  - **Today's set is the loop a working day runs**: warm up on real pushback (Replay, else a
+    Quick-Think built on real objections) → rehearse the next real call → after calling, watch the
+    film. Each falls back to the fictional practice when there's nothing real yet. The passive
+    "today's video" left the home screen (videos stay in Learn): the minutes before a session
+    belong to the calls
+  - **The School teaches the company's real asks** (`coach.ASKS`, the master sheet's WHAT WE ASK
+    FOR: try it on the next count — free month, no card; a short call with the founder; the name
+    and hours of whoever orders). It used to drill "15 minutes Tuesday at 2 on your price list".
+    The grader and the tape review judge the ask against them; school.py's refresh writes new
+    Gauntlet rounds and questions from `coach.PRODUCT` + `coach.ASKS_TEXT` (it used to feed the
+    lead-research qualifying rules — licence records, 2-9 months open — to the CALLER's quiz). The
+    quiz lost those trivia items and gained ones on what the app does and doesn't do (no POS, no
+    fill-level reading), and the Gauntlet lost an unverified "you can export it" line.
+    Covered by test_coach.py and test_rehearsal.py
 - coach.py — cold-call PRACTICE, opened via **School** in the burger menu (`data-panel`
   section). **`PRODUCT` is built from pitch.py** (real price, first month free, no card, how it
   works) so a practice owner who asks the price gets the real one and the grader marks a wrong
@@ -275,7 +312,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_order_numbers.py -q` (503 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_lead_finding.py test_order_numbers.py test_rehearsal.py -q` (522 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
