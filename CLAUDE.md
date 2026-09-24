@@ -25,7 +25,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   it shares a process and a database with the product API but is not part of the product.
   Nothing in the inventory/scan/order paths reads from it. See the CRM section below
 - static/crm.html — the CRM UI, served at `/crm`. **Three tabs only** — Call list, CRM,
-  Follow-ups — with School, Apple Analytics and Customers behind a burger top right:
+  Follow-ups — with School, Yet to Contact, Apple Analytics and Customers behind a burger top right:
   those are looked at occasionally and thought about once, and in the tab row they competed
   with the three things a working day actually needs. The burger turns orange when the open
   page lives inside it. Single self-contained file, no build step;
@@ -39,7 +39,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   now gets a one-line status instead of a table, not a wall of leads that aren't callable yet.
   Undo still works — the 10-second Undo on the toast after every logged call — it just isn't
   a permanent banner anymore
-- **The burger holds School, Apple Analytics and Customers.** Numbers (funnel, connect rate by
+- **The burger holds School, Yet to Contact, Apple Analytics and Customers.** Numbers (funnel, connect rate by
   hour, attribution re-match) and Lead engine (run now, bank health, restaurant recheck) were
   removed from the PAGE at the operator's request; every endpoint behind them is still live
   (`/funnel`, `/dialstats`, `/attribution/rematch`, `/leadgen/health`, `/leadgen/run`,
@@ -515,7 +515,15 @@ capture. Don't reintroduce them or describe them as current.)
   by test_ask.py
 - `q` searches name, town, contact, email and phone. The phone match strips punctuation on
   both sides, so "6157429095" finds "+1-615-742-9095"
-- **Two buttons only: Open and Dead** (`status=open` on `/leads` means `status <> 'dead'`).
+- **The CRM tab shows only WORKED leads — a call or email logged.** Never-contacted leads
+  (`status='new' AND last_touch_at IS NULL`, the call list's own "unworked" test) live in the
+  burger's **Yet to Contact** tab instead: listing ~195 names nobody had rung buried the few
+  actually in play. `/leads` takes three views besides the raw stages (`LEAD_VIEWS` in crm.py):
+  `open` = worked and not dead, `worked` = every worked lead (the CRM tab's search),
+  `untouched` = never contacted; `counts` carries all three. Yet to Contact renders through
+  the same `loadPipeline()` and the same row-click handler (`TAB` picks the list), so Log /
+  Email / Edit / Delete behave identically in both
+- **Two buttons only: Open and Dead** (`status=open` on `/leads` — see above).
   Every lead is Open until they said no — not interested, already have a system or an app,
   don't call again — and the debrief/quick-add prompts send exactly those to `dead`. The five
   stage chips this replaced (In play / Not called yet / Won / Dead / Everything) made the

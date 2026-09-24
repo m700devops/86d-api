@@ -562,6 +562,16 @@ def _cadence(attempt: int, outcome: Optional[str]) -> tuple[Optional[int], Optio
     return CADENCE_DAYS[min(attempt - 1, len(CADENCE_DAYS) - 1)], None
 
 
+# Never contacted: the same test the call list uses to decide who's still
+# unworked. Everything else has had at least one logged call or email.
+_UNTOUCHED = "(status = 'new' AND last_touch_at IS NULL)"
+LEAD_VIEWS = {
+    "untouched": _UNTOUCHED,
+    "worked": f"NOT {_UNTOUCHED}",
+    "open": f"(status <> 'dead' AND NOT {_UNTOUCHED})",
+}
+
+
 def _lead_row(row) -> dict:
     lead = {k: row[k] for k in LEAD_COLUMNS}
     lead["phone_digits"] = phone_digits(lead.get("phone"))
@@ -628,19 +638,23 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     lead you spoke to on Tuesday and didn't set a follow-up for is invisible,
     which is how warm leads quietly die.
     """
-    # "open" is the CRM tab's default: every lead that isn't dead. The tab has
-    # two buttons, Open and Dead — a lead only leaves Open when they said no.
-    if status is not None and status != "open" and status not in VALID_STATUSES:
+    # Views, not stages. The CRM tab shows only leads that have been WORKED
+    # (a call or email logged): "open" is worked and not dead, and "worked"
+    # is every worked lead, for its search. Never-contacted leads live in the
+    # burger's Yet to Contact tab ("untouched") — the CRM tab listing 195
+    # names nobody had called buried the handful actually in play.
+    if status is not None and status not in LEAD_VIEWS and status not in VALID_STATUSES:
         raise HTTPException(status_code=422, detail={
             "error": "invalid_status",
-            "message": f"status must be 'open' or one of {', '.join(VALID_STATUSES)}",
+            "message": (f"status must be one of {', '.join(LEAD_VIEWS)} or "
+                        f"{', '.join(VALID_STATUSES)}"),
         })
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
     where, params = ["1=1"], []
-    if status == "open":
-        where.append("status <> 'dead'")
+    if status in LEAD_VIEWS:
+        where.append(LEAD_VIEWS[status])
     elif status:
         where.append("status = %s"); params.append(status)
     if q and q.strip():
@@ -677,6 +691,10 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         by_status = {r["status"]: r["n"] for r in cursor.fetchall()}
         cursor.execute("SELECT COUNT(*) AS n FROM crm_leads")
         everything = cursor.fetchone()["n"]
+        view_counts = {}
+        for view, clause in LEAD_VIEWS.items():
+            cursor.execute(f"SELECT COUNT(*) AS n FROM crm_leads WHERE {clause}")
+            view_counts[view] = cursor.fetchone()["n"]
 
     for lead in leads:
         lead["window"] = _call_window(lead.get("tz_offset_hours"),
@@ -684,8 +702,7 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     return {"leads": leads, "count": len(leads), "matching": matching,
             "offset": offset, "limit": limit,
             "counts": {**{k: by_status.get(k, 0) for k in VALID_STATUSES},
-                       "open": everything - by_status.get("dead", 0),
-                       "all": everything}}
+                       **view_counts, "all": everything}}
 
 
 @crm_router.get("/leads/{lead_id}", response_model=dict)
