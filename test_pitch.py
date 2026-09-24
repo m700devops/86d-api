@@ -206,3 +206,31 @@ def test_the_system_prompt_is_the_same_for_every_bar():
     assert pitch.system_prompt("k", []) == pitch.system_prompt("k", [])
     assert "WHAT WE KNOW ABOUT THIS BAR" not in pitch.system_prompt("k", [])
     assert pitch.user_prompt("Venue: Rioja", "Write it").startswith("=== WHAT WE KNOW ABOUT THIS BAR")
+
+
+# ── the master sheet, as an owner would brief a rep ─────────────────────────
+
+def test_the_sheet_says_what_the_app_does_not_do():
+    sheet = pitch.master_sheet()
+    for limit in ("No Android version", "doesn't connect to a POS",
+                  "doesn't measure how full a bottle is",
+                  "doesn't order through distributor websites",
+                  "No customer numbers, testimonials"):
+        assert limit in sheet, limit
+
+
+def test_the_sheet_briefs_who_its_for_the_pains_and_the_pushback():
+    sheet = pitch.master_sheet()
+    for part in ("WHO IT'S FOR", "PAINS TO ASK ABOUT", "HONEST ANSWERS TO THE USUAL PUSHBACK",
+                 "WHAT WE ASK FOR", '"My staff use Android."', "Cancel any time, from the app"):
+        assert part in sheet, part
+    assert "as questions, never as statements about their bar" in sheet
+
+
+def test_the_angle_follows_the_state_tip_credit():
+    assert "no tip credit" in pitch.state_angle("Reno, NV")
+    assert "no tip credit" in pitch.state_angle("Los Angeles, CA")
+    assert "allows a tip credit" in pitch.state_angle("Austin, TX")
+    assert pitch.state_angle("Austin") is None and pitch.state_angle(None) is None
+    ctx = pitch.lead_context({"name": "Shiner's Saloon", "loc": "Austin, TX"})
+    assert "Angle for this state: TX allows a tip credit" in ctx

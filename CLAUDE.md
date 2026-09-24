@@ -237,7 +237,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py -q` (472 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_lead_finding.py -q` (475 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -932,7 +932,17 @@ capture. Don't reintroduce them or describe them as current.)
   claimed "a unique order number"; the distributor email has none** (subject "Order from
   {bar} — {date}"), so the sheet leaves it out until one exists. Numbers and links are
   env-overridable: COMPANY_OWNER_NAME, COMPANY_OWNER_TITLE, COMPANY_PHONE, COMPANY_PRICE,
-  COMPANY_APP_URL, COMPANY_WEBSITE. It used to be bland for three reasons: a four-sentence,
+  COMPANY_APP_URL, COMPANY_WEBSITE. **The sheet is a rep's briefing, not just facts**: WHAT
+  IT DOES NOT DO (no Android, no POS link, no fill-level reading, no distributor portals, NO
+  customer numbers/testimonials/percentages to quote), WHO IT'S FOR (independent, full bar,
+  1-few locations, whoever counts and orders), PAINS TO ASK ABOUT (as questions, never
+  claims about their bar), HONEST ANSWERS TO THE USUAL PUSHBACK, and WHAT WE ASK FOR (one
+  ask per email/call). `state_angle(loc)` adds the 86d-leads pitch rule to every draft and
+  prep sheet: no-tip-credit states (`NO_TIP_CREDIT`: AK, CA, MN, MT, NV, OR, WA) lead with
+  the labour cost of the count, tip-credit states with time and accurate orders. The School
+  (coach.PRODUCT) carries the same limits so an overclaim in practice is marked down. Every
+  new claim was checked in code (the billing portal makes "cancel any time" true; there is
+  no POS integration). It used to be bland for three reasons: a four-sentence,
   no-list rule that forbade the owner's own best email, no price/trial/phone, and Haiku.
   **Split for caching**: `pitch.system_prompt(knowledge, winners)` is the same for every bar
   (sheet, the brain, the owner's example, `_winning_emails()` — our latest emails that got a

@@ -188,7 +188,9 @@ def _product() -> str:
             "and it sorts everything by distributor and emails every distributor its order in "
             "one tap, with the restaurant's and bar manager's names on it. Each bottle's price, "
             "par and distributor are set once and remembered, and every order is saved. First "
-            f"month free with no credit card, then {pitch.PRICE}. The rep is the founder.")
+            f"month free with no credit card, then {pitch.PRICE}. It does NOT connect to a "
+            "POS, measure how full a bottle is, or order through distributor portals, and "
+            "there are no customer numbers or testimonials to quote. The rep is the founder.")
 
 
 PRODUCT = _product()

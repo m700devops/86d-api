@@ -2236,6 +2236,10 @@ def _brief_input(row: dict, lines: list, profile: dict, knowledge: str) -> str:
         about.append(f"We've been asking for: {row['contact']}")
     if row.get("last_outcome"):
         about.append(f"Last outcome: {row['last_outcome']}")
+    import pitch
+    angle = pitch.state_angle(row.get("loc"))
+    if angle:
+        about.append(f"Angle for this state: {angle}")
     facts = "\n".join(f"- {l['text']} (from {l['source']})" for l in lines)
     history = _lead_history(row, lines=6)
     parts = ["THE BAR\n" + "\n".join(about)]
