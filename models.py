@@ -91,12 +91,13 @@ class ProductCreate(ProductBase):
 
 class ProductResponse(ProductBase):
     id: str
+    product_type: Optional[str] = None
     image_url: Optional[str] = None
     scan_count: int = 0
     verified: bool = False
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 

@@ -8,7 +8,8 @@ ringing during their afternoon. The strings come from real OpenStreetMap
 
 import pytest
 
-from phones import format_us_phone, is_toll_free, normalize_us_phone
+from phones import (format_us_phone, format_us_phone_dashed, is_toll_free,
+                    normalize_us_phone)
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -83,6 +84,15 @@ def test_formatting_is_for_reading_not_for_dialling():
     assert format_us_phone("6157429095") == "(615) 742-9095"
     assert format_us_phone("615742909") == ""
     assert format_us_phone(None) == ""
+
+
+def test_dashed_formatting_is_what_cloudtalk_will_paste():
+    # CloudTalk's paste box rejects a bare 10-digit string with no
+    # separators, so this is what the CALL LIST's COPY button hands the
+    # clipboard — dashes, not format_us_phone's parens-and-space.
+    assert format_us_phone_dashed("6157429095") == "615-742-9095"
+    assert format_us_phone_dashed("615742909") == ""
+    assert format_us_phone_dashed(None) == ""
 
 
 def test_non_strings_do_not_raise():

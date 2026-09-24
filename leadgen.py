@@ -159,12 +159,53 @@ CHAIN_SITE_HINTS = re.compile(
 )
 
 # Words that confirm a full liquor program rather than a beer-and-wine cafe.
+#
+# Every term here is anchored to something a kitchen-only menu can't also say.
+# The previous list wasn't: bare "cocktail" matched "shrimp cocktail" and
+# "fruit cocktail" on family-restaurant menus, "bar menu" matched "salad bar
+# menu" and "raw bar menu", "spirits" (no word boundary) matched "spirited",
+# "shots" matched "screenshot", and bare "draft"/"happy hour" match a pizza
+# place's NFL-watch-party page or lunch specials with zero alcohol involved.
+# A real harvested pizzeria (no booze at all) qualified through exactly this
+# door. Every phrase below is one a kitchen-only site has no reason to use.
 LIQUOR_HINTS = re.compile(
-    r"(cocktail|full bar|craft beer|spirits?|whisk(e)?y|bourbon|tequila|mezcal|"
-    r"martini|margarita|happy hour|liquor|distiller|mixolog|draft|draught|"
-    r"wine list|bar menu|drink menu|shots?\b|tap list)",
+    r"(craft cocktail|cocktail menu|cocktail list|cocktail bar|signature cocktail|"
+    r"full bar|craft beer|beer on tap|\bon draft\b|draft beer|draught beer|"
+    r"whisk(e)?y|bourbon|tequila|mezcal|\bvodka\b|\brum\b|\bgin\b|"
+    r"martini|margarita|\bliquor\b|distiller|mixolog|wine list|tap list|beer list)",
     re.I,
 )
+
+# Explicit signals a venue does NOT pour, checked before LIQUOR_HINTS: a site
+# saying this outright beats any inference from a keyword match, and BYOB
+# specifically means there is no liquor license to sell against at all.
+NO_LIQUOR_HINTS = re.compile(
+    r"(\bbyob\b|bring your own (bottle|beer|wine)|no alcohol (is )?served|"
+    r"non-alcoholic (restaurant|establishment)|we do not serve alcohol|"
+    r"does not serve alcohol|\bdry\b (restaurant|county)|"
+    r"no liquor license|not licensed (to serve|for alcohol))",
+    re.I,
+)
+
+
+def _restaurant_pours(html_seen: str, tags: dict) -> tuple[bool, Optional[str]]:
+    """Whether a restaurant-tagged venue shows enough evidence it sells
+    alcohol to be worth a call. Pure function of the crawled text and the OSM
+    tags, so it's testable without a DB, network or clock — see
+    test_leadgen.py. Returns (qualifies, reject_reason).
+
+    An explicit "we don't serve alcohol"/BYOB statement on the venue's own
+    site wins over everything else, including an OSM `bar=yes` tag: OSM tags
+    are third-party edits and can be stale or wrong, but a venue is not wrong
+    about whether it holds a liquor license.
+    """
+    if html_seen and NO_LIQUOR_HINTS.search(html_seen):
+        return False, "site says no alcohol served"
+    drinks = bool(html_seen and LIQUOR_HINTS.search(html_seen))
+    tagged_bar = tags.get("bar") == "yes" or tags.get("drink:cocktail") == "yes"
+    if drinks or tagged_bar:
+        return True, None
+    return False, "restaurant with no sign of a bar programme"
 
 
 # ── Small HTTP helper ───────────────────────────────────────────────────────
@@ -867,6 +908,20 @@ UPSCALE_HINTS = re.compile(
     r"|wine pairing|dress code|jacket required|omakase|degustation",
     re.I,
 )
+# Same idea again, read straight off the OSM `cuisine` tag instead of crawled
+# text — no site fetch needed, it's already on the harvested candidate. Per
+# Stephan's own sales experience: an Asian restaurant (sushi bar, ramen shop,
+# izakaya, hot pot, ...) runs a materially higher rate of already having SOME
+# system in place — POS-bundled inventory, a supplier relationship through a
+# restaurant group — than an ordinary neighbourhood bar does. Gentler weight,
+# same as UPSCALE_HINTS: plenty still count sake and well liquor by hand, and
+# they stay on the list, just lower.
+ASIAN_CUISINE_HINTS = re.compile(
+    r"\basian\b|\bchinese\b|\bjapanese\b|\bsushi\b|\bthai\b|\bvietnamese\b"
+    r"|\bkorean\b|\bkorean_bbq\b|\bdim_sum\b|\bramen\b|\bteppanyaki\b|\bhibachi\b"
+    r"|\bpho\b|\bhot_pot\b|\bhotpot\b|\bizakaya\b|\bdumpling\b|\bpan_asian\b",
+    re.I,
+)
 # The opposite end, and the sweet spot for this product: a room with a real
 # liquor inventory and nobody to count it but the manager, after close, by
 # hand. These are the calls that go well.
@@ -883,6 +938,48 @@ NEIGHBOURHOOD_NAME = re.compile(
     r"|\bcantina\b|\bbrewhouse\b|\bpourhouse\b|\btaproom\b",
     re.I,
 )
+
+# The tourist strip in each metro, keyed by the same city name `_seed_cities`
+# stores on every harvested candidate. A bar on Las Vegas Blvd or Lower
+# Broadway isn't independent in the way a neighbourhood dive is — it's a
+# resort concierge program or a bar built for a bachelorette crawl, with
+# volume and turnover that already justified buying SOME system, whatever
+# it is. Keyed by CITY rather than a bare street-name regex on purpose:
+# "Broadway" alone is also a perfectly ordinary street in a dozen other
+# seeded metros, and matching it there would penalize an actual
+# neighbourhood bar for sharing a street name with Nashville's. Like
+# POS_STACK_HINTS, this is a SCORING PENALTY, not a reject — an
+# independently-run dive that happens to sit on one of these blocks stays
+# on the list, just further down it. Not exhaustive; add a metro's strip
+# here as it comes up rather than guessing every one in advance.
+TOURIST_STRIP_STREETS = {
+    "las vegas": (r"\blas vegas blvd\b", r"\bfremont st(?:reet)?\b"),
+    "nashville": (r"\bbroadway\b", r"\b(?:lower\s+)?2nd\s+ave\b"),
+    "new orleans": (r"\bbourbon st(?:reet)?\b", r"\bdecatur st(?:reet)?\b"),
+    "austin": (r"\b(?:e\.?\s*|east\s+)?6th\s+st(?:reet)?\b", r"\brainey st(?:reet)?\b"),
+    "memphis": (r"\bbeale st(?:reet)?\b",),
+    "san antonio": (r"\briver\s*walk\b",),
+    "orlando": (r"\bicon\s*park\b", r"\binternational\s+dr(?:ive)?\b"),
+    "chicago": (r"\brush st(?:reet)?\b",),
+}
+
+
+def _on_tourist_strip(tags: dict, city: Optional[str]) -> bool:
+    """Whether the venue's OWN street address falls on a known tourist strip.
+
+    Reads `addr:street` off the map tags, never inferred from the city or
+    venue name alone — a bar two blocks off Broadway is a different bar
+    from one on it.
+    """
+    if not city:
+        return False
+    streets = TOURIST_STRIP_STREETS.get(city.strip().lower())
+    if not streets:
+        return False
+    addr = (tags.get("addr:street") or "").lower()
+    if not addr:
+        return False
+    return any(re.search(p, addr) for p in streets)
 
 
 def _stack_signals(site_html: str) -> dict:
@@ -901,7 +998,8 @@ def _stack_signals(site_html: str) -> dict:
 
 
 def score_candidate(tags: dict, email: Optional[str], site_html: str,
-                    manager: Optional[dict] = None) -> int:
+                    manager: Optional[dict] = None,
+                    city: Optional[str] = None) -> int:
     """How well this fits a bar-inventory pitch. Higher is better.
 
     Two things were added once the call list started sorting by this rather
@@ -913,6 +1011,10 @@ def score_candidate(tags: dict, email: Optional[str], site_html: str,
     inventory and, most likely, a clipboard. Neither is a rule — plenty of
     fancy rooms still count by hand, and they stay on the list — but when
     there are fifty names in front of you, order matters more than inclusion.
+    A tourist-strip address is the same idea from a different signal: not the
+    venue's own words, but WHERE it is. Asian cuisine (OSM `cuisine` tag) is
+    the same idea from a THIRD signal — not words, not location, but what
+    kind of restaurant it is.
 
     REACH. A name to ask for and a human's mailbox both mean the call has
     somewhere to land, and both are rare enough to be worth putting first.
@@ -953,8 +1055,12 @@ def score_candidate(tags: dict, email: Optional[str], site_html: str,
         score += 2
     if site_html and UPSCALE_HINTS.search(site_html):
         score -= 2
+    if ASIAN_CUISINE_HINTS.search(tags.get("cuisine") or ""):
+        score -= 2
     if site_html and POS_STACK_HINTS.search(site_html):
         score -= 3
+    if _on_tourist_strip(tags, city):
+        score -= 4           # Vegas Strip, Lower Broadway — already has a system
     return score
 
 
@@ -980,6 +1086,64 @@ def geocode_city(name: str, state: Optional[str] = None) -> Optional[tuple[float
         return float(results[0]["lat"]), float(results[0]["lon"])
     except (KeyError, ValueError, TypeError):
         return None
+
+
+def find_venue_website(name: str, loc: Optional[str] = None) -> Optional[str]:
+    """A venue's own website from OpenStreetMap, looked up by name (+ town).
+
+    For a bar the operator found themselves: the notes say "their email is on
+    the website" without the URL, and OSM usually has the `website` tag.
+    """
+    query = ", ".join(x for x in [name, loc] if x)
+    url = (f"{NOMINATIM}?q={urllib.parse.quote(query)}"
+           "&format=json&limit=3&countrycodes=us&extratags=1")
+    body, status = _http(url, timeout=15)
+    if status != 200:
+        return None
+    try:
+        results = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    for r in results:
+        tags = r.get("extratags") or {}
+        site = (tags.get("website") or tags.get("contact:website") or "").strip()
+        if site:
+            return site if site.lower().startswith("http") else "http://" + site
+    return None
+
+
+def find_email_on_site(website: str, max_pages: int = 4) -> tuple[Optional[str], Optional[str]]:
+    """(email, page it was read on) from a venue's own site, or (None, None).
+
+    Same order enrich_candidate uses: homepage, then the site's own contact
+    links, then the usual guessed paths. Bounded so a click in the UI stays
+    a few seconds, not a minute.
+    """
+    home, status = _http(website, timeout=PAGE_TIMEOUT, verify_public=True)
+    if status != 200 or not home:
+        return None, None
+    found = extract_emails(home)
+    if found:
+        return found[0], website
+    urls: list[str] = []
+    for href, _kind in CONTACT_LINK_RE.findall(home):
+        if href.startswith(("mailto:", "tel:", "#", "javascript:")):
+            continue
+        full = urllib.parse.urljoin(website, href)
+        if full.lower().startswith(("http://", "https://")) \
+                and domain_of(full) == domain_of(website) and full not in urls:
+            urls.append(full)
+    for path in CONTACT_PATHS:
+        full = website.rstrip("/") + path
+        if full not in urls:
+            urls.append(full)
+    for url in urls[:max_pages - 1]:
+        body, status = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
+        if status == 200 and body:
+            found = extract_emails(body)
+            if found:
+                return found[0], url
+    return None, None
 
 
 # ── Stage 1: harvest ────────────────────────────────────────────────────────
@@ -1233,11 +1397,9 @@ def enrich_candidate(cand: dict) -> dict:
     # this the wider harvest would fill the list with sandwich shops.
     amenity = (cand.get("amenity") or "").lower()
     if amenity == "restaurant":
-        drinks = bool(html_seen and LIQUOR_HINTS.search(html_seen))
-        tagged_bar = tags.get("bar") == "yes" or tags.get("drink:cocktail") == "yes"
-        if not (drinks or tagged_bar):
-            return {"status": "rejected",
-                    "reject_reason": "restaurant with no sign of a bar programme",
+        qualifies, reason = _restaurant_pours(html_seen, tags)
+        if not qualifies:
+            return {"status": "rejected", "reject_reason": reason,
                     "email": None, "email_source": None, "email_kind": None,
                     "manager_name": None, "manager_role": None,
                     "manager_source": None, "manager_seen_at": None,
@@ -1268,7 +1430,7 @@ def enrich_candidate(cand: dict) -> dict:
             # into "what are you using now?" without knowing their site runs
             # Toast is how you get told something you could have read.
             **_stack_signals(html_seen))),
-        "score": score_candidate(tags, email, html_seen, manager),
+        "score": score_candidate(tags, email, html_seen, manager, cand.get("city")),
     }
 
 
@@ -1460,6 +1622,90 @@ def bucket_counts(cursor=None) -> dict:
 def bucket_deficits(cursor=None) -> dict:
     """How many more leads each cell needs to reach BUCKET_TARGET."""
     return {b: max(0, BUCKET_TARGET - n) for b, n in bucket_counts(cursor).items()}
+
+
+def recheck_restaurant_leads(limit: int = 200) -> dict:
+    """Re-run the (now tightened) liquor gate against restaurant rows that
+    were qualified or promoted under the old, looser LIQUOR_HINTS.
+
+    A one-time correction, not a boot-time reconciliation like
+    `_reconcile_bad_emails()`: an email string or a lat/lon can be
+    recomputed from what's already stored, but this decision needs the
+    venue's own site again, so fixing it means re-crawling every restaurant
+    row rather than a cheap recompute. Too heavy to run on every boot —
+    triggered on demand instead, from the Lead engine panel.
+
+    Only ever touches restaurant-tagged rows nobody has worked yet:
+      - banked candidates (`status='qualified'`) are re-rejected in place,
+        exactly as if they'd failed `enrich_candidate()` today.
+      - promoted-but-never-touched leads (`status='new' AND last_touch_at
+        IS NULL`) are deleted the same way the operator's own Delete button
+        deletes one — which also retires the candidate row, so the
+        generator can't re-promote the same venue tomorrow.
+    A lead that's already been called or logged is left alone: a keyword
+    list changing doesn't undo a call that already happened.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, website, raw_tags FROM crm_lead_candidates
+             WHERE amenity = 'restaurant' AND status = 'qualified'
+             ORDER BY discovered_at ASC LIMIT %s
+        """, (limit,))
+        banked = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT c.id AS candidate_id, c.website, c.raw_tags, c.promoted_lead_id
+              FROM crm_lead_candidates c
+              JOIN crm_leads l ON l.id = c.promoted_lead_id
+             WHERE c.amenity = 'restaurant' AND l.status = 'new'
+               AND l.last_touch_at IS NULL
+             ORDER BY c.discovered_at ASC LIMIT %s
+        """, (limit,))
+        promoted = [dict(r) for r in cursor.fetchall()]
+
+    rows = banked + promoted
+    result = {"checked": 0, "banked_rejected": 0, "leads_removed": 0}
+    if not rows:
+        return result
+
+    def _fetch(row: dict) -> str:
+        home, status = _http(row["website"], timeout=PAGE_TIMEOUT, verify_public=True)
+        return home[:200000] if status == 200 and home else ""
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=ENRICH_WORKERS) as pool:
+        htmls = list(pool.map(_fetch, rows))
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for row, html in zip(rows, htmls):
+            result["checked"] += 1
+            try:
+                tags = json.loads(row.get("raw_tags") or "{}")
+            except json.JSONDecodeError:
+                tags = {}
+            qualifies, reason = _restaurant_pours(html, tags)
+            if qualifies:
+                continue
+            if "candidate_id" in row:   # a promoted, never-touched lead
+                cursor.execute("DELETE FROM crm_leads WHERE id=%s", (row["promoted_lead_id"],))
+                cursor.execute("""
+                    UPDATE crm_lead_candidates
+                       SET status='rejected', reject_reason=%s, promoted_lead_id=NULL
+                     WHERE id=%s
+                """, (reason, row["candidate_id"]))
+                result["leads_removed"] += 1
+            else:                        # still banked, never promoted
+                cursor.execute("""
+                    UPDATE crm_lead_candidates
+                       SET status='rejected', reject_reason=%s
+                     WHERE id=%s
+                """, (reason, row["id"]))
+                result["banked_rejected"] += 1
+        conn.commit()
+
+    return result
 
 
 def promote_leads(limit: int = DAILY_TARGET) -> int:
