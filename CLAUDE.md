@@ -236,7 +236,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_ask.py test_apple.py test_followup_email.py test_tries.py test_dedupe.py
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
-  test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py -q` (454 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
+  test_lead_finding.py -q` (472 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -388,7 +389,13 @@ capture. Don't reintroduce them or describe them as current.)
   `overpass.osm.ch` was removed because it is a European regional mirror: a US query gets
   HTTP 200 and an empty element list, a confident "there are no bars in Austin". That is
   worse than an outage because it looks like success. `_overpass()` therefore treats a
-  zero-element response as a miss and tries the next mirror
+  zero-element response as a miss and tries the next mirror. **Each mirror gets a POST AND a
+  GET** (a busy 429/503/504 pauses 5s first): on 2026-09-24 the main mirror answered POST
+  with 504 / a reset and the same query as GET with 200, while kumi and private.coffee timed
+  out — one POST per mirror meant no new bars. `maps.mail.ru` (VK, full planet) is the fourth
+  mirror and answered when the other three failed in the Austin test. A city whose harvest
+  fails on every mirror is rested `CITY_RETRY_HOURS` (20) via `harvest_failed_at` instead of
+  taking the first slot of every run
 - A total harvest failure RAISES rather than returning (0, 0) — a silent zero would mark the
   city harvested and look identical to a city with no bars
 - Runs interrupted mid-flight are reconciled to `phase='abandoned'` on the next run; the
@@ -399,6 +406,45 @@ capture. Don't reintroduce them or describe them as current.)
 - Enrichment runs in a thread pool (`LEADGEN_ENRICH_WORKERS`, default 8) and gives up on a
   site the moment its homepage doesn't load — a dead domain used to cost one request per
   guessed path. It prefers links the homepage actually points at over guessed URLs
+- **Where good bars used to get lost — measured on 90 real Austin venues, 2026-09-24: 22
+  callable leads before, 35 after, 18 more queued to retry instead of lost.** Each fix is in
+  test_lead_finding.py:
+  - `_fetch_site()` makes the recoveries a browser makes silently: any 2xx with a body is a
+    page (a host answering 202 was "unreachable"); a stale deep link from the map (404) falls
+    back to the site root (Iron Cactus's `/austin-downtown`); a certificate problem curl
+    won't accept (`tls_status` → -1: self-signed, missing intermediate) tries `http://`, then
+    reads the public page without the check (`insecure` — reading only, nothing is sent).
+  - A homepage that fails for a TEMPORARY reason (`TRANSIENT_STATUSES`: 0, 403, 429, 5xx…)
+    makes the candidate `status='retry'` with `retry_after` +1 then +3 days, and only
+    `ENRICH_TRIES` (3) failures reject it (`_record_retry`). It used to be rejected forever
+    on the first failure — 21 of 90, one of which loaded on the very next try.
+  - **No email is no longer a rejection** (15 of 90 were lost to it). It's a CALL list: a bar
+    whose own site vouches for its number becomes a call-only lead ("No email on their
+    site — a call-only lead" in its notes), sorted below leads with an email (score gives an
+    email +3..+7). An unsourced or blocklisted address is DROPPED at promote, not the venue.
+  - A shared email (one management company's info@ for several bars) used to reject every
+    venue after the first as "duplicate email"; they're kept, without the address.
+  - The harvest keeps venues with a website and NO phone tag (~160 of ~530 in Austin): their
+    own site supplies the number (`judge_phone(None, ...)` → from_site), about a quarter of
+    them. Phone tags holding two numbers ("…; …", "… or …") and website tags holding two
+    sites are parsed piece by piece (`first_phone`, `first_website`, also `contact:mobile`)
+    instead of failing the whole field.
+  - A re-harvest REFRESHES a known venue (`ON CONFLICT … DO UPDATE`, only rows in new /
+    rejected / retry) instead of skipping it: changed phone, website or hours land, and a
+    rejection re-opens only when the data changed and the reason is one a fresh look can
+    overturn (`REOPENABLE`) — never "deleted by hand", suppressed, or already a lead/customer.
+  - Chains: `CHAIN_NAMES` match WHOLE WORDS, brand stems only in the possessive
+    (`_POSSESSIVE_CHAINS`: "chilis", "dennys"), and the over-broad "tap house", "brewhouse",
+    "casino", "airport" are gone (Casino El Camino is an independent dive). The site test
+    (`CHAIN_SITE_HINTS`) fires only on store-locator / franchise language — "our locations",
+    "all locations" and "nationwide" rejected Pinthouse Pizza and an independent brewpub.
+  - A restaurant that fails the drinks gate gets its own drinks / menu pages read
+    (`_drink_links`, up to 2, no PDFs/images) before it's rejected (Tandoori Lounge's whisky
+    list was on its drink menu page), and OSM drink tags (`drink:beer/wine/spirits`,
+    `cocktails`, `alcohol`) count.
+  - `_requalify_once()` (marker `requalify_2026_09_fixes`) put every candidate rejected by one
+    of these old rules back to 'new' ONCE, so the bank gets re-checked under today's rules.
+    Grep `LEADGEN_REQUALIFY`
 - **The harvest takes `restaurant` as well as `bar`/`pub`/`nightclub`.** It used to take the
   three drink-led types only, which is a small slice of the places that pour: an independent
   restaurant with a licence has a back bar to count exactly like a tavern does, and in OSM it
@@ -441,8 +487,9 @@ capture. Don't reintroduce them or describe them as current.)
 - Measured yield: roughly 280 bars per metro → ~17% have both phone and website → ~30-50% of
   those have a findable email ≈ **15-20 qualified leads per city**. Sustaining 25/day needs
   ~1.5 new cities per day; 58 US metros are seeded, more via `POST /v1/crm/leadgen/cities`
-- A lead is NEVER promoted without both a phone and an email, and never if it's suppressed,
-  already in the pipeline, or already a customer
+- A lead is NEVER promoted without a phone its own website vouches for (`PHONE_OK`), and
+  never if it's suppressed, already in the pipeline, or already a customer. An email is
+  preferred, not required (call-only leads — see "Where good bars used to get lost")
 - **A number reaches the call list only if the venue's OWN WEBSITE vouches for it.** The
   phone comes off the OSM tag and nothing used to check it against the bar. Measured on 102
   real Denver bars (2026-09-24): where the bar's site listed a number, the map's disagreed
