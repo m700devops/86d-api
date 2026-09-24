@@ -525,6 +525,13 @@ capture. Don't reintroduce them or describe them as current.)
 - Eight columns, not ten: the contact's name sits under the bar's, and last-touch/next-due are
   one column. At ten the action buttons fell off the right-hand edge, and the buttons are the
   point of the screen
+- **WHERE THINGS STAND is two plain lines: what happened last, then what's next** (`standing()`
+  in crm.html). Last: "Nobody picked up · yesterday", "Laura asked for a callback · today",
+  "Already has a system" (a not_interested whose notes say so). Next: "Try again (attempt 2
+  of 6) today", "Call Laura back Sunday", "Call back for the manager tomorrow", in red when
+  overdue, and "No follow-up set — pick a date" in red when someone was reached and nothing
+  is scheduled — the warm lead that quietly dies. Hover shows the latest note. It replaced a
+  single line like "call back 2026-09-25 — Answered · 1 try"
 - **WHERE THINGS STAND shows `last_outcome`, not just a bare date.** A STAGE badge of
   CONTACTED covers a voicemail, a gatekeeper, and an actual conversation alike (`log_touch`
   in crm.py lands all three on "contacted") — the badge alone can't answer "did I actually

@@ -58,6 +58,8 @@
   .pipebar input{flex:1;min-width:220px}
   .pipebar button{flex:none;white-space:nowrap}
   /* Open / Dead — the CRM tab's only two views. */
+  .stands{font-size:13px;line-height:1.35;min-width:220px}
+  .stands .err{font-weight:600}
   .glance{display:flex;gap:8px;margin-bottom:14px}
   .glance button{font-size:14px;font-weight:700;padding:9px 18px;border-radius:10px}
   .glance button b{margin-left:6px;color:var(--text3);font-weight:700}
@@ -1488,6 +1490,68 @@ const OUTCOME_LABEL = {
 };
 const outcomeLabel = o => o ? (OUTCOME_LABEL[o] || o) : '';
 
+/* WHERE THINGS STAND, as two plain lines: what happened last, and what's next.
+   It used to be one line like "call back 2026-09-25 — Answered · 1 try": a raw
+   date, "call back" whether a person asked for one or nobody picked up, and
+   nothing to say it was overdue. Hover shows the latest note. */
+const MAX_ATTEMPTS=6;   // crm.py MAX_ATTEMPTS: 5 retries on the ladder, then retired
+function niceDay(ymd){
+  if(!ymd) return '';
+  const d=new Date(ymd+'T12:00:00'), t=new Date(); t.setHours(12,0,0,0);
+  const diff=Math.round((d-t)/86400000);
+  if(diff===0) return 'today';
+  if(diff===1) return 'tomorrow';
+  if(diff===-1) return 'yesterday';
+  const txt=d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+  return diff>1&&diff<7 ? d.toLocaleDateString('en-US',{weekday:'long'}) : txt;
+}
+function latestNote(l){
+  const lines=(l.notes||'').split('\n').filter(x=>x.trim());
+  const last=lines[lines.length-1]||'';
+  // "[date] call · attempt N: summary — Your notes: …" -> the summary part
+  return last.replace(/^\[[^\]]*\][^:]*:\s*/,'').split(' — Your notes:')[0].trim();
+}
+function standing(l){
+  const note=latestNote(l);
+  const when=niceDay((l.last_touch_at||'').slice(0,10));
+  const who=l.contact?l.contact.split(/[(,]/)[0].trim():'';
+  const hasSystem=/already (?:has|have|uses?|using|got)|has a system|have a system|using (?:an? )?(?:app|system|software)/i.test(l.notes||'');
+  const last={
+    answered:`Talked to ${who||'someone'}`,
+    callback:`${who||'They'} asked for a callback`,
+    voicemail:'Left a voicemail',
+    no_answer:'Nobody picked up',
+    gatekeeper:"Manager wasn't in",
+    not_interested:hasSystem?'Already has a system':'Said no',
+    logged:'Logged a call',
+  }[l.last_outcome];
+  const out={last:'', next:'', lastTone:'', nextTone:'muted', note};
+  if(l.status==='won'){ out.last=last?`${last} · ${when}`:'Signed up'; out.next='Customer — signed up';
+    out.nextTone='win-good'; return out; }
+  if(l.status==='dead'){ out.last=(last||'Said no')+(when?` · ${when}`:''); out.next="Don't call again";
+    out.nextTone='muted'; return out; }
+  if(!l.last_touch_at&&!l.last_outcome){ out.last='Not called yet'; out.lastTone='muted';
+    out.next=l.queued_email_at?'Email queued':'On the call list'; return out; }
+  out.last=(last||'Called')+(when?` · ${when}`:'');
+
+  const tries=l.attempts||0;
+  const reached=['answered','callback','gatekeeper'].includes(l.last_outcome);
+  const due=l.followup_date, today=new Date().toISOString().slice(0,10);
+  if(l.queued_email_at){ out.next='Email queued to send'; }
+  else if(due){
+    const overdue=due<today, isToday=due===today;
+    const verb=l.last_outcome==='callback'&&who?`Call ${who} back`
+             : l.last_outcome==='gatekeeper'?'Call back for the manager'
+             : reached?'Follow up'
+             : `Try again (attempt ${Math.min(tries+1,MAX_ATTEMPTS)} of ${MAX_ATTEMPTS})`;
+    out.next=overdue?`${verb} — overdue since ${niceDay(due)}`:`${verb} ${niceDay(due)}`;
+    out.nextTone=overdue?'err':isToday?'win-good':'muted';
+  }
+  else if(reached){ out.next='No follow-up set — pick a date'; out.nextTone='err'; }
+  else out.next=`${tries} tr${tries===1?'y':'ies'} so far`;
+  return out;
+}
+
 function pipeRow(l,n){
   /* Two lines per row instead of eight columns. Everything that was a column
      of its own — email, town, who to ask for — is still here, just stacked
@@ -1498,21 +1562,7 @@ function pipeRow(l,n){
           : (l.manager_name ? `ask if ${l.manager_name} is still ${l.manager_role||'there'}` : '');
   const sub=[who, l.email, l.loc].filter(Boolean).join(' · ');
 
-  // The one thing that matters per row: what happens next, or that nothing is.
-  // A bare date used to be the whole answer — "last touched 2026-09-22" says
-  // a call happened, not whether anyone was reached, which is the actual
-  // question a CONTACTED badge leaves open.
-  const outcome=outcomeLabel(l.last_outcome);
-  let stands, tone='muted';
-  if(l.followup_date){
-    stands=`call back ${l.followup_date}`+(outcome?` — ${outcome}`:'');
-    tone='win-good';
-  }
-  else if(l.queued_email_at){ stands='email queued'; tone='muted'; }
-  else if(touch){ stands=outcome?`${outcome} · ${touch}`:`last touched ${touch}`; tone='muted'; }
-  else { stands='never contacted'; tone='muted'; }
-  const tries=l.attempts?` · ${l.attempts} tr${l.attempts>1?'ies':'y'}`:'';
-
+  const st=standing(l);
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}"
               data-contact="${esc(l.contact||'')}">
     <td class="rownum">${n}</td>
@@ -1523,7 +1573,9 @@ function pipeRow(l,n){
       ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`
         +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button></div>`
       : '<span class="muted">no number</span>'}</td>
-    <td><span class="${tone}">${esc(stands)}</span><span class="muted">${esc(tries)}</span></td>
+    <td class="stands" title="${esc(st.note)}">
+      <div class="${st.lastTone}">${esc(st.last)}</div>
+      <div class="${st.nextTone}">${esc(st.next)}</div></td>
     <td><div class="acts">
       <button class="go" data-act="log">Log</button>
       <button data-act="mail">Email</button>
