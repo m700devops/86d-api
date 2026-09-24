@@ -145,6 +145,8 @@ def init_crm_tables():
             ("queued_email_at", "TEXT"),            # denormalised so every list can show it
             ("venue_facts", "TEXT"),                # attributable facts for the call
             ("call_brief", "TEXT"),                 # the talking points written from them
+            ("phone_status", "TEXT"),               # does their own site vouch for it
+            ("phone_note", "TEXT"),                 # what the check found, in words
         ]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -389,6 +391,7 @@ LEAD_COLUMNS = (
     "opening_hours", "opener",
     "lead_score", "email_kind", "tz_name", "queued_email_at", "venue_facts",
     "manager_name", "manager_role", "manager_source", "manager_seen_at",
+    "phone_status", "phone_note",
 )
 
 # How long to wait before the next dial, by attempt number. Spread across days
@@ -409,7 +412,20 @@ CONNECTED_OUTCOMES = {"answered", "gatekeeper", "callback", "not_interested"}
 # now asked for directly (see _apply_call_notes). One set so all three ways
 # of logging a call agree on the vocabulary.
 TOUCH_OUTCOMES = {"answered", "voicemail", "no_answer", "gatekeeper", "not_interested",
-                  "callback"}
+                  "callback", "wrong_number"}
+
+# leadgen.PHONE_OK: numbers the venue's own website vouches for. A generated
+# lead is only offered for dialling with one of these; the operator's own
+# entries are trusted as typed. See leadgen.judge_phone().
+TRUSTED_PHONE = ("confirmed", "from_site")
+# What the check found wrong. The auto-dialer export leaves these out; a lead
+# not checked yet (no status) isn't one of them.
+BAD_PHONE = ("conflict", "unconfirmed", "wrong")
+
+
+def _dial_ok(row) -> bool:
+    """Whether a lead's number may be offered for dialling at all."""
+    return row.get("source") != "leadgen" or row.get("phone_status") in TRUSTED_PHONE
 
 # "Nobody picked up" in the operator's own words. There was no outcome for
 # this at all, so a call that rang out with no way to leave a message had
@@ -2529,6 +2545,15 @@ def undo_touch(undo_id: str, _: bool = Depends(require_crm_key)):
                               ORDER BY at DESC LIMIT 1)
             """, (undo["lead_id"],))
 
+        if (undo["action"] or "").startswith("wrong-number"):
+            # The number goes back on the lead, so it comes off the list of
+            # numbers never to dial again.
+            bad = phone_digits(snapshot.get("phone")) or re.sub(
+                r"\D", "", snapshot.get("phone") or "")[-10:]
+            if bad:
+                cursor.execute("DELETE FROM crm_suppressions WHERE kind = 'phone' "
+                               "AND value = %s", (bad,))
+
         if undo["counters_spent"]:
             kind = (undo["action"] or "").split()[-1]
             counter_col = {"call": "daily_calls_remaining",
@@ -2860,6 +2885,138 @@ def leadgen_recheck_restaurants(limit: int = 200, _: bool = Depends(require_crm_
             "note": "Rechecking restaurant leads against the current liquor gate."}
 
 
+# ============== WRONG NUMBER ==============
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s|,;]+", re.I)
+
+
+@crm_router.post("/leads/{lead_id}/wrong-number", response_model=dict)
+def wrong_number(lead_id: str, _: bool = Depends(require_crm_key)):
+    """The number on file rang somebody else.
+
+    Logs the dial (it happened, and /dialstats should know), retires the
+    number for good — no lead may bring it back — and looks on the venue's own
+    website for the right one. Found: the lead gets it, and a follow-up for
+    today so it shows under Follow-ups to try again. Not found: no number at
+    all rather than a known-bad one; the lead stays, so it can still be
+    emailed. Undo puts all of it back, the retired number included.
+    """
+    from leadgen import _local_codes_by_city, find_site_phones, judge_phone
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT l.*, c.website AS cand_website, c.city AS cand_city
+              FROM crm_leads l
+              LEFT JOIN crm_lead_candidates c ON c.promoted_lead_id = l.id
+             WHERE l.id = %s
+        """, (lead_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "Lead not found"})
+        codes = _local_codes_by_city(cursor, [row.get("cand_city")]).get(
+            row.get("cand_city"), set())
+    bad = phone_digits(row["phone"]) or re.sub(r"\D", "", row["phone"] or "")[-10:]
+    if not bad:
+        raise HTTPException(status_code=422, detail={
+            "error": "no_phone", "message": "There's no number on this lead to mark wrong."})
+
+    # The network first, outside any transaction: a slow site mustn't hold a
+    # row lock. A quick-added lead has no candidate, but its notes often carry
+    # the website it was found on.
+    website = row.get("cand_website")
+    if not website:
+        found = _URL_IN_TEXT.search(row.get("notes") or "")
+        website = found.group(0) if found else None
+    new = None
+    if website:
+        try:
+            numbers, _loaded = find_site_phones(website, None)
+            verdict = judge_phone(bad, [p for p in numbers if p != bad], codes)
+            if verdict["status"] == "from_site":
+                new = verdict["phone"]
+        except Exception as exc:
+            print(f"[crm] wrong-number site lookup failed: {exc}", flush=True)
+
+    today, now = _today(), now_iso()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (lead_id,))
+        lead = cursor.fetchone()
+        if not lead:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "Lead not found"})
+        undo_id = _snapshot(cursor, lead, "wrong-number call")
+        attempt = (lead["attempts"] or 0) + 1
+        _attach_touch(cursor, undo_id, _record_touch(
+            cursor, lead, "call", "wrong_number", attempt, lead.get("tz_offset_hours")))
+        said = f"[{today}] call · attempt {attempt}: Wrong number — {format_us_phone_dashed(bad)} rang someone else."
+        if new:
+            said += f" Their website lists {format_us_phone_dashed(new)}; try that."
+            phone, status, why, follow = (format_us_phone_dashed(new), "from_site",
+                                          f"{format_us_phone_dashed(bad)} was a wrong number; "
+                                          f"{format_us_phone_dashed(new)} is from their website",
+                                          today)
+        else:
+            said += " Their website shows no other number — email them instead."
+            phone, status, why, follow = (None, "wrong",
+                                          f"{format_us_phone_dashed(bad)} was a wrong number", None)
+        cursor.execute("""
+            UPDATE crm_leads
+               SET phone = %s, phone_status = %s, phone_note = %s, followup_date = %s,
+                   attempts = %s, call_date = %s, last_touch_at = %s,
+                   last_outcome = 'wrong_number', updated_at = %s,
+                   notes = COALESCE(notes || E'\\n', '') || %s
+             WHERE id = %s
+         RETURNING *
+        """, (phone, status, why, follow, attempt, today, now, now, said, lead_id))
+        updated = cursor.fetchone()
+        # Never again, on any lead: the generator checks this before promoting.
+        cursor.execute("""
+            INSERT INTO crm_suppressions (id, kind, value, reason, created_at)
+            VALUES (%s, 'phone', %s, %s, %s) ON CONFLICT DO NOTHING
+        """, (generate_id(), bad, f"wrong number for {lead['name']}"[:200], now))
+        _load_counters_locked(cursor)
+        cursor.execute("""
+            UPDATE crm_counters
+               SET daily_calls_remaining = GREATEST(0, daily_calls_remaining - 1),
+                   touch_ticker_remaining = GREATEST(0, touch_ticker_remaining - 1),
+                   touch_ticker_last_action = 'call', updated_at = %s
+             WHERE id = 1
+        """, (now,))
+        conn.commit()
+
+    return {"lead": _lead_row(updated), "undo_id": undo_id,
+            "new_phone": format_us_phone_dashed(new) if new else None,
+            "bad_phone": format_us_phone_dashed(bad)}
+
+
+@crm_router.post("/leadgen/verify-phones", response_model=dict)
+def leadgen_verify_phones(_: bool = Depends(require_crm_key)):
+    """Check the call list's numbers against each venue's own website now,
+    in the background. It also runs by itself after every deploy that finds
+    unchecked numbers; this is for doing it on demand. Poll GET."""
+    import leadgen
+    threading.Thread(target=leadgen._verify_phones_safe, daemon=True,
+                     name="leadgen-verify-phones").start()
+    return {"started": True}
+
+
+@crm_router.get("/leadgen/verify-phones", response_model=dict)
+def leadgen_verify_phones_status(_: bool = Depends(require_crm_key)):
+    """How the call list's numbers stand: checked, corrected, not yet looked at."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COALESCE(phone_status, 'not checked yet') AS s, COUNT(*) AS n
+              FROM crm_leads
+             WHERE source = 'leadgen' AND status = 'new' AND last_touch_at IS NULL
+             GROUP BY 1
+        """)
+        return {"call_list": {r["s"]: r["n"] for r in cursor.fetchall()}}
+
+
 @crm_router.get("/leadgen/recheck-restaurants", response_model=dict)
 def leadgen_recheck_restaurants_status(_: bool = Depends(require_crm_key)):
     """Is a recheck in flight, and what did the last one find?"""
@@ -2954,6 +3111,8 @@ def export_csv(scope: str = "today", _: bool = Depends(require_crm_key)):
     writer.writerow(["Name", "Phone", "Email", "Location", "Status",
                      "Last called", "Follow-up", "Local time", "Notes"])
     for row in rows:
+        if row.get("phone_status") in BAD_PHONE:
+            continue      # a number the website check found wrong never reaches a dialer
         window = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"))
         writer.writerow([
             row["name"], row["phone"] or "", row["email"] or "", row["loc"] or "",
@@ -3015,8 +3174,9 @@ def call_list(_: bool = Depends(require_crm_key)):
     usable = 0
     for row in rows:
         lead = _lead_row(row)
-        # A number that didn't validate is never offered for dialling.
-        if not lead["phone_ok"]:
+        # A number that didn't validate, or that the venue's own site doesn't
+        # vouch for, is never offered for dialling.
+        if not lead["phone_ok"] or not _dial_ok(row):
             continue
         usable += 1
         lead["call_window"] = _call_window(row.get("tz_offset_hours"),
@@ -3183,7 +3343,9 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
     ready, soon, rest = [], [], []
     for row in rows:
         lead = _lead_row(row)
-        if not lead["phone_ok"]:
+        # About one map number in five isn't the bar's any more: only numbers
+        # the venue's own website vouches for are dialled. See leadgen.
+        if not lead["phone_ok"] or not _dial_ok(row):
             continue
         window = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"),
                               row.get("tz_name"))

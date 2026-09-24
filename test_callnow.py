@@ -163,3 +163,19 @@ def test_rest_count_is_the_real_total_when_the_page_is_capped():
     d = _run(rows, states, limit=5)
     assert len(d["rest"]) == 5
     assert d["rest_count"] == 30
+
+
+def test_only_numbers_their_website_vouches_for_are_offered():
+    # Measured on 102 real Denver bars: where the bar's own site listed a
+    # number, the map's disagreed about one time in five. A generated lead is
+    # only dialled once its website has vouched for the number.
+    rows, states = _rows(("ok", "good"), ("fixed", "good"), ("unchecked", "good"),
+                         ("conflict", "good"), ("mine", "good"))
+    for r in rows:
+        r["source"] = "leadgen"
+    rows[0]["phone_status"] = "confirmed"
+    rows[1]["phone_status"] = "from_site"
+    rows[3]["phone_status"] = "conflict"
+    rows[4]["source"] = "manual"          # the operator's own entry: trusted as typed
+    names = {l["name"] for l in _run(rows, states)["ready"]}
+    assert names == {"ok", "fixed", "mine"}

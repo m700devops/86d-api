@@ -30,6 +30,7 @@
   .assist-list{margin:8px 0 0;padding-left:18px;font-size:13px;line-height:1.8}
   .assist-list li.undone{opacity:.45;text-decoration:line-through}
   .assist-list button{margin-left:8px;padding:2px 9px;font-size:12px}
+  .phok{font-size:11px;color:var(--text3);margin-top:3px;white-space:nowrap}
   .attempts{border-collapse:collapse;font-size:13px;margin:0 0 4px}
   .attempts td{padding:3px 14px 3px 0;border:0;background:none !important;vertical-align:top}
   .attempts td:first-child{color:var(--text3)}
@@ -1175,7 +1176,7 @@ function row(l,n,calling){
     <td><div class="phcell">
       <span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>
       <button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button>
-    </div></td>
+    </div>${phoneCheck(l)?`<div class="phok" title="${esc(l.phone_note||'')}">${phoneCheck(l)}</div>`:''}</td>
     <td title="${esc(w.hint||'')}">${calling
       ? `<span class="${w.good_now?'win-good':shut?'win-shut':'win-bad'}">${
            esc((w.hint||'').replace('CALL NOW — ',''))}</span>`
@@ -1378,6 +1379,7 @@ $('zones').onclick=async e=>{
         <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
         <button data-outcome="not_interested" data-note="Not interested, asked not to be called again.">Not interested</button>
         <button data-outcome="not_interested" data-note="Already has a system/app for inventory.">Has a system</button>
+        <button data-wrong>Wrong number</button>
         <button data-cancel>Cancel</button>
       </div>
       <div class="applied hide"></div>
@@ -1386,6 +1388,19 @@ $('zones').onclick=async e=>{
     d.querySelector('textarea').focus();
   }
 };
+
+/* The number rang somebody else. The server logs the dial, retires the
+   number for good and looks on their own website for the right one. */
+async function reportWrongNumber(btn, id, reload){
+  btn.disabled=true; btn.textContent='Checking their site…';
+  try{
+    const r=await api(`/leads/${id}/wrong-number`,{method:'POST'});
+    toast(r.new_phone
+      ? `Wrong number retired. Their website lists ${r.new_phone} — it's in Follow-ups for today`
+      : `Wrong number retired. No other number on their website — email them instead`, r.undo_id);
+    await reload();
+  }catch(err){ btn.disabled=false; btn.textContent='Wrong number'; toast(err.message); }
+}
 
 async function drawerAction(dr,e){
   const tr=dr.previousElementSibling; const id=tr.dataset.id;
@@ -1420,6 +1435,7 @@ async function drawerAction(dr,e){
      round trip to be told what the button already said — and it meant the
      quick path stopped working entirely when no API key was set. Only free
      text a human actually typed is worth a model. */
+  if(e.target.closest('[data-wrong]')) return reportWrongNumber(e.target.closest('[data-wrong]'), id, loadCalls);
   const quick=e.target.closest('[data-outcome]');
   if(quick){
     quick.disabled=true;
@@ -1545,9 +1561,17 @@ const OUTCOME_LABEL = {
   answered: 'Answered', voicemail: 'Voicemail', no_answer: 'No answer',
   gatekeeper: 'Manager out',
   not_interested: 'Not interested', callback: 'Asked for a callback',
-  logged: 'Logged', emailed: 'Emailed',
+  logged: 'Logged', emailed: 'Emailed', wrong_number: 'Wrong number',
 };
 const outcomeLabel = o => o ? (OUTCOME_LABEL[o] || o) : '';
+
+/* Whether the venue's own website vouches for the number. Only vouched-for
+   numbers reach the call list (see leadgen.judge_phone). */
+function phoneCheck(l){
+  if(l.phone_status==='confirmed') return '✓ on their website';
+  if(l.phone_status==='from_site') return '✓ from their website';
+  return '';
+}
 
 /* Tries = every attempt to sell them — calls, emails, Facebook messages —
    counted from the touch log. Not `attempts`: that counts calls only, because
@@ -1597,7 +1621,8 @@ function leadDetailsCell(l, cols){
     ${f('Bar',l.name)}${f('Where',l.loc)}${f('Stage',l.status)}
     ${f('Last touch',[outcomeLabel(l.last_outcome),(l.last_touch_at||'').slice(0,10)].filter(Boolean).join(' · '))}
     ${f('Tries',t.total?`${t.total}${why?' ('+why+')':''}`:'')}${f('Call back',l.followup_date)}
-    ${f('Spoke to',l.contact)}${f('Phone',l.phone_dial||l.phone)}${f('Email',l.email)}
+    ${f('Spoke to',l.contact)}${f('Phone',l.phone_dial||l.phone)}
+    ${f('Phone check',l.phone_note||phoneCheck(l))}${f('Email',l.email)}
     ${f('Manager',l.manager_name&&`${l.manager_name}${l.manager_role?' ('+l.manager_role+')':''}`)}
     <p class="hint" style="margin:10px 0 4px">Every attempt <span class="muted">(your time)</span></p>
     ${touches.length?`<table class="attempts">${touches.map((x,i)=>`<tr>
@@ -1811,6 +1836,7 @@ $('pipeBody').onclick=async e=>{
         <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
         <button data-outcome="not_interested" data-note="Not interested.">Not interested</button>
         <button data-outcome="not_interested" data-note="Already has a system/app for inventory.">Has a system</button>
+        <button data-wrong>Wrong number</button>
         <button data-cancel>Cancel</button>
       </div>
       <div class="applied hide"></div></td>`;
@@ -1874,6 +1900,7 @@ async function pipeDrawer(dr,e){
     return;
   }
   if(dr.dataset.mode==='log'){
+    if(e.target.closest('[data-wrong]')) return reportWrongNumber(e.target.closest('[data-wrong]'), id, loadPipeline);
     const quick=e.target.closest('[data-outcome]');
     const ta=dr.querySelector('textarea');
     if(quick){

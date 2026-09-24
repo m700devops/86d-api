@@ -104,7 +104,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   carrying extensions, two numbers in one field, international numbers and vanity spellings;
   anything this can't prove dialable returns None and is never promoted. It can promise the
   digits are a structurally valid US number, NOT that the line still belongs to that venue —
-  nothing short of dialling proves that
+  that's leadgen's website check (see "A number reaches the call list only if…"). Rejects
+  N9X area codes (reserved; a real bar's site carried "997-427-9989")
 - leadgen.py — the daily lead generator: harvest (OpenStreetMap/Overpass) → enrich (crawl
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
@@ -164,7 +165,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
   test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
   test_ask.py test_apple.py test_followup_email.py test_tries.py test_dedupe.py
-  test_assist.py -q` (377 tests)
+  test_assist.py test_phone_check.py -q` (398 tests)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -371,6 +372,31 @@ capture. Don't reintroduce them or describe them as current.)
   ~1.5 new cities per day; 58 US metros are seeded, more via `POST /v1/crm/leadgen/cities`
 - A lead is NEVER promoted without both a phone and an email, and never if it's suppressed,
   already in the pipeline, or already a customer
+- **A number reaches the call list only if the venue's OWN WEBSITE vouches for it.** The
+  phone comes off the OSM tag and nothing used to check it against the bar. Measured on 102
+  real Denver bars (2026-09-24): where the bar's site listed a number, the map's disagreed
+  about ONE TIME IN FIVE — one Denver entry carried a Chicago area code. `site_phones()` reads
+  what a venue's own pages publish, best evidence first: `tel:` links, structured data
+  (schema.org `telephone`, site-builder JSON — read even inside `<script>`, unlike emails),
+  then visible text; toll-free dropped. `judge_phone()` decides: **confirmed** (map number on
+  their site), **from_site** (it isn't, but the site shows exactly ONE local number — use
+  that, keep the map's in `phone_note`), **conflict** (site numbers, none the map's and not
+  exactly one local — another location, a group office), **unconfirmed** (site shows none).
+  Only `PHONE_OK` = confirmed/from_site is promoted; the rest stay banked. "Local" is
+  `local_area_codes()`: the codes a metro's own harvested bars use (Denver → 303, 720), so
+  there's no area-code table to maintain. Checked in `enrich_candidate` from pages already
+  fetched (a contact page or two more within `MAX_PAGES_PER_SITE`). On the Denver sample:
+  42 confirmed, 10 corrected, 2 conflict + 16 unconfirmed held back. `verify_phones()`
+  re-checks rows enriched before this: never-called leads first (corrected in place, or
+  deleted off the call list back to the bank — never a lead someone rang, never one with an
+  email queued), then the bank's best. Starts itself in a background thread at boot when any
+  call-list lead is unchecked, runs before each daily promote for the bank, and on demand via
+  `POST /v1/crm/leadgen/verify-phones` (GET shows the call list by status). Idempotent: only
+  rows with no `phone_status`. `pool_depth()`'s `qualified` no longer counts banked
+  candidates that can't be promoted. The call list (`/now`, `/calllist`) also skips any
+  `leadgen` lead without a trusted status (`_dial_ok`); the operator's own entries are
+  trusted as typed; the CSV export drops `BAD_PHONE`. Logs `LEADGEN_PHONES_VERIFIED` /
+  `LEADGEN_PHONES_VERIFY_FAILED`. Covered by test_phone_check.py
 - **One bar, one lead: the same phone AND the same name (`same_venue()`) is a duplicate.**
   Olde Town Tavern sat on the call list AND in the CRM tab: quick-add had created a fresh row
   for a bar the generator already had on the call list, and the generator's own check (email,
@@ -666,6 +692,15 @@ capture. Don't reintroduce them or describe them as current.)
   "call me Tuesday", that wins
 - The call list orders by fewest attempts first: an untried lead beats a fourth swing at one
   that never answers
+- **Wrong number** (a button in both Log drawers): `POST /leads/{id}/wrong-number` logs the dial
+  (outcome `wrong_number`), retires the number in `crm_suppressions` so no lead can bring it
+  back, and looks on the venue's own site (the candidate's website, else a URL in the notes)
+  for the right one. Found → the lead gets it (`from_site`) and a follow-up for TODAY, so it's
+  in Follow-ups to try again; not found → the number is cleared (`phone_status='wrong'`) and
+  the lead stays for email. The site lookup happens before the transaction, never under a row
+  lock. Undo (`wrong-number call`) restores the row, refunds the call and lifts the
+  suppression. Under each call-list number, "✓ on their website" / "✓ from their website"
+  (hover for what the map said); the details panel shows the check's note
 - `GET /v1/crm/dialstats` — connect rate by hour, weekday and attempt number, from the
   `crm_touches` log. The windows above are a REASONED HEURISTIC; this is how it gets checked
   against reality. Once a few hundred dials are logged, move the window to match the data
