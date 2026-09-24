@@ -487,6 +487,22 @@ def init_db():
                 print(f"[db] migrated users: added {col} {col_type}", flush=True)
         conn.commit()
 
+        # Order numbers: users.last_order_number is the per-account counter
+        # (#1001, #1002, …, drawn by main._next_order_number) and
+        # orders.order_number is what each emailed order carried. Orders sent
+        # before this stay NULL rather than being numbered after the fact: no
+        # distributor ever saw a number on them, so one in the history would
+        # be a reference nobody else can match.
+        for table, col in (("users", "last_order_number"), ("orders", "order_number")):
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = %s AND column_name = %s
+            """, (table, col))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER")
+                print(f"[db] migrated {table}: added {col} INTEGER", flush=True)
+        conn.commit()
+
         # Migrate par_levels: add full_quantity, current_stock, price columns if absent
         for col, col_type in [("full_quantity", "NUMERIC(10,2)"), ("current_stock", "NUMERIC(10,2)"), ("price", "NUMERIC(10,2)")]:
             cursor.execute("""

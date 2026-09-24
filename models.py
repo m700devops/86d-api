@@ -341,6 +341,7 @@ class OrderDistributor(BaseModel):
 
 class OrderResponse(BaseModel):
     id: str
+    order_number: Optional[int] = None  # None for orders sent before numbers existed
     session_id: str
     location_id: str
     location_name: Optional[str] = None

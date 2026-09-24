@@ -250,3 +250,60 @@ def generate_order_items(
     order_items.sort(key=lambda x: urgency_order[x["urgency"]])
     
     return order_items
+
+FIRST_ORDER_NUMBER = 1001
+
+
+def format_order_number(n: Optional[int]) -> Optional[str]:
+    """`#1042`, or None for an order sent before numbers existed."""
+    return f"#{int(n)}" if n else None
+
+
+def order_email(
+    order_number: Optional[int],
+    distributor_name: str,
+    business_name: str,
+    location_suffix: str,
+    items: list[dict],
+    manager_name: str,
+    today: str,
+) -> tuple[str, str]:
+    """Subject and plain-text body of one distributor's order email.
+
+    The order number goes in the subject, where a rep's inbox search and an
+    invoice clerk both look, and once more at the bottom with the ask to put it
+    on the invoice: that is what lets a bar match a delivery or a bill back to
+    the order it sent. `items` are {"name", "size", "quantity"}.
+    """
+    ref = format_order_number(order_number)
+    lines = []
+    total_qty = 0.0
+    for item in items:
+        qty = item["quantity"]
+        total_qty += qty
+        qty_str = str(int(qty)) if qty == int(qty) else f"{qty:g}"
+        size_str = f" {item['size']}" if item.get("size") else ""
+        lines.append(f"- {item['name']}{size_str} x {qty_str}")
+    total_str = str(int(total_qty)) if total_qty == int(total_qty) else f"{total_qty:g}"
+
+    if ref:
+        subject = f"Order {ref} from {business_name} — {today}"
+        opening = f"This is order {ref} from {business_name}{location_suffix}."
+        reference = f"\nPlease put order {ref} on the invoice so we can match it up.\n"
+    else:
+        subject = f"Order from {business_name} — {today}"
+        opening = f"This is an order from {business_name}{location_suffix}."
+        reference = ""
+    body = f"""Hi {distributor_name},
+
+{opening} Please prepare the following for pickup/delivery:
+
+{chr(10).join(lines)}
+
+Total: {total_str} bottles
+{reference}
+Thank you,
+{manager_name}
+{business_name}
+(sent via 86'd bar inventory)"""
+    return subject, body

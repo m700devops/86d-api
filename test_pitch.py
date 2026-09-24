@@ -31,11 +31,16 @@ def test_the_sheet_carries_the_owners_facts():
     assert pitch.APP_URL == "https://apps.apple.com/us/app/86d-bar-inventory/id6798359825"
 
 
-def test_the_sheet_never_claims_an_order_number():
-    # The owner's sample said "a unique order number"; the distributor email
-    # has none ("Order from {bar} — {date}"). A bar that checks stops trusting.
-    assert "order number" not in pitch.master_sheet().lower()
-    assert "order number" not in pitch.EXAMPLE_EMAIL.lower()
+def test_the_sheet_claims_the_order_number_the_email_really_carries():
+    # Kept off the sheet until the distributor email carried one; now it does,
+    # so the sheet says so — in the same shape the email uses.
+    import helpers
+    sheet = pitch.master_sheet()
+    assert "order number (#1001, #1002" in sheet
+    assert "order number" in pitch.EXAMPLE_EMAIL.lower()
+    subject, body = helpers.order_email(1001, "SG", "Rioja", "", [{"name": "x", "quantity": 1}],
+                                        "Ed", "today")
+    assert "#1001" in subject and "put order #1001 on the invoice" in body
 
 
 def test_the_prompt_has_the_sheet_the_example_and_the_rules():

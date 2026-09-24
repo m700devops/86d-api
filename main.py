@@ -19,7 +19,7 @@ from auth import (
 from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
     classify_level, smooth_level, calculate_variance, generate_order_items,
-    normalize_match_text, NORM_SQL
+    normalize_match_text, NORM_SQL, FIRST_ORDER_NUMBER, format_order_number, order_email
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -1943,8 +1943,15 @@ def list_orders(
             where_clause += " AND o.created_at <= %s"
             params.append(end_date)
         if q:
-            where_clause += " AND o.order_data ILIKE %s"
-            params.append(f"%{q}%")
+            # "1042" or "#1042" finds that order by its number as well as by
+            # any distributor or item name in it.
+            number = q.strip().lstrip("#").strip()
+            if number.isdigit() and len(number) <= 9:
+                where_clause += " AND (o.order_data ILIKE %s OR o.order_number = %s)"
+                params += [f"%{q}%", int(number)]
+            else:
+                where_clause += " AND o.order_data ILIKE %s"
+                params.append(f"%{q}%")
 
         # Get total count
         cursor.execute(f"""
@@ -1974,6 +1981,7 @@ def list_orders(
 
             orders.append({
                 "id": order["id"],
+                "order_number": order.get("order_number"),
                 "session_id": order["session_id"],
                 "location_id": order["location_id"],
                 "location_name": order["location_name"],
@@ -2023,6 +2031,7 @@ def get_order(order_id: str, user_id: str = Depends(get_current_user)):
         return {
             "order": {
                 "id": order["id"],
+                "order_number": order.get("order_number"),
                 "session_id": order["session_id"],
                 "location": {
                     "id": order["location_id"],
@@ -2075,7 +2084,9 @@ def export_order(order_id: str, export_data: OrderExportRequest, user_id: str = 
         location_name = order["location_name"]
         created_at = order["created_at"][:10]  # Just the date
         
-        content_lines = [f"ORDER - {location_name}", created_at, "─" * 40, ""]
+        ref = format_order_number(order.get("order_number"))
+        content_lines = [f"ORDER {ref} - {location_name}" if ref else f"ORDER - {location_name}",
+                         created_at, "─" * 40, ""]
         
         # Group by urgency
         critical = [i for i in items if i.get("urgency") == "critical"]
@@ -2663,6 +2674,28 @@ def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, 
         return (False, str(e))
 
 
+def _next_order_number(conn, cursor, user_id: str) -> int:
+    """The bar's next order number: #1001, #1002, … per account.
+
+    Per account rather than per location because the distributor list, the
+    business name and the email's sign-off are all per account — the number
+    is unique under the name the distributor sees. Taken from a counter on the
+    users row (the UPDATE locks it, so two sends can't draw the same number)
+    and COMMITTED before any email goes: if something failed after the send,
+    a rollback would hand the same number to the next order, and two orders
+    carrying one number is the one thing a reference number must never do. A
+    gap in the sequence costs nothing.
+    """
+    cursor.execute("""
+        UPDATE users SET last_order_number = COALESCE(last_order_number, %s) + 1
+        WHERE id = %s
+        RETURNING last_order_number
+    """, (FIRST_ORDER_NUMBER - 1, user_id))
+    row = cursor.fetchone()
+    conn.commit()
+    return row["last_order_number"] if row else None
+
+
 @v1_router.post("/orders/email")
 def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(get_current_user)):
     """Send order emails to distributors, one email per distributor."""
@@ -2677,6 +2710,7 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
     results = []
     order_distributors = []  # mirrors `results` but also carries each distributor's line items, for order history
     all_items = []
+    order_number = None  # one number for the whole send, shared by every distributor's email
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -2736,29 +2770,14 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
                 })
                 continue
 
-            lines = []
-            total_qty = 0.0
-            for item in order.items:
-                qty = item.quantity
-                total_qty += qty
-                qty_str = str(int(qty)) if qty == int(qty) else f"{qty:g}"
-                size_str = f" {item.size}" if item.size else ""
-                lines.append(f"- {item.name}{size_str} x {qty_str}")
-
-            total_str = str(int(total_qty)) if total_qty == int(total_qty) else f"{total_qty:g}"
-            subject = f"Order from {business_name} — {today}"
-            body_text = f"""Hi {dist['name']},
-
-This is an order from {business_name}{location_suffix}. Please prepare the following for pickup/delivery:
-
-{chr(10).join(lines)}
-
-Total: {total_str} bottles
-
-Thank you,
-{manager_name}
-{business_name}
-(sent via 86'd bar inventory)"""
+            # Numbered only once an email is really about to go, so an order
+            # where no distributor had an address doesn't burn a number.
+            if order_number is None:
+                order_number = _next_order_number(conn, cursor, user_id)
+            subject, body_text = order_email(
+                order_number, dist["name"], business_name, location_suffix,
+                item_dicts, manager_name, today,
+            )
 
             # BCC the bar's own email: proof in the manager's inbox that the
             # order went out, and a paper trail if a distributor claims they
@@ -2800,17 +2819,18 @@ Thank you,
             "total_cost": total_cost if total_cost > 0 else None,
         }
         cursor.execute("""
-            INSERT INTO orders (id, session_id, location_id, order_data, total_items, estimated_cost, exported_at, export_format, export_destination, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO orders (id, session_id, location_id, order_data, total_items, estimated_cost, exported_at, export_format, export_destination, created_at, order_number)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             order_id, session_id, request.location_id, json.dumps(order_data), len(all_items),
-            order_data["total_cost"], now, "email", ", ".join(sent_emails) or None, now
+            order_data["total_cost"], now, "email", ", ".join(sent_emails) or None, now, order_number
         ))
         conn.commit()
 
     sent = sum(1 for r in results if r["status"] == "sent")
     return {
         "order_id": order_id,
+        "order_number": order_number,
         "results": results,
         "sent": sent,
         "failed": len(results) - sent,
