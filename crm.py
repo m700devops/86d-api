@@ -3366,6 +3366,139 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
             "counters": _counters_row(counters) if counters else None}
 
 
+# ============== ASK AI ==============
+#
+# A question box above the CRM tab's search: "how many people did I call",
+# "who did we leave a voicemail on the 22nd", "who did we email last
+# Thursday". Claude is handed a snapshot of the book — every lead and the
+# full call/email log — and answers from that alone. It is deliberately NOT
+# allowed to write SQL: the same database holds customer accounts and
+# password hashes, and a snapshot of CRM rows is all a sales question needs.
+# Read-only by construction: nothing here writes anything.
+
+ASK_SYSTEM = """You answer questions about a salesperson's CRM. They sell 86'd, an iPhone
+app for bar inventory, to independent bars and restaurants, mostly by cold-calling.
+
+You are given a snapshot: TODAY, a LEADS table and a TOUCHES log (every call and email
+logged, newest first). Answer ONLY from the snapshot. Never invent a lead, a number,
+a date or a name. If the snapshot can't answer it, say so plainly.
+
+Meanings:
+- A touch's outcome: answered = a person picked up and spoke; voicemail = left a
+  message; no_answer = nobody picked up, no message left; gatekeeper = spoke to staff,
+  decision maker not in; not_interested = said no (lead is dead); callback = asked to
+  be called back / showed interest; logged = recorded with no specific outcome.
+- Lead status: new = never worked; contacted; warm = interested; won = signed up;
+  dead = said no. "Open" means anything not dead.
+- All dates and times are the salesperson's own local time (given in TODAY). Resolve
+  "today", "yesterday", "last Thursday", "this week" against TODAY. "Last Thursday" is
+  the most recent Thursday before today.
+- Count carefully. When asked "how many", give the number first.
+
+Return ONLY a JSON object:
+  "answer": the answer in plain, short sentences (no markdown tables). Lead with the
+            direct answer. At most ~6 short lines.
+  "leads": the ids (like "L12") of the leads the answer is about, most relevant first,
+           or [] if it isn't about particular leads. At most 50."""
+
+
+def _ask_when(iso: Optional[str], tz) -> str:
+    """A stored UTC ISO timestamp as the operator's local 'YYYY-MM-DD Thu 2:05pm'."""
+    if not iso:
+        return ""
+    try:
+        when = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return str(iso)[:16]
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    local = when.astimezone(tz)
+    return local.strftime("%Y-%m-%d %a ") + local.strftime("%I:%M%p").lstrip("0").lower()
+
+
+def _ask_snapshot(leads: list, touches: list, now: datetime, tz) -> tuple[str, dict]:
+    """Everything Ask AI may see, as compact text, plus alias -> lead id.
+
+    Leads get short aliases (L1, L2 ...) instead of their ids: the ids are
+    long and would be repeated on every touch line, which is most of the
+    tokens for no information.
+    """
+    alias: dict = {}
+    back: dict = {}
+    for i, lead in enumerate(leads, 1):
+        alias[lead["id"]] = f"L{i}"
+        back[f"L{i}"] = lead["id"]
+
+    def clip(v, n):
+        v = (v or "").replace("\n", " ").replace("|", "/").strip()
+        return v[:n]
+
+    lines = [f"TODAY: {now.astimezone(tz).strftime('%Y-%m-%d %A %I:%M%p')} "
+             f"(salesperson's local time, {getattr(tz, 'key', 'UTC')})", "",
+             "LEADS (id | name | where | status | last outcome | calls | last touched | "
+             "follow-up | contact | email | latest note)"]
+    for lead in leads:
+        notes = [n for n in (lead.get("notes") or "").splitlines() if n.strip()]
+        lines.append(" | ".join([
+            alias[lead["id"]], clip(lead.get("name"), 60), clip(lead.get("loc"), 40),
+            lead.get("status") or "", lead.get("last_outcome") or "",
+            str(lead.get("attempts") or 0), _ask_when(lead.get("last_touch_at"), tz),
+            lead.get("followup_date") or "", clip(lead.get("contact"), 40),
+            clip(lead.get("email"), 60), clip(notes[-1] if notes else "", 160),
+        ]))
+    lines += ["", "TOUCHES (when | lead | kind | outcome | attempt #)"]
+    for t in touches:
+        lines.append(" | ".join([
+            _ask_when(t.get("at"), tz), alias.get(t.get("lead_id"), "?"),
+            t.get("kind") or "", t.get("outcome") or "", str(t.get("attempt") or ""),
+        ]))
+    return "\n".join(lines), back
+
+
+class AskCRM(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+
+
+@crm_router.post("/ask", response_model=dict)
+def ask_crm(data: AskCRM, _: bool = Depends(require_crm_key)):
+    """Plain-English questions about the CRM, answered from a snapshot of it."""
+    tz = _operator_tz()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, name, loc, status, last_outcome, attempts, last_touch_at,
+                   followup_date, contact, email, phone, notes
+              FROM crm_leads
+             ORDER BY COALESCE(last_touch_at, '') DESC, created_at DESC
+             LIMIT 2000
+        """)
+        leads = cursor.fetchall()
+        # Undone touches never happened as far as the operator is concerned.
+        cursor.execute("""
+            SELECT lead_id, kind, outcome, attempt, at FROM crm_touches
+             WHERE outcome IS DISTINCT FROM 'undone'
+             ORDER BY at DESC LIMIT 3000
+        """)
+        touches = cursor.fetchall()
+
+    snapshot, back = _ask_snapshot(leads, touches, datetime.now(timezone.utc), tz)
+    out = _ask_claude(ASK_SYSTEM, f"{snapshot}\n\nQUESTION: {data.question.strip()}",
+                      max_tokens=900, timeout=60.0)
+
+    answer = str(out.get("answer") or "").strip()[:3000] or "I couldn't work that out."
+    by_id = {l["id"]: l for l in leads}
+    picked = []
+    for a in (out.get("leads") or [])[:50]:
+        lead = by_id.get(back.get(str(a).strip()))
+        if lead and lead not in picked:
+            picked.append(lead)
+    return {"answer": answer, "leads": [{
+        "id": l["id"], "name": l["name"], "loc": l["loc"], "status": l["status"],
+        "last_outcome": l["last_outcome"], "last_touch_at": l["last_touch_at"],
+        "phone_dial": format_us_phone_dashed(phone_digits(l.get("phone"))),
+    } for l in picked]}
+
+
 # ============== AI QUICK ADD ==============
 #
 # A call that already happened to a bar that was never in the pipeline at

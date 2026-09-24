@@ -114,7 +114,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
-  test_leadgen.py test_quick_add.py test_coach.py test_school.py -q`
+  test_leadgen.py test_quick_add.py test_coach.py test_school.py test_ask.py -q`
 - test_leadgen.py — `_restaurant_pours()`, the restaurant liquor gate, pure (crawled text +
   OSM tags in, a yes/no and a reason out). Stubs `database` in `sys.modules` the same way
   test_callnow.py stubs it for crm
@@ -471,6 +471,16 @@ capture. Don't reintroduce them or describe them as current.)
   stops the same bar being rung twice — and Follow-ups only shows what's due, so before this
   tab existed a bar you spoke to on Tuesday and forgot to book a callback for was invisible.
   That is how warm leads quietly die
+- **Ask AI** — the box ABOVE the search bar. `POST /v1/crm/ask {question}` hands Claude
+  (`_ask_claude`, Haiku) a text snapshot of the book — every lead (status, last outcome,
+  calls, last touched, follow-up, contact, email, latest note) and the full touch log with
+  undone dials excluded — and returns `{answer, leads}`. Every timestamp in the snapshot is
+  the OPERATOR's local time (`CRM_OPERATOR_TZ`), with TODAY stated, so "who did we email last
+  Thursday" resolves against their calendar. Leads are aliased L1, L2… to save tokens; the
+  server maps them back and drops any alias the model invented. **The model never writes
+  SQL**: the same database holds customer accounts and password hashes, and a snapshot of
+  CRM rows is all a sales question needs. Read-only — nothing on this path writes. Covered
+  by test_ask.py
 - `q` searches name, town, contact, email and phone. The phone match strips punctuation on
   both sides, so "6157429095" finds "+1-615-742-9095"
 - **Two buttons only: Open and Dead** (`status=open` on `/leads` means `status <> 'dead'`).
