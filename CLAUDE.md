@@ -164,7 +164,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
   test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
   test_ask.py test_apple.py test_followup_email.py test_tries.py test_dedupe.py
-  test_assist.py -q` (374 tests)
+  test_assist.py -q` (377 tests)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -380,7 +380,8 @@ capture. Don't reintroduce them or describe them as current.)
   A shared phone ALONE is never a duplicate: one owner can run two bars off one number.
   `_promote_one` now rejects a candidate matching a lead by phone + `same_venue`;
   quick-add's `_find_existing_lead()` logs the call onto the bar already in the book instead
-  of inserting a second row; and `_reconcile_duplicate_leads()` runs every boot, folding a
+  of inserting a second row; and `_reconcile_duplicate_leads()` runs every boot (a phone written in a worked lead's notes counts
+  too, and quick-add tries every number in the paste — Olde Town's notes named two), folding a
   never-called, auto-sourced copy into the lead in play (worked, else oldest): the keeper's
   empty columns are filled from the copy, the candidate and any queued email re-pointed to
   the keeper, then the copy deleted. Worked rows and the operator's own entries are never

@@ -95,3 +95,19 @@ def test_reconcile_moves_everything_to_the_keeper_before_deleting_the_copy():
                                       "UPDATE crm_scheduled_emails SET", "DELETE FROM crm_leads"]
     assert writes[0][1] == ("QA", "GEN")
     assert writes[3][1] == ("GEN",)
+
+
+def test_a_number_written_in_the_worked_leads_notes_counts_too():
+    # Olde Town's call notes read "(720) 242-9667 or (303) 467-1472"; the map's
+    # copy could carry either number.
+    worked = _lead("QA", "Olde Town Tavern & Grill", "(720) 242-9667",
+                   worked=True, source="manual", created="2026-09-22")
+    worked["notes"] = "Your notes: Olde Town Tavern & Grill at (720) 242-9667 or (303) 467-1472"
+    copy = _lead("GEN", "Olde Town Tavern", "303-467-1472")
+    assert duplicate_folds([copy, worked]) == [("QA", "GEN")]
+
+
+def test_a_different_bar_named_in_someones_notes_is_not_folded():
+    worked = _lead("QA", "Olde Town Tavern & Grill", "720-242-9667", worked=True)
+    worked["notes"] = "Owner also runs Blue Room, 303-467-1472"
+    assert duplicate_folds([worked, _lead("GEN", "Blue Room", "303-467-1472")]) == []

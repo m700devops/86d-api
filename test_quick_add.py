@@ -418,3 +418,16 @@ def test_quick_add_still_creates_a_lead_for_a_different_bar_on_the_same_phone(mo
     assert any(sql.startswith("INSERT INTO crm_leads") for sql, _ in cur.executed)
     assert result["lead"]["name"] == "The Monkey Bar"
     assert "matched_existing" not in result["applied"]
+
+
+def test_quick_add_matches_on_any_number_in_the_paste(monkeypatch):
+    on_list = _lead(id="GEN3", name="Olde Town Tavern", loc="Arvada, CO",
+                    phone="303-467-1472", source="leadgen", created_at="2026-09-18T00:00:00Z")
+    cur = _FakeCursor(existing=[on_list])
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
+    _no_lookup(monkeypatch)
+    monkeypatch.setattr(crm, "_quick_add_extract", lambda text: {
+        "name": "Olde Town Tavern & Grill", "phone": "(720) 242-9667", "outcome": "gatekeeper"})
+    result = crm.quick_add_lead(crm.QuickAdd(
+        text="Olde Town Tavern & Grill at (720) 242-9667 or (303) 467-1472. Taylor picked up"), True)
+    assert result["lead"]["id"] == "GEN3"

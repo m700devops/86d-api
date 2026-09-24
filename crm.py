@@ -4292,7 +4292,7 @@ def _clean(v, limit: int = 300) -> Optional[str]:
 
 
 @crm_router.post("/leads/quick-add", response_model=dict, status_code=201)
-def _find_existing_lead(cursor, name: str, loc: Optional[str], phone: Optional[str],
+def _find_existing_lead(cursor, name: str, loc: Optional[str], phones,
                         email: Optional[str]):
     """The lead already in the book for this bar, locked, or None.
 
@@ -4306,13 +4306,12 @@ def _find_existing_lead(cursor, name: str, loc: Optional[str], phone: Optional[s
     from leadgen import same_venue
 
     found = []
-    digits = re.sub(r"\D", "", phone or "")[-10:]
-    if len(digits) == 10:
+    for digits in phones:
         cursor.execute(
             "SELECT * FROM crm_leads "
             "WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = %s",
             (digits,))
-        found = [r for r in cursor.fetchall() if same_venue(r["name"], name)]
+        found += [r for r in cursor.fetchall() if same_venue(r["name"], name)]
     if not found and email:
         cursor.execute("SELECT * FROM crm_leads WHERE LOWER(email) = LOWER(%s)", (email,))
         found = cursor.fetchall()
@@ -4387,7 +4386,13 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
         cursor = conn.cursor()
         # A bar already in the book gets the call logged on ITS row — never a
         # second row for the same venue.
-        lead = _find_existing_lead(cursor, name, loc, extracted.get("phone"),
+        # Every number in the paste, not just the one the model picked: notes
+        # like "(720) 242-9667 or (303) 467-1472" name the bar either way.
+        from leadgen import phones_in
+        phones = sorted(phones_in(" ".join(filter(None, [
+            str(extracted.get("phone") or ""), str(extracted.get("other_phones") or ""),
+            data.text]))))
+        lead = _find_existing_lead(cursor, name, loc, phones,
                                    _clean(extracted.get("email"), 320))
         matched = lead is not None
         if not matched:

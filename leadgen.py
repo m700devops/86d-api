@@ -571,6 +571,19 @@ def _phone10(phone: Optional[str]) -> str:
     return digits if len(digits) == 10 else ""
 
 
+_PHONE_IN_TEXT = re.compile(r"(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}")
+
+
+def phones_in(text: Optional[str]) -> set:
+    """Every US-shaped phone number written anywhere in `text`, as ten digits.
+
+    A logged call's notes often carry more than one: Olde Town's read
+    "(720) 242-9667 or (303) 467-1472", and the map's copy of the bar could
+    be listed under either.
+    """
+    return {p for p in (_phone10(m) for m in _PHONE_IN_TEXT.findall(text or "")) if p}
+
+
 def _worked(row: dict) -> bool:
     return bool(row.get("last_touch_at")) or (row.get("status") or "new") != "new"
 
@@ -585,19 +598,24 @@ def duplicate_folds(rows: list) -> list:
     """
     groups: dict = {}
     for row in rows:
-        key = _phone10(row.get("phone"))
-        if key:
+        keys = {_phone10(row.get("phone"))}
+        if _worked(row):
+            # Numbers the operator wrote down on a worked lead count too.
+            keys |= phones_in(row.get("notes"))
+        for key in keys - {""}:
             groups.setdefault(key, []).append(row)
     folds = []
+    folded: set = set()
     for group in groups.values():
         if len(group) < 2:
             continue
         keeper = min(group, key=lambda r: (not _worked(r), r.get("created_at") or ""))
         for row in group:
-            if (row["id"] != keeper["id"] and not _worked(row)
-                    and row.get("source") == "leadgen"
+            if (row["id"] != keeper["id"] and row["id"] not in folded
+                    and not _worked(row) and row.get("source") == "leadgen"
                     and same_venue(row.get("name"), keeper.get("name"))):
                 folds.append((keeper["id"], row["id"]))
+                folded.add(row["id"])
     return folds
 
 
@@ -618,8 +636,8 @@ def _reconcile_duplicate_leads(cursor) -> int:
     again and nothing scheduled is lost. Idempotent and cheap, so every boot.
     """
     cursor.execute("""
-        SELECT id, name, phone, status, last_touch_at, source, created_at
-          FROM crm_leads WHERE phone IS NOT NULL
+        SELECT id, name, phone, status, last_touch_at, source, created_at, notes
+          FROM crm_leads WHERE phone IS NOT NULL OR notes IS NOT NULL
     """)
     folds = duplicate_folds(cursor.fetchall())
     for keeper_id, dup_id in folds:
