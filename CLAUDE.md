@@ -379,6 +379,15 @@ capture. Don't reintroduce them or describe them as current.)
   EXCLUDE anything — a fine-dining room, a sushi bar, or a Broadway honky-tonk can still be
   on a clipboard and stays on the list; they only decide order, which is what matters when
   fifty names are in front of you
+- **The Asian-cuisine and tourist-strip penalties were back-applied ONCE**
+  (`_rescore_map_penalties_once()`, `_map_fit_penalty()`). A score is computed at enrichment
+  and stored, so rows banked or promoted before those two existed kept their old order.
+  The fix adds the penalty to the stored score (the crawled HTML behind the rest isn't
+  kept) for banked candidates and never-called leads enriched before
+  `MAP_PENALTY_CUTOFF`, and writes a marker row in `crm_leadgen_oneshots` in the same
+  transaction so it never runs again. It is NOT a `_reconcile_*` pass. Grep Render logs for
+  `LEADGEN_RESCORE`. A future scoring change needs its own one-shot (new marker name and
+  cutoff), or it only applies to new rows
 - A personal mailbox (`dave@divebar.com`) scores +4 and a named manager +5: both mean the
   call has somewhere to land, and both are rare enough to be worth putting first
 - **An email with no recorded `email_source` is never promoted, whatever it looks like.**

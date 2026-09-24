@@ -440,10 +440,86 @@ def init_leadgen_tables():
                   f"{bad_leads} leads", flush=True)
         conn.commit()
 
+        try:
+            _rescore_map_penalties_once(cursor)
+            conn.commit()
+        except Exception as exc:
+            # Rolls the marker back with the updates, so the next boot retries.
+            conn.rollback()
+            print(f"[leadgen] LEADGEN_RESCORE_FAILED {exc}", flush=True)
+
         print(f"[leadgen] LEADGEN_TABLES_READY cities={city_count} "
               f"bucket_target={BUCKET_TARGET} max_active={MAX_ACTIVE} "
               f"daily_target={DAILY_TARGET} pool_floor={POOL_FLOOR}"
               + (f" retimezoned={moved}" if moved else ""), flush=True)
+
+
+# When the Asian-cuisine and tourist-strip penalties went live (PR #29's
+# merge). Anything enriched after this was scored with them already, and must
+# not be charged twice.
+MAP_PENALTY_CUTOFF = "2026-09-24T06:41:08+00:00"
+
+
+def _rescore_map_penalties_once(cursor) -> Optional[tuple[int, int]]:
+    """ONE-TIME: apply the Asian-cuisine / tourist-strip penalties to rows
+    scored before they existed. Unlike the `_reconcile_*` passes this is not
+    meant to run every boot: a marker row in `crm_leadgen_oneshots` is written
+    in the same transaction as the updates, so it runs once, and a failure
+    rolls both back and it tries again on the next boot.
+
+    Adds the penalty to the stored score rather than recomputing it: the
+    site-based parts of the score came from crawled HTML that isn't kept.
+    Touches banked candidates (`qualified`) and promoted leads nobody has
+    called yet — never a lead someone has worked. Returns None if it has
+    already run.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS crm_leadgen_oneshots (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL,
+            detail TEXT
+        )
+    """)
+    cursor.execute("""
+        INSERT INTO crm_leadgen_oneshots (name, applied_at) VALUES (%s, %s)
+        ON CONFLICT (name) DO NOTHING RETURNING name
+    """, ("rescore_map_penalties_2026_09", now_iso()))
+    if not cursor.fetchone():
+        return None
+
+    cursor.execute("""
+        SELECT c.id, c.status, c.city, c.raw_tags, c.promoted_lead_id,
+               (l.id IS NOT NULL) AS lead_unworked
+          FROM crm_lead_candidates c
+          LEFT JOIN crm_leads l
+                 ON l.id = c.promoted_lead_id
+                AND l.status = 'new' AND l.last_touch_at IS NULL
+         WHERE c.status IN ('qualified', 'promoted')
+           AND c.enriched_at IS NOT NULL AND c.enriched_at < %s
+    """, (MAP_PENALTY_CUTOFF,))
+    cands = leads = 0
+    for row in cursor.fetchall():
+        if row["status"] == "promoted" and not row["lead_unworked"]:
+            continue
+        try:
+            tags = json.loads(row["raw_tags"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        penalty = _map_fit_penalty(tags, row["city"])
+        if not penalty:
+            continue
+        cursor.execute("UPDATE crm_lead_candidates SET score = score + %s WHERE id = %s",
+                       (penalty, row["id"]))
+        cands += 1
+        if row["status"] == "promoted":
+            cursor.execute(
+                "UPDATE crm_leads SET lead_score = COALESCE(lead_score, 0) + %s "
+                "WHERE id = %s", (penalty, row["promoted_lead_id"]))
+            leads += 1
+    cursor.execute("UPDATE crm_leadgen_oneshots SET detail = %s WHERE name = %s",
+                   (f"candidates={cands} leads={leads}", "rescore_map_penalties_2026_09"))
+    print(f"[leadgen] LEADGEN_RESCORE_DONE candidates={cands} leads={leads}", flush=True)
+    return cands, leads
 
 
 def _backfill_venue_facts(cursor) -> int:
@@ -1055,13 +1131,23 @@ def score_candidate(tags: dict, email: Optional[str], site_html: str,
         score += 2
     if site_html and UPSCALE_HINTS.search(site_html):
         score -= 2
-    if ASIAN_CUISINE_HINTS.search(tags.get("cuisine") or ""):
-        score -= 2
     if site_html and POS_STACK_HINTS.search(site_html):
         score -= 3
+    return score + _map_fit_penalty(tags, city)
+
+
+def _map_fit_penalty(tags: dict, city: Optional[str]) -> int:
+    """The fit penalties read off the map alone — no crawled text needed.
+
+    Kept apart from score_candidate() so `_rescore_map_penalties_once()` can
+    apply exactly the same numbers to rows scored before these existed.
+    """
+    penalty = 0
+    if ASIAN_CUISINE_HINTS.search(tags.get("cuisine") or ""):
+        penalty -= 2
     if _on_tourist_strip(tags, city):
-        score -= 4           # Vegas Strip, Lower Broadway — already has a system
-    return score
+        penalty -= 4         # Vegas Strip, Lower Broadway — already has a system
+    return penalty
 
 
 def geocode_city(name: str, state: Optional[str] = None) -> Optional[tuple[float, float]]:
