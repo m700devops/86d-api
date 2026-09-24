@@ -175,17 +175,32 @@ def snapshot(leads: list, tries: dict, today: str,
     return "\n".join(lines), back
 
 
-def user_message(book: str, dates: str, text: str, history: list, log: str = "") -> str:
+def context_block(book: str, dates: str, log: str = "") -> str:
+    """What stays the same across a run of messages — the calendar, the book
+    and the log — sent first and cached, so a second message in the same few
+    minutes reads the whole book at a tenth of the price."""
     parts = ["DATES", dates, "", book]
     if log:
         parts += ["", log]
+    return "\n".join(parts)
+
+
+def message_block(text: str, history: list) -> str:
+    """What changes every message: earlier turns and the new message."""
+    parts: list = []
     if history:
         parts += ["", "EARLIER IN THIS CONVERSATION (context only)"]
         for turn in history:
             parts.append(f"Them: {_clip(turn.get('you'), 1000)}")
             parts.append(f"You: {_clip(turn.get('ai'), 1000)}")
-    parts += ["", f"NEW MESSAGE: {text.strip()}"]
+        parts.append("")
+    parts.append(f"NEW MESSAGE: {text.strip()}")
     return "\n".join(parts)
+
+
+def user_message(book: str, dates: str, text: str, history: list, log: str = "") -> str:
+    """Both halves as one string (the shape the model reads either way)."""
+    return context_block(book, dates, log) + "\n\n" + message_block(text, history)
 
 
 # ---------------------------------------------------------------------------

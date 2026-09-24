@@ -3575,25 +3575,41 @@ class Debrief(BaseModel):
     kind: Literal["call", "email", "fb"] = "call"
 
 
-DEBRIEF_SYSTEM = """You turn a salesperson's rough notes from a phone call into structured CRM fields.
-
-They sell 86'd, an iPhone app for bar inventory, to independent bars and restaurants.
-
-Return ONLY a JSON object with these keys (omit any you cannot determine — never guess):
-  "status": one of "new","contacted","warm","won","dead"
+# What a logged call is turned into — one definition for /debrief and
+# quick-add, so the two can't drift. Two things the old prompts got wrong:
+#  - DATES. The model was handed the notes and nothing else — no today, no
+#    calendar — with a rule reading '"Monday" is 3 unless told otherwise',
+#    which is only true on a Friday. It now gets today and the next two weeks
+#    spelled out (assist.dates_table, the AI bar's fix for the same problem)
+#    and returns the actual date.
+#  - WHO TO ASK FOR. `contact` is shown on every screen as "ask for X", but
+#    it was filled with whoever picked up. A bartender who said "the owner is
+#    Brent, he's in Tuesdays" became the person to ask for next time. It is
+#    now `ask_for` (the decision maker when one is named), with `spoke_to`
+#    kept in the note.
+CALL_FIELDS = """  "status": one of "new","contacted","warm","won","dead"
   "outcome": one of "answered","voicemail","no_answer","gatekeeper","not_interested","callback" —
     what SPECIFICALLY happened on this call, not to be confused with status. A voicemail and
     an actual conversation can both land status "contacted", and outcome is the only field
-    that still tells them apart — getting this vague is exactly the bug it exists to prevent.
-  "contact": the name of the person they spoke to
-  "email": a corrected or newly learned email address
-  "phone": a corrected or newly learned phone number
-  "followup_in_days": integer number of days until the agreed follow-up
+    that still tells them apart.
+  "spoke_to": the person they actually spoke to, with role if given ("Taylor (bartender)")
+  "ask_for": who to ask for on the NEXT call: the owner, GM or whoever decides, if the notes
+    name them ("Brent (owner)"); otherwise the person they spoke to, if that's who to deal
+    with. Null if no name was given
+  "followup_date": YYYY-MM-DD, the day they agreed to be contacted again. Null if no day
+    was agreed — the system schedules retries itself when nobody was reached
+  "best_time": when they said to call, short, in their words ("Tuesdays after 2pm")
+  "objection": what they pushed back with, close to their words ("already use BevSpot",
+    "too busy until after the holidays", "the owner does all the ordering")
+  "current_setup": how they do inventory and ordering today, if said ("clipboard and a
+    spreadsheet", "the owner counts Sunday nights")
+  "next_step": the concrete next action, one short sentence ("Email Brent the app link")
   "summary": one or two sentences recording what happened. Keep personal details the
-    person shared (their pets, family, plans, what they said about the product) — the
-    salesperson opens the next call with those
+    person shared (pets, family, plans, what they said about the product) — the
+    salesperson opens the next call with those"""
 
-Rules:
+CALL_RULES = """Rules:
+- Never guess. Leave out any key the notes don't support.
 - "not interested", "hung up", "don't call again", "no thanks" -> status "dead", outcome "not_interested"
 - they already have a system / app / software for inventory, or are happy with how they do it now -> status "dead", outcome "not_interested"
 - an agreed callback, a demo booked, real interest -> status "warm", outcome "callback"
@@ -3602,8 +3618,26 @@ Rules:
 - left a voicemail -> status "contacted", outcome "voicemail"
 - nobody picked up and NO message was left (rang out, no voicemail, mailbox full) -> status "contacted", outcome "no_answer"
 - "answered" means a real person picked up and spoke. If nobody picked up it is NEVER "answered"
-- spoke to staff/a gatekeeper, the decision maker wasn't in or available -> status "contacted", outcome "gatekeeper"
-- "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
+- spoke to staff/a bartender/a gatekeeper, the decision maker wasn't in -> status "contacted", outcome "gatekeeper"
+- Dates come from DATES: a weekday means the next one after today, "tomorrow" is the next
+  day, "next week" with no day is 7 days from today, "in two weeks" is 14; for anything
+  further, count from TODAY. Never a date before today.
+- "call back at 3" is a best_time, not a date; put it in best_time and use the day it
+  goes with, if one was given."""
+
+DEBRIEF_SYSTEM = f"""You turn a salesperson's rough notes from a phone call into structured CRM fields.
+
+They sell 86'd, an iPhone app for bar inventory and ordering, to independent bars and
+restaurants. You are given TODAY, DATES (today and the next two weeks, with weekdays), THE
+LEAD (the bar, who we've been asking for, what happened before) and their CALL NOTES.
+
+Return ONLY a JSON object with these keys (omit any you cannot determine):
+{CALL_FIELDS}
+  "email": a corrected or newly learned email address
+  "phone": a corrected or newly learned phone number
+
+{CALL_RULES}
+- Earlier history is context for "her", "him", "again". The fields describe THIS call.
 """
 
 
@@ -3637,92 +3671,45 @@ AI_MIN_TIMEOUT = 90.0
 
 
 def _ask_claude(system: str, user: str, max_tokens: int = 400,
-                temperature: float = 0, timeout: float = 40.0) -> dict:
-    """One JSON answer from Claude. Raises HTTPException when unusable.
-
-    Shared by the call-notes reader, quick-add, the prep sheet, Ask AI, the
-    School and the email drafter — one place that knows the headers and what
-    each failure should say. Every caller's prompt already says "return ONLY a
-    JSON object"; the object is cut out of the reply text.
-
-    It used to prefill the reply with "{" and set a temperature, which is how
-    Haiku was kept to JSON. Current models reject both with a 400, so neither
-    is sent: `temperature` is accepted and ignored so callers don't change.
-    `output_config.effort` is sent, and a 400 is retried once without it, so
-    an API-side change to that field can't take every AI feature down.
-    """
-    import json as _json
-
-    import httpx
-
-    key = os.getenv("ANTHROPIC_API_KEY")
-    if not key:
-        raise HTTPException(status_code=503, detail={
-            "error": "ai_unavailable",
-            "message": ("No ANTHROPIC_API_KEY is set, so this can't be done "
-                        "automatically — write it by hand."),
-        })
-
-    def send(with_effort: bool):
-        body = {"model": AI_MODEL, "max_tokens": max(max_tokens, AI_MIN_TOKENS),
-                "system": system, "messages": [{"role": "user", "content": user}]}
-        if with_effort and AI_EFFORT:
-            body["output_config"] = {"effort": AI_EFFORT}
-        return httpx.post(
-            ANTHROPIC_URL,
-            headers={"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION,
-                     "content-type": "application/json"},
-            json=body, timeout=max(timeout, AI_MIN_TIMEOUT))
-
-    try:
-        resp = send(True)
-        if resp.status_code == 400:
-            print(f"[crm] Claude refused the effort setting, retrying without: "
-                  f"{resp.text[:200]}", flush=True)
-            resp = send(False)
-    except Exception as exc:
-        print(f"[crm] Claude request failed: {exc}", flush=True)
-        raise HTTPException(status_code=503, detail={
-            "error": "ai_unavailable",
-            "message": "Couldn't reach the AI — write it by hand.",
-        })
-
-    if resp.status_code != 200:
-        # The body carries the real reason (bad key, rate limit, credit) and
-        # it's an internal tool, so say it rather than making it a guess.
-        detail = resp.text[:160]
-        print(f"[crm] Claude HTTP {resp.status_code}: {detail}", flush=True)
-        raise HTTPException(status_code=503, detail={
-            "error": "ai_unavailable",
-            "message": f"The AI returned {resp.status_code} — {detail}",
-        })
-
-    try:
-        body = resp.json()
-    except ValueError:
-        body = {}
-    if body.get("stop_reason") == "refusal":
-        raise HTTPException(status_code=503, detail={
-            "error": "ai_declined", "message": "The AI declined that one — do it by hand."})
-    # Thinking blocks come first on current models; only text carries the JSON.
-    text = "".join(b.get("text", "") for b in body.get("content", [])
-                   if b.get("type") == "text")
-    start, end = text.find("{"), text.rfind("}")
-    try:
-        if start < 0 or end < start:
-            raise ValueError("no JSON object in the reply")
-        return _json.loads(text[start:end + 1])
-    except ValueError as exc:
-        print(f"[crm] Claude returned unparseable JSON: {exc}", flush=True)
-        raise HTTPException(status_code=503, detail={
-            "error": "ai_unreadable",
-            "message": "The AI's answer didn't parse — write it by hand.",
-        })
+                temperature: float = 0, timeout: float = 40.0, purpose: str = "") -> dict:
+    """One JSON answer from Claude, for prompts that describe their own JSON
+    shape. Raises HTTPException when unusable. See `_claude()` for how every
+    CRM AI call is made; `temperature` is accepted and ignored (current models
+    reject it) so callers written for Haiku don't change."""
+    return _claude(system, user, max_tokens=max_tokens, timeout=timeout, purpose=purpose)
 
 
-def _debrief_extract(text: str) -> dict:
-    """Ask the model for structured fields from a salesperson's rough notes."""
-    return _ask_claude(DEBRIEF_SYSTEM, text, max_tokens=400)
+def _calendar(today: str) -> str:
+    import assist as _assist
+    d = date.fromisoformat(today)
+    return f"TODAY: {today} ({d.strftime('%A')})\n\nDATES\n{_assist.dates_table(d)}"
+
+
+def _lead_history(lead: dict, lines: int = 4) -> str:
+    """The last few note lines, clipped: enough for "called her again" to
+    resolve, not the whole history."""
+    notes = [l.strip() for l in (lead.get("notes") or "").splitlines() if l.strip()]
+    return "\n".join(l[:400] for l in notes[-lines:])
+
+
+def _debrief_extract(text: str, lead: Optional[dict] = None,
+                     today: Optional[str] = None) -> dict:
+    """Ask the model for structured fields from a salesperson's rough notes,
+    with the calendar and the lead's own recent history alongside."""
+    today = today or _today()
+    parts = [_calendar(today)]
+    if lead:
+        about = [f"Bar: {lead.get('name')}" + (f", {lead['loc']}" if lead.get("loc") else "")]
+        if lead.get("contact"):
+            about.append(f"Asking for: {lead['contact']}")
+        if lead.get("last_outcome"):
+            about.append(f"Last outcome: {lead['last_outcome']}")
+        history = _lead_history(lead)
+        if history:
+            about.append("Recent history (oldest first):\n" + history)
+        parts.append("THE LEAD\n" + "\n".join(about))
+    parts.append("CALL NOTES\n" + text.strip())
+    return _ask_claude(DEBRIEF_SYSTEM, "\n\n".join(parts), purpose="call-notes")
 
 
 def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
@@ -3739,7 +3726,18 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
     status = extracted.get("status")
     if status not in VALID_STATUSES:
         status = None
-    followup = extracted.get("followup_in_days")
+    # The date the model read off the calendar wins; a day count is the
+    # older shape (and what an AI-bar log passes). Either must land between
+    # today and a year out, or it's dropped rather than trusted.
+    followup = None
+    when = extracted.get("followup_date")
+    if isinstance(when, str) and when.strip():
+        try:
+            followup = (date.fromisoformat(when.strip()[:10]) - date.fromisoformat(today)).days
+        except ValueError:
+            followup = None
+    if followup is None:
+        followup = extracted.get("followup_in_days")
     try:
         followup = int(followup) if followup is not None else None
         if followup is not None and not (0 <= followup <= 365):
@@ -3806,16 +3804,24 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
     # Length caps on model output: these columns are written straight from
     # whatever the model returned, and a model is perfectly capable of
     # handing back a paragraph where a name was asked for.
+    #
+    # `contact` is who to ASK FOR next time: `ask_for` when the model names
+    # one (the decision maker), else the older `contact` key. Whoever actually
+    # picked up goes in the note instead.
+    def _text(key: str, limit: int) -> Optional[str]:
+        v = extracted.get(key)
+        return re.sub(r"\s+", " ", v).strip()[:limit] if isinstance(v, str) and v.strip() else None
+
     FIELD_LIMITS = {"contact": 200, "email": 320, "phone": 50}
     for field, limit in FIELD_LIMITS.items():
-        value = extracted.get(field)
-        if isinstance(value, str) and value.strip():
-            clean = value.strip()[:limit]
-            sets.append(f"{field} = %s"); params.append(clean)
-            applied[field] = clean
+        value = _text("ask_for", limit) if field == "contact" else None
+        value = value or _text(field, limit)
+        if value:
+            sets.append(f"{field} = %s"); params.append(value)
+            applied[field] = value
     follow_days = followup if followup is not None else cadence_days
     if follow_days is not None:
-        when = (datetime.now(_reset_tz()) + timedelta(days=follow_days)).strftime("%Y-%m-%d")
+        when = (date.fromisoformat(today) + timedelta(days=follow_days)).isoformat()
         sets.append("followup_date = %s"); params.append(when)
         applied["followup_date"] = when
         if followup is None:
@@ -3829,6 +3835,19 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
     if kind == "call":
         stamp += f" · attempt {attempt}"
     note = f"{stamp}: {summary}"
+    # What the call taught us that has no column, labelled and on the same
+    # line: the next call, the prep sheet, the drafter and the playbook all
+    # read these. Who picked up only when it isn't who we'll ask for.
+    spoke_to = _text("spoke_to", 200)
+    extras = [("Spoke to", spoke_to if spoke_to and spoke_to != applied.get("contact") else None),
+              ("Objection", _text("objection", 300)),
+              ("How they do it now", _text("current_setup", 300)),
+              ("Best time", _text("best_time", 120)),
+              ("Next", _text("next_step", 300))]
+    extras = [(k, v) for k, v in extras if v]
+    if extras:
+        note += " · " + " · ".join(f"{k}: {v}" for k, v in extras)
+        applied["details"] = {k: v for k, v in extras}
     # The operator's OWN words, verbatim, every time. The summary is a
     # model's one-or-two-sentence rewrite and it drops whatever doesn't fit a
     # field — The Barrel House lost "Laura just paid $800 at the vet for her
@@ -3866,8 +3885,18 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
     Everything it decides is echoed back in `applied` so a wrong reading is
     visible immediately rather than silently rewriting the pipeline.
     """
-    extracted = _debrief_extract(data.text)
     today = _today()
+    # Read the lead first (no lock: the model call takes seconds, and a row
+    # lock must never wait on a network round trip), so the model sees who
+    # we've been asking for and what happened last time.
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+        before = cursor.fetchone()
+    if not before:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "Lead not found"})
+    extracted = _debrief_extract(data.text, before, today)
     now = now_iso()
     with get_db() as conn:
         cursor = conn.cursor()
@@ -3904,21 +3933,42 @@ _FALLBACK_MODELS = {"claude-opus-5", "claude-fable-5-1"}
 
 
 def _claude_json(system: str, user: str, schema: dict, model: Optional[str] = None,
-                 max_tokens: int = 16000, timeout: float = 120.0) -> dict:
-    """One schema-shaped JSON answer from a current Claude model.
+                 max_tokens: int = 16000, timeout: float = 120.0,
+                 context: Optional[str] = None, purpose: str = "") -> dict:
+    """One schema-shaped JSON answer: structured outputs guarantee the reply
+    parses against `schema`. See `_claude()`."""
+    return _claude(system, user, schema=schema, model=model, max_tokens=max_tokens,
+                   timeout=timeout, context=context, purpose=purpose)
 
-    NOT `_ask_claude()`: current models reject both things that helper leans
-    on — an assistant prefill and `temperature` — with a 400. Structured
-    outputs (`output_config.format`) do the prefill's job instead: the reply
-    is guaranteed to parse against `schema`. A 400 is retried once as a plain
-    request with the schema spelled out in the prompt, so an API-side schema
-    rule can't take the bar down.
+
+def _claude(system: str, user: str, *, schema: Optional[dict] = None,
+            model: Optional[str] = None, max_tokens: int = 16000, timeout: float = 120.0,
+            context: Optional[str] = None, purpose: str = "") -> dict:
+    """Every AI call the CRM makes goes through here.
+
+    - One model and effort (`CRM_AI_MODEL` / `CRM_AI_EFFORT`), sent as
+      `output_config.effort`; thinking is on by default on Opus 5 and its
+      blocks come first, so only text blocks are read.
+    - No prefill and no temperature: current models reject both with a 400.
+    - `fallbacks: "default"` on the models that document it: a request the
+      safety classifiers decline is re-run on Anthropic's recommended model
+      inside the same call instead of coming back empty.
+    - PROMPT CACHING. The system prompt, and `context` when given (a large
+      block that stays the same across several calls, like the whole book the
+      AI bar reads), are marked `cache_control`. A repeat within 5 minutes
+      reads them at a tenth of the input price; everything that changes per
+      call (the question, the notes) goes after them, uncached.
+    - A 400 is retried once as the plainest request there is — no effort,
+      no fallbacks, no cache markers, the schema written into the prompt —
+      so an API-side change to any of those can't take the AI features down.
+    - One `AI_USAGE` log line per call: tokens in/out and cache reads/writes,
+      which is how a cost question gets answered from the Render logs.
     """
     import json as _json
 
     import httpx
 
-    model = model or ASSIST_MODEL
+    model = model or AI_MODEL
     key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
         raise HTTPException(status_code=503, detail={
@@ -3926,40 +3976,53 @@ def _claude_json(system: str, user: str, schema: dict, model: Optional[str] = No
             "message": "No ANTHROPIC_API_KEY is set, so the AI can't run — "
                        "do this one by hand."})
 
-    def send(structured: bool):
+    def send(plain: bool):
         headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION,
                    "content-type": "application/json"}
-        body = {"model": model, "max_tokens": max_tokens,
-                "messages": [{"role": "user", "content": user}]}
-        if structured:
-            body["system"] = system
-            body["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+        body: dict = {"model": model, "max_tokens": max(max_tokens, AI_MIN_TOKENS)}
+        if plain:
+            sys_text = system
+            if schema:
+                sys_text += ("\n\nReturn ONLY a JSON object matching this JSON schema:\n"
+                             + _json.dumps(schema))
+            body["system"] = sys_text
+            body["messages"] = [{"role": "user", "content":
+                                 (context + "\n\n" + user) if context else user}]
+        else:
+            cached = {"type": "ephemeral"}
+            body["system"] = [{"type": "text", "text": system, "cache_control": cached}]
+            content = ([{"type": "text", "text": context, "cache_control": cached},
+                        {"type": "text", "text": user}] if context else user)
+            body["messages"] = [{"role": "user", "content": content}]
+            output: dict = {}
             if AI_EFFORT:
-                body["output_config"]["effort"] = AI_EFFORT
+                output["effort"] = AI_EFFORT
+            if schema:
+                output["format"] = {"type": "json_schema", "schema": schema}
+            if output:
+                body["output_config"] = output
             if model in _FALLBACK_MODELS:
-                # A policy decline is re-run on Anthropic's recommended model
-                # inside the same call, instead of coming back as a refusal.
                 body["fallbacks"] = "default"
                 headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
-        else:
-            body["system"] = (system + "\n\nReturn ONLY a JSON object matching this "
-                              "JSON schema:\n" + _json.dumps(schema))
-        return httpx.post(ANTHROPIC_URL, headers=headers, json=body, timeout=timeout)
+        return httpx.post(ANTHROPIC_URL, headers=headers, json=body,
+                          timeout=max(timeout, AI_MIN_TIMEOUT))
 
     try:
-        resp = send(True)
+        resp = send(False)
         if resp.status_code == 400:
-            print(f"[crm] AI bar: structured request refused, retrying plain: "
+            print(f"[crm] AI {purpose or '-'}: request refused, retrying plain: "
                   f"{resp.text[:200]}", flush=True)
-            resp = send(False)
+            resp = send(True)
     except Exception as exc:
-        print(f"[crm] AI bar request failed: {exc}", flush=True)
+        print(f"[crm] AI {purpose or '-'} request failed: {exc}", flush=True)
         raise HTTPException(status_code=503, detail={
             "error": "ai_unavailable", "message": "Couldn't reach the AI — try again."})
 
     if resp.status_code != 200:
+        # The body carries the real reason (bad key, rate limit, credit) and
+        # it's an internal tool, so say it rather than making it a guess.
         detail = resp.text[:160]
-        print(f"[crm] AI bar HTTP {resp.status_code}: {detail}", flush=True)
+        print(f"[crm] AI {purpose or '-'} HTTP {resp.status_code}: {detail}", flush=True)
         raise HTTPException(status_code=503, detail={
             "error": "ai_unavailable",
             "message": f"The AI returned {resp.status_code} — {detail}"})
@@ -3968,25 +4031,32 @@ def _claude_json(system: str, user: str, schema: dict, model: Optional[str] = No
         body = resp.json()
     except ValueError:
         body = {}
+    usage = body.get("usage") or {}
+    print(f"[crm] AI_USAGE {purpose or '-'} model={body.get('model') or model} "
+          f"in={usage.get('input_tokens', 0)} cache_read={usage.get('cache_read_input_tokens', 0)} "
+          f"cache_write={usage.get('cache_creation_input_tokens', 0)} "
+          f"out={usage.get('output_tokens', 0)}", flush=True)
     stop = body.get("stop_reason")
     if stop == "refusal":
         raise HTTPException(status_code=503, detail={
             "error": "ai_declined",
-            "message": "The AI declined that one — make the change with Edit."})
+            "message": "The AI declined that one — do it by hand."})
     if stop == "max_tokens":
         raise HTTPException(status_code=503, detail={
             "error": "ai_truncated",
             "message": "The AI ran out of room — try it as a shorter message."})
-    # Thinking blocks come first on current models; only text carries the JSON.
     text = "".join(b.get("text", "") for b in body.get("content", [])
                    if b.get("type") == "text")
     start, end = text.find("{"), text.rfind("}")
     try:
         if start < 0 or end < start:
             raise ValueError("no JSON object in the reply")
-        return _json.loads(text[start:end + 1])
+        out = _json.loads(text[start:end + 1])
+        if not isinstance(out, dict):
+            raise ValueError("the reply is not a JSON object")
+        return out
     except ValueError as exc:
-        print(f"[crm] AI bar returned unparseable JSON: {exc}", flush=True)
+        print(f"[crm] AI {purpose or '-'} returned unparseable JSON: {exc}", flush=True)
         raise HTTPException(status_code=503, detail={
             "error": "ai_unreadable",
             "message": "The AI's answer didn't parse — try again."})
@@ -4107,10 +4177,9 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
         f"{_ask_when(t['at'], tz)} | {alias_of.get(t['lead_id'], '?')} | {t['kind']} | "
         f"{t['outcome'] or ''}" for t in touches])
     history = [t.model_dump() for t in data.history][-4:]
-    out = _claude_json(_assist.SYSTEM,
-                       _assist.user_message(book, _assist.dates_table(today_d), text,
-                                            history, log),
-                       _assist.SCHEMA)
+    out = _claude_json(_assist.SYSTEM, _assist.message_block(text, history), _assist.SCHEMA,
+                       context=_assist.context_block(book, _assist.dates_table(today_d), log),
+                       purpose="ai-bar")
 
     reply = str(out.get("reply") or "").strip()[:2000]
     question = out.get("question")
@@ -4699,11 +4768,14 @@ class QuickAdd(BaseModel):
     name: Optional[str] = Field(default=None, max_length=200)
 
 
-QUICK_ADD_SYSTEM = """You turn a salesperson's rough notes about a call they just made — to a bar or restaurant that ISN'T already in the CRM — into a new lead record. The notes are often pasted straight off a website or Google listing, with words run together ("80002Primary Phone:") — read through that.
+QUICK_ADD_SYSTEM = f"""You turn a salesperson's rough notes about a call they just made — to a bar or restaurant that ISN'T already in the CRM — into a new lead record. The notes are often pasted straight off a website or Google listing, with words run together ("80002Primary Phone:") — read through that.
 
-They sell 86'd, an iPhone app for bar inventory, to independent bars and restaurants.
+They sell 86'd, an iPhone app for bar inventory and ordering, to independent bars and
+restaurants. You are given TODAY, DATES (today and the next two weeks, with weekdays) and
+their NOTES.
 
-Return ONLY a JSON object with these keys (omit any you truly cannot find):
+Return ONLY a JSON object with these keys (omit any you truly cannot find).
+About the venue:
   "name": the bar or restaurant's name. It is almost always the first thing in the notes and often repeated (e.g. after "Website:"). ALWAYS return it when any venue name appears anywhere in the text.
   "loc": "City, ST"
   "address": street address if given
@@ -4712,31 +4784,18 @@ Return ONLY a JSON object with these keys (omit any you truly cannot find):
   "website": a URL if one is given (only a real URL, never a guess)
   "email": an email address, if one is given
   "email_on_website": true if the notes say the email is on their website / to find it on the site
-  "contact": the person they spoke to, with role if given (e.g. "Taylor (bartender)")
   "decision_makers": who makes the buying decision, with role if given (e.g. "Mallory and Mike (owners)")
-  "status": one of "new","contacted","warm","won","dead"
-  "outcome": one of "answered","voicemail","no_answer","gatekeeper","not_interested","callback"
-  "followup_in_days": integer number of days until the agreed follow-up
-  "next_step": the concrete next action, one short sentence (e.g. "Email the owners")
-  "summary": one or two clean sentences recording what happened, keeping every useful detail —
-    including personal details the person shared (pets, family, plans, what they said about
-    the product), which the salesperson opens the next call with
+About the call:
+{CALL_FIELDS}
 
-Rules:
-- "not interested", "hung up", "don't call again" -> status "dead", outcome "not_interested"
-- they already have a system / app / software for inventory, or are happy with how they do it now -> status "dead", outcome "not_interested"
-- an agreed callback, a demo booked, real interest -> status "warm", outcome "callback"
-- reached the decision maker, real conversation, no clear next step -> status "contacted", outcome "answered"
-- left a voicemail -> status "contacted", outcome "voicemail"
-- nobody picked up and NO message was left (rang out, no voicemail, mailbox full) -> status "contacted", outcome "no_answer"
-- "answered" means a real person picked up and spoke. If nobody picked up it is NEVER "answered"
-- spoke to staff/bartender/gatekeeper, the decision maker wasn't there -> status "contacted", outcome "gatekeeper"
-- "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
+{CALL_RULES}
 """
 
 
-def _quick_add_extract(text: str) -> dict:
-    return _ask_claude(QUICK_ADD_SYSTEM, text, max_tokens=700)
+def _quick_add_extract(text: str, today: Optional[str] = None) -> dict:
+    return _ask_claude(QUICK_ADD_SYSTEM,
+                       _calendar(today or _today()) + "\n\nNOTES\n" + text.strip(),
+                       purpose="quick-add")
 
 
 _NAME_CUT = re.compile(r"\s+(?:at|@|-|–|—|:)\s+|\s*\(\d|\s*\d{3}[-.\s]\d{3}|[.,;\n]")
@@ -4809,7 +4868,8 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
     the site (given URL, else OpenStreetMap by name + town) and reads the
     address off it, the same way the lead generator does.
     """
-    extracted = _quick_add_extract(data.text)
+    today = _today()
+    extracted = _quick_add_extract(data.text, today)
 
     name = _clean(data.name, 200) or _clean(extracted.get("name"), 200) \
         or _name_from_text(data.text)
@@ -4839,8 +4899,6 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
     # notes, labelled — "contacted" alone tells the operator nothing.
     details = [f"{label}: {val}" for label, val in [
         ("Decision makers", _clean(extracted.get("decision_makers"))),
-        ("Spoke to", _clean(extracted.get("contact"))),
-        ("Next step", _clean(extracted.get("next_step"))),
         ("Address", _clean(extracted.get("address"))),
         ("Other phones", _clean(extracted.get("other_phones"))),
         ("Website", website),

@@ -1563,8 +1563,12 @@ async function drawerAction(dr,e){
   try{
     const r=await api(`/leads/${id}/debrief`,
       {method:'POST',body:JSON.stringify({text,kind:'call'})});
+    // `details` is what the call taught us (objection, best time…): flatten
+    // it into the same line; `contact` reads as who to ask for next time.
     const bits=Object.entries(r.applied).filter(([k])=>k!=='note')
-      .map(([k,v])=>`${k.replace(/_/g,' ')}: ${v}`).join(' · ');
+      .flatMap(([k,v])=> v && typeof v==='object'
+        ? Object.entries(v).map(([a,b])=>`${a}: ${b}`)
+        : [`${k==='contact'?'ask for':k.replace(/_/g,' ')}: ${v}`]).join(' · ');
     toast(bits?('Saved — '+bits):'Saved', r.undo_id);
     await loadCalls();
   }catch(err){
