@@ -23,6 +23,7 @@ import contacts  # noqa: E402
 import inbox  # noqa: E402
 import leadgen  # noqa: E402
 import venue  # noqa: E402
+import coach  # noqa: E402
 
 N = 800_000
 SHAPES = {
@@ -59,6 +60,9 @@ READERS = {
     "opt-out check": inbox.looks_like_opt_out,
     "html email": lambda h: inbox.parse(_mail("html", h)),
     "plain email": lambda h: inbox.parse(_mail("plain", h)),
+    # A lead's notes carry lines written from strangers' emails.
+    "rehearsal details": coach.lead_details,
+    "labelled notes": lambda h: coach.lead_details("Objection: " * (len(h) // 11) + h),
 }
 
 

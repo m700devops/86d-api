@@ -524,8 +524,9 @@
             <p id="pNowW"></p>
             <button class="startbtn" id="pNowGo">Start</button>
           </div>
-          <div id="pVid"></div>
           <div class="ptiles">
+            <button id="pTileReh"><b>🎭 Rehearse a real call</b><span id="pTileRehS">The bar you're about to ring, from what's on file.</span></button>
+            <button id="pTileFilm"><b>🎬 Review my real calls</b><span>Coaching from your own logged calls.</span></button>
             <button id="pTileCall"><b>📞 Take a call</b><span id="pTileCallS">A tough owner. Get them to try it.</span></button>
             <button id="pTileGaunt"><b>🎯 Gauntlet</b><span>10 fast objections. Works offline.</span></button>
             <button id="pTileTape"><b>🩺 Tape Doctor</b><span id="pTileTapeS">Find 3 mistakes in 90 seconds. Hard.</span></button>
@@ -699,6 +700,24 @@
               <div style="display:flex;gap:8px"><button class="go" id="cGot">I had it</button><button id="cMiss">Not yet</button></div></div>
           </div>
           <div id="cDone" class="hide card"><b>All caught up.</b><p class="muted" style="margin:6px 0 10px">Lines you miss in drills, calls and the Gauntlet come back here: tomorrow, then in 3 days, then a week, then two weeks.</p><button class="go" id="cNext">Next</button></div>
+        </div>
+
+        <div id="pReh" class="hide">
+          <div class="ghead"><button id="rLeave">← Leave</button><div class="t">Rehearse a real call</div></div>
+          <p style="font-size:15px;color:var(--text2);margin:0 0 12px">Pick the call you're about to make. The practice owner
+            knows only what's on file about that bar (its facts, who we ask for, what happened last time) and invents
+            the rest. Whoever picks up first isn't the one who decides: get through to them, then get a next step.
+            You finish with two lines to say on the real call.</p>
+          <div id="rList"></div>
+        </div>
+
+        <div id="pFilm" class="hide">
+          <div class="ghead"><button id="fLeave">← Leave</button><div class="t">Game film</div></div>
+          <p class="hint" style="margin:0 0 12px">Your real conversations from the last two weeks, read back by the coach.
+            Voicemails and missed calls aren't film: nothing happened on them. Every drill it finds goes into Replay misses.</p>
+          <div id="fBody"></div>
+          <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+            <button class="go hide" id="fPractise">Practise these now</button><button id="fBack">Back to School</button></div>
         </div>
       </div>
     </section>
@@ -1378,7 +1397,9 @@ function renderWhereInfo(box, d, l){
     +(d.facts.length?`<div class="fx">${d.facts.map(f=>
       `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`:'')
     +(thin?'<div class="none">Not much on file for this one — go in fresh. It doesn\u2019t '
-      +'change where it sits on the list.</div>':'');
+      +'change where it sits on the list.</div>':'')
+    +(l.id?`<div style="margin-top:10px"><button data-rehearse="${esc(l.id)}"
+        title="Practise this exact call first, against a practice owner who knows what's on file">🎭 Rehearse this call</button></div>`:'');
 }
 
 const MAIL_SUBJECT = "Following up — 86'd bar inventory";
@@ -1806,6 +1827,7 @@ function leadDetailsCell(l, cols){
     <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
     <div class="row" style="margin-top:10px"><button data-edit>Edit</button>
       <button data-prep="${esc(l.id)}">Prep me for the call</button>
+      <button data-rehearse="${esc(l.id)}">Rehearse this call</button>
       <button data-cancel>Close</button></div>
     <div class="wherebox hide" data-prepbox style="margin-top:10px"></div></td>`;
 }
@@ -2853,6 +2875,7 @@ function prScore(rec){ PR.scores.push({...rec, at:new Date().toISOString(), day:
 const dayNum=()=>{ const d=new Date(); return Math.floor(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())/864e5); };
 let BLOCK=Math.floor(dayNum()/ROT_DAYS);
 let SCHOOL=null, DAILY=[];   // the server's school pack, once applied (see applyPack)
+let NEXT_LEADS=null;         // real calls coming up (loadNextLeads), for the daily set and the rehearsal picker
 const daysLeft=()=>ROT_DAYS-(dayNum()%ROT_DAYS);
 function rng(seed){ return ()=>{ seed|=0; seed=seed+0x6D2B79F5|0; let t=Math.imul(seed^seed>>>15,1|seed); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
 function pick(arr,n,salt){ const r=rng(BLOCK*97+salt), a=arr.slice();
@@ -2864,10 +2887,10 @@ function pick(arr,n,salt){ const r=rng(BLOCK*97+salt), a=arr.slice();
 // the way out, both driven from switchTab's loader map and its tab-leave
 // check below.
 function loadSchoolPanel(){
-  prView('pHome'); prRender(); window.scrollTo(0,0); loadSchool();
+  prView('pHome'); prRender(); window.scrollTo(0,0); loadSchool(); loadNextLeads();
   return Promise.resolve();
 }
-function prView(id){ ['pHome','pSch','pGame','pGaunt','pTape','pCards'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
+function prView(id){ ['pHome','pSch','pGame','pGaunt','pTape','pCards','pReh','pFilm'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
 $('pTileBack').onclick=()=>switchTab($('tabs').querySelector('button[data-tab="calls"]'));
 
 /* ── content banks ── */
@@ -2876,7 +2899,7 @@ const P_MODS=[
   ['The reason, as a problem','One sentence naming a problem they already have. No features.','“Most bar owners I talk to lose a couple of hours a week counting bottles and retyping it into orders, and the order still comes in wrong. Is that you, or have you got it handled?”','30+minutes+to+presidents+club+problem+proposition','opener'],
   ['Discovery','Ask, then stop talking. Find out about prices, distributors, and who does the counts.','“Who does your counts, and when?” · “How many distributors?” · “When a price changes, where does that get written down?”','sales+discovery+questions+cold+call','discovery'],
   ['Objections','Acknowledge, ask about it, then answer. Don\'t argue with the first no.','“Totally fair, most people have a system. Out of curiosity, what does yours look like on a Sunday night?”','handling+cold+call+objections+josh+braun','objections'],
-  ['The ask','Small and specific: 15 minutes, on their own iPhone, before service.','“Worth 15 minutes Tuesday around 2, before you open? I\'ll put your actual price list on your phone so you can see it working.”','booking+meeting+on+cold+call','ask'],
+  ['The ask','One small ask, never three. Best: try it on their next count, free for the first month, no card. If not that, a short call with Stephan, or the name of whoever orders and when they\'re in.','“Want to try it on your next count? The first month\'s free and there\'s no card. I\'ll email you the link right now, and your next count is on your phone.”','cold+call+close+free+trial','ask'],
   ['Gatekeepers & voicemail','Whoever answers is on your side. Get the owner\'s name and when they\'re in.','“Quick one: who handles the liquor orders there? … Perfect. When\'s Maria usually in before service?”','cold+call+gatekeeper+voicemail+script','opener']
 ];
 /* Every video is embeddable, under 21 minutes, and checked by hand: [id, title, channel, length, topic].
@@ -2930,24 +2953,24 @@ document.addEventListener('click',e=>{
 });
 const P_QUIZ=[
   ['Which opener does Gong\'s data say hurts booking rates most?',['“How have you been?”','“Did I catch you at a bad time?”','“The reason I\'m calling is…”','“I know this is out of the blue.”'],1,'Asking if it\'s a bad time invites “yes, bye.” It cost about 40% in Gong\'s data.'],
-  ['A bar opened 5 weeks ago. Call now?',['Yes, get in early','No: under 2 months, no settled distributors or prices yet','Only in California','Only by email'],1,'The window is 2–9 months open, or an ownership change.'],
+  ['First real conversation. What do you ask for?',['Everything at once: a trial, a demo and a meeting','Try it on their next count: free month, no card','A one-hour demo next month','Their budget'],1,'One small ask. Trying it on their own next count is the easiest yes to give.'],
   ['Owner: “We already have a system.” First move?',['Explain why 86\'d is better','Offer a discount','Acknowledge it, then ask what it looks like on a busy night','Call back next month'],2,'Acknowledge and ask. Their answer shows you where it hurts.'],
   ['Strongest pitch in Nevada?',['Labour cost: no tip credit, so every counting hour is full wage','Time savings only','Android support','Chain-wide rollout'],0,'NV, like CA, WA and OR, has no tip credit, so the labour maths works for you.'],
   ['“My staff use Android.” You say…',['It works fine','Be straight: it\'s iPhone-only. Does the owner or manager have an iPhone?','Change the subject','Android is coming soon'],1,'It\'s iOS-only. Find out who has an iPhone, and never promise what doesn\'t exist.'],
-  ['Where do you verify a full spirits licence?',['The cocktail menu','Instagram','The state\'s own licence records','Yelp'],2,'Never go by a menu or photos. Always check the state\'s own records.'],
-  ['Strongest way to end the call?',['“Can I send you some info?”','“Let me know if you\'re interested.”','“15 minutes Tuesday at 2, before you open, on your own price list?”','“What\'s your budget?”'],2,'Small, specific, and about their own data.'],
+  ['“Does it work with my POS?” You say…',['“Yes, it plugs right in.”','“It doesn\'t connect to a POS. It counts the bottles and sends the orders to your reps.”','Change the subject','“That\'s coming soon.”'],1,'It doesn\'t connect to a POS. Say what it does do, and never promise what it doesn\'t.'],
+  ['Strongest way to end the call?',['“Can I send you some info?”','“Let me know if you\'re interested.”','“Want to try it on your next count? First month free, no card, I\'ll email the link now.”','“What\'s your budget?”'],2,'Small, specific, and on their own next count.'],
   ['A bartender picks up. Best move?',['Pitch them','Ask who handles liquor orders and when they\'re in','Hang up','Leave a long message'],1,'Get a name and a time to call back.'],
   ['What\'s the pause after a question for?',['Filling silence','Letting them think and answer. The silence does the work','Sounding friendly','Keeping it short'],1,'Ask, then stop talking.'],
   ['A “problem proposition” is…',['A list of features','A pain they already feel, said in their words','A discount','A case study'],1,'Name the problem, not the product.'],
   ['Strongest pitch in Arizona?',['Full-wage labour cost','Time saved and fewer ordering mistakes','Android support','Tax savings'],1,'AZ has a tip credit, so lead with time and accuracy, not labour cost.'],
   ['A bar changed hands 3 months ago. Good lead?',['No, too new','Yes: ownership transfers count, and new owners inherit messy processes','Only if it\'s a chain','Only in Nevada'],1,'An ownership change of an operating bar is in the window.'],
   ['Why skip bars open longer than 9 months?',['They\'re closing','They usually have an entrenched process already','They can\'t afford it','Licence rules'],1,'Past 9 months, habits are set and the pain feels normal.'],
-  ['A Las Vegas Strip casino bar calls you back. Qualified?',['Yes, big volume','No: casino-operated venues buy centrally','Only on weekends','Only with a manager'],1,'Strip and casino venues are corporate. Independents cluster off-Strip.'],
-  ['In Washington, a “Tavern” licence means…',['Full spirits','Beer and wine only','Nightclub','Restaurant'],1,'In WA, Tavern means beer and wine only. Always check that state\'s definition.'],
+  ['“So the camera tells you how full the bottle is?”',['“Yes, it reads the level.”','“No. The camera identifies the bottle, and you tap in the count.”','“Sometimes.”','“In the next version.”'],1,'It identifies the bottle; you enter the count. Never claim it reads fill levels.'],
+  ['What does trying 86\'d cost a bar on day one?',['The first month up front','Nothing: the first month is free and there\'s no card to start','A setup fee','A one-year contract'],1,'First month free, no card to start, cancel any time from the app.'],
   ['“How much is it?” in the first 20 seconds. Best reply?',['Give the full price breakdown','“Fair question. Depends on how many bottles. Roughly how many do you carry?”','Dodge it','“It\'s cheap”'],1,'Answer honestly and turn it into a discovery question.'],
   ['“Just email me.” Best reply?',['“Sure, what\'s your email?” and hang up','“Happy to. So I send the right thing, is counting or ordering the bigger headache?”','Argue','Ignore it'],1,'Agree, then earn one more answer so the email is worth opening.'],
   ['The best time to label an emotion is…',['Never','When they sound stressed or annoyed: “Sounds like it\'s been a long week”','After the close','Only by email'],1,'Labels lower tension so they can keep listening.'],
-  ['A no-oriented question looks like…',['“Do you want to save time?”','“Would it be crazy to look at this for 15 minutes?”','“Can I show you a demo?”','“Is now good?”'],1,'People feel safe saying no, and “no, not crazy” is a yes.'],
+  ['A no-oriented question looks like…',['“Do you want to save time?”','“Would it be crazy to try it on your next count?”','“Can I show you a demo?”','“Is now good?”'],1,'People feel safe saying no, and “no, not crazy” is a yes.'],
   ['On a discovery call, who should talk more?',['You','The owner','Equal','Doesn\'t matter'],1,'Top reps listen more than they talk.'],
   ['Your voice at the end of a statement should…',['Go up, like a question','Go down, sounding certain','Get faster','Get louder'],1,'Downward inflection sounds confident. Upward sounds unsure.'],
   ['Most meetings from cold outreach come…',['On the first dial','After several attempts','Only by email','Never'],1,'Persistence wins. Check your own attempt numbers under Numbers.'],
@@ -2972,7 +2995,7 @@ const P_FINDS=[
   ['Label','Chris Voss','<b>Name the emotion.</b> “Sounds like it\'s been a long week” lowers a stressed owner\'s guard faster than any pitch.'],
   ['No','Chris Voss','<b>Ask for a no.</b> “Would it be crazy to look at this before your next count?” People feel safe saying no, and “no, not crazy” is a yes.'],
   ['↓','Tone','<b>End statements on a downward note.</b> Rising at the end makes everything sound like a question, and uncertain reps don\'t get meetings.'],
-  ['2–9 mo','86\'d','<b>Timing is the silent qualifier.</b> Newer than 2 months, they have no prices or reps to organise yet. Older than 9, the pain feels normal.']
+  ['1 ask','86\'d','<b>Make one ask, not three.</b> Trying it on their next count is free and needs no card, so it\'s the easiest yes to give. A short call with Stephan, or the name of whoever orders and when they\'re in, are the fallbacks.']
 ];
 const GAUNT=[
   ['Owner, mid-delivery','“Who is this? I\'ve got a truck at the back.”',['“Did I catch you at a bad time?”','“It\'s [name] with 86\'d. Sounds like a bad moment. 20 seconds now, or call back at 2?”','Launch into the pitch'],1,'Name the moment and give them control.'],
@@ -2989,7 +3012,7 @@ const GAUNT=[
   ['Owner, curious','“So what does it actually do?”',['List every feature','“Short version: it remembers every price you pay and turns your count into an order. What\'s the worse part for you, counting or ordering?”','“It\'s complicated.”'],1,'One sentence, then back to them.'],
   ['Owner, no time','“I don\'t have time to learn new software.”',['“It\'s easy!”','“Fair. How long does counting take you now?”','“Make time.”'],1,'Compare against the time they already lose.'],
   ['Owner, cost','“I can\'t afford another subscription.”',['“It pays for itself!”','“Understood. What does a missed or wrong order cost you in a week?”','Offer a discount straight away'],1,'Put a number on their current cost first.'],
-  ['Owner, trust','“Where\'s my data going?”',['“Don\'t worry about it.”','“It\'s your price list, it stays yours, and you can export it. What would you need to feel OK with it?”','“The cloud.”'],1,'Take the concern seriously and ask what they need.'],
+  ['Owner, trust','“Where\'s my data going?”',['“Don\'t worry about it.”','“It\'s your price list and it stays yours. What would you need to feel OK trying it?”','“The cloud.”'],1,'Take the concern seriously and ask what they need.'],
   ['Owner, maybe','“Call me next month.”',['“OK!”','“Will do. What changes next month? Just so I call at the right time.”','“Why wait?”'],1,'Find out what really changes.'],
   ['New owner','“I just bought the place, it\'s chaos.”',['“Congrats, want a demo?”','“Congrats. Did the old owner leave you any price records?”','“Call when it\'s calm.”'],1,'Ownership changes often come with no records. Ask.'],
   ['Owner, testing you','“Why should I trust a startup?”',['“We\'re the best.”','“Fair. You shouldn\'t on my word. Try it on one count and judge it on that.”','“Everyone trusts us.”'],1,'Lower the risk instead of arguing.'],
@@ -2997,7 +3020,7 @@ const GAUNT=[
   ['Owner, voicemail','(voicemail beep)',['Leave a 60-second pitch','“Hi, it\'s [name], about the Sunday counts. I\'ll try you Tuesday at 2.”','Hang up without a message'],1,'Short, specific, with a promised time.'],
   ['Owner, positive','“Actually, counts do kill my Sundays.”',['Start the pitch','“How long do they take, start to finish?”','“Great, sign up!”'],1,'Dig deeper before you pitch.'],
   ['Owner, comparing','“How are you different from BevSpot?”',['Trash BevSpot','“What do you like or not like about what you\'re using now?”','“We\'re cheaper.”'],1,'Let them tell you the gap.'],
-  ['Owner, ready','“OK, what\'s the next step?”',['“I\'ll send info.”','“15 minutes Tuesday at 2, before you open, on your real price list. That work?”','“Whenever you want.”'],1,'Specific time, their data.'],
+  ['Owner, ready','“OK, what\'s the next step?”',['“I\'ll send info.”','“Try it on your next count: download 86\'d, the first month\'s free, no card. I\'ll email you the link now. Best address?”','“Whenever you want.”'],1,'One small step, on their own next count.'],
   ['Owner, hesitant','“I need to talk to my partner.”',['“Can\'t you decide?”','“Makes sense. What will your partner ask that I can answer now?”','“OK, bye.”'],1,'Prepare them to sell it for you.']
 ];
 
@@ -3044,9 +3067,8 @@ $('pMods').onclick=e=>{
 $('pMods').onchange=e=>{ if(e.target.id!=='mDone') return; PR.mods['m'+(PR.mi|0)]=e.target.checked; prSave(); prRender(); };
 function prVids(){
   $('pFilms').innerHTML=ROT.films.map(vidHTML).join('');
-  // One short video a day, 10 minutes or less, rotating through the whole library.
-  const short=DAILY.length?DAILY:VIDS.filter(v=>vSecs(v)<=630), v=short[dayNum()%short.length];
-  $('pVid').innerHTML=`<div class="todayvid">${vidHTML(v).replace('<div class="vmeta">','<div class="vmeta hide">')}<div><div class="glabel" style="margin:0 0 4px">TODAY'S VIDEO · ${v[3]}</div><b>${esc(v[1])}</b><div class="muted" style="font-size:12px">${esc(v[2])}${PR.watched[v[0]]?' · ✓ watched':''}</div></div></div>`;
+  // No video on the home screen: watching isn't a warm-up, and the minutes
+  // before a calling session belong to the calls. The library stays in Learn.
   const n=Object.keys(PR.watched).length;
   $('pWatched').textContent=`${n} of ${VIDS.length} videos watched.`+(n<VIDS.length?' Unwatched ones keep rotating in.':' All of them. Nice.');
 }
@@ -3063,11 +3085,11 @@ $('sHome').onclick=()=>{ prView('pHome'); prRender(); };
 
 /* ── replay misses: spaced repetition of your own fumbles ── */
 const BOX_DAYS=[0,1,3,7,14];
-function addCard(ctx,front,back){
-  if(!front||!back) return;
-  if(PR.cards.some(c=>c.front===front&&c.back===back)) return;
-  PR.cards.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),ctx,front,back,box:1,due:dayNum()+1});
-  PR.cards=PR.cards.slice(-150); prSave();
+function addCard(ctx,front,back,now){
+  if(!front||!back) return false;
+  if(PR.cards.some(c=>c.front===front&&c.back===back)) return false;
+  PR.cards.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),ctx,front,back,box:1,due:dayNum()+(now?0:1)});
+  PR.cards=PR.cards.slice(-150); prSave(); return true;
 }
 const dueCards=()=>PR.cards.filter(c=>c.box<BOX_DAYS.length&&c.due<=dayNum());
 let CQ=[], CUR=null, CSEEN=0;
@@ -3101,7 +3123,7 @@ function skillLevels(){
   return out;
 }
 const RANKS=[[0,'Barback'],[60,'Bartender'],[200,'Head Bartender'],[450,'Bar Manager'],[900,'Beverage Director'],[2000,'Closer']];
-function xp(){ return PR.scores.reduce((a,s)=>a+(s.kind==='game'?(s.pts||0):s.kind==='quiz'?s.score*5:s.kind==='gaunt'?Math.round((s.pts||0)/5):s.kind==='cards'?10:s.kind==='tape'?Math.round((s.pts||0)/3):(s.score||0)*3),0)
+function xp(){ return PR.scores.reduce((a,s)=>a+(s.kind==='game'||s.kind==='rehearse'?(s.pts||0):s.kind==='film'?15:s.kind==='quiz'?s.score*5:s.kind==='gaunt'?Math.round((s.pts||0)/5):s.kind==='cards'?10:s.kind==='tape'?Math.round((s.pts||0)/3):(s.score||0)*3),0)
   + Object.values(PR.mods).filter(Boolean).length*20 + Object.keys(PR.lines).length*15 + Object.keys(PR.watched).length*5; }
 function streak(){
   const days=new Set(PR.scores.map(s=>s.day||s.at.slice(0,10))); let n=0; const d=new Date();
@@ -3122,18 +3144,29 @@ ROT.guests=pick(Object.keys(GUEST_META),2,7);
 const unlocked=b=>b.level===1||wins(LADDER[b.level-2].id).length>0;
 const nextLadder=()=>LADDER.find(b=>unlocked(b)&&!wins(b.id).length);
 
+/* Today's set is the loop a working day actually runs: warm up on the
+   pushback you're really getting, rehearse the call you're about to make,
+   then (after calling) review how the real calls went. Each step falls back
+   to the old fictional practice when there's nothing real to use yet. */
 function dailySet(){
   const lv=skillLevels(); let weakest=null;
   SKILLS.forEach(s=>{ if(lv[s[0]]!=null&&(!weakest||lv[s[0]]<lv[weakest[0]])) weakest=s; });
   const due=dueCards().length;
   const warm=due?{kind:'cards',t:`Replay ${due} line${due===1?'':'s'} you fumbled.`,w:'Say each one out loud before you flip. Takes 2 minutes.',go:cOpen}
-                :{kind:'gaunt',t:'Run the Gauntlet.',w:'10 fast objections, 12 seconds each. Wakes your brain up.',go:xOpen};
-  const drill={kind:'drill',t:weakest&&lv[weakest[0]]<7?`One rep on your ${weakest[1].toLowerCase()}.`:'One 25-second curveball.',
-    w:weakest?`Weakest skill right now: ${weakest[1]} (${lv[weakest[0]].toFixed(1)}/10).`:'Claude throws a line, you answer before the clock runs out.',
-    go:()=>{ openSchool('pDrill'); $('dNew').click(); }};
-  const nb=nextLadder(), gid=nb?nb.id:ROT.guests[0], gname=nb?nb.name:GUEST_META[gid][0];
-  const call={kind:'game',t:`Win a call against ${gname}.`,w:nb?`Level ${nb.level}. ${nb.tag}`:`Guest this rotation. ${GUEST_META[gid][1]}`,go:()=>gStart(gid)};
-  return [warm,drill,call];
+    :{kind:'drill',t:'One real objection, 25 seconds.',
+      w:(weakest?`Weakest skill right now: ${weakest[1]} (${lv[weakest[0]].toFixed(1)}/10). `:'')+'Built from what prospects actually said on your calls.',
+      go:()=>{ openSchool('pDrill'); $('dNew').click(); }};
+  const nl=NEXT_LEADS&&NEXT_LEADS[0];
+  let reh;
+  if(nl) reh={kind:'rehearse',t:`Rehearse your call to ${nl.name}.`,
+    w:`${nl.why}. The practice owner knows what's on file about them; you finish with two lines for the real call.`,
+    go:()=>gStartLead(nl.id)};
+  else{ const nb=nextLadder(), gid=nb?nb.id:ROT.guests[0], gname=nb?nb.name:GUEST_META[gid][0];
+    reh={kind:'game',t:`Win a call against ${gname}.`,w:nb?`Level ${nb.level}. ${nb.tag}`:`Guest this rotation. ${GUEST_META[gid][1]}`,go:()=>gStart(gid)}; }
+  const film={kind:'film',t:'After your calls: watch the film.',
+    w:'Make your calls first. Then the coach reads your real conversations back to you, and anything you fumbled comes back in Replay.',
+    go:fOpen};
+  return [warm,reh,film];
 }
 let PNOW=null;
 function prRender(){
@@ -3156,10 +3189,12 @@ function prRender(){
   const set=dailySet(), state=set.map(s=>doneToday(s.kind)), i=state.indexOf(false);
   $('pDots').innerHTML=state.map((d,j)=>`<i class="${d?'done':(j===i?'cur':'')}"></i>`).join('');
   if(i<0){ $('pNowK').textContent='TODAY\'S SET · DONE';
-    PNOW={t:'Warmed up. Go make real calls.',w:'Everything after this is bonus. The call list is waiting.',go:()=>showPractice(false)};
+    PNOW={t:'Done for today. Go make the next call.',w:'Everything after this is bonus. The call list is waiting.',
+          go:()=>switchTab($('tabs').querySelector('button[data-tab="calls"]'))};
   } else { $('pNowK').textContent=`TODAY'S SET · ${i+1} OF 3`; PNOW=set[i]; }
   $('pNowT').textContent=PNOW.t; $('pNowW').textContent=PNOW.w;
-  $('pNowGo').textContent=i<0?'Go to the call list':'Start';
+  $('pNowGo').textContent=i<0?'Go to the call list':PNOW.kind==='film'?'Review my calls':PNOW.kind==='rehearse'?'Rehearse it':'Start';
+  $('pTileRehS').textContent=NEXT_LEADS&&NEXT_LEADS.length?`Next up: ${NEXT_LEADS[0].name}.`:'The bar you\'re about to ring, from what\'s on file.';
   if(!$('gPick').classList.contains('hide')) gBossList();
 }
 function openSchool(id){ sOpen({pDrill:'drill',pLines:'drill',pTest:'test',pMods:'learn'}[id]||'learn'); }
@@ -3359,14 +3394,102 @@ async function gStart(id){
   const rule=ROT.rule, rmod=(BINFO.challenges&&BINFO.challenges[rule]&&BINFO.challenges[rule].patience)||0;
   G={id,name,level:meta?meta.level:2,guest:!meta,rule,patience:Math.max(20,Math.min(100,b.patience+rmod)),trust:10,found:[],log:[],
      busy:false,speaking:true,over:false,interrupts:0,maxLines:rule==='speed'?10:MAX_LINES,ints:rule==='storm'?4:2,intP:rule==='storm'?0.55:0.28};
+  gBegin(tok, rule==='gatekeeper'?'Hey, this is the bar — who\'s calling?':b.opening, '— ringing —');
+}
+function gBegin(tok, opening, ringLine){
   $('gSend').disabled=false; gMeters();
-  ring(); gMsg('ev','— ringing —');
-  const opening=rule==='gatekeeper'?'Hey, this is the bar — who\'s calling?':b.opening;
-  setTimeout(()=>{ if(tok!==gToken||!G) return; gMsg('them',opening); G.log.push({role:'owner',text:opening}); gMeters(); say(opening,id,()=>gYourTurn(tok)); },1100);
+  ring(); gMsg('ev',ringLine);
+  setTimeout(()=>{ if(tok!==gToken||!G) return; gMsg('them',opening); G.log.push({role:'owner',text:opening}); gMeters(); say(opening,G.id,()=>gYourTurn(tok)); },1100);
   // Patience leaks only while it's your turn to talk. Hesitate and they're gone.
   gTick=setInterval(()=>{ if(!G||G.busy||G.speaking||G.over) return; G.patience=Math.max(0,G.patience-1); gMeters();
     if(G.patience<=0) gEnd('lost','You went quiet too long. Click.'); },2500);
 }
+
+/* ── Rehearse a real call ──
+   The same game, against a real bar on the list: the server builds the
+   practice owner from what's on file (coach.lead_boss). What's real is shown
+   before the phone rings, so the rep knows which details they can use for
+   real and which the practice owner will make up. */
+async function gStartLead(leadId){
+  gQuit(); const tok=gToken;
+  prView('pGame'); gView('gPlay'); $('gChat').innerHTML=''; $('gNote').textContent=''; $('gIn').value='';
+  $('gTitle').textContent='Rehearsal'; $('gSend').disabled=true;
+  let r;
+  try{ r=await api('/coach/rehearse/'+encodeURIComponent(leadId)); }
+  catch(e){ if(tok===gToken) gMsg('ev','— '+e.message+' —'); return; }
+  if(tok!==gToken) return;
+  if(!r.ai){ gMsg('ev','— the practice owner can\'t talk: no AI key on the server —'); return; }
+  $('gTitle').textContent='Rehearsal · '+r.bar;
+  G={id:'lead',lead:leadId,bar:r.bar,name:r.name,level:2,guest:true,rule:'none',patience:r.patience,trust:10,found:[],log:[],
+     busy:false,speaking:true,over:false,interrupts:0,maxLines:MAX_LINES,ints:1,intP:0.2,real:r.real||[]};
+  const real=document.createElement('div'); real.className='gmsg ev'; real.style.maxWidth='100%';
+  real.innerHTML='<b>Real, on file:</b> '+(G.real.length?G.real.map(esc).join(' · '):'just the name')
+    +'<br>Everything else they say is made up for practice.';
+  $('gChat').appendChild(real);
+  gBegin(tok, r.opening, '— ringing '+r.bar+' —');
+}
+async function rOpen(){
+  prView('pReh');
+  if(!NEXT_LEADS) await loadNextLeads(true);
+  const ls=NEXT_LEADS||[];
+  $('rList').innerHTML=ls.length?ls.map(l=>`<button class="boss" data-lead="${esc(l.id)}"><div class="lv">🎭</div>
+      <div><b>${esc(l.name)}</b><span>${esc(l.why)}</span></div><div class="st">Rehearse</div></button>`).join('')
+    :'<div class="card muted" style="font-size:13px">Nothing coming up on the call list or in Follow-ups right now. '
+      +'You can rehearse any bar from its row: open it and press “Rehearse this call”.</div>';
+}
+$('rList').onclick=e=>{ const b=e.target.closest('[data-lead]'); if(b) gStartLead(b.dataset.lead); };
+$('rLeave').onclick=()=>{ prView('pHome'); prRender(); };
+$('pTileReh').onclick=()=>rOpen();
+
+/* The real calls coming up, for the daily set and the picker: overdue
+   callbacks first, then today's, then whoever is in a calling window now. */
+async function loadNextLeads(quiet){
+  const [q,n]=await Promise.all([api('/queue').catch(()=>null), api('/now').catch(()=>null)]);
+  const out=[], seen=new Set();
+  const add=(l,why)=>{ if(l&&l.id&&!seen.has(l.id)){ seen.add(l.id); out.push({id:l.id,name:l.name,why}); } };
+  ((q&&q.overdue)||[]).forEach(l=>add(l,'Callback overdue'));
+  ((q&&q.due_today)||[]).forEach(l=>add(l,'Callback due today'));
+  ((n&&n.ready)||[]).forEach(l=>add(l,'In their calling window now'));
+  ((n&&n.soon)||[]).slice(0,4).forEach(l=>add(l,'Their window opens soon'));
+  NEXT_LEADS=out.slice(0,12);
+  if(!quiet&&TAB==='school') prRender();
+}
+/* A Rehearse button anywhere on the page (the prep sheet, a lead's details)
+   opens the School straight into that call. */
+document.addEventListener('click',e=>{
+  const b=e.target.closest('[data-rehearse]'); if(!b) return;
+  e.preventDefault();
+  const tab=document.querySelector('#menu button[data-tab="school"]');
+  if(tab&&TAB!=='school') switchTab(tab);
+  gStartLead(b.dataset.rehearse);
+});
+
+/* ── Game film: the coach reads your real calls back to you ── */
+let FILM=null;
+async function fOpen(){
+  prView('pFilm'); $('fPractise').classList.add('hide');
+  $('fBody').innerHTML='<div class="muted">Reading your calls…</div>';
+  let r;
+  try{ r=await api('/coach/film',{method:'POST'}); }
+  catch(e){ $('fBody').innerHTML=`<div class="card">${esc(e.message)}</div>`; return; }
+  FILM=r;
+  if(!r.calls){ $('fBody').innerHTML=`<div class="card muted" style="font-size:13px">${esc(r.note||'Nothing to review yet.')}</div>`; return; }
+  let added=0;
+  (r.drills||[]).forEach(d=>{ if(addCard(`From your call with ${d.from}`,`${d.who}: “${d.line}”`,d.better,true)) added++; });
+  const note=(k,x)=>x?`<div class="find"><div class="v">${k}<small>${esc(x.from)}</small></div><p>${esc(x.text)}</p></div>`:'';
+  $('fBody').innerHTML=`<p class="muted" style="font-size:12px;margin:0 0 10px">${r.calls} real conversation${r.calls===1?'':'s'} reviewed.</p>`
+    +note('Keep',r.working)+note('Fix',r.costing)
+    +((r.drills||[]).length?`<div class="glabel" style="margin-top:14px">FROM YOUR CALLS</div>`
+      +r.drills.map(d=>`<div class="card" style="margin-bottom:8px"><div class="muted" style="font-size:12px">${esc(d.from)} · ${esc(d.who)}</div>
+        <div class="pline" style="font-size:15px">“${esc(d.line)}”</div><div class="say">${esc(d.better)}</div></div>`).join('')
+      :'<p class="muted" style="font-size:13px">No drills this time.</p>')
+    +(added?`<p class="muted" style="font-size:12px">${added} added to Replay misses, due today.</p>`:'');
+  $('fPractise').classList.toggle('hide',!dueCards().length);
+  prScore({kind:'film',score:Math.min(10,(r.drills||[]).length*2)});
+}
+$('fPractise').onclick=()=>cOpen();
+$('fBack').onclick=$('fLeave').onclick=()=>{ prView('pHome'); prRender(); };
+$('pTileFilm').onclick=()=>fOpen();
 $('gMic').onclick=()=>{ if(rec){ try{ rec.stop(); }catch{} return; } try{ speechSynthesis.cancel(); }catch{} listen($('gIn'),$('gMic'),null); };
 $('gSend').onclick=()=>gSend();
 $('gIn').onkeydown=e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); gSend(); } };
@@ -3379,7 +3502,7 @@ async function gSend(){
   const bubble=gMsg('them','…');
   let r;
   try{
-    r=await api('/coach/turn',{method:'POST',body:JSON.stringify({boss:G.id,challenge:G.rule,transcript:G.log.slice(-40),said:t,patience:G.patience,trust:G.trust,found:G.found,interrupt})});
+    r=await api('/coach/turn',{method:'POST',body:JSON.stringify({boss:G.id,lead_id:G.lead||null,challenge:G.rule,transcript:G.log.slice(-40),said:t,patience:G.patience,trust:G.trust,found:G.found,interrupt})});
   }catch(e){
     if(tok!==gToken||!G) return;
     bubble.remove(); $('gIn').value=t; $('gNote').textContent=e.message+' Your line is back in the box. Send it again.';
@@ -3392,7 +3515,7 @@ async function gSend(){
   $('gNote').textContent=(r.coach_tag?'Coach: '+r.coach_tag:'')+(r.new_pain?' · 💡 found a problem':'');
   G.busy=false; $('gSend').disabled=false;
   const lines=G.log.filter(l=>l.role==='rep').length;
-  if(r.result){ say(r.reply,G.id); return gEnd(r.result, r.result==='won'?`${G.name} said yes to a trial.`:`${G.name} hung up.`); }
+  if(r.result){ say(r.reply,G.id); return gEnd(r.result, r.result==='won'?(G.lead?`${G.name} agreed to a next step.`:`${G.name} said yes to a trial.`):`${G.name} hung up.`); }
   if(lines>=G.maxLines){ say(r.reply,G.id); return gEnd('lost',`Out of time: ${G.maxLines} lines and no yes.`); }
   G.speaking=true; say(r.reply,G.id,()=>gYourTurn(tok));
 }
@@ -3402,23 +3525,28 @@ async function gEnd(result, why){
   const lines=g.log.filter(l=>l.role==='rep').length, won=result==='won';
   const pts=won?Math.max(0,100+g.level*50+g.trust+g.patience*2+g.found.length*25-lines*3):g.found.length*15+Math.floor(g.trust/2);
   const stars=won?(lines<=8&&g.found.length===3?3:lines<=12?2:1):0;
-  const rec3={kind:'game',boss:g.id,won,stars,pts,score:Math.min(10,Math.round(pts/40))};
+  const rec3={kind:g.lead?'rehearse':'game',boss:g.id,won,stars,pts,score:Math.min(10,Math.round(pts/40))};
   setTimeout(()=>{ if(tok!==gToken) return; gView('gEnd');
-    $('eVerdict').textContent=(won?'Trial booked. ':'Lost them. ')+why;
+    $('eVerdict').textContent=(won?(g.lead?'Next step agreed. ':'Trial booked. '):'Lost them. ')+why;
+    $('ePick').textContent=g.lead?'Another real call':'Different owner';
     $('eStars').textContent=won?'★'.repeat(stars)+'☆'.repeat(3-stars):'';
     $('ePts').textContent=`${pts} pts · ${lines} lines · ${g.found.length}/3 problems found · trust ${g.trust} · patience ${g.patience}`; },1200);
   $('eTape').innerHTML='<div class="muted">Reviewing the tape…</div>';
   if(lines>0){
-    try{ const r=await api('/coach/review',{method:'POST',body:JSON.stringify({boss:g.id,transcript:g.log.slice(-60),result})});
+    try{ const r=await api('/coach/review',{method:'POST',body:JSON.stringify({boss:g.id,lead_id:g.lead||null,transcript:g.log.slice(-60),result})});
       Object.assign(rec3,{opener:r.opener,discovery:r.discovery,objections:r.objections,ask:r.ask});
       if(!won||Math.min(r.opener,r.discovery,r.objections,r.ask)<6) addCard('Call with '+g.name+' · '+(r.turning_point||'').slice(0,140),'What would you say differently next time?',r.redo);
-      if(tok===gToken) $('eTape').innerHTML=`<div>Opener ${r.opener} · Discovery ${r.discovery} · Objections ${r.objections} · Ask ${r.ask}</div><div><strong>Turning point:</strong> ${esc(r.turning_point)}</div><div class="say">${esc(r.redo)}</div>`;
+      const sheet=(r.cheat_sheet||[]).length?`<div class="card" style="margin-top:6px"><strong>For the real call to ${esc(g.bar)}</strong>
+          ${r.cheat_sheet.map(x=>`<div class="say" style="margin-top:6px">${esc(x)}</div>`).join('')}
+          ${r.avoid?`<div style="margin-top:8px"><strong>Don't:</strong> ${esc(r.avoid)}</div>`:''}
+          <div class="muted" style="font-size:12px;margin-top:8px">Built only from what's on file. The rest of the practice call was made up.</div></div>`:'';
+      if(tok===gToken) $('eTape').innerHTML=`<div>Opener ${r.opener} · Discovery ${r.discovery} · Objections ${r.objections} · Ask ${r.ask}</div><div><strong>Turning point:</strong> ${esc(r.turning_point)}</div><div class="say">${esc(r.redo)}</div>${sheet}`;
     }catch{ if(tok===gToken) $('eTape').innerHTML='<div class="muted">No tape review this time. Your score still counts.</div>'; }
   } else $('eTape').innerHTML='';
   prScore(rec3);
 }
-$('eAgain').onclick=()=>{ const id=G&&G.id; if(id) gStart(id); else gOpen(); };
-$('ePick').onclick=()=>gOpen();
+$('eAgain').onclick=()=>{ const g=G; if(g&&g.lead) gStartLead(g.lead); else if(g&&g.id) gStart(g.id); else gOpen(); };
+$('ePick').onclick=()=>{ const g=G; if(g&&g.lead) rOpen(); else gOpen(); };
 $('eNext').onclick=()=>{ gQuit(); prView('pHome'); prRender(); };
 $('gLeave').onclick=()=>{ gQuit(); prView('pHome'); prRender(); };
 
@@ -3435,7 +3563,7 @@ const TAPES=[
     ['rep','Makes sense. Anyway, let me know if you\'re ever interested and I can send some info.'],['owner','Sure. Bye.']],
     m:[[0,'bad_time','Handed him the easy exit in the first line.','“Hey Sal, it\'s Chris with 86\'d. I know I\'m catching you during prep. 30 seconds on why I called?”'],
        [6,'feature_dump','He just told you his pain, and you answered with a feature list.','“Three hours on a Sunday, then four texts. What would you do with that night back?”'],
-       [12,'weak_ask','He admitted the pain twice and you ended on “let me know.”','“Worth 15 minutes Tuesday at 2, before you open, on your real price list?”']]},
+       [12,'weak_ask','He admitted the pain twice and you ended on “let me know.”','“Want to try it on your next count? First month free, no card. I\'ll email the link now.”']]},
   {owner:'Dana, The Copper Owl, Reno',lines:[
     ['rep','Hi Dana, it\'s Chris with 86\'d. The reason I\'m calling is bar inventory. Can I have 30 seconds, and you tell me if it\'s worth more?'],['owner','Fine, 30 seconds.'],
     ['rep','Most owners I talk to lose hours to counts and still get wrong orders. Is that you, or have you got it handled?'],['owner','We use BevSpot. It\'s fine.'],
@@ -3454,10 +3582,10 @@ const TAPES=[
     ['rep','Sorry, back up. You said chaos since the manager left. What\'s fallen through the cracks?'],['owner','Nobody knows what we pay for anything. The reps just bill us.'],
     ['rep','How much would you guess you\'ve overpaid since then?'],['owner','No idea. That\'s the problem.'],
     ['rep','Want to book a full demo with our team for next month? It\'s about an hour.'],['owner','An hour? No.'],
-    ['rep','Understood. Smaller: 15 minutes Tuesday before you open, just on your top 20 bottles?'],['owner','…Fine, Tuesday.']],
+    ['rep','Understood. Smaller, then: try it free on your next count, just your top 20 bottles?'],['owner','…Fine. Send me the link.']],
     m:[[0,'fake_rapport','Flattery before a name or a reason. He doesn\'t know who you are yet.','“Hey Marcus, it\'s Chris with 86\'d. I know this is out of the blue. Can I tell you why I called?”'],
        [4,'missed_pain','He said “chaos since we lost our manager” and you pitched a feature.','“Lost your manager. What\'s slipped since then?”'],
-       [10,'rushed_ask','A one-hour demo next month is a big ask, and you hadn\'t earned it yet.','“15 minutes before you open Tuesday, on your top 20 bottles?”']]}
+       [10,'rushed_ask','A one-hour demo next month is a big ask, and you hadn\'t earned it yet.','“Try it free on your next count, just your top 20 bottles?”']]}
 ];
 let TP=null, tpT=null;
 const tpHard=()=>PR.scores.filter(s2=>s2.kind==='tape'&&s2.perfect).length>=2;
