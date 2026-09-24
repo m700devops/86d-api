@@ -2115,13 +2115,17 @@ async function loadApple(){
   $('appleConnect').classList.toggle('hide', d.connected);
   if(!d.connected){
     // Say exactly what this Render service can and can't see, so "I set the
-    // keys" and "connected: false" stop being a mystery. A name typo or the
-    // vars living on the wrong Render service are the usual reason.
-    const seen=d.env_seen||{}, names={issuer_id:'APPLE_ISSUER_ID',key_id:'APPLE_KEY_ID',private_key:'APPLE_PRIVATE_KEY'};
-    const anyEnv=Object.values(seen).some(Boolean);
-    const envLine=anyEnv?`<div class="banner">Render env vars this server can see right now: `+
+    // keys" and "connected: false" stop being a mystery. Shown even when NONE
+    // are visible — that's the most useful case to surface, not one to hide —
+    // and `seen` is defaulted to all-false so a server that predates env_seen
+    // (not yet redeployed) reads as "nothing seen" rather than an empty
+    // object's vacuously-true every().
+    const names={issuer_id:'APPLE_ISSUER_ID',key_id:'APPLE_KEY_ID',private_key:'APPLE_PRIVATE_KEY'};
+    const seen={issuer_id:false,key_id:false,private_key:false,...(d.env_seen||{})};
+    const allSeen=Object.keys(names).every(k=>seen[k]);
+    const envLine=`<div class="banner">Render env vars this server can see right now: `+
         Object.entries(names).map(([k,n])=>`<b style="color:${seen[k]?'var(--go)':'var(--stop)'}">${seen[k]?'✓':'✗'} ${n}</b>`).join(' · ')+
-      `.${Object.values(seen).every(Boolean)?'':' All three need to be set on THIS service (86d-api) for it to connect automatically — check the name and the service, then redeploy.'}</div>`:'';
+      `.${allSeen?'':' All three need to be set on THIS service (86d-api) for it to connect automatically — check the exact name and the service, then redeploy.'}</div>`;
     $('appleBody').innerHTML = envLine + (d.key_unreadable
       ? '<div class="banner bad">The saved key can no longer be read (the server\'s SECRET_KEY changed). Connect it again below.</div>' : '');
     return;
