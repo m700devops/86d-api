@@ -84,7 +84,12 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   username is the FULL email address, password is the mailbox password. Deliberately NOT the
   path order confirmations use — those stay on Resend in main.py, because mixing
   transactional mail with cold outreach on one reputation means a few spam complaints from
-  strangers start bouncing customers' receipts
+  strangers start bouncing customers' receipts. **SMTP only sends — it never files a copy.**
+  `save_to_sent()` appends every sent message to the mailbox's Sent folder over IMAP
+  (`SPACEMAIL_IMAP_HOST`, default the SMTP host; `SPACEMAIL_IMAP_PORT` 993), finding it by the
+  server's `\Sent` flag, else the usual names. Three emails reached their recipients and
+  none was in Sent before this. It never raises — the mail has gone either way — and logs
+  `SENT_COPY_FAILED`; `send()` returns `saved_to`. Covered by test_mailer.py
 - venue.py — what's true about a bar, for the thirty seconds before you dial: cuisine, size,
   hours (a volume proxy), how long it's been open, address. Every fact is EXTRACTED from
   either the harvested OSM tags or the venue's OWN site text, and **carries its source** —
@@ -165,7 +170,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
   test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
   test_ask.py test_apple.py test_followup_email.py test_tries.py test_dedupe.py
-  test_assist.py test_phone_check.py -q` (398 tests)
+  test_assist.py test_phone_check.py test_mailer.py -q` (405 tests)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -598,6 +603,13 @@ capture. Don't reintroduce them or describe them as current.)
   stops the same bar being rung twice — and Follow-ups only shows what's due, so before this
   tab existed a bar you spoke to on Tuesday and forgot to book a callback for was invisible.
   That is how warm leads quietly die
+- **The CRM tab's AI box now goes through `/assist`**, the same engine as the Follow-ups bar,
+  with the last 300 touches added to what it reads, so it both ANSWERS ("who did we email last
+  Thursday") and ACTS. Pasting a reply from a bar ("Brent is no longer with the company,
+  contact Jed Thompson at jthompson@…") updates the contact and email, notes it, and updates
+  any other venue in the book the reply names (assist.SYSTEM rule 9) — it's never logged as a
+  touch. Read-only `/ask` could only answer "you should update the lead". The description
+  below is the old endpoint, still live but no longer used by the page
 - **Ask AI** — the box ABOVE the search bar. `POST /v1/crm/ask {question}` hands Claude
   (`_ask_claude`, Haiku) a text snapshot of the book — every lead (status, last outcome,
   calls, last touched, follow-up, contact, email, latest note) and the full touch log with

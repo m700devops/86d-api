@@ -75,7 +75,7 @@ SCHEMA = {
 
 SYSTEM = """You keep a salesperson's CRM up to date from what they tell you in plain English. They sell 86'd, an iPhone app that counts bar inventory, to independent bars and restaurants, mostly by cold-calling, and work from a Follow-ups list of bars to get back to.
 
-You are given DATES (today and the two weeks after it, with weekdays), LEADS (every lead in the book), sometimes EARLIER turns of this conversation, and their NEW MESSAGE. Act on the new message. Earlier turns are only context for words like "her", "that one", "yes, the Denver one".
+You are given DATES (today and the two weeks after it, with weekdays), LEADS (every lead in the book), TOUCHES (the calls and emails logged, newest first), sometimes EARLIER turns of this conversation, and their NEW MESSAGE. Act on the new message. Earlier turns are only context for words like "her", "that one", "yes, the Denver one".
 
 For each lead the message is about, return one entry in "changes". Use null for every field you are not changing.
 - name, loc ("City, ST"), contact (the person to ask for), phone, email.
@@ -92,7 +92,9 @@ Rules:
 5. One message can cover many leads. "Everything overdue" or "all of today's" means the leads whose LIST column says overdue or due today.
 6. A question that asks nothing to change gets an answer in reply, from LEADS, and no changes.
 7. reply: one or two plain sentences saying exactly what you changed, or answering them. No filler, no exclamation marks.
-8. Change only what the message asks for. Never change a field just because you could."""
+8. Change only what the message asks for. Never change a field just because you could.
+9. A pasted email or message FROM a venue is information to record, not a question. A new person to deal with and their address go on the lead (contact, email); what it says goes in note ("bpeterson has left the company; Jed Thompson now handles Mean Eyed Cat, Lala's Little Nugget and Lavaca Street Bar"). Any other venue it names that is in LEADS gets the same update. A reply they sent is not a call or email you made — never log it.
+10. Questions about what was done ("who did I email Thursday", "how many calls today") are answered from TOUCHES, whose times are the salesperson's own clock."""
 
 
 def dates_table(today: date, days: int = 14) -> str:
@@ -173,8 +175,10 @@ def snapshot(leads: list, tries: dict, today: str,
     return "\n".join(lines), back
 
 
-def user_message(book: str, dates: str, text: str, history: list) -> str:
+def user_message(book: str, dates: str, text: str, history: list, log: str = "") -> str:
     parts = ["DATES", dates, "", book]
+    if log:
+        parts += ["", log]
     if history:
         parts += ["", "EARLIER IN THIS CONVERSATION (context only)"]
         for turn in history:

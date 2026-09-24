@@ -672,7 +672,7 @@
 
     <section data-panel="pipeline" class="hide">
       <div class="askbar">
-        <input id="askInput" placeholder="Ask AI — how many did I call today? who got a voicemail yesterday? who did we email last Thursday?">
+        <input id="askInput" placeholder="Ask or tell the AI — who did we email last Thursday? · paste a reply from a bar and it updates the lead">
         <button class="go" id="askBtn">Ask AI</button>
       </div>
       <div id="askOut" class="askout hide"></div>
@@ -1739,6 +1739,11 @@ $('pipeStats').onclick=e=>{
 };
 /* Ask AI. Nothing it returns is trusted as markup — the answer is set as
    text and every lead field goes through esc(). */
+/* The same engine as the Follow-ups bar: it answers questions from the book
+   and the call/email log, and when what you paste carries news — a reply
+   from a bar naming a new contact — it updates the lead, with Undo. It used
+   to be read-only (/ask), so it could only say "you should update the lead". */
+let ASK_HISTORY=[];
 async function askAI(){
   const q=$('askInput').value.trim(); if(!q) return;
   const box=$('askOut'), btn=$('askBtn');
@@ -1746,26 +1751,31 @@ async function askAI(){
   box.innerHTML=`<div class="q">${esc(q)}</div><div class="a muted">Thinking…</div>`;
   btn.disabled=true;
   try{
-    const r=await api('/ask',{method:'POST',body:JSON.stringify({question:q})});
+    const r=await api('/assist',{method:'POST',body:JSON.stringify({
+      text:q, history:ASK_HISTORY.slice(-4)})});
+    ASK_HISTORY.push({you:q, ai:[r.reply,r.question].filter(Boolean).join(' ')});
+    ASK_HISTORY=ASK_HISTORY.slice(-4);
+    $('askInput').value='';
     box.innerHTML=`<button class="x" data-close title="Close">×</button>
-      <div class="q">${esc(q)}</div><div class="a"></div>
-      ${r.leads.length?`<div class="sheetwrap"><table class="sheet"><thead><tr>
-        <th>BAR</th><th>WHERE</th><th>PHONE</th><th>STAGE</th><th>LAST</th></tr></thead><tbody>
-        ${r.leads.map(l=>`<tr>
-          <td class="nm">${esc(l.name)}</td><td class="muted">${esc(l.loc||'')}</td>
-          <td>${l.phone_dial?`<span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`:''}</td>
-          <td><span class="st st-${esc(l.status)}">${esc((l.status||'').toUpperCase())}</span></td>
-          <td class="muted">${esc(outcomeLabel(l.last_outcome))}</td></tr>`).join('')}
-      </tbody></table></div>`:''}`;
-    box.querySelector('.a').textContent=r.answer;
+      <div class="q">${esc(q)}</div>${assistResult(r)}`;
+    if(r.applied.length) await loadPipeline();
   }catch(err){
     box.innerHTML=`<div class="q">${esc(q)}</div><div class="a err">${esc(err.message)}</div>`;
   }finally{ btn.disabled=false; }
 }
 $('askBtn').onclick=askAI;
 $('askInput').onkeydown=e=>{ if(e.key==='Enter') askAI(); };
-$('askOut').onclick=e=>{
+$('askOut').onclick=async e=>{
   if(e.target.closest('[data-close]')){ $('askOut').classList.add('hide'); return; }
+  const u=e.target.closest('[data-assist-undo]');
+  if(u){
+    const li=u.closest('li'); u.disabled=true;
+    try{ await api('/undo/'+li.dataset.undo,{method:'POST'});
+         li.classList.add('undone'); u.textContent='Undone'; toast('Put back');
+         await loadPipeline(); }
+    catch(err){ u.disabled=false; toast(err.message); }
+    return;
+  }
   const d=e.target.closest('.digits'); if(d) copyDigits(d);
 };
 

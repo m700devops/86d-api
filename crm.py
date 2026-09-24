@@ -3963,11 +3963,25 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
         """)
         leads = cursor.fetchall()
         tries = _touch_counts(cursor, [l["id"] for l in leads])
+        # The log too, so the same box answers "who did I email Thursday" —
+        # it replaced Ask AI on the CRM tab, which could answer but not act.
+        cursor.execute("""
+            SELECT lead_id, kind, outcome, at FROM crm_touches
+             WHERE outcome IS DISTINCT FROM 'undone'
+             ORDER BY at DESC LIMIT 300
+        """)
+        touches = cursor.fetchall()
 
     book, back = _assist.snapshot(leads, tries, today, data.focus_lead_id)
+    alias_of = {lead_id: alias for alias, lead_id in back.items()}
+    tz = _operator_tz()
+    log = "\n".join(["TOUCHES (when, your time | lead | kind | outcome)"] + [
+        f"{_ask_when(t['at'], tz)} | {alias_of.get(t['lead_id'], '?')} | {t['kind']} | "
+        f"{t['outcome'] or ''}" for t in touches])
     history = [t.model_dump() for t in data.history][-4:]
     out = _claude_json(_assist.SYSTEM,
-                       _assist.user_message(book, _assist.dates_table(today_d), text, history),
+                       _assist.user_message(book, _assist.dates_table(today_d), text,
+                                            history, log),
                        _assist.SCHEMA)
 
     reply = str(out.get("reply") or "").strip()[:2000]
