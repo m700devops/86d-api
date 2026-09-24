@@ -163,3 +163,33 @@ def test_rest_count_is_the_real_total_when_the_page_is_capped():
     d = _run(rows, states, limit=5)
     assert len(d["rest"]) == 5
     assert d["rest_count"] == 30
+
+
+def test_only_numbers_their_website_vouches_for_are_offered():
+    # Measured on 102 real Denver bars: where the bar's own site listed a
+    # number, the map's disagreed about one time in five. A generated lead is
+    # only dialled once its website has vouched for the number.
+    rows, states = _rows(("ok", "good"), ("fixed", "good"), ("unchecked", "good"),
+                         ("conflict", "good"), ("mine", "good"))
+    for r in rows:
+        r["source"] = "leadgen"
+    rows[0]["phone_status"] = "confirmed"
+    rows[1]["phone_status"] = "from_site"
+    rows[3]["phone_status"] = "conflict"
+    rows[4]["source"] = "manual"          # the operator's own entry: trusted as typed
+    names = {l["name"] for l in _run(rows, states)["ready"]}
+    assert names == {"ok", "fixed", "mine"}
+
+
+def test_the_prep_sheet_profile_is_only_whats_on_file():
+    # Kind, website and hours, all already stored: a generated lead's come
+    # from its candidate, a quick-added one's website from its notes.
+    row = {"cand_website": "https://devonspub.example", "cand_amenity": "pub",
+           "opening_hours": "Mo-Th 15:00-24:00", "notes": ""}
+    assert crm._venue_profile(row) == {"kind": "pub", "website": "https://devonspub.example",
+                                       "hours": "Mo-Th 15:00-24:00"}
+    quick = {"cand_website": None, "cand_amenity": None, "opening_hours": None,
+             "notes": "Decision makers: Mike · Website: https://oldetown.example | Next step: call"}
+    assert crm._venue_profile(quick)["website"] == "https://oldetown.example"
+    bare = {"cand_website": None, "cand_amenity": None, "opening_hours": None, "notes": None}
+    assert crm._venue_profile(bare) == {"kind": None, "website": None, "hours": None}
