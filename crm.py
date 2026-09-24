@@ -270,6 +270,10 @@ def init_crm_tables():
         _reconcile_no_answer()
     except Exception as e:  # a repair pass must never stop the CRM booting
         print(f"[crm] NO_ANSWER_RECONCILE_FAILED {e!r}", flush=True)
+    try:
+        init_apple_tables()
+    except Exception as e:  # Apple Analytics is optional; never block the CRM
+        print(f"[crm] APPLE_TABLES_FAILED {e!r}", flush=True)
 
 
 def _reconcile_no_answer() -> int:
@@ -3497,6 +3501,251 @@ def ask_crm(data: AskCRM, _: bool = Depends(require_crm_key)):
         "last_outcome": l["last_outcome"], "last_touch_at": l["last_touch_at"],
         "phone_dial": format_us_phone_dashed(phone_digits(l.get("phone"))),
     } for l in picked]}
+
+
+# ============== APPLE ANALYTICS ==============
+#
+# The burger menu's Apple Analytics tab: App Store Connect's App Analytics
+# numbers for the 86'd app, pulled through Apple's Analytics Reports API (see
+# apple.py for how that API works and why the first data takes a day or two).
+#
+# Credentials: the team API key's Issuer ID, Key ID and .p8 private key. Env
+# vars win when set (APPLE_ISSUER_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY /
+# APPLE_APP_ID); otherwise the page's Connect form saves them here. The .p8 is
+# stored ENCRYPTED with a key derived from SECRET_KEY and is never sent back
+# to the page — the page only ever learns whether a key is set. Rotating
+# SECRET_KEY makes a saved key unreadable; the tab then asks to reconnect.
+
+import apple as _apple
+
+APPLE_STALE_HOURS = 6        # opening the tab re-syncs when data is older than this
+_apple_lock = threading.Lock()
+_apple_state: dict = {"running": False}
+
+
+def init_apple_tables():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_apple_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                issuer_id TEXT, key_id TEXT, private_key_enc TEXT,
+                app_ref TEXT, app_id TEXT, app_name TEXT, bundle_id TEXT,
+                request_id TEXT,
+                last_sync_at TEXT, last_sync_ok BOOLEAN, last_error TEXT,
+                updated_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_apple_instances (
+                id TEXT PRIMARY KEY, report TEXT, processing_date TEXT, imported_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_apple_metrics (
+                report TEXT NOT NULL, day TEXT NOT NULL, dim TEXT NOT NULL,
+                metric TEXT NOT NULL, value DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (report, day, dim, metric)
+            )
+        """)
+        conn.commit()
+
+
+def _apple_fernet():
+    import base64
+    import hashlib
+
+    from cryptography.fernet import Fernet
+    from auth import SECRET_KEY
+    return Fernet(base64.urlsafe_b64encode(
+        hashlib.sha256(("86d-apple-analytics:" + SECRET_KEY).encode()).digest()))
+
+
+def _apple_config() -> dict:
+    """Saved config merged with env overrides. `private_key` is decrypted."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_apple_config WHERE id = 1")
+        row = dict(cursor.fetchone() or {})
+    key = None
+    if row.get("private_key_enc"):
+        try:
+            key = _apple_fernet().decrypt(row["private_key_enc"].encode()).decode()
+        except Exception:
+            key = None
+            row["key_unreadable"] = True
+    env = {"issuer_id": os.getenv("APPLE_ISSUER_ID"), "key_id": os.getenv("APPLE_KEY_ID"),
+           "private_key": os.getenv("APPLE_PRIVATE_KEY"), "app_ref": os.getenv("APPLE_APP_ID")}
+    from_env = bool(env["issuer_id"] and env["key_id"] and env["private_key"])
+    cfg = {**row, "private_key": key}
+    if from_env:
+        cfg.update({k: v for k, v in env.items() if v})
+    cfg["source"] = "env" if from_env else ("saved" if key else None)
+    cfg["connected"] = bool(cfg.get("issuer_id") and cfg.get("key_id") and cfg.get("private_key"))
+    return cfg
+
+
+def _apple_save(**fields):
+    fields["updated_at"] = now_iso()
+    cols = list(fields)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO crm_apple_config (id, {', '.join(cols)})
+            VALUES (1, {', '.join(['%s'] * len(cols))})
+            ON CONFLICT (id) DO UPDATE SET {', '.join(f'{c} = EXCLUDED.{c}' for c in cols)}
+        """, [fields[c] for c in cols])
+        conn.commit()
+
+
+def _apple_client(cfg: dict) -> "_apple.ASC":
+    return _apple.ASC(cfg["key_id"], cfg["issuer_id"], cfg["private_key"])
+
+
+def _apple_sync_job():
+    """One background import. Errors are stored for the page, never raised."""
+    try:
+        cfg = _apple_config()
+        if not cfg["connected"]:
+            return
+        asc = _apple_client(cfg)
+        app_id = cfg.get("app_id")
+        if not app_id:
+            app = _apple.resolve_app(asc, cfg.get("app_ref"))
+            app_id = app["id"]
+            _apple_save(app_id=app_id, app_name=app["name"], bundle_id=app["bundle_id"])
+        request_id = _apple.ensure_report_request(asc, app_id, cfg.get("request_id"))
+        if request_id != cfg.get("request_id"):
+            _apple_save(request_id=request_id)
+
+        def already(inst_id):
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1 FROM crm_apple_instances WHERE id = %s", (inst_id,))
+                return cursor.fetchone() is not None
+
+        def save(inst_id, report, pdate, totals):
+            with get_db() as conn:
+                cursor = conn.cursor()
+                for (day, dim, metric), value in totals.items():
+                    cursor.execute("""
+                        INSERT INTO crm_apple_metrics (report, day, dim, metric, value)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (report, day, dim, metric) DO UPDATE SET value = EXCLUDED.value
+                    """, (report[:200], day, dim[:200], metric[:120], value))
+                cursor.execute("""
+                    INSERT INTO crm_apple_instances (id, report, processing_date, imported_at)
+                    VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING
+                """, (inst_id, report[:200], pdate, now_iso()))
+                conn.commit()
+
+        result = _apple.sync(asc, request_id, already, save)
+        _apple_save(last_sync_at=now_iso(), last_sync_ok=True, last_error=None)
+        print(f"[crm] APPLE_SYNC ok reports={result['reports']} imported={result['imported']} "
+              f"partial={result['partial']}", flush=True)
+    except _apple.AppleError as e:
+        _apple_save(last_sync_at=now_iso(), last_sync_ok=False, last_error=str(e)[:500])
+        print(f"[crm] APPLE_SYNC failed: {e}", flush=True)
+    except Exception as e:
+        _apple_save(last_sync_at=now_iso(), last_sync_ok=False,
+                    last_error=f"Unexpected error: {e!r}"[:500])
+        print(f"[crm] APPLE_SYNC crashed: {e!r}", flush=True)
+    finally:
+        _apple_state["running"] = False
+
+
+def _apple_start_sync() -> bool:
+    with _apple_lock:
+        if _apple_state["running"]:
+            return False
+        _apple_state["running"] = True
+    threading.Thread(target=_apple_sync_job, daemon=True, name="apple-sync").start()
+    return True
+
+
+def _apple_status(cfg: dict) -> dict:
+    return {
+        "connected": cfg["connected"], "source": cfg.get("source"),
+        "key_unreadable": bool(cfg.get("key_unreadable")),
+        "issuer_id": cfg.get("issuer_id"), "key_id": cfg.get("key_id"),
+        "app": {"id": cfg.get("app_id"), "name": cfg.get("app_name"),
+                "bundle_id": cfg.get("bundle_id")} if cfg.get("app_id") else None,
+        "reports_requested": bool(cfg.get("request_id")),
+        "last_sync_at": cfg.get("last_sync_at"), "last_sync_ok": cfg.get("last_sync_ok"),
+        "last_error": cfg.get("last_error"), "syncing": _apple_state["running"],
+    }
+
+
+@crm_router.get("/apple", response_model=dict)
+def apple_analytics(window: int = 30, _: bool = Depends(require_crm_key)):
+    """Status + everything imported so far. Kicks off a sync when stale."""
+    window = 7 if window <= 7 else 90 if window >= 90 else 30
+    cfg = _apple_config()
+    if cfg["connected"]:
+        last = cfg.get("last_sync_at")
+        stale = True
+        if last:
+            try:
+                age = datetime.now(timezone.utc) - datetime.fromisoformat(last.replace("Z", "+00:00"))
+                stale = age > timedelta(hours=APPLE_STALE_HOURS)
+            except ValueError:
+                pass
+        if stale:
+            _apple_start_sync()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT report, day, dim, metric, value FROM crm_apple_metrics "
+                       "WHERE day >= %s",
+                       ((datetime.now(timezone.utc) - timedelta(days=2 * window + 10)).strftime("%Y-%m-%d"),))
+        rows = [dict(r) for r in cursor.fetchall()]
+    return {**_apple_status(_apple_config()), **_apple.summarize(rows, window)}
+
+
+class AppleConnect(BaseModel):
+    issuer_id: str = Field(min_length=8, max_length=100)
+    key_id: str = Field(min_length=4, max_length=40)
+    private_key: str = Field(min_length=40, max_length=10000)
+    app: Optional[str] = Field(default=None, max_length=200)
+
+
+@crm_router.post("/apple/connect", response_model=dict)
+def apple_connect(data: AppleConnect, _: bool = Depends(require_crm_key)):
+    """Check the key against Apple RIGHT NOW, then save it and start importing.
+
+    Checking first means a typo'd Issuer ID fails here, with Apple's reason,
+    instead of being saved and failing silently in the background later.
+    """
+    key = _apple.normalize_key(data.private_key)
+    asc = _apple.ASC(data.key_id.strip(), data.issuer_id.strip(), key)
+    try:
+        app = _apple.resolve_app(asc, data.app)
+    except _apple.AppleError as e:
+        raise HTTPException(status_code=422, detail={"error": "apple_rejected", "message": str(e)})
+    _apple_save(issuer_id=data.issuer_id.strip(), key_id=data.key_id.strip(),
+                private_key_enc=_apple_fernet().encrypt(key.encode()).decode(),
+                app_ref=(data.app or "").strip() or None, app_id=app["id"],
+                app_name=app["name"], bundle_id=app["bundle_id"], request_id=None,
+                last_sync_at=None, last_sync_ok=None, last_error=None)
+    _apple_start_sync()
+    return {"ok": True, "app": app}
+
+
+@crm_router.post("/apple/sync", response_model=dict)
+def apple_sync(_: bool = Depends(require_crm_key)):
+    if not _apple_config()["connected"]:
+        raise HTTPException(status_code=409, detail={
+            "error": "not_connected", "message": "Connect your Apple API key first."})
+    return {"started": _apple_start_sync(), "syncing": True}
+
+
+@crm_router.post("/apple/disconnect", response_model=dict)
+def apple_disconnect(_: bool = Depends(require_crm_key)):
+    """Forget the saved key. Imported numbers stay — they're yours either way."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM crm_apple_config WHERE id = 1")
+        conn.commit()
+    return {"ok": True}
 
 
 # ============== AI QUICK ADD ==============

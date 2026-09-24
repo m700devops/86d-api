@@ -25,7 +25,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   it shares a process and a database with the product API but is not part of the product.
   Nothing in the inventory/scan/order paths reads from it. See the CRM section below
 - static/crm.html — the CRM UI, served at `/crm`. **Three tabs only** — Call list, CRM,
-  Follow-ups — with School, Numbers, Customers and Lead engine behind a burger top right:
+  Follow-ups — with School, Apple Analytics and Customers behind a burger top right:
   those are looked at occasionally and thought about once, and in the tab row they competed
   with the three things a working day actually needs. The burger turns orange when the open
   page lives inside it. Single self-contained file, no build step;
@@ -39,6 +39,36 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   now gets a one-line status instead of a table, not a wall of leads that aren't callable yet.
   Undo still works — the 10-second Undo on the toast after every logged call — it just isn't
   a permanent banner anymore
+- **The burger holds School, Apple Analytics and Customers.** Numbers (funnel, connect rate by
+  hour, attribution re-match) and Lead engine (run now, bank health, restaurant recheck) were
+  removed from the PAGE at the operator's request; every endpoint behind them is still live
+  (`/funnel`, `/dialstats`, `/attribution/rematch`, `/leadgen/health`, `/leadgen/run`,
+  `/leadgen/recheck-restaurants`), and the daily 6pm run and the Call list's empty-list
+  auto-fill still keep leads coming without anyone opening a panel
+- apple.py — **Apple Analytics**: App Store Connect's App Analytics (impressions, product
+  page views, conversion, downloads, proceeds, sessions, installs, deletions, crashes) via
+  Apple's **Analytics Reports API**. There is no "give me the dashboard" call: the app gets
+  ONE ongoing report request (`ensure_report_request`, reused if it exists — Apple allows one
+  per app), Apple then produces a daily INSTANCE per report as gzipped TSVs behind pre-signed
+  URLs (downloaded WITHOUT the bearer token), and `sync()` imports each instance once
+  (`crm_apple_instances`) into `crm_apple_metrics (report, day, dim, metric, value)`. Only
+  "Standard" reports — the "Detailed" variants hold the same numbers split finer and would
+  double every total. Report columns vary, so `aggregate()` never assumes them: a column is
+  a metric if its name says it counts something, and the numbers split by the first present
+  of `DIM_PREFERENCE` (Event, Download Type, …). **The first reports take Apple about 1–2
+  days after connecting**; the tab says so instead of looking broken. `summarize()` ends its
+  windows at the LATEST day Apple has reported, not today — the newest day or two are never
+  in yet and would read as a collapse. A tile whose rows Apple didn't report shows "—", never
+  0. Auth is an ES256 JWT (python-jose, already a dependency) from the team key's Issuer ID,
+  Key ID and .p8. Routes in crm.py: `GET /v1/crm/apple` (status + tiles + tables; starts a
+  background import when data is older than `APPLE_STALE_HOURS`), `POST /apple/connect`
+  (checks the key against Apple BEFORE saving, so a typo fails with Apple's reason),
+  `/apple/sync`, `/apple/disconnect`. The .p8 is stored Fernet-encrypted with a key derived
+  from `SECRET_KEY` and never returned to the page; rotating `SECRET_KEY` makes it unreadable
+  and the tab asks to reconnect. Env vars `APPLE_ISSUER_ID` / `APPLE_KEY_ID` /
+  `APPLE_PRIVATE_KEY` (+ optional `APPLE_APP_ID`) override the saved key. The key needs the
+  **Admin** role, because creating the report request does. Covered by test_apple.py; grep
+  Render logs for `APPLE_SYNC`
 - static/icon.png, static/favicon.png — the app logo, copied from the mobile repo's assets and
   served via the allowlisted `/crm/{asset}` route (NOT a directory mount — that would be one
   traversal away from serving the repo). Re-copy from 86d-mobile/assets when rebranding
@@ -79,7 +109,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
 - coach.py — cold-call PRACTICE, opened via **School** in the burger menu (`data-panel`
-  section, same as Numbers/Customers/Lead engine — it used to live inline in the Call list
+  section, same as Apple Analytics/Customers — it used to live inline in the Call list
   tab behind a "Warm up first" button, which put practice above the actual dial list; moving
   it behind the menu is what let the Call list tab shrink to one button and one table).
   Prompts for the drills and for "The Holdout", a game where
@@ -114,7 +144,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
-  test_leadgen.py test_quick_add.py test_coach.py test_school.py test_ask.py -q`
+  test_leadgen.py test_quick_add.py test_coach.py test_school.py test_ask.py
+  test_apple.py -q`
 - test_leadgen.py — `_restaurant_pours()`, the restaurant liquor gate, pure (crawled text +
   OSM tags in, a yes/no and a reason out). Stubs `database` in `sys.modules` the same way
   test_callnow.py stubs it for crm
@@ -284,7 +315,8 @@ capture. Don't reintroduce them or describe them as current.)
   candidate's site is exactly the kind of network-heavy work the harvest cap exists to avoid
   doing needlessly — so it's a manual action: `POST /v1/crm/leadgen/recheck-restaurants`
   (poll the same path with GET), background-threaded like `/leadgen/fill` but under its own
-  lock, and a button in the Lead engine panel. It never touches a lead someone has already
+  lock (the Lead engine panel that had a button for it was removed from the page — call the
+  endpoint directly). It never touches a lead someone has already
   called or logged — only banked candidates and promoted-but-`last_touch_at IS NULL` leads,
   which it deletes the same way the operator's own Delete button does (retiring the
   candidate too, so the generator can't re-promote the same venue tomorrow)
@@ -390,7 +422,7 @@ capture. Don't reintroduce them or describe them as current.)
   domain, then unique normalized business_name, recording WHICH method matched. Conservative
   on purpose: a wrong attribution points the next 5,000 touches at the wrong city
 - `GET /v1/crm/users?status=&q=&limit=&offset=` — the **Customers** page (behind the burger,
-  beside Numbers): everyone who actually downloaded the app and made an account, which is the
+  beside Apple Analytics): everyone who actually downloaded the app and made an account, which is the
   other side of the pipeline tab (everyone who HASN'T). Reads straight from `users`, not
   `crm_leads` — most rows never touched the pipeline at all, since an organic download signs
   up with no call or email behind it. No touch/log/email actions — the calling workflow lives
@@ -743,6 +775,9 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   LEADGEN_ENRICH_WORKERS (8),
   LEADGEN_RUN_HOUR (18 = 6pm, local) — optional lead generator tuning. No API key needed: the
   generator uses OpenStreetMap, which has neither keys nor billing
+- APPLE_ISSUER_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY (+ optional APPLE_APP_ID) — optional; the
+  Apple Analytics tab's App Store Connect team key. Unset is fine: the tab's Connect form
+  saves the key instead (encrypted). `\n` in APPLE_PRIVATE_KEY is accepted
 - SENTRY_DSN — optional, error visibility only
 - CONFIDENCE_THRESHOLD, LEVEL_DEADBAND — optional tuning, see AI Vision Rules above
 

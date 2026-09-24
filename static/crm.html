@@ -243,6 +243,33 @@
   .tabs button{border-radius:999px}
   .tabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+  /* Apple Analytics. One tile per App Store Connect overview metric: label,
+     compact value, change vs the previous window (green/red by whether that
+     direction is GOOD — more crashes is red), and a per-day bar trend in the
+     muted ink with the latest day in the accent. */
+  .applehead{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  .applehead > div:first-child{flex:1;min-width:180px}
+  .applehead .small{font-size:12px}
+  .aseg{display:flex;gap:4px}
+  .aseg button{padding:6px 11px;font-size:12px;white-space:nowrap}
+  .aseg button.on{border-color:var(--accent);color:var(--accent);background:#FF6B351A}
+  .agrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-bottom:22px}
+  .atile{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 14px 10px}
+  .atile .al{font-size:12px;color:var(--text2)}
+  .atile .av{font-size:26px;font-weight:650;letter-spacing:-0.5px;margin-top:2px}
+  .atile .delta{font-size:12px;font-weight:600;margin-top:2px;color:var(--text2)}
+  .atile .delta span{font-weight:400;color:var(--text3);margin-left:4px}
+  .atile .delta.good{color:var(--go)} .atile .delta.bad{color:var(--stop)}
+  .spark{display:flex;align-items:flex-end;gap:2px;height:34px;margin-top:10px}
+  .spark i{flex:1;background:var(--line2);border-radius:2px 2px 0 0;min-width:2px}
+  .spark i:hover{background:var(--text3)}
+  .spark i.now{background:var(--accent)}
+  .applesub{font-size:13px;letter-spacing:1px;color:var(--text3);margin:0 0 10px;font-weight:700}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .applehow{margin:8px 0 14px;padding-left:20px;color:var(--text2);font-size:13px;line-height:1.6}
+  .applegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+  .applegrid label,.applefile{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--text2)}
+  .applefile{margin-top:10px}
   .stat{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px}
   .stat .n{font-size:21px;font-weight:700;letter-spacing:-0.5px}
   .stat .l{font-size:10px;letter-spacing:1.2px;color:var(--text3);font-weight:700;margin-top:2px}
@@ -418,12 +445,10 @@
         <div class="menu hide" id="menu" role="menu">
           <button data-tab="school" role="menuitem">School
             <em>warm up and learn before you dial</em></button>
-          <button data-tab="numbers" role="menuitem">Numbers
-            <em>funnel, connect rates, what's working</em></button>
+          <button data-tab="apple" role="menuitem">Apple Analytics
+            <em>App Store impressions, downloads, sessions, crashes</em></button>
           <button data-tab="users" role="menuitem">Customers
             <em>everyone who signed up in the app</em></button>
-          <button data-tab="engine" role="menuitem">Lead engine
-            <em>where tomorrow's leads come from</em></button>
         </div>
       </div>
     </div>
@@ -668,29 +693,6 @@
       </div>
     </section>
 
-    <section data-panel="numbers" class="hide">
-      <div class="card"><strong>Today</strong>
-        <div class="grid" style="margin-top:12px" id="nToday"></div></div>
-      <div class="card"><strong>Signups</strong>
-        <div class="grid" style="margin-top:12px" id="nUsers"></div></div>
-      <div class="card"><strong>Activation — signed up but never finished a count</strong>
-        <div class="grid" style="margin-top:12px" id="nAct"></div></div>
-      <div class="card"><strong>What's actually connecting</strong>
-        <p class="muted" style="margin:4px 0 0;font-size:12px" id="dialAdvice"></p>
-        <div class="tablewrap" style="margin-top:12px">
-          <table class="sheet"><thead><tr>
-            <th>HOUR (LOCAL)</th><th>DIALS</th><th>CONNECTED</th><th>RATE</th>
-          </tr></thead><tbody id="dialHours"></tbody></table></div>
-        <div class="tablewrap" style="margin-top:12px">
-          <table class="sheet"><thead><tr>
-            <th>ATTEMPT</th><th>DIALS</th><th>CONNECTED</th><th>RATE</th>
-          </tr></thead><tbody id="dialAttempts"></tbody></table></div>
-      </div>
-      <div class="card"><strong>What outreach produced</strong>
-        <div class="grid" style="margin-top:12px" id="nChan"></div>
-        <div style="margin-top:12px"><button id="rematch">Re-run matching</button></div></div>
-    </section>
-
     <!-- Read-only roster: who actually signed up, not who to work. The
          pipeline tab is the list with actions on it; this one just answers
          "did it work" one account at a time instead of as a funnel total. -->
@@ -702,36 +704,34 @@
       <div id="usersBody"></div>
     </section>
 
-    <section data-panel="engine" class="hide">
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-          <strong>Lead engine</strong>
-          <button id="runNow">Run now</button>
+    <!-- App Store Connect's App Analytics for the 86'd app, pulled with the
+         team API key. See apple.py for how Apple's report API works. -->
+    <section data-panel="apple" class="hide">
+      <div id="appleConnect" class="card hide">
+        <strong>Connect your App Store Connect API key</strong>
+        <ol class="applehow">
+          <li>In <b>App Store Connect</b> go to <b>Users and Access → Integrations →
+            App Store Connect API → Team Keys</b>.</li>
+          <li>Click <b>+</b>, name it “86'd CRM”, give it <b>Admin</b> access (Apple requires
+            Admin to turn on analytics reports), and generate.</li>
+          <li>Copy the <b>Issuer ID</b> (top of that page) and the key's <b>Key ID</b>, then
+            <b>Download</b> the .p8 file — Apple only lets you download it once.</li>
+        </ol>
+        <div class="applegrid">
+          <label>Issuer ID<input id="apIssuer" placeholder="69a6de7e-…" autocomplete="off"></label>
+          <label>Key ID<input id="apKey" placeholder="2X9R4HXF34" autocomplete="off"></label>
+          <label>App (optional)<input id="apApp" placeholder="bundle ID or Apple ID — blank if it's your only app" autocomplete="off"></label>
         </div>
-        <p class="muted" style="margin:6px 0 0;font-size:12px">
-          Runs at 6pm daily and keeps every tab topped up to 50 leads — eight
-          tabs, so up to 400 in the bank, but you only ever see one tab at a
-          time. The emptiest tab is always filled first. Work leads off and the
-          spots refill.</p>
-        <div id="engineBanner" style="margin-top:12px"></div>
-        <div class="grid" style="margin-top:12px" id="engineStats"></div>
-        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-            <strong style="font-size:13px">Restaurant liquor gate</strong>
-            <button id="recheckBtn" class="del">Recheck existing restaurant leads</button>
-          </div>
-          <p class="muted" style="margin:6px 0 0;font-size:12px">
-            One-time cleanup: re-crawls every banked or never-called restaurant
-            lead against today's (tighter) liquor gate and drops the ones that no
-            longer clear it — same as the old "pizzeria with no bar" bug. Never
-            touches a lead someone's already called.</p>
-          <div id="recheckResult" style="margin-top:8px"></div>
-        </div>
-        <div class="tablewrap" style="margin-top:14px">
-          <table class="sheet"><thead><tr>
-            <th>TAB</th><th>EASTERN</th><th>CENTRAL</th><th>MOUNTAIN</th><th>PACIFIC</th>
-          </tr></thead><tbody id="engineBuckets"></tbody></table></div>
+        <label class="applefile">Private key (.p8)
+          <input type="file" id="apFile" accept=".p8,text/plain">
+          <textarea id="apPem" rows="4" placeholder="…or paste the whole file here, including the BEGIN and END lines"></textarea>
+        </label>
+        <div class="row"><button class="go" id="apSave">Connect</button></div>
+        <p class="muted" style="font-size:12px;margin:8px 0 0">The key is checked with Apple
+          before it's saved, stored encrypted, and never shown again on this page.</p>
+        <div class="applied hide" id="apResult"></div>
       </div>
+      <div id="appleBody"></div>
     </section>
 
   </div>
@@ -823,7 +823,7 @@ function switchTab(b){
     .forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
-    numbers:loadNumbers,users:loadUsers,engine:loadEngine,
+    apple:loadApple,users:loadUsers,
     school:loadSchoolPanel}[TAB])()
     .catch(e=>toast(e.message));
 }
@@ -1837,40 +1837,7 @@ async function loadFollowups(){
   };
 });
 
-/* ── numbers ──────────────────────────────────────────────────────────── */
 const tile=(n,l)=>`<div class="stat"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
-async function loadNumbers(){
-  const [f,c,ds]=await Promise.all([api('/funnel'),api('/counters'),api('/dialstats')]);
-  $('dialAdvice').textContent=ds.advice;
-  const maxH=Math.max(0,...ds.by_hour.map(h=>h.connect_pct));
-  const line=(label,r,hi)=>`<tr><td>${esc(label)}</td><td>${r.dials}</td><td>${r.connects}</td>
-    <td class="${hi?'win-good':''}">${r.connect_pct}%</td></tr>`;
-  $('dialHours').innerHTML=ds.by_hour.length
-    ? ds.by_hour.map(h=>line(h.hour_label||h.hour,h,h.connect_pct===maxH&&maxH>0)).join('')
-    : '<tr><td colspan="4" class="muted">No calls logged yet.</td></tr>';
-  $('dialAttempts').innerHTML=ds.by_attempt.length
-    ? ds.by_attempt.map(a=>line('Attempt '+a.attempt,a,false)).join('')
-    : '<tr><td colspan="4" class="muted">No calls logged yet.</td></tr>';
-  $('nToday').innerHTML=[tile(c.counters.daily_calls_remaining,'CALLS LEFT'),
-    tile(c.counters.daily_emails_remaining,'EMAILS LEFT'),
-    tile(c.counters.touch_ticker_remaining,'TOUCHES LEFT'),
-    tile(c.counters.downloads_confirmed,'DOWNLOADS')].join('');
-  $('nUsers').innerHTML=[tile(f.users.total,'SIGNUPS'),tile(f.users.paying,'PAYING'),
-    tile(f.users.trial_to_paid_pct+'%','TRIAL → PAID'),
-    tile(f.trials_ending['0-3_days'],'ENDING ≤3 DAYS')].join('');
-  $('nAct').innerHTML=[tile(f.activation.started_a_count,'STARTED A COUNT'),
-    tile(f.activation.completed_a_count,'FINISHED ONE'),
-    tile(f.activation.never_started_pct+'%','NEVER STARTED'),
-    tile(f.activation.started_but_never_finished,'STALLED')].join('');
-  $('nChan').innerHTML=[tile(f.pipeline.total,'LEADS'),
-    tile(f.pipeline.converted_to_signup,'BECAME SIGNUPS'),
-    tile(f.channels.called_win_pct+'%','CALL WIN RATE'),
-    tile(f.channels.emailed_win_pct+'%','EMAIL WIN RATE')].join('');
-}
-$('rematch').onclick=async()=>{
-  try{const r=await api('/attribution/rematch',{method:'POST'});
-      toast(`Matched ${r.matched}`); await loadNumbers();}catch(e){toast(e.message)}
-};
 
 /* ── customers (app users) ────────────────────────────────────────────────
    Everyone who actually downloaded the app and made an account — separate
@@ -1985,89 +1952,126 @@ $('usersBody').onclick=async e=>{
   catch(err){ toast(err.message); }
 };
 
-/* ── lead engine ──────────────────────────────────────────────────────── */
-async function loadEngine(){
-  const d=await api('/leadgen/health');
-  /* A full list is the healthy resting state, so it reads as a plain note
-     rather than a warning — nothing is wrong when you have work waiting. */
-  const msg = d.warnings.length ? esc(d.warnings.join(' ')) : esc(d.note);
-  $('engineBanner').innerHTML=`<div class="banner ${d.warnings.length?(d.stale?'bad':''):'ok'}">${msg}</div>`;
-  $('engineStats').innerHTML=[
-    tile(`${d.pool.active_leads}/${d.pool.max_active}`,'CALL LIST'),
-    tile(d.pool.headroom,'SPOTS OPEN'),
-    tile(d.pool.qualified,'BANKED'),
-    tile(d.pool.days_of_runway,'DAYS OF WORK'),
-    tile(d.cities.unharvested,'CITIES LEFT')].join('');
+/* ── Apple Analytics ──────────────────────────────────────────────────────
+   App Store Connect's App Analytics, imported by the server from Apple's
+   Analytics Reports API (apple.py). Headline tiles first — the same metrics,
+   in the same order, as App Store Connect's own overview — then every report
+   Apple produced as a plain table, so nothing it reports is left out. */
+let APPLE={window:30}, appleTimer=null;
 
-  /* Which tabs are actually stocked. The totals above can look healthy while
-     the tab you're about to open is empty, and that's the only number that
-     decides whether there's anything to call. */
-  const zones=[-5,-6,-7,-8];
-  const cell=b=>{
-    const full=b.count>=d.pool.bucket_target;
-    const col=full?'var(--go)':(b.count>=d.pool.bucket_target/2?'var(--wait)':'var(--stop)');
-    return `<td style="color:${col};font-weight:700">${b.count}`
-         + (full?'':` <span class="muted" style="font-weight:400">/${d.pool.bucket_target}</span>`)
-         + '</td>';
-  };
-  $('engineBuckets').innerHTML=[['lunch','Open for lunch'],['dinner','Dinner only']]
-    .map(([key,label])=>`<tr><td>${label}</td>`
-      + zones.map(z=>cell(d.pool.buckets.find(b=>b.service===key&&b.zone===z)
-                          ||{count:0})).join('')
-      + '</tr>').join('');
-}
-$('runNow').onclick=async()=>{
-  const b=$('runNow'); b.disabled=true; b.textContent='Running…';
-  try{const r=await api('/leadgen/run',{method:'POST'});
-      toast(`Added ${r.promoted} leads`); await loadEngine();}
-  catch(e){toast(e.message)}finally{b.disabled=false;b.textContent='Run now'}
+const compact=(v,unit)=>{
+  if(v==null) return '—';
+  if(unit==='%') return v.toFixed(1)+'%';
+  const a=Math.abs(v);
+  const s=a>=1e6?(v/1e6).toFixed(1).replace(/\.0$/,'')+'M'
+         :a>=1e4?(v/1e3).toFixed(1).replace(/\.0$/,'')+'K'
+         :Math.round(v).toLocaleString();
+  return unit==='$'?'$'+s:s;
+};
+const agoShort=iso=>{
+  if(!iso) return 'never';
+  const m=Math.round((Date.now()-new Date(iso))/60000);
+  return m<1?'just now':m<60?`${m} min ago`:m<1440?`${Math.round(m/60)}h ago`:`${Math.round(m/1440)}d ago`;
 };
 
-// The gate re-crawls sites, so this is the same "too slow for one request,
-// start it and poll" shape as startFill() above, just against its own
-// endpoint — a recheck and a fill are different jobs and shouldn't share a
-// lock or a status line.
-let recheckTimer=null;
-function renderRecheckResult(last){
-  if(!last) return;
-  if(last.error){
-    $('recheckResult').innerHTML=`<div class="banner bad">Recheck failed: ${esc(last.error)}</div>`;
+function appleTile(k,win){
+  const unit=k.unit||(k.key==='proceeds'?'$':'');
+  let delta='';
+  if(k.change_pct!=null){
+    const up=k.change_pct>0, flat=k.change_pct===0;
+    const good=flat?null:(up===k.up_is_good);
+    const sign=up?'+':'';
+    delta=`<div class="delta ${good==null?'':good?'good':'bad'}">${sign}${k.change_pct}${k.change_is_points?' pts':'%'}
+      <span>vs previous ${win} days</span></div>`;
+  }else if(k.value!=null){
+    delta=`<div class="delta"><span>no earlier data to compare</span></div>`;
+  }
+  const daily=k.daily||[];
+  const max=Math.max(0,...daily.map(d=>d.value));
+  const bars=daily.length&&max>0?`<div class="spark" role="img" aria-label="${esc(k.label)} per day">${
+    daily.map((d,i)=>`<i style="height:${Math.max(2,d.value/max*100)}%"
+      class="${i===daily.length-1?'now':''}" title="${esc(d.day)}: ${esc(compact(d.value,unit))}"></i>`).join('')}</div>`:'';
+  return `<div class="atile"><div class="al">${esc(k.label)}</div>
+    <div class="av">${esc(compact(k.value,unit))}</div>${delta}${bars}</div>`;
+}
+
+async function loadApple(){
+  const d=await api('/apple?window='+APPLE.window);
+  $('appleConnect').classList.toggle('hide', d.connected);
+  if(!d.connected){
+    $('appleBody').innerHTML = d.key_unreadable
+      ? '<div class="banner bad">The saved key can no longer be read (the server\'s SECRET_KEY changed). Connect it again below.</div>' : '';
     return;
   }
-  const removed=last.banked_rejected+last.leads_removed;
-  $('recheckResult').innerHTML=`<div class="banner ${removed?'':'ok'}">`
-    + `Checked ${last.checked} · dropped ${last.banked_rejected} from the bank`
-    + ` · removed ${last.leads_removed} never-called lead${last.leads_removed===1?'':'s'}`
-    + `</div>`;
-}
-async function startRecheck(){
-  const b=$('recheckBtn'); b.disabled=true; b.textContent='Rechecking…';
-  try{
-    const r=await api('/leadgen/recheck-restaurants',{method:'POST'});
-    if(!r.started && !r.running) toast(r.note||'Could not start');
-  }catch(err){
-    b.disabled=false; b.textContent='Recheck existing restaurant leads';
-    return toast('Could not start: '+err.message);
-  }
-  if(recheckTimer) clearInterval(recheckTimer);
-  recheckTimer=setInterval(async()=>{
-    let st;
-    try{ st=await api('/leadgen/recheck-restaurants'); }catch{ return; }
-    if(!st.running){
-      clearInterval(recheckTimer); recheckTimer=null;
-      b.disabled=false; b.textContent='Recheck existing restaurant leads';
-      renderRecheckResult(st.last_run);
-      if(st.last_run && !st.last_run.error){
-        const removed=st.last_run.banked_rejected+st.last_run.leads_removed;
-        toast(removed?`Removed ${removed} non-liquor restaurant lead${removed===1?'':'s'}`
-                     :'Nothing needed removing');
-      }
-      if(TAB==='calls') loadCalls();
-    }
-  }, 4000);
-}
-$('recheckBtn').onclick=startRecheck;
+  const win=d.window||APPLE.window;
+  const head=`<div class="applehead">
+      <div><strong>${esc(d.app?.name||'Your app')}</strong>
+        <span class="muted">${esc(d.app?.bundle_id||'')}</span></div>
+      <div class="aseg">${[7,30,90].map(w=>`<button data-win="${w}" class="${w===win?'on':''}">${w} days</button>`).join('')}</div>
+      <div class="muted small">${d.syncing?'Importing from Apple…':'Synced '+esc(agoShort(d.last_sync_at))}
+        ${d.through?` · data through ${esc(d.through)}`:''}</div>
+      <div class="row" style="margin:0">
+        <button id="apSync" ${d.syncing?'disabled':''}>${d.syncing?'Importing…':'Sync now'}</button>
+        ${d.source==='saved'?'<button class="del" id="apDisconnect">Disconnect</button>':''}
+      </div>
+    </div>`;
+  const err=d.last_error?`<div class="banner bad">${esc(d.last_error)}</div>`:'';
+  const has=d.kpis&&d.kpis.some(k=>k.value!=null);
+  const wait=!has?`<div class="banner">${d.syncing?'Importing from Apple — this can take a minute.'
+      :'No numbers yet. After you first connect, Apple takes about 1–2 days to produce the '
+      +'first reports. This tab imports them automatically whenever you open it.'}</div>`:'';
+  const tiles=has?`<div class="agrid">${d.kpis.map(k=>appleTile(k,win)).join('')}</div>`:'';
+  const tables=(d.reports||[]).map(r=>`<div class="zbar"><span class="name">${esc(r.report.toUpperCase())}</span></div>
+    <div class="zone"><div class="sheetwrap"><table class="sheet"><thead><tr>
+      <th>WHAT</th><th>MEASURE</th><th>LAST 7 DAYS</th><th>LAST ${win} DAYS</th><th>PREVIOUS ${win} DAYS</th><th>CHANGE</th>
+    </tr></thead><tbody>${r.rows.map(x=>{
+      const ch=x.previous?((x.current-x.previous)/x.previous*100):null;
+      return `<tr><td>${esc(x.dim)}</td><td class="muted">${esc(x.metric)}</td>
+        <td class="num">${esc(compact(x.last7))}</td><td class="num">${esc(compact(x.current))}</td>
+        <td class="num muted">${esc(compact(x.previous))}</td>
+        <td class="num muted">${ch==null?'—':(ch>0?'+':'')+ch.toFixed(0)+'%'}</td></tr>`;}).join('')}
+    </tbody></table></div></div>`).join('<div style="height:14px"></div>');
+  $('appleBody').innerHTML=head+err+wait+tiles
+    +(tables?`<h3 class="applesub">Everything Apple reported</h3>${tables}`:'');
 
+  // Poll while an import runs, stop the moment it's done or you leave.
+  clearTimeout(appleTimer);
+  if(d.syncing) appleTimer=setTimeout(()=>{ if(TAB==='apple') loadApple().catch(()=>{}); }, 5000);
+}
+
+$('appleBody').onclick=async e=>{
+  const w=e.target.closest('[data-win]');
+  if(w){ APPLE.window=+w.dataset.win; return loadApple().catch(x=>toast(x.message)); }
+  if(e.target.id==='apSync'){
+    try{ await api('/apple/sync',{method:'POST'}); toast('Importing from Apple'); await loadApple(); }
+    catch(x){ toast(x.message); }
+  }
+  if(e.target.id==='apDisconnect'){
+    if(!confirm('Forget the saved Apple key? Numbers already imported stay.')) return;
+    try{ await api('/apple/disconnect',{method:'POST'}); toast('Disconnected'); await loadApple(); }
+    catch(x){ toast(x.message); }
+  }
+};
+$('apFile').onchange=async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  $('apPem').value=await f.text();
+};
+$('apSave').onclick=async()=>{
+  const btn=$('apSave'), box=$('apResult');
+  const body={issuer_id:$('apIssuer').value.trim(), key_id:$('apKey').value.trim(),
+              private_key:$('apPem').value.trim(), app:$('apApp').value.trim()||null};
+  if(!body.issuer_id||!body.key_id||!body.private_key)
+    return toast('Issuer ID, Key ID and the .p8 key are all needed');
+  btn.disabled=true; btn.textContent='Checking with Apple…'; box.className='applied hide';
+  try{
+    const r=await api('/apple/connect',{method:'POST',body:JSON.stringify(body)});
+    $('apPem').value=''; $('apFile').value='';
+    toast('Connected to '+(r.app.name||'your app'));
+    await loadApple();
+  }catch(x){
+    box.className='applied err'; box.textContent=x.message;
+  }finally{ btn.disabled=false; btn.textContent='Connect'; }
+};
 
 /* ── practice ─────────────────────────────────────────────────────────────
    Warm-up inside the Call list tab. The surface is one headline, one button
