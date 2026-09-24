@@ -4754,7 +4754,6 @@ def _clean(v, limit: int = 300) -> Optional[str]:
     return v.strip()[:limit] if isinstance(v, str) and v.strip() else None
 
 
-@crm_router.post("/leads/quick-add", response_model=dict, status_code=201)
 def _find_existing_lead(cursor, name: str, loc: Optional[str], phones,
                         email: Optional[str]):
     """The lead already in the book for this bar, locked, or None.
@@ -4792,6 +4791,11 @@ def _find_existing_lead(cursor, name: str, loc: Optional[str], phones,
     return cursor.fetchone()
 
 
+# The decorator must sit directly on quick_add_lead. #34 inserted
+# _find_existing_lead between them, which registered THAT function as the
+# route: every "Add a lead" came back 422 asking for query parameters.
+# test_routes.py now checks every CRM route lands on the function it names.
+@crm_router.post("/leads/quick-add", response_model=dict, status_code=201)
 def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
     """Describe a call to a bar that isn't in the CRM yet — paste whatever you
     have — and get back a new lead with the call logged and every detail kept.
