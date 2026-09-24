@@ -98,11 +98,3 @@ def test_dashed_formatting_is_what_cloudtalk_will_paste():
 def test_non_strings_do_not_raise():
     for junk in (12345, [], {}, object()):
         assert normalize_us_phone(junk) is None
-
-
-def test_reserved_n9x_area_codes_are_never_dialled():
-    # A real Denver bar's site listed "997-427-9989" beside its actual number.
-    # No area code with a middle 9 is in use anywhere in the plan.
-    assert normalize_us_phone("997-427-9989") is None
-    assert normalize_us_phone("(393) 555-2020") is None
-    assert normalize_us_phone("303-353-2918") == "3033532918"

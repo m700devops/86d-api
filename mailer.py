@@ -23,10 +23,8 @@ blast wearing a personal return address.
 
 import os
 import re
-import imaplib
 import smtplib
 import ssl
-import time
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 from typing import Optional
@@ -37,13 +35,6 @@ USER = os.getenv("SPACEMAIL_USER", "")
 PASSWORD = os.getenv("SPACEMAIL_PASSWORD", "")
 FROM_NAME = os.getenv("SPACEMAIL_FROM_NAME", "")
 TIMEOUT = int(os.getenv("SPACEMAIL_TIMEOUT", "20"))
-# SMTP only SENDS. A mail app puts a copy in Sent itself, over IMAP, as a
-# separate step — and this code never did, so three emails that reached their
-# recipients (one replied) were nowhere in the operator's Sent folder.
-IMAP_HOST = os.getenv("SPACEMAIL_IMAP_HOST", HOST)
-IMAP_PORT = int(os.getenv("SPACEMAIL_IMAP_PORT", "993"))
-# Tried in order when the server doesn't flag its Sent folder (RFC 6154).
-SENT_NAMES = ("Sent", "INBOX.Sent", "Sent Items", "Sent Messages", "INBOX/Sent")
 
 # Enough to reject nonsense before opening a connection. Deliberately not a
 # full RFC 5322 implementation — the mail server is the real authority on
@@ -132,84 +123,4 @@ def send(to: str, subject: str, body: str,
     except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
         raise MailFailed(f"Couldn't reach {HOST}:{PORT} — {exc}")
 
-    return {"message_id": msg["Message-ID"], "to": to, "from": USER,
-            "saved_to": save_to_sent(msg)}
-
-
-def _sent_folder(imap) -> Optional[str]:
-    """The mailbox's Sent folder: the one the server flags \\Sent, else the
-    first of the usual names that exists."""
-    status, rows = imap.list()
-    if status != "OK":
-        return None
-    names = []
-    for raw in rows or []:
-        line = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
-        m = re.match(r'\((?P<flags>[^)]*)\)\s+(?:"[^"]*"|NIL)\s+"?(?P<name>.*?)"?$', line)
-        if not m:
-            continue
-        if "\\sent" in m.group("flags").lower():
-            return m.group("name")
-        names.append(m.group("name"))
-    return next((n for n in SENT_NAMES if n in names), None)
-
-
-def save_to_sent(msg: EmailMessage) -> Optional[str]:
-    """Put a copy of a message that has ALREADY been sent into Sent.
-
-    Never raises: the mail has gone, and failing here would tell the caller it
-    hadn't — the one lie the send path must never tell. Returns the folder it
-    landed in, or None (logged).
-    """
-    try:
-        with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT,
-                               ssl_context=ssl.create_default_context(),
-                               timeout=TIMEOUT) as imap:
-            imap.login(USER, PASSWORD)
-            folder = _sent_folder(imap)
-            if not folder:
-                print("[mailer] SENT_COPY_FAILED no Sent folder found", flush=True)
-                return None
-            quoted = f'"{folder}"' if " " in folder else folder
-            status, _ = imap.append(quoted, "\\Seen", imaplib.Time2Internaldate(time.time()),
-                                    msg.as_bytes())
-            if status != "OK":
-                print(f"[mailer] SENT_COPY_FAILED append to {folder}: {status}", flush=True)
-                return None
-            return folder
-    except Exception as exc:
-        print(f"[mailer] SENT_COPY_FAILED {exc}", flush=True)
-        return None
-
-
-def fetch_recent(days: int = 3, limit: int = 60) -> list:
-    """The raw bytes of the newest messages in INBOX from the last `days`.
-
-    Opened READ-ONLY and fetched with BODY.PEEK, so nothing is marked read:
-    the operator still sees every reply as new in their own mail app.
-    Raises MailFailed when the mailbox can't be read.
-    """
-    if not is_configured():
-        raise MailNotConfigured("No mailbox configured.")
-    import datetime as _dt
-    since = (_dt.date.today() - _dt.timedelta(days=days)).strftime("%d-%b-%Y")
-    try:
-        with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT,
-                               ssl_context=ssl.create_default_context(),
-                               timeout=TIMEOUT) as imap:
-            imap.login(USER, PASSWORD)
-            imap.select("INBOX", readonly=True)
-            status, data = imap.uid("SEARCH", None, "SINCE", since)
-            if status != "OK":
-                raise MailFailed(f"Inbox search failed: {status}")
-            uids = (data[0] or b"").split()[-limit:]
-            out = []
-            for uid in uids:
-                status, parts = imap.uid("FETCH", uid, "(BODY.PEEK[])")
-                if status == "OK":
-                    out += [p[1] for p in parts if isinstance(p, tuple) and len(p) > 1]
-            return out
-    except MailFailed:
-        raise
-    except Exception as exc:
-        raise MailFailed(f"Couldn't read the inbox on {IMAP_HOST}: {exc}")
+    return {"message_id": msg["Message-ID"], "to": to, "from": USER}

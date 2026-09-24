@@ -30,7 +30,6 @@
   .assist-list{margin:8px 0 0;padding-left:18px;font-size:13px;line-height:1.8}
   .assist-list li.undone{opacity:.45;text-decoration:line-through}
   .assist-list button{margin-left:8px;padding:2px 9px;font-size:12px}
-  .phok{font-size:11px;color:var(--text3);margin-top:3px;white-space:nowrap}
   .attempts{border-collapse:collapse;font-size:13px;margin:0 0 4px}
   .attempts td{padding:3px 14px 3px 0;border:0;background:none !important;vertical-align:top}
   .attempts td:first-child{color:var(--text3)}
@@ -179,13 +178,6 @@
                      border:1px solid var(--line);border-radius:999px;padding:3px 9px}
   .wherebox .fx span i{color:var(--text3);font-style:normal;font-size:10px}
   .wherebox .none{font-size:12px;color:var(--text3)}
-  #zones tr[data-id]{cursor:pointer}
-  #zones tr[data-id]:hover td{background:#ffffff08}
-  #zones td.nm .nmtxt{text-decoration:underline dotted var(--text3);text-underline-offset:3px}
-  .prep{display:grid;grid-template-columns:110px 1fr;gap:5px 12px;font-size:13px;margin-bottom:10px}
-  .prep dt{color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding-top:2px}
-  .prep dd{margin:0;color:var(--text)}
-  .prep a{color:var(--accent)}
   .acts{display:flex;gap:6px;white-space:nowrap}
   button{font:inherit;background:var(--surface2);color:var(--text);border:1px solid var(--line2);
          border-radius:7px;padding:6px 11px;cursor:pointer}
@@ -679,7 +671,7 @@
 
     <section data-panel="pipeline" class="hide">
       <div class="askbar">
-        <input id="askInput" placeholder="Ask or tell the AI — who did we email last Thursday? · paste a reply from a bar and it updates the lead">
+        <input id="askInput" placeholder="Ask AI — how many did I call today? who got a voicemail yesterday? who did we email last Thursday?">
         <button class="go" id="askBtn">Ask AI</button>
       </div>
       <div id="askOut" class="askout hide"></div>
@@ -712,11 +704,6 @@
           <button id="fAssistGo">Update</button>
         </div>
         <div id="fAssistOut"></div>
-      </div>
-      <div class="card hide" id="fAway">
-        <strong>While you were away</strong>
-        <span class="muted" id="fAwayNote" style="font-size:13px"></span>
-        <div id="fAwayList" style="margin-top:8px"></div>
       </div>
       <div class="card hide" id="fEmpty">
         <strong>No follow-ups due</strong>
@@ -1078,21 +1065,6 @@ async function runDraft(dr, id){
 
 function stopNowTimer(){ if(nowTimer){ clearInterval(nowTimer); nowTimer=null; } }
 
-/* The 60-second refresh must never pull the list out from under someone
-   mid-call. It used to redraw the whole table on the clock, which destroyed
-   an open Log box — and everything typed in it — and jumped the page. Now it
-   waits while any drawer is open or focus is in the list, and keeps the
-   scroll position when it does redraw. */
-function callsBusy(){
-  return !!document.querySelector('#zones tr.drawer') || $('zones').contains(document.activeElement);
-}
-async function refreshNowQuietly(){
-  if(TAB!=='calls' || callsBusy()) return;
-  const y=window.scrollY;
-  await loadNow();
-  window.scrollTo(0, y);
-}
-
 async function loadNow(){
   const d=await api('/now'); NOWDATA=d;
   d.ready=d.ready.filter(l=>!SKIPPED.has(l.id));
@@ -1120,7 +1092,7 @@ async function loadNow(){
         + d.rest_count + ' outside a window. Press the button again once one opens.</p></div>';
     }
     // Windows open and shut on the clock — keep checking even while empty.
-    if(!nowTimer) nowTimer=setInterval(refreshNowQuietly, 60000);
+    if(!nowTimer) nowTimer=setInterval(()=>{ if(TAB==='calls') loadNow(); }, 60000);
     return d;
   }
 
@@ -1141,7 +1113,7 @@ async function loadNow(){
     </div></div>`;
 
   // Windows open and shut on the clock, so a list left sitting goes stale.
-  if(!nowTimer) nowTimer=setInterval(refreshNowQuietly, 60000);
+  if(!nowTimer) nowTimer=setInterval(()=>{ if(TAB==='calls') loadNow(); }, 60000);
   return d;
 }
 
@@ -1197,13 +1169,13 @@ function row(l,n,calling){
   const tries = l.attempts||0;
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}" data-contact="${esc(l.contact||'')}">
     <td class="rownum">${n}</td>
-    <td class="nm" title="Click for a quick read on ${esc(l.name)}"><span class="nmtxt">${esc(l.name)}</span>${whyTag(l)}
+    <td class="nm" title="${esc(w.hint||l.name)}">${esc(l.name)}${whyTag(l)}
       ${ask(l)}
       ${l.opener?`<div class="opener">${esc(l.opener)}</div>`:''}</td>
     <td><div class="phcell">
       <span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>
       <button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button>
-    </div>${phoneCheck(l)?`<div class="phok" title="${esc(l.phone_note||'')}">${phoneCheck(l)}</div>`:''}</td>
+    </div></td>
     <td title="${esc(w.hint||'')}">${calling
       ? `<span class="${w.good_now?'win-good':shut?'win-shut':'win-bad'}">${
            esc((w.hint||'').replace('CALL NOW — ',''))}</span>`
@@ -1232,52 +1204,25 @@ function row(l,n,calling){
    data on every click, and the server itself caches the model-written
    points, so this just avoids a redundant round trip within one session. */
 const WHERE_INFO={};
-async function loadWhereInfo(id, box, lead){
-  if(WHERE_INFO[id]) return renderWhereInfo(box, WHERE_INFO[id], lead);
+async function loadWhereInfo(id, box){
+  if(WHERE_INFO[id]) return renderWhereInfo(box, WHERE_INFO[id]);
   try{
     const d=await api(`/leads/${id}/brief`);
     WHERE_INFO[id]=d;
-    renderWhereInfo(box, d, lead);
+    renderWhereInfo(box, d);
   }catch(err){ box.innerHTML=`<div class="none">${esc(err.message)}</div>`; }
 }
-const KIND_LABEL={bar:'Bar', pub:'Pub', restaurant:'Restaurant with a bar', nightclub:'Nightclub'};
-/* OSM hours ("Mo-Th 15:00-24:00; Fr 15:00-26:00") in this screen's 12-hour
-   clock: "Mon-Thu 3pm-12am; Fri 3pm-2am". Past-midnight hours (26:00) wrap. */
-const DAY={Mo:'Mon',Tu:'Tue',We:'Wed',Th:'Thu',Fr:'Fri',Sa:'Sat',Su:'Sun',PH:'holidays'};
-function hours12(h){
-  return (h||'').replace(/\b(Mo|Tu|We|Th|Fr|Sa|Su|PH)\b/g, d=>DAY[d])
-    .replace(/(\d{1,2}):(\d{2})/g, (_,hh,mm)=>{
-      const H=(+hh)%24, ap=H<12?'am':'pm', h12=H%12||12;
-      return mm==='00'?`${h12}${ap}`:`${h12}:${mm}${ap}`;
-    });
-}
-/* The prep sheet: what's on file, a line each, then the talking points and
-   facts. Thin is fine — it never changes where a bar sits on the list; it's
-   only there so the first ten seconds of the call aren't cold. */
-function renderWhereInfo(box, d, l){
-  l=l||{}; const p=d.profile||{}; const w=l.call_window||{};
-  const site=p.website?`<a href="${esc(p.website)}" target="_blank" rel="noopener">${
-    esc(p.website.replace(/^https?:\/\/(www\.)?/,'').replace(/\/$/,''))}</a>`:'';
-  const rows=[
-    ['What', [KIND_LABEL[p.kind]||'', l.name?fullAddress(l):''].filter(Boolean).join(' · ')],
-    ['Website', site],
-    ['Ask for', l.manager_name?`${esc(l.manager_name)}${l.manager_role?' ('+esc(l.manager_role)+')':''} — check they're still there`:''],
-    ['Hours', esc(hours12(p.hours))],
-    ['Call window', esc([w.window, w.local_time&&`it's ${w.local_time} there`].filter(Boolean).join(' · '))],
-    ['Their line', esc(l.opener||'')],
-    ['Number', esc(l.phone_note||phoneCheck(l)||'')],
-    ['Email', l.email?`${esc(l.email)}${l.email_kind==='personal'?' — a person, not a front desk':''}`:''],
-  ].filter(([,v])=>v);
-  const thin = !d.points.length && !d.facts.length && !l.opener && !l.manager_name;
+function renderWhereInfo(box, d){
+  if(!d.facts.length && !d.points.length){
+    box.innerHTML='<div class="none">Nothing on file beyond the address — '
+      +'the map entry is bare and their site gave nothing up.</div>';
+    return;
+  }
   box.innerHTML=
-    (rows.length?`<dl class="prep">${rows.map(([k,v])=>`<dt>${k}</dt><dd>${
-      k==='What'?esc(v):v}</dd>`).join('')}</dl>`:'')
-    +(d.points.length?`<div class="pts">${d.points.map(pt=>
-      `<div class="pt">${esc(pt)}</div>`).join('')}</div>`:'')
-    +(d.facts.length?`<div class="fx">${d.facts.map(f=>
-      `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`:'')
-    +(thin?'<div class="none">Not much on file for this one — go in fresh. It doesn\u2019t '
-      +'change where it sits on the list.</div>':'');
+    (d.points.length?`<div class="pts">${d.points.map(p=>
+      `<div class="pt">${esc(p)}</div>`).join('')}</div>`:'')
+    +`<div class="fx">${d.facts.map(f=>
+      `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`;
 }
 
 const MAIL_SUBJECT = "Following up — 86'd bar inventory";
@@ -1361,13 +1306,7 @@ $('zones').onclick=async e=>{
   const dr=e.target.closest('.drawer');
   if(dr) return drawerAction(dr,e);
 
-  let btn=e.target.closest('button[data-act]');
-  if(!btn){
-    // Anywhere else on a bar's row: the prep sheet, same as its address.
-    const rowEl=e.target.closest('tr[data-id]');
-    if(!rowEl || e.target.closest('a')) return;
-    btn={dataset:{act:'where'}, closest:()=>rowEl, rowClick:true};
-  }
+  const btn=e.target.closest('button[data-act]'); if(!btn) return;
   if(btn.dataset.act==='fill') return startFill(btn);
   const tr=btn.closest('tr'); const id=tr.dataset.id;
 
@@ -1395,19 +1334,14 @@ $('zones').onclick=async e=>{
     return;
   }
   if(btn.dataset.act==='where'){
-    const open=tr.nextElementSibling;
-    if(open?.classList.contains('drawer')){
-      // A stray click on the row must never close a Log or Email box and
-      // throw away what's typed in it — only the prep sheet toggles.
-      if(btn.rowClick && !open.classList.contains('info')) return;
-      open.remove(); return;
+    if(tr.nextElementSibling?.classList.contains('drawer')){
+      tr.nextElementSibling.remove(); return;
     }
     const d=document.createElement('tr');
     d.className='drawer info';
     d.innerHTML=`<td colspan="8"><div class="wherebox"><div class="none">Reading up on them…</div></div></td>`;
     tr.after(d);
-    loadWhereInfo(id, d.querySelector('.wherebox'),
-                  (NOWDATA?.ready||[]).find(x=>x.id===id));
+    loadWhereInfo(id, d.querySelector('.wherebox'));
     return;
   }
   if(btn.dataset.act==='mail'){
@@ -1444,7 +1378,6 @@ $('zones').onclick=async e=>{
         <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
         <button data-outcome="not_interested" data-note="Not interested, asked not to be called again.">Not interested</button>
         <button data-outcome="not_interested" data-note="Already has a system/app for inventory.">Has a system</button>
-        <button data-wrong>Wrong number</button>
         <button data-cancel>Cancel</button>
       </div>
       <div class="applied hide"></div>
@@ -1453,19 +1386,6 @@ $('zones').onclick=async e=>{
     d.querySelector('textarea').focus();
   }
 };
-
-/* The number rang somebody else. The server logs the dial, retires the
-   number for good and looks on their own website for the right one. */
-async function reportWrongNumber(btn, id, reload){
-  btn.disabled=true; btn.textContent='Checking their site…';
-  try{
-    const r=await api(`/leads/${id}/wrong-number`,{method:'POST'});
-    toast(r.new_phone
-      ? `Wrong number retired. Their website lists ${r.new_phone} — it's in Follow-ups for today`
-      : `Wrong number retired. No other number on their website — email them instead`, r.undo_id);
-    await reload();
-  }catch(err){ btn.disabled=false; btn.textContent='Wrong number'; toast(err.message); }
-}
 
 async function drawerAction(dr,e){
   const tr=dr.previousElementSibling; const id=tr.dataset.id;
@@ -1500,7 +1420,6 @@ async function drawerAction(dr,e){
      round trip to be told what the button already said — and it meant the
      quick path stopped working entirely when no API key was set. Only free
      text a human actually typed is worth a model. */
-  if(e.target.closest('[data-wrong]')) return reportWrongNumber(e.target.closest('[data-wrong]'), id, loadCalls);
   const quick=e.target.closest('[data-outcome]');
   if(quick){
     quick.disabled=true;
@@ -1626,17 +1545,9 @@ const OUTCOME_LABEL = {
   answered: 'Answered', voicemail: 'Voicemail', no_answer: 'No answer',
   gatekeeper: 'Manager out',
   not_interested: 'Not interested', callback: 'Asked for a callback',
-  logged: 'Logged', emailed: 'Emailed', wrong_number: 'Wrong number',
+  logged: 'Logged', emailed: 'Emailed',
 };
 const outcomeLabel = o => o ? (OUTCOME_LABEL[o] || o) : '';
-
-/* Whether the venue's own website vouches for the number. Only vouched-for
-   numbers reach the call list (see leadgen.judge_phone). */
-function phoneCheck(l){
-  if(l.phone_status==='confirmed') return '✓ on their website';
-  if(l.phone_status==='from_site') return '✓ from their website';
-  return '';
-}
 
 /* Tries = every attempt to sell them — calls, emails, Facebook messages —
    counted from the touch log. Not `attempts`: that counts calls only, because
@@ -1686,8 +1597,7 @@ function leadDetailsCell(l, cols){
     ${f('Bar',l.name)}${f('Where',l.loc)}${f('Stage',l.status)}
     ${f('Last touch',[outcomeLabel(l.last_outcome),(l.last_touch_at||'').slice(0,10)].filter(Boolean).join(' · '))}
     ${f('Tries',t.total?`${t.total}${why?' ('+why+')':''}`:'')}${f('Call back',l.followup_date)}
-    ${f('Spoke to',l.contact)}${f('Phone',l.phone_dial||l.phone)}
-    ${f('Phone check',l.phone_note||phoneCheck(l))}${f('Email',l.email)}
+    ${f('Spoke to',l.contact)}${f('Phone',l.phone_dial||l.phone)}${f('Email',l.email)}
     ${f('Manager',l.manager_name&&`${l.manager_name}${l.manager_role?' ('+l.manager_role+')':''}`)}
     <p class="hint" style="margin:10px 0 4px">Every attempt <span class="muted">(your time)</span></p>
     ${touches.length?`<table class="attempts">${touches.map((x,i)=>`<tr>
@@ -1804,11 +1714,6 @@ $('pipeStats').onclick=e=>{
 };
 /* Ask AI. Nothing it returns is trusted as markup — the answer is set as
    text and every lead field goes through esc(). */
-/* The same engine as the Follow-ups bar: it answers questions from the book
-   and the call/email log, and when what you paste carries news — a reply
-   from a bar naming a new contact — it updates the lead, with Undo. It used
-   to be read-only (/ask), so it could only say "you should update the lead". */
-let ASK_HISTORY=[];
 async function askAI(){
   const q=$('askInput').value.trim(); if(!q) return;
   const box=$('askOut'), btn=$('askBtn');
@@ -1816,31 +1721,26 @@ async function askAI(){
   box.innerHTML=`<div class="q">${esc(q)}</div><div class="a muted">Thinking…</div>`;
   btn.disabled=true;
   try{
-    const r=await api('/assist',{method:'POST',body:JSON.stringify({
-      text:q, history:ASK_HISTORY.slice(-4)})});
-    ASK_HISTORY.push({you:q, ai:[r.reply,r.question].filter(Boolean).join(' ')});
-    ASK_HISTORY=ASK_HISTORY.slice(-4);
-    $('askInput').value='';
+    const r=await api('/ask',{method:'POST',body:JSON.stringify({question:q})});
     box.innerHTML=`<button class="x" data-close title="Close">×</button>
-      <div class="q">${esc(q)}</div>${assistResult(r)}`;
-    if(r.applied.length) await loadPipeline();
+      <div class="q">${esc(q)}</div><div class="a"></div>
+      ${r.leads.length?`<div class="sheetwrap"><table class="sheet"><thead><tr>
+        <th>BAR</th><th>WHERE</th><th>PHONE</th><th>STAGE</th><th>LAST</th></tr></thead><tbody>
+        ${r.leads.map(l=>`<tr>
+          <td class="nm">${esc(l.name)}</td><td class="muted">${esc(l.loc||'')}</td>
+          <td>${l.phone_dial?`<span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`:''}</td>
+          <td><span class="st st-${esc(l.status)}">${esc((l.status||'').toUpperCase())}</span></td>
+          <td class="muted">${esc(outcomeLabel(l.last_outcome))}</td></tr>`).join('')}
+      </tbody></table></div>`:''}`;
+    box.querySelector('.a').textContent=r.answer;
   }catch(err){
     box.innerHTML=`<div class="q">${esc(q)}</div><div class="a err">${esc(err.message)}</div>`;
   }finally{ btn.disabled=false; }
 }
 $('askBtn').onclick=askAI;
 $('askInput').onkeydown=e=>{ if(e.key==='Enter') askAI(); };
-$('askOut').onclick=async e=>{
+$('askOut').onclick=e=>{
   if(e.target.closest('[data-close]')){ $('askOut').classList.add('hide'); return; }
-  const u=e.target.closest('[data-assist-undo]');
-  if(u){
-    const li=u.closest('li'); u.disabled=true;
-    try{ await api('/undo/'+li.dataset.undo,{method:'POST'});
-         li.classList.add('undone'); u.textContent='Undone'; toast('Put back');
-         await loadPipeline(); }
-    catch(err){ u.disabled=false; toast(err.message); }
-    return;
-  }
   const d=e.target.closest('.digits'); if(d) copyDigits(d);
 };
 
@@ -1911,7 +1811,6 @@ $('pipeBody').onclick=async e=>{
         <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
         <button data-outcome="not_interested" data-note="Not interested.">Not interested</button>
         <button data-outcome="not_interested" data-note="Already has a system/app for inventory.">Has a system</button>
-        <button data-wrong>Wrong number</button>
         <button data-cancel>Cancel</button>
       </div>
       <div class="applied hide"></div></td>`;
@@ -1975,7 +1874,6 @@ async function pipeDrawer(dr,e){
     return;
   }
   if(dr.dataset.mode==='log'){
-    if(e.target.closest('[data-wrong]')) return reportWrongNumber(e.target.closest('[data-wrong]'), id, loadPipeline);
     const quick=e.target.closest('[data-outcome]');
     const ta=dr.querySelector('textarea');
     if(quick){
@@ -2073,27 +1971,7 @@ function miniTable(list){
           <button class="del" data-act="del">Delete</button></div></td>
     </tr>`).join('')}</tbody></table></div>`;
 }
-/* Replies the inbox reader handled on its own (crm.process_inbox): who wrote,
-   what the AI made of it, what it changed — each lead with Undo. */
-async function loadAway(){
-  let d;
-  try{ d=await api('/inbox'); }catch{ return; }
-  const card=$('fAway');
-  card.classList.toggle('hide', !d.items.length && !d.last_processed);
-  $('fAwayNote').textContent = d.last_processed
-    ? ` — replies from bars, read and filed automatically. Last checked ${touchWhen(d.last_processed)}.` : '';
-  $('fAwayList').innerHTML = d.items.length ? d.items.map(it=>`
-    <div style="padding:8px 0;border-top:1px solid var(--line2)">
-      <div style="font-size:13px"><strong>${esc(it.from)}</strong>
-        <span class="muted">· ${esc(it.subject||'')} · ${esc(touchWhen(it.processed_at))}</span></div>
-      ${assistResult({reply:it.reply, question:null, applied:it.applied, skipped:it.skipped})}
-    </div>`).join('')
-    : '<p class="muted" style="margin:0;font-size:13px">No replies from bars yet.</p>';
-}
-$('fAwayList').onclick=e=>$('fAssistOut').onclick(e);   // same Undo handling, looked up at click time
-
 async function loadFollowups(){
-  loadAway();
   const d=await api('/queue');
   // "(50)" when 400 are overdue would be a comforting lie, so when the list is
   // capped the header says so.

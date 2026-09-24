@@ -142,9 +142,6 @@ class _Cursor:
             self._rows = self.book
         elif s.startswith("SELECT lead_id, kind, COUNT(*)"):
             self._rows = []
-        elif s.startswith("SELECT lead_id, kind, outcome, at FROM crm_touches"):
-            self._rows = [{"lead_id": "L-barrel", "kind": "email", "outcome": "emailed",
-                           "at": "2026-09-24T03:00:00+00:00"}]
         elif s.startswith("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE"):
             self._rows = [self.row] if params[0] == self.row["id"] else []
         elif not (s.startswith("INSERT INTO crm_lead_undo") or s.startswith("UPDATE crm_leads")):
@@ -167,11 +164,7 @@ def _wire(monkeypatch, reply):
 
     monkeypatch.setattr(crm, "get_db", db)
     monkeypatch.setattr(crm, "_today", lambda: "2026-09-24")
-    def fake_model(system, user, schema):
-        cur.sent_to_model = user
-        return reply
-
-    monkeypatch.setattr(crm, "_claude_json", fake_model)
+    monkeypatch.setattr(crm, "_claude_json", lambda system, user, schema: reply)
     return cur
 
 
@@ -316,28 +309,3 @@ def test_undoing_an_ai_edit_never_marks_a_real_call_undone(monkeypatch):
     assert not any(s.startswith("UPDATE crm_touches") for s in cur.seen)
     assert any(s.startswith("UPDATE crm_leads SET contact = %s, followup_date = %s")
                for s in cur.seen)
-
-
-def test_the_box_reads_the_call_and_email_log_too(monkeypatch):
-    cur = _wire(monkeypatch, {"reply": "You emailed The Barrel House.", "question": None,
-                              "changes": []})
-    crm.assist_update(crm.AssistRequest(text="who did I email?"), True)
-    assert "TOUCHES (when, your time | lead | kind | outcome)" in cur.sent_to_model
-    assert "| L1 | email | emailed" in cur.sent_to_model
-
-
-def test_a_pasted_reply_naming_a_new_contact_is_kept():
-    # Mean Eyed Cat's reply: bpeterson has left, Jed Thompson handles it now.
-    text = ("Thank you for reaching out but the person you are trying to connect with is "
-            "no longer with the company. If you have any immediate questions regarding "
-            "Lala's Little Nugget, Mean Eyed Cat or Lavaca Street Bar in the Domain, please "
-            "connect with Jed Thompson at jthompson@fbrmgmt.com.")
-    lead = _lead(name="Mean Eyed Cat", contact=None, email="bpeterson@fbrmgmt.com")
-    clean, problems = assist.clean_change(
-        _change(contact="Jed Thompson", email="jthompson@fbrmgmt.com",
-                note="bpeterson has left; Jed Thompson handles the group's venues"),
-        lead, text, TODAY)
-    assert problems == []
-    assert (clean["contact"], clean["email"]) == ("Jed Thompson", "jthompson@fbrmgmt.com")
-    assert "note" in clean and "logged" not in clean
-    assert "A pasted email or message FROM a venue is information to record" in assist.SYSTEM

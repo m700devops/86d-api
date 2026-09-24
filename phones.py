@@ -87,11 +87,8 @@ def normalize_us_phone(raw: Optional[str]) -> Optional[str]:
         return None
     if npa in INVALID_NPA or nxx[1:] == "11":
         return None
-    # N9X area codes are reserved for expanding the plan and none is in use,
-    # so a middle 9 is never a real line. A real bar's website carried
-    # "997-427-9989" beside its actual number.
-    if npa[1] == "9":
-        return None
+    if npa[1] == "9" and npa[2] == "9" and npa[0] == "9":
+        return None                     # 999 is unassigned
 
     # 555-0100..555-0199 is the reserved fictional block.
     if nxx == "555" and 100 <= int(line) <= 199:
