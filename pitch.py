@@ -4,11 +4,12 @@ Everything the drafting model may say about 86'd lives in `master_sheet()`,
 and every fact in it was checked against the code: the order email carries
 the restaurant and manager name (main.py's /orders/email), the trial is 30
 days from sign-up with no card (checkout only opens once it lapses), a
-bottle's distributor, price and par are set once (the product book). One
-claim from the owner's own sample email is deliberately NOT here: "a unique
-order number". The distributor email has none today — its subject is "Order
-from {bar} — {date}" — and a bar that checks is a bar that stops trusting the
-rest. Add it here the day the order email carries one.
+bottle's distributor, price and par are set once (the product book), and each
+emailed order carries its own number (#1001, #1002, … per bar — main.py's
+_next_order_number), in the subject and with a request to put it on the
+invoice. That last one was kept OFF this sheet until the email really carried
+it: the owner's own sample promised "a unique order number" before there was
+one, and a bar that checks a claim and finds it false stops trusting the rest.
 
 The drafts used to be bland for three reasons, all fixed below: the rules
 capped the body at four sentences and banned lists (which ruled out the
@@ -45,7 +46,7 @@ Here's how it works:
 3. In the background, AI organizes everything by distributor.
 4. Tap "Email." Orders go out to all your distributors at once, without ever opening your inbox.
 
-Each order is sent with your restaurant's name and your bar manager's name. You set each product's distributor and price once, and the app remembers it from then on. Every order is saved, so you can look back at your ordering history anytime.
+Each order is sent with its own order number, your restaurant's name and your bar manager's name. You set each product's distributor and price once, and the app remembers it from then on. Every order is saved, so you can look back at your ordering history anytime.
 
 The first month is free, with no credit card required. Just download and go. After that, it's {PRICE}.
 
@@ -104,8 +105,10 @@ HOW IT WORKS
    to open their inbox or write an order by hand.
 
 DETAILS THAT ARE TRUE
-- Every order goes out with the restaurant's name and the bar manager's name on it, and
-  the bar gets a copy.
+- Every order goes out with its own order number (#1001, #1002, … for each bar), the
+  restaurant's name and the bar manager's name on it, and the bar gets a copy. The email
+  asks the distributor to put the number on the invoice, so a delivery or a bill can be
+  matched to the order that asked for it.
 - Each bottle's distributor, price and par level are set once; the app remembers them,
   so the next count only asks for the number. The first count builds the book as you go:
   there's no setup day.

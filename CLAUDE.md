@@ -237,7 +237,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py -q` (475 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_lead_finding.py test_order_numbers.py -q` (480 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -318,6 +318,21 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - POST /inventory/{session_id}/voice — voice notes
 - POST /inventory/{session_id}/complete
 - GET/POST /distributors — distributor management
+- POST /orders/email — one email per distributor via Resend. **Every send carries an ORDER
+  NUMBER**: `_next_order_number()` draws the bar's next one (#1001, #1002, … per ACCOUNT, not
+  per location — the distributor list, business name and sign-off are all per account) from
+  `users.last_order_number`, and commits that BEFORE any email goes, so a failure after the
+  send can never hand the same number to the next order (a gap is harmless; a repeat is the
+  one thing a reference number must never do). Drawn only once an email is actually about to
+  go, so a send where no distributor had an address burns nothing. One number per send,
+  shared by every distributor's email; a re-send to one that failed is a new order with a new
+  number. It leads the subject ("Order #1042 from {bar} — {date}"), opens the body and is
+  asked for on the invoice (`helpers.order_email()`, pure, test_order_numbers.py). Saved in
+  `orders.order_number` and returned by `/orders/email`, `GET /orders` and `GET /orders/{id}`;
+  `GET /orders?q=1042` (or `#1042`) finds it. Orders sent before this stay NULL — no
+  distributor ever saw a number on them, so backfilling one would be a reference nobody else
+  can match. `OrderResponse` declares the field: a field the response_model doesn't list is
+  silently dropped before it reaches the app
 - POST /billing/create-checkout-session — Stripe hosted checkout (no IAP, checkout happens in system browser)
 - GET /health, GET / (API info), GET /docs
 
@@ -929,8 +944,9 @@ capture. Don't reintroduce them or describe them as current.)
   number or URL that isn't on the sheet or in WHAT WE KNOW. `_draft_system(row)` builds WHAT
   WE KNOW from the lead's venue facts (with sources), the cached prep-sheet points and — for
   a first email; a follow-up's ask carries its own — the logged history. **The owner's sample
-  claimed "a unique order number"; the distributor email has none** (subject "Order from
-  {bar} — {date}"), so the sheet leaves it out until one exists. Numbers and links are
+  claimed "a unique order number" before the distributor email had one, so the sheet left it
+  out until it was real** — it is now (see ORDER NUMBERS), and the sheet says so. A claim a
+  bar can check and find false costs every other line on the sheet. Numbers and links are
   env-overridable: COMPANY_OWNER_NAME, COMPANY_OWNER_TITLE, COMPANY_PHONE, COMPANY_PRICE,
   COMPANY_APP_URL, COMPANY_WEBSITE. **The sheet is a rep's briefing, not just facts**: WHAT
   IT DOES NOT DO (no Android, no POS link, no fill-level reading, no distributor portals, NO
