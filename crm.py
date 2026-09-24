@@ -628,6 +628,7 @@ def _blank_to_none(value):
 
 @crm_router.get("/leads", response_model=dict)
 def list_leads(status: Optional[str] = None, q: Optional[str] = None,
+               first: Optional[str] = None,
                limit: int = 200, offset: int = 0,
                _: bool = Depends(require_crm_key)):
     """The whole pipeline: every lead, at every stage, searchable.
@@ -677,11 +678,16 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         cursor = conn.cursor()
         cursor.execute(f"SELECT COUNT(*) AS n FROM crm_leads WHERE {sql_where}", params)
         matching = cursor.fetchone()["n"]
+        # `first` = a stage to float to the top (the CRM tab's clickable STAGE
+        # header). Done here, not in the page, so it holds across pages.
+        stage_first, order_params = "", []
+        if first in VALID_STATUSES:
+            stage_first, order_params = "(status = %s) DESC, ", [first]
         cursor.execute(
             f"""SELECT * FROM crm_leads WHERE {sql_where}
-                 ORDER BY COALESCE(last_touch_at, updated_at) DESC, created_at DESC
+                 ORDER BY {stage_first}COALESCE(last_touch_at, updated_at) DESC, created_at DESC
                  LIMIT %s OFFSET %s""",
-            params + [limit, offset])
+            params + order_params + [limit, offset])
         leads = [_lead_row(row) for row in cursor.fetchall()]
 
         # Always the totals for the whole pipeline, not for the current filter:

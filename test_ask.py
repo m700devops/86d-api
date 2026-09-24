@@ -133,3 +133,14 @@ def test_unknown_view_is_rejected(monkeypatch):
     import pytest
     with pytest.raises(crm.HTTPException):
         _list(monkeypatch, "bogus")
+
+
+def test_first_floats_one_stage_to_the_top_and_ignores_junk(monkeypatch):
+    cur = _LeadsCursor()
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
+    crm.list_leads(status="open", q=None, first="warm", limit=100, offset=0)
+    assert "ORDER BY (status = %s) DESC" in cur.sql[1]
+    cur2 = _LeadsCursor()
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur2))
+    crm.list_leads(status="open", q=None, first="'; DROP TABLE x;--", limit=100, offset=0)
+    assert "(status = %s) DESC" not in cur2.sql[1]     # not a stage -> ignored, never interpolated

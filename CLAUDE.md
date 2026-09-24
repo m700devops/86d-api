@@ -524,6 +524,10 @@ capture. Don't reintroduce them or describe them as current.)
   the same `loadPipeline()` and the same row-click handler (`TAB` picks the list), so Log /
   Email / Edit / Delete behave identically in both
 - **Two buttons only: Open and Dead** (`status=open` on `/leads` — see above).
+- **The STAGE header is clickable** on the CRM tab: each click floats the next stage to the
+  top (Warm → Contacted → Won → back to most-recently-worked). Sorted server-side via
+  `/leads?first=<stage>` (`ORDER BY (status = %s) DESC, …`, only accepted when it's a real
+  stage) so it holds across pages
   Every lead is Open until they said no — not interested, already have a system or an app,
   don't call again — and the debrief/quick-add prompts send exactly those to `dead`. The five
   stage chips this replaced (In play / Not called yet / Won / Dead / Everything) made the

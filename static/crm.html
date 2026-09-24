@@ -59,6 +59,11 @@
   .pipebar button{flex:none;white-space:nowrap}
   /* Open / Dead — the CRM tab's only two views. */
   .stands{font-size:13px;line-height:1.35;min-width:220px}
+  /* Clickable column header — styled as a header, not a button. */
+  .thsort{background:none;border:0;padding:0;font:inherit;color:inherit;letter-spacing:inherit;
+          cursor:pointer;white-space:nowrap}
+  .thsort span{margin-left:4px;color:var(--text3)}
+  .thsort:hover,.thsort.on,.thsort.on span{color:var(--accent)}
   .stands .err{font-weight:600}
   .glance{display:flex;gap:8px;margin-bottom:14px}
   .glance button{font-size:14px;font-weight:700;padding:9px 18px;border-radius:10px}
@@ -1445,7 +1450,11 @@ async function drawerAction(dr,e){
    Only bars you've WORKED are here — a call or email logged. The ones nobody
    has contacted yet live in the burger's Yet to Contact tab, which renders
    through this same function and the same row buttons (TAB decides which). */
-let PIPE={view:'open',q:'',offset:0};
+let PIPE={view:'open',q:'',offset:0,first:''};
+// Click STAGE to float one stage to the top; each click moves to the next,
+// then back to the normal order (most recently worked first).
+const STAGE_CYCLE=['','warm','contacted','won'];
+const STAGE_NAME={warm:'Warm',contacted:'Contacted',won:'Won'};
 let YET={q:'',offset:0};
 const leadList=()=>TAB==='yet'
   ? {S:YET, body:$('yetBody')} : {S:PIPE, body:$('pipeBody')};
@@ -1461,6 +1470,7 @@ async function loadPipeline(){
   const qs=new URLSearchParams();
   qs.set('status', yet?'untouched':searching?'worked':PIPE.view);
   if(S.q) qs.set('q',S.q);
+  if(!yet&&PIPE.first) qs.set('first',PIPE.first);
   qs.set('offset',S.offset); qs.set('limit',100);
   const d=await api('/leads?'+qs);
 
@@ -1486,7 +1496,11 @@ async function loadPipeline(){
     <div class="zone"><div class="sheetwrap">
       <table class="sheet">
         <thead><tr>
-          <th></th><th>BAR</th><th>STAGE</th><th>PHONE</th><th>WHERE THINGS STAND</th><th></th>
+          <th></th><th>BAR</th>
+          <th>${yet?'STAGE':`<button class="thsort ${PIPE.first?'on':''}" data-sortstage
+               title="Click to put a stage at the top">STAGE ${PIPE.first
+               ?`<span>· ${esc(STAGE_NAME[PIPE.first])} first</span>`:'<span>⇅</span>'}</button>`}</th>
+          <th>PHONE</th><th>WHERE THINGS STAND</th><th></th>
         </tr></thead>
         <tbody>${d.leads.map((l,i)=>pipeRow(l,S.offset+i+1)).join('')}</tbody>
       </table>
@@ -1662,6 +1676,11 @@ $('pipeBody').onclick=async e=>{
   const page=e.target.closest('button[data-page]');
   if(page){ const {S}=leadList(); S.offset=Math.max(0,S.offset+(+page.dataset.page)*100);
             return loadPipeline().catch(x=>toast(x.message)); }
+  if(e.target.closest('[data-sortstage]')){
+    PIPE.first=STAGE_CYCLE[(STAGE_CYCLE.indexOf(PIPE.first)+1)%STAGE_CYCLE.length];
+    PIPE.offset=0;
+    return loadPipeline().catch(x=>toast(x.message));
+  }
 
   const cp=e.target.closest('[data-act="copy"]'); if(cp) return copyDigits(cp);
   const dig=e.target.closest('.digits'); if(dig) return copyDigits(dig);
