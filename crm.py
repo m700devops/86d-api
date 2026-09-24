@@ -181,6 +181,16 @@ def init_crm_tables():
         # Every Message-ID the CRM sent, so a reply is tied to its lead even
         # when it comes back from a different address than it went to.
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_sent_emails (
+                touch_id TEXT PRIMARY KEY,      -- the 'email' row in crm_touches
+                lead_id TEXT NOT NULL,
+                to_addr TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                sent_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS crm_sent_messages (
                 message_id TEXT PRIMARY KEY,
                 lead_id TEXT NOT NULL,
@@ -809,11 +819,11 @@ def get_lead(lead_id: str, _: bool = Depends(require_crm_key)):
         # Every attempt to sell them, for the details drawer — undone ones
         # excluded, same as the tally.
         cursor.execute("""
-            SELECT kind, outcome, at FROM crm_touches
+            SELECT id, kind, outcome, at FROM crm_touches
              WHERE lead_id = %s AND outcome IS DISTINCT FROM 'undone'
              ORDER BY at ASC
         """, (lead_id,))
-        touches = [{"kind": t["kind"], "outcome": t["outcome"], "at": t["at"]}
+        touches = [{"id": t["id"], "kind": t["kind"], "outcome": t["outcome"], "at": t["at"]}
                    for t in cursor.fetchall()]
     lead = _lead_row(row)
     lead["window"] = _call_window(row.get("tz_offset_hours"),
@@ -821,6 +831,74 @@ def get_lead(lead_id: str, _: bool = Depends(require_crm_key)):
     lead["touches"] = touches
     lead["tries"] = _tries((t["kind"], 1) for t in touches)
     return {"lead": lead}
+
+
+def _parse_utc(value) -> Optional[datetime]:
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+_NOTE_EMAIL_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2})\] email to (\S{1,200}): (.{0,300})$", re.M)
+
+
+def _email_from_notes(notes: Optional[str], at: str) -> Optional[dict]:
+    """The note line an email left behind — for mail sent before bodies were
+    kept, it's all there is: the date, the address and the subject. The note
+    is dated in the CRM's day and the touch in UTC, so the nearest day wins."""
+    when = _parse_utc(at)
+    if not when:
+        return None
+    day, best = when.date(), None
+    for when, to, subject in _NOTE_EMAIL_RE.findall(notes or ""):
+        try:
+            gap = abs((date.fromisoformat(when) - day).days)
+        except ValueError:
+            continue
+        if gap <= 1 and (best is None or gap < best[0]):
+            best = (gap, to, subject.strip())
+    return {"to": best[1], "subject": best[2]} if best else None
+
+
+@crm_router.get("/leads/{lead_id}/touches/{touch_id}/email", response_model=dict)
+def sent_email(lead_id: str, touch_id: str, _: bool = Depends(require_crm_key)):
+    """The email behind one 'email' attempt, for the details panel.
+
+    Kept on every send since this was added. Earlier ones are recovered where
+    something still holds them: a scheduled send kept its body in
+    crm_scheduled_emails; a send-now left only its subject in the notes, and
+    the answer says so rather than pretending there's nothing.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_touches WHERE id = %s AND lead_id = %s",
+                       (touch_id, lead_id))
+        touch = cursor.fetchone()
+        if not touch or touch["kind"] != "email":
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "No email attempt with that id."})
+        cursor.execute("SELECT * FROM crm_sent_emails WHERE touch_id = %s", (touch_id,))
+        kept = cursor.fetchone()
+        if kept:
+            return {"to": kept["to_addr"], "subject": kept["subject"], "body": kept["body"],
+                    "sent_at": kept["sent_at"], "complete": True}
+        cursor.execute("""
+            SELECT to_addr, subject, body, sent_at FROM crm_scheduled_emails
+             WHERE lead_id = %s AND status = 'sent' AND sent_at IS NOT NULL
+        """, (lead_id,))
+        at = _parse_utc(touch["at"])
+        for job in cursor.fetchall():
+            sent = _parse_utc(job["sent_at"])
+            if at and sent and abs((sent - at).total_seconds()) <= 600:
+                return {"to": job["to_addr"], "subject": job["subject"], "body": job["body"],
+                        "sent_at": job["sent_at"], "complete": True}
+        cursor.execute("SELECT notes FROM crm_leads WHERE id = %s", (lead_id,))
+        row = cursor.fetchone()
+    found = _email_from_notes(row["notes"] if row else None, touch["at"]) or {}
+    return {"to": found.get("to"), "subject": found.get("subject"), "body": None,
+            "sent_at": touch["at"], "complete": False}
 
 
 @crm_router.post("/leads", response_model=dict, status_code=201)
@@ -2188,7 +2266,8 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
     now = now_iso()
     with get_db() as conn:
         cursor = conn.cursor()
-        undo_id = _record_email_sent(cursor, lead_id, to, data.subject, today, now)
+        undo_id = _record_email_sent(cursor, lead_id, to, data.subject, today, now,
+                                     body=data.body)
         _remember_sent(cursor, sent.get("message_id"), lead_id, now)
         cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
         updated = cursor.fetchone()
@@ -2430,7 +2509,7 @@ def run_due_emails(limit: int = 20) -> dict:
             try:
                 _remember_sent(cursor, sent_msg.get("message_id"), job["lead_id"], now_iso())
                 _record_email_sent(cursor, job["lead_id"], job["to_addr"],
-                                   job["subject"], _today(), now_iso())
+                                   job["subject"], _today(), now_iso(), body=job["body"])
             except Exception as exc:
                 # The mail is already gone; a bookkeeping failure must not make
                 # it look unsent. Say so loudly and keep the 'sent' status.
@@ -2452,7 +2531,7 @@ def _remember_sent(cursor, message_id: Optional[str], lead_id: str, now: str) ->
 
 
 def _record_email_sent(cursor, lead_id: str, to: str, subject: str,
-                       today: str, now: str) -> str:
+                       today: str, now: str, body: Optional[str] = None) -> str:
     """Everything that happens to a lead once mail has actually gone out.
 
     Shared by the send-now path and the scheduled worker so a queued email
@@ -2478,9 +2557,16 @@ def _record_email_sent(cursor, lead_id: str, to: str, subject: str,
         if to.lower() != (lead["email"] or "").lower():
             sets.append("email = %s"); params.append(to)
 
-        _attach_touch(cursor, undo_id, _record_touch(
-            cursor, lead, "email", "emailed", lead["attempts"] or 0,
-            lead.get("tz_offset_hours")))
+        touch_id = _record_touch(cursor, lead, "email", "emailed", lead["attempts"] or 0,
+                                 lead.get("tz_offset_hours"))
+        _attach_touch(cursor, undo_id, touch_id)
+        # What was actually said, so the attempt can be opened later. Only the
+        # subject used to survive, as a line in the notes.
+        if body is not None:
+            cursor.execute("""
+                INSERT INTO crm_sent_emails (touch_id, lead_id, to_addr, subject, body, sent_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (touch_id, lead_id, to, subject.strip(), body, now))
         # Whatever was queued has now gone, so the badge comes off.
         sets.append("queued_email_at = NULL")
         params.append(lead_id)

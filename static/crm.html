@@ -34,6 +34,14 @@
   .attempts{border-collapse:collapse;font-size:13px;margin:0 0 4px}
   .attempts td{padding:3px 14px 3px 0;border:0;background:none !important;vertical-align:top}
   .attempts td:first-child{color:var(--text3)}
+  .attempts tr.mailtouch{cursor:pointer}
+  .attempts tr.mailtouch:hover td{color:var(--text)}
+  .attempts .linkish{text-decoration:underline dotted;text-underline-offset:3px}
+  .attempts tr.open .linkish{text-decoration:none}
+  .sentmail td{padding:4px 0 10px !important}
+  .sentmail .box{border:1px solid var(--line2);background:var(--surface2);border-radius:8px;padding:10px 12px;max-width:720px}
+  .sentmail .hd{font-size:12px;color:var(--text3);margin-bottom:6px;line-height:1.5}
+  .sentmail .bd{white-space:pre-wrap;font-size:13px;line-height:1.55}
   .card.muted .hint{margin-top:8px}
   .card.muted button.go{margin-top:4px}
 
@@ -860,6 +868,29 @@ document.addEventListener('click', e=>{
   if(!e.target.closest('.menuwrap')) closeMenu();
 });
 document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeMenu(); });
+
+/* An "Email" line in any details panel's attempt list opens the email that
+   was sent, right under it; a second click folds it away. Delegated here so
+   the CRM, Yet to Contact and Follow-ups panels all get it from one place. */
+document.addEventListener('click', async e=>{
+  const row=e.target.closest('tr[data-email-touch]'); if(!row) return;
+  const next=row.nextElementSibling;
+  if(next?.classList.contains('sentmail')){ next.remove(); row.classList.remove('open'); return; }
+  let m;
+  try{ m=await api(`/leads/${encodeURIComponent(row.dataset.lead)}/touches/${encodeURIComponent(row.dataset.emailTouch)}/email`); }
+  catch(err){ return toast(err.message); }
+  if(row.nextElementSibling?.classList.contains('sentmail')) return;   // a double click
+  const v=document.createElement('tr'); v.className='sentmail';
+  const hd=[m.to&&`To: ${esc(m.to)}`, m.subject&&`Subject: <strong>${esc(m.subject)}</strong>`]
+    .filter(Boolean).join('<br>');
+  v.innerHTML=`<td></td><td colspan="3"><div class="box">
+    ${hd?`<div class="hd">${hd}</div>`:''}
+    ${m.body!=null?`<div class="bd">${esc(m.body)}</div>`
+      :`<div class="muted" style="font-size:13px">The text of this one wasn't saved — emails sent
+        before Sep 24 only kept their subject. Every email from now on is kept in full.</div>`}
+  </div></td>`;
+  row.classList.add('open'); row.after(v);
+});
 
 function switchTab(b){
   const prev=TAB;
@@ -1690,10 +1721,12 @@ function leadDetailsCell(l, cols){
     ${f('Phone check',l.phone_note||phoneCheck(l))}${f('Email',l.email)}
     ${f('Manager',l.manager_name&&`${l.manager_name}${l.manager_role?' ('+l.manager_role+')':''}`)}
     <p class="hint" style="margin:10px 0 4px">Every attempt <span class="muted">(your time)</span></p>
-    ${touches.length?`<table class="attempts">${touches.map((x,i)=>`<tr>
+    ${touches.length?`<table class="attempts">${touches.map((x,i)=>{
+        const mail=x.kind==='email'&&x.id;
+        return `<tr${mail?` class="mailtouch" data-email-touch="${esc(x.id)}" data-lead="${esc(l.id)}" title="Show the email that was sent"`:''}>
         <td>${i+1}</td><td>${esc(touchWhen(x.at))}</td>
         <td><strong>${esc(TOUCH_KIND[x.kind]||x.kind)}</strong></td>
-        <td>${esc(x.kind==='email'?'Sent':outcomeLabel(x.outcome))}</td></tr>`).join('')}</table>`
+        <td>${mail?'Sent · <span class="linkish">view email</span>':esc(x.kind==='email'?'Sent':outcomeLabel(x.outcome))}</td></tr>`;}).join('')}</table>`
       :'<p class="muted" style="margin:0;font-size:13px">None logged yet.</p>'}
     <p class="hint" style="margin:10px 0 4px">Notes &amp; history</p>
     <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>

@@ -192,7 +192,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
   test_ask.py test_apple.py test_followup_email.py test_tries.py test_dedupe.py
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
-  test_hostile_pages.py -q` (383 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_hostile_pages.py test_sent_email.py -q` (391 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -812,6 +812,13 @@ capture. Don't reintroduce them or describe them as current.)
 - **Follow-ups rows have an Edit button** (between Email and Delete), and the details panel
   has one beside Close. Both open `leadEditCell()` — one form shared with the CRM tab, now
   with Bar and Where as well — saving through `PATCH /leads/{id}`
+- **An email in "Every attempt" opens the email itself.** Every send (now or scheduled) keeps
+  its to/subject/body in `crm_sent_emails`, keyed by the attempt's `crm_touches` id;
+  `GET /leads/{id}/touches/{touch_id}/email` returns it. Sends from before that table existed
+  come back from `crm_scheduled_emails` (a held send kept its body) or, for a send-now, from
+  the notes line — subject and address only, with `complete: false` so the page says the
+  text wasn't kept rather than showing a blank. One delegated click handler in crm.html
+  serves the CRM, Yet to Contact and Follow-ups panels. Covered by test_sent_email.py
 - **Follow-ups rows are clickable too**, opening the same full record as the CRM tab —
   `leadDetailsCell()` in crm.html, shared by CRM, Yet to Contact and Follow-ups so they can't
   drift: every field, an "Every attempt" list (each call/email in the operator's own clock,
