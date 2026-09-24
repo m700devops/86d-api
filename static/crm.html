@@ -483,6 +483,8 @@
             <em>warm up and learn before you dial</em></button>
           <button data-tab="yet" role="menuitem">Yet to Contact
             <em>bars on the list nobody has called or emailed yet</em></button>
+          <button data-tab="brain" role="menuitem">AI Brain
+            <em>what the AI knows, your instructions, what it has learned</em></button>
         </div>
       </div>
     </div>
@@ -745,6 +747,38 @@
     <!-- Read-only roster: who actually signed up, not who to work. The
          pipeline tab is the list with actions on it; this one just answers
          "did it work" one account at a time instead of as a funnel total. -->
+    <!-- The company brain (playbook.py): what every AI works from. The
+         master sheet is fixed in code; the instructions are the owner's; the
+         playbook is learned from the log about once a day. -->
+    <section data-panel="brain" class="hide">
+      <div class="card">
+        <strong>Your standing instructions</strong>
+        <p class="hint" style="margin:4px 0 8px">Anything the AI should always know or do when it
+          writes emails, preps a call or coaches you. You're the authority here: facts you put in
+          are treated as true. For example: <em>"I'm free for demos Tuesday and Thursday
+          afternoons." "Don't lead with the price in a first email." "Our Denver customers love
+          the one-tap distributor emails."</em></p>
+        <textarea id="brainNotes" rows="6" maxlength="8000"
+          placeholder="Type instructions for the AI, one per line…"></textarea>
+        <div class="row" style="margin-top:8px;align-items:center;gap:10px">
+          <button class="go" id="brainSave">Save instructions</button>
+          <span class="muted" id="brainSaved" style="font-size:13px"></span></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <div class="row" style="justify-content:space-between;align-items:center;gap:10px">
+          <strong>What it has learned from your calls</strong>
+          <button id="brainRefresh">Re-learn now</button></div>
+        <p class="hint" style="margin:4px 0 8px" id="brainWhen"></p>
+        <div id="brainPlaybook"></div>
+      </div>
+      <details class="card" style="margin-top:12px">
+        <summary><strong>What it knows about 86'd</strong>
+          <span class="muted" style="font-size:13px"> — the master sheet, the only product facts
+          it may state</span></summary>
+        <pre id="brainSheet" style="white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.5;margin:10px 0 0"></pre>
+      </details>
+    </section>
+
     <section data-panel="users" class="hide">
       <div class="pipebar">
         <input id="usersSearch" placeholder="Search a customer by business, manager, name or email…">
@@ -915,7 +949,7 @@ function switchTab(b){
     .forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
-    apple:loadApple,users:loadUsers,yet:loadPipeline,
+    apple:loadApple,users:loadUsers,yet:loadPipeline,brain:loadBrain,
     school:loadSchoolPanel}[TAB])()
     .catch(e=>toast(e.message));
 }
@@ -2357,6 +2391,54 @@ const tile=(n,l)=>`<div class="stat"><div class="n">${esc(n)}</div><div class="l
 let USERS={status:'',q:'',offset:0};
 let usersTimer=null;
 const USER_STAGES=[['','All'],['trial','Trial'],['active','Paying'],['canceled','Canceled']];
+
+/* ── AI Brain ─────────────────────────────────────────────────────────── */
+let brainPoll=null, brainWait=null;   // brainWait: {from, until} after "Re-learn now"
+async function loadBrain(){
+  const d=await api('/brain');
+  if(brainWait && (d.playbook_refreshed_at!==brainWait.from || d.playbook_error!==brainWait.err
+                   || Date.now()>brainWait.until)) brainWait=null;
+  if(brainWait) d.refreshing=true;
+  const notes=$('brainNotes');
+  if(document.activeElement!==notes) notes.value=d.owner_notes||'';
+  $('brainSaved').textContent=d.owner_notes_updated_at?`Saved ${touchWhen(d.owner_notes_updated_at)}`:'';
+  $('brainSheet').textContent=d.master_sheet||'';
+  const pb=d.playbook;
+  $('brainWhen').textContent = d.refreshing ? 'Learning from the log now — this takes a minute…'
+    : d.playbook_refreshed_at ? `Learned ${touchWhen(d.playbook_refreshed_at)} from your calls, emails and replies. It re-learns about once a day when there's something new.`
+    : `It starts learning once ${d.min_touches} calls and emails are logged, then keeps learning about once a day.`;
+  $('brainRefresh').disabled=!!d.refreshing;
+  $('brainPlaybook').innerHTML =
+    (d.playbook_error?`<p class="err" style="font-size:13px">Last try failed: ${esc(d.playbook_error)}</p>`:'')
+    + (pb&&pb.sections&&pb.sections.length
+      ? (pb.summary?`<p style="margin:0 0 10px">${esc(pb.summary)}</p>`:'')
+        + pb.sections.map(sec=>`<div style="margin:10px 0">
+            <div style="font-weight:600;font-size:14px">${esc(sec.title)}</div>
+            <ul style="margin:4px 0 0;padding-left:18px">${sec.points.map(p=>`
+              <li style="margin:4px 0;font-size:13px;line-height:1.5">${esc(p.text)}
+                <span class="muted"> — ${esc(p.evidence.join(', '))}</span></li>`).join('')}</ul></div>`).join('')
+      : '<p class="muted" style="margin:0;font-size:13px">Nothing learned yet.</p>');
+  clearTimeout(brainPoll);
+  if(d.refreshing && TAB==='brain') brainPoll=setTimeout(()=>loadBrain().catch(()=>{}),8000);
+}
+$('brainSave').onclick=async()=>{
+  const b=$('brainSave'); b.disabled=true;
+  try{
+    const r=await api('/brain/notes',{method:'PUT',body:JSON.stringify({text:$('brainNotes').value})});
+    $('brainSaved').textContent=`Saved ${touchWhen(r.owner_notes_updated_at)}`;
+    toast('Instructions saved — every AI uses them from now on');
+  }catch(err){ toast(err.message); }
+  b.disabled=false;
+};
+$('brainRefresh').onclick=async()=>{
+  try{
+    const before=await api('/brain');
+    const r=await api('/brain/refresh',{method:'POST'});
+    if(!r.started) toast(r.message||'Already learning');
+    else brainWait={from:before.playbook_refreshed_at, err:before.playbook_error, until:Date.now()+180000};
+    await loadBrain();
+  }catch(err){ toast(err.message); }
+};
 
 async function loadUsers(){
   const qs=new URLSearchParams();

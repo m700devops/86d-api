@@ -294,6 +294,21 @@ def init_crm_tables():
             ON CONFLICT (id) DO NOTHING
         """, (_today(), now_iso()))
 
+        # The company brain (playbook.py): one row, pinned like crm_counters.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_ai_brain (
+                id INTEGER PRIMARY KEY,
+                owner_notes TEXT,
+                owner_notes_updated_at TEXT,
+                playbook TEXT,
+                playbook_refreshed_at TEXT,
+                playbook_touches INTEGER,
+                playbook_error TEXT,
+                CONSTRAINT crm_ai_brain_single_row CHECK (id = 1)
+            )
+        """)
+        cursor.execute("INSERT INTO crm_ai_brain (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
+
         conn.commit()
 
         # Deliberately loud and distinctive: this is the line to grep for in
@@ -1061,6 +1076,21 @@ def _load_counters_locked(cursor) -> dict:
             VALUES (1, %s, %s)
             ON CONFLICT (id) DO NOTHING
         """, (_today(), now_iso()))
+
+        # The company brain (playbook.py): one row, pinned like crm_counters.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_ai_brain (
+                id INTEGER PRIMARY KEY,
+                owner_notes TEXT,
+                owner_notes_updated_at TEXT,
+                playbook TEXT,
+                playbook_refreshed_at TEXT,
+                playbook_touches INTEGER,
+                playbook_error TEXT,
+                CONSTRAINT crm_ai_brain_single_row CHECK (id = 1)
+            )
+        """)
+        cursor.execute("INSERT INTO crm_ai_brain (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
         cursor.execute("SELECT * FROM crm_counters WHERE id = 1 FOR UPDATE")
         row = cursor.fetchone()
 
@@ -1863,6 +1893,202 @@ def _draft_system(row: dict, include_log: bool = True) -> str:
             log = "…" + log[-DRAFT_LOG_CHARS:]
     ctx = pitch.lead_context(lead, lines, [str(p) for p in points if p][:3], log)
     return pitch.system_prompt(ctx)
+
+
+# ============== THE COMPANY BRAIN ==============
+#
+# What the owner tells the AI (standing instructions, typed on the AI Brain
+# page) and what the AI has learned from the log (the playbook, refreshed
+# about once a day). See playbook.py. Read by the drafter, the prep sheet and
+# the School through _knowledge(); the master sheet stays the only source of
+# product facts.
+
+PLAYBOOK_MIN_TOUCHES = 5         # below this there is nothing to learn from yet
+PLAYBOOK_EVERY_HOURS = 20
+PLAYBOOK_NEW_TOUCHES = 3         # a refresh needs this much new activity
+PLAYBOOK_DAYS = 90
+_playbook_lock = threading.Lock()
+
+
+def _brain_row() -> dict:
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM crm_ai_brain WHERE id = 1")
+            row = cursor.fetchone()
+        return dict(row) if row else {}
+    except Exception as exc:
+        # A missing table must never take the drafter or the prep sheet down.
+        print(f"[crm] brain read failed: {exc}", flush=True)
+        return {}
+
+
+def _playbook_of(row: dict) -> Optional[dict]:
+    try:
+        pb = json.loads(row.get("playbook") or "null")
+    except (TypeError, ValueError):
+        return None
+    return pb if isinstance(pb, dict) else None
+
+
+def _knowledge(playbook: bool = True) -> str:
+    """The owner's instructions and (optionally) the playbook, as prompt text.
+    Empty when neither exists yet."""
+    import playbook as _pb
+    row = _brain_row()
+    parts = [_pb.render_owner(row.get("owner_notes"))]
+    if playbook:
+        parts.append(_pb.render(_playbook_of(row), row.get("playbook_refreshed_at")))
+    return "\n\n".join(p for p in parts if p)
+
+
+def _playbook_inputs(cursor, today: str) -> tuple[str, list, int]:
+    """(the digest the model reads, the bar names it may cite, touch count)."""
+    import playbook as _pb
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=PLAYBOOK_DAYS)).isoformat()
+    cursor.execute("SELECT COUNT(*) AS n FROM crm_touches WHERE outcome IS DISTINCT FROM 'undone'")
+    touches = cursor.fetchone()["n"]
+    cursor.execute("""
+        SELECT id, name, loc, status, last_outcome, notes FROM crm_leads
+         WHERE last_touch_at IS NOT NULL AND last_touch_at >= %s
+         ORDER BY last_touch_at DESC LIMIT 150
+    """, (cutoff,))
+    leads = cursor.fetchall()
+    names = {l["id"]: l["name"] for l in leads}
+    cursor.execute("""
+        SELECT from_name, from_addr, subject, lead_ids, result, processed_at FROM crm_inbox
+         WHERE status IN ('updated', 'no_change') AND processed_at >= %s
+         ORDER BY processed_at DESC LIMIT 60
+    """, (cutoff,))
+    inbox = cursor.fetchall()
+    replies, replied_at = [], {}
+    for r in inbox:
+        try:
+            said = (json.loads(r["result"] or "{}") or {}).get("reply")
+        except ValueError:
+            said = None
+        ids = [i for i in (r["lead_ids"] or "").split(",") if i]
+        for i in ids:
+            replied_at[i] = max(replied_at.get(i, ""), r["processed_at"] or "")
+        replies.append({"from": r["from_name"] or r["from_addr"], "subject": r["subject"],
+                        "about": ", ".join(names.get(i, "") for i in ids if names.get(i)) or "a bar",
+                        "said": said or r["subject"]})
+    cursor.execute("""
+        SELECT t.lead_id, t.at, e.subject FROM crm_touches t
+          LEFT JOIN crm_sent_emails e ON e.touch_id = t.id
+         WHERE t.kind = 'email' AND t.outcome IS DISTINCT FROM 'undone' AND t.at >= %s
+         ORDER BY t.at DESC LIMIT 80
+    """, (cutoff,))
+    emails = [{"lead": names.get(e["lead_id"], "a bar"),
+               "subject": e["subject"] or "(subject not kept)",
+               "replied": replied_at.get(e["lead_id"], "") > (e["at"] or "")}
+              for e in cursor.fetchall()]
+    return _pb.digest(leads, replies, emails, today), list(names.values()), touches
+
+
+def refresh_playbook(force: bool = False) -> dict:
+    """Rewrite the playbook from the log if there's something new to learn.
+
+    Skips (no model call) when fewer than PLAYBOOK_MIN_TOUCHES calls/emails
+    are logged at all, or — unless forced — when the last refresh is under
+    PLAYBOOK_EVERY_HOURS old or fewer than PLAYBOOK_NEW_TOUCHES touches have
+    been logged since. One refresh at a time.
+    """
+    import playbook as _pb
+
+    if not _playbook_lock.acquire(blocking=False):
+        return {"skipped": "a refresh is already running"}
+    try:
+        today = _today()
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM crm_ai_brain WHERE id = 1")
+            row = dict(cursor.fetchone() or {})
+            digest, names, touches = _playbook_inputs(cursor, today)
+        if touches < PLAYBOOK_MIN_TOUCHES:
+            return {"skipped": f"only {touches} calls and emails logged so far — "
+                               f"it starts learning at {PLAYBOOK_MIN_TOUCHES}"}
+        last = _parse_utc(row.get("playbook_refreshed_at"))
+        fresh = last and datetime.now(timezone.utc) - last < timedelta(hours=PLAYBOOK_EVERY_HOURS)
+        quiet = touches - (row.get("playbook_touches") or 0) < PLAYBOOK_NEW_TOUCHES
+        if not force and row.get("playbook") and (fresh or quiet):
+            return {"skipped": "nothing new to learn since the last refresh"}
+        try:
+            out = _claude_json(_pb.SYSTEM, digest, _pb.SCHEMA, purpose="playbook")
+            pb = _pb.clean(out, names)
+            error = None
+        except HTTPException as exc:
+            pb, error = None, str((exc.detail or {}).get("message") if isinstance(exc.detail, dict)
+                                  else exc.detail)[:300]
+        with get_db() as conn:
+            cursor = conn.cursor()
+            if pb is not None:
+                cursor.execute("""
+                    UPDATE crm_ai_brain SET playbook = %s, playbook_refreshed_at = %s,
+                           playbook_touches = %s, playbook_error = NULL WHERE id = 1
+                """, (json.dumps(pb), now_iso(), touches))
+            else:
+                cursor.execute("UPDATE crm_ai_brain SET playbook_error = %s WHERE id = 1",
+                               (error,))
+            conn.commit()
+        points = sum(len(sec["points"]) for sec in (pb or {}).get("sections", []))
+        print(f"[crm] PLAYBOOK_REFRESHED points={points} touches={touches}"
+              + (f" error={error}" if error else ""), flush=True)
+        return {"refreshed": pb is not None, "points": points, "error": error}
+    finally:
+        _playbook_lock.release()
+
+
+def _refresh_playbook_safe(force: bool = False) -> None:
+    try:
+        refresh_playbook(force=force)
+    except Exception as exc:
+        print(f"[crm] PLAYBOOK_FAILED {exc}", flush=True)
+
+
+class OwnerNotes(BaseModel):
+    text: str = Field(default="", max_length=8000)
+
+
+@crm_router.get("/brain", response_model=dict)
+def brain(_: bool = Depends(require_crm_key)):
+    """Everything the AI works from: the master sheet (fixed, from pitch.py),
+    the owner's standing instructions and the learned playbook."""
+    import pitch
+    row = _brain_row()
+    return {"master_sheet": pitch.master_sheet(),
+            "owner_notes": row.get("owner_notes") or "",
+            "owner_notes_updated_at": row.get("owner_notes_updated_at"),
+            "playbook": _playbook_of(row),
+            "playbook_refreshed_at": row.get("playbook_refreshed_at"),
+            "playbook_error": row.get("playbook_error"),
+            "refreshing": _playbook_lock.locked(),
+            "min_touches": PLAYBOOK_MIN_TOUCHES}
+
+
+@crm_router.put("/brain/notes", response_model=dict)
+def save_owner_notes(data: OwnerNotes, _: bool = Depends(require_crm_key)):
+    now = now_iso()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO crm_ai_brain (id, owner_notes, owner_notes_updated_at) VALUES (1, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET owner_notes = EXCLUDED.owner_notes,
+                   owner_notes_updated_at = EXCLUDED.owner_notes_updated_at
+        """, (data.text.strip(), now))
+        conn.commit()
+    return {"saved": True, "owner_notes_updated_at": now}
+
+
+@crm_router.post("/brain/refresh", response_model=dict)
+def brain_refresh(_: bool = Depends(require_crm_key)):
+    """Re-learn the playbook now, in the background (a minute or so). Poll GET /brain."""
+    if _playbook_lock.locked():
+        return {"started": False, "message": "Already learning — give it a minute."}
+    threading.Thread(target=_refresh_playbook_safe, kwargs={"force": True}, daemon=True,
+                     name="crm-playbook").start()
+    return {"started": True}
 
 
 BRIEF_SYSTEM = """You write two or three short notes for a salesperson about to phone a bar.
