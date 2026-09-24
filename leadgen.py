@@ -88,6 +88,9 @@ OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
+    # VK's public instance: full planet (answered a US query on 2026-09-24
+    # while the main mirror was refusing and the other two timed out).
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 
@@ -151,20 +154,21 @@ CHAIN_NAMES = {
     "carrabba", "bonefish grill", "longhorn steakhouse", "logan's roadhouse",
     "beef o brady", "beef 'o' brady", "world of beer", "mellow mushroom",
     "buffalo wings", "wing house", "winghouse", "quaker steak", "fox and hound",
-    "fox & hound", "bar louie", "brewhouse", "granite city", "mcfadden",
-    "tap house", "walk-on", "walk on's", "walkons", "pluckers", "torchy",
+    "fox & hound", "bar louie", "granite city", "mcfadden",
+    "walk-on", "walk on's", "walkons", "pluckers", "torchy",
     "punch bowl social", "lucky strike", "main event", "topgolf", "chuck e",
     "golden corral", "red lobster", "on the border", "uno pizzeria",
     "famous dave", "smokey bones", "hurricane grill", "duffy's sports",
     "tijuana flats", "first watch", "another broken egg", "marriott", "hilton",
     "hyatt", "sheraton", "doubletree", "embassy suites", "holiday inn",
-    "courtyard by", "residence inn", "casino", "airport",
+    "courtyard by", "residence inn", 
 }
 
 # Words on a site that mean "this is one of many" — franchise language.
 CHAIN_SITE_HINTS = re.compile(
-    r"(find a location|our locations|all locations|franchis|nearest location|"
-    r"select a location|locations near|corporate office|nationwide)",
+    r"(find a location|find your (nearest|local)|store locator|restaurant locator|"
+    r"\bfranchis(e|ing|ee)|nearest location|locations near you|corporate office|"
+    r"become an? (owner|franchisee))",
     re.I,
 )
 
@@ -212,7 +216,12 @@ def _restaurant_pours(html_seen: str, tags: dict) -> tuple[bool, Optional[str]]:
     if html_seen and NO_LIQUOR_HINTS.search(html_seen):
         return False, "site says no alcohol served"
     drinks = bool(html_seen and LIQUOR_HINTS.search(html_seen))
-    tagged_bar = tags.get("bar") == "yes" or tags.get("drink:cocktail") == "yes"
+    # What mappers record about a place's drinks. Any of these says it pours.
+    tagged_bar = (tags.get("bar") == "yes" or tags.get("cocktails") == "yes"
+                  or any(tags.get(k) in ("yes", "served", "only")
+                         for k in ("drink:cocktail", "drink:cocktails", "drink:spirits",
+                                   "drink:liquor", "drink:beer", "drink:wine",
+                                   "drink:craft_beer", "alcohol")))
     if drinks or tagged_bar:
         return True, None
     return False, "restaurant with no sign of a bar programme"
@@ -261,8 +270,15 @@ def _is_public_http_url(url: str) -> bool:
     return True
 
 
+# curl exit codes that mean the TLS handshake or certificate failed — the site
+# may be fine in a browser (which fetches missing intermediate certificates),
+# so _fetch_site tries again rather than calling the site dead.
+_TLS_EXITS = {35, 51, 53, 54, 58, 59, 60, 64, 66, 77, 80, 82, 83, 90, 91}
+
+
 def _http(url: str, timeout: int = 20, data: Optional[str] = None,
-          verify_public: bool = False) -> tuple[str, int]:
+          verify_public: bool = False, insecure: bool = False,
+          tls_status: bool = False) -> tuple[str, int]:
     """Returns (body, status). Never raises — a failed fetch is ('', 0).
 
     `verify_public` is set for anything crawled from map data; the fixed
@@ -281,6 +297,10 @@ def _http(url: str, timeout: int = 20, data: Optional[str] = None,
     ]
     if data is not None:
         cmd += ["-X", "POST", "--data-urlencode", f"data={data}"]
+    if insecure:
+        # Only ever for READING a venue's public pages after a certificate
+        # error — see _fetch_site. Never for anything sent or signed in.
+        cmd.append("-k")
     cmd.append(url)
     try:
         # +5, not more: curl already enforces --max-time, and this outer guard
@@ -299,6 +319,8 @@ def _http(url: str, timeout: int = 20, data: Optional[str] = None,
         why = (proc.stderr or "").strip().replace("\n", " ")[:160]
         print(f"[leadgen] no HTTP response from {url[:90]} "
               f"(curl exit {proc.returncode}{': ' + why if why else ''})", flush=True)
+        if tls_status and proc.returncode in _TLS_EXITS:
+            return out, -1
         return out, 0
     body, _, status = out.rpartition("__STATUS__")
     try:
@@ -351,7 +373,10 @@ def init_leadgen_tables():
                               ("manager_source", "TEXT"), ("manager_seen_at", "TEXT"),
                               # Whether the venue's own site vouches for the
                               # number: see judge_phone().
-                              ("phone_status", "TEXT"), ("phone_note", "TEXT")]:
+                              ("phone_status", "TEXT"), ("phone_note", "TEXT"),
+                              # A site that didn't load is tried again on later
+                              # runs (up to ENRICH_TRIES) instead of rejected.
+                              ("enrich_attempts", "INTEGER"), ("retry_after", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'crm_lead_candidates' AND column_name = %s
@@ -389,6 +414,14 @@ def init_leadgen_tables():
                 created_at TEXT NOT NULL
             )
         """)
+        # When a city's harvest last failed on every mirror: it rests a day
+        # rather than taking the first slot of every run while it keeps failing.
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'crm_leadgen_cities' AND column_name = 'harvest_failed_at'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE crm_leadgen_cities ADD COLUMN harvest_failed_at TEXT")
         cursor.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_city_name "
             "ON crm_leadgen_cities(LOWER(name), LOWER(COALESCE(state, '')))"
@@ -473,6 +506,15 @@ def init_leadgen_tables():
             conn.rollback()
             print(f"[leadgen] LEADGEN_RESCORE_FAILED {exc}", flush=True)
 
+        try:
+            reopened = _requalify_once(cursor)
+            conn.commit()
+            if reopened:
+                print(f"[leadgen] LEADGEN_REQUALIFY reopened={reopened}", flush=True)
+        except Exception as exc:
+            conn.rollback()
+            print(f"[leadgen] LEADGEN_REQUALIFY_FAILED {exc}", flush=True)
+
         # Numbers that predate the website check are NOT checked here. Doing
         # it at boot — every unchecked number at once, 8 crawls in parallel —
         # is what took the server down: a 0.5-CPU instance spent on crawling
@@ -489,6 +531,49 @@ def init_leadgen_tables():
 # merge). Anything enriched after this was scored with them already, and must
 # not be charged twice.
 MAP_PENALTY_CUTOFF = "2026-09-24T06:41:08+00:00"
+
+
+# Rejections the September 2026 fixes overturn (see enrich_candidate,
+# looks_like_chain, _fetch_site). Chain-name rejections are re-opened only for
+# the names that were over-broad; a re-check re-rejects any real chain.
+REQUALIFY_REASONS = (
+    r"^(site unreachable|no email found on site|restaurant with no sign|"
+    r"franchise language on site|duplicate email|"
+    r"chain name \((tap house|brewhouse|casino|airport|chili|denny|applebee|hooter|"
+    r"carrabba|famous dave|mcfadden|chuy)\))")
+
+
+def _requalify_once(cursor) -> Optional[int]:
+    """ONE-TIME: give every candidate rejected by a rule that has since been
+    fixed another look — site unreachable (now retried, with 2xx/404/TLS
+    recoveries), no email (now call-only), the drinks gate (now reads menu
+    pages), franchise language and over-broad chain names (now narrower), a
+    shared email (now kept). Back to 'new', so the next runs re-crawl them
+    under today's rules; nothing is promoted without passing those. Marker row
+    in crm_leadgen_oneshots, same transaction, so it runs once."""
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS crm_leadgen_oneshots (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL,
+            detail TEXT
+        )
+    """)
+    cursor.execute("""
+        INSERT INTO crm_leadgen_oneshots (name, applied_at) VALUES (%s, %s)
+        ON CONFLICT (name) DO NOTHING RETURNING name
+    """, ("requalify_2026_09_fixes", now_iso()))
+    if not cursor.fetchone():
+        return None
+    cursor.execute("""
+        UPDATE crm_lead_candidates
+           SET status = 'new', enrich_attempts = 0, retry_after = NULL
+         WHERE status = 'rejected' AND promoted_lead_id IS NULL
+           AND lower(COALESCE(reject_reason, '')) ~ %s
+    """, (REQUALIFY_REASONS,))
+    reopened = cursor.rowcount
+    cursor.execute("UPDATE crm_leadgen_oneshots SET detail = %s WHERE name = %s",
+                   (json.dumps({"reopened": reopened}), "requalify_2026_09_fixes"))
+    return reopened
 
 
 def _rescore_map_penalties_once(cursor) -> Optional[tuple[int, int]]:
@@ -934,12 +1019,41 @@ def normalize_name(name: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", (name or "").lower()).strip()
 
 
+# Compiled once, matched on WORD boundaries. It used to be a plain substring
+# test, so "casino" rejected Austin's Casino El Camino (an independent dive),
+# "chili" rejected Chili Pepper Grill and "tap house" / "brewhouse" / "airport"
+# swept up independents that merely use the words.
+# Brands whose NAME is a possessive: the stem alone is an ordinary word or a
+# first name ("Chili Pepper Grill", "Denny's Tavern" run by a Denny), so only
+# the possessive form — "chilis" once normalize_name drops the apostrophe —
+# is the chain.
+_POSSESSIVE_CHAINS = {"chili", "denny", "applebee", "hooter", "carrabba", "famous dave",
+                      "mcfadden", "chuy"}
+
+
+def _chain_alt(c: str) -> str:
+    return re.escape(c) + ("s" if c in _POSSESSIVE_CHAINS else "(?:s)?")
+
+
+_CHAIN_NAME_RE = re.compile(
+    r"\b(" + "|".join(_chain_alt(c) for c in sorted(CHAIN_NAMES, key=len, reverse=True))
+    + r")\b")
+
+
 def looks_like_chain(name: str, website: str = "", site_html: str = "") -> Optional[str]:
-    """Why this is a chain, or None if it looks independent."""
+    """Why this is a chain, or None if it looks independent.
+
+    The site test only fires on STORE-LOCATOR / franchise language ("find a
+    location", "franchise", "corporate office"). "Our locations" / "all
+    locations" used to reject too, and measured on Austin it threw out
+    Pinthouse Pizza ("all locations open at 10:30AM for the game") and a brewpub
+    whose beer description said "nationwide" — a local owner with two or three
+    bars is still the independent 86'd is for.
+    """
     norm = normalize_name(name)
-    for chain in CHAIN_NAMES:
-        if chain in norm:
-            return f"chain name ({chain})"
+    m = _CHAIN_NAME_RE.search(norm)
+    if m:
+        return f"chain name ({m.group(1)})"
     # "Sullivan's #14", "Tavern Store 3"
     if re.search(r"\b(#\s*\d+|store\s*\d+|location\s*\d+|unit\s*\d+)\b", norm):
         return "numbered location"
@@ -1398,6 +1512,17 @@ def find_email_on_site(website: str, max_pages: int = 4) -> tuple[Optional[str],
 
 # ── Stage 1: harvest ────────────────────────────────────────────────────────
 
+def _overpass_answer(body: str, status: int) -> Optional[dict]:
+    """The parsed answer if it's usable: JSON with at least one element."""
+    if status != 200 or not body.strip().startswith("{"):
+        return None
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    return data if data.get("elements") else None
+
+
 def _overpass(query: str) -> Optional[dict]:
     """Query the first mirror that returns a usable answer.
 
@@ -1407,24 +1532,65 @@ def _overpass(query: str) -> Optional[dict]:
     an empty answer means trusting a mirror that may simply not hold this part
     of the planet (see the note on OVERPASS_MIRRORS). Silent emptiness is the
     failure this pipeline can least afford, so it is never treated as data.
+
+    Each mirror gets a POST and then a GET. Measured 2026-09-24: the main
+    mirror answered our POST with a 504 and a connection reset and the same
+    query as a GET with 200, while the next two timed out — one try per
+    mirror, POST only, meant no new bars that day. A busy answer (429/504)
+    gets a short pause before the retry.
     """
     for mirror in OVERPASS_MIRRORS:
         body, status = _http(mirror, timeout=90, data=query)
-        if status == 200 and body.strip().startswith("{"):
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                data = None
-            if data is not None:
-                if data.get("elements"):
-                    return data
-                print(f"[leadgen] overpass mirror {mirror} -> 200 but 0 elements, "
-                      f"treating as a miss and trying the next", flush=True)
-                time.sleep(1)
-                continue
-        print(f"[leadgen] overpass mirror {mirror} -> {status}", flush=True)
+        data = _overpass_answer(body, status)
+        if data:
+            return data
+        if status in (429, 503, 504):
+            time.sleep(5)
+        url = f"{mirror}?data={urllib.parse.quote(query)}"
+        body2, status2 = _http(url, timeout=90)
+        data = _overpass_answer(body2, status2)
+        if data:
+            return data
+        print(f"[leadgen] overpass mirror {mirror} -> POST {status}, GET {status2}"
+              + (" (200 but 0 elements: treated as a miss)" if 200 in (status, status2) else ""),
+              flush=True)
         time.sleep(1)
     return None
+
+
+_MULTI_SPLIT = re.compile(r"\s*(?:;|,|/|\bor\b|\|)\s*", re.I)
+
+
+def first_phone(raw: Optional[str]) -> Optional[str]:
+    """The first dialable, non-toll-free US number in an OSM phone tag.
+
+    Mappers put two numbers in one field ("+1 512-555-0100; +1 512-555-0101",
+    "... or ..."), and the strict validator, handed the whole string, rejected
+    the venue outright. Each piece is validated on its own instead.
+    """
+    for piece in _MULTI_SPLIT.split(raw or "")[:6]:
+        phone = normalize_us_phone(piece)
+        if phone and not is_toll_free(phone):
+            return phone
+    return None
+
+
+def first_website(raw: Optional[str]) -> Optional[str]:
+    """The first usable URL in an OSM website tag ("a.com;b.com" happens)."""
+    for piece in re.split(r"[;\s]+", (raw or "").strip())[:4]:
+        piece = piece.strip().strip(",")
+        if "." not in piece or len(piece) > 300:
+            continue
+        return piece if piece.lower().startswith("http") else "http://" + piece
+    return None
+
+
+# Rejections a fresh look can overturn: the site was down, or a rule that has
+# since been fixed. A re-harvest with changed data re-opens these; anything the
+# operator or the book decided (deleted by hand, suppressed, already a lead or
+# a customer, a chain by name) stays closed.
+REOPENABLE = ("site unreachable", "no email found", "restaurant with no sign",
+              "phone not a dialable", "franchise language", "no phone on their site")
 
 
 def harvest_city(city: dict) -> tuple[int, int]:
@@ -1475,40 +1641,61 @@ out center tags;
             # else costs a request.
             if (tags.get("opening_hours") or "").strip().lower() in ("closed", "off"):
                 continue
-            raw_phone = (tags.get("phone") or tags.get("contact:phone") or "").strip()
-            # Validated at the door. An unusable number can never reach the call
-            # list, because dialling a stranger costs more than dropping a lead.
-            phone = normalize_us_phone(raw_phone)
-            if phone and is_toll_free(phone):
-                continue   # toll-free on an independent bar is a platform line
-            website = (tags.get("website") or tags.get("contact:website")
-                       or tags.get("url") or "").strip()
-            # No phone or no website means it can never satisfy the brief, so
-            # it isn't worth a row or a later crawl.
-            if not phone or not website:
+            raw_phone = " ; ".join(t for t in (tags.get("phone"), tags.get("contact:phone"),
+                                               tags.get("contact:mobile")) if t)
+            # Validated at the door, each number in the field on its own. An
+            # unusable number can never reach the call list; a toll-free one
+            # on an independent bar is a platform line.
+            phone = first_phone(raw_phone)
+            website = first_website(tags.get("website") or tags.get("contact:website")
+                                    or tags.get("url"))
+            # The website is the one thing it can't do without: it's where the
+            # number gets checked and the email found. A venue with a website
+            # and no phone tag is kept — its own site supplies the number
+            # (judge_phone's from_site), which is better provenance than a
+            # map tag ever is. In Austin that was ~180 venues out of ~530 with
+            # a website, all thrown away at the door.
+            if not website:
                 continue
-            if not website.lower().startswith("http"):
-                website = "http://" + website
 
             source_ref = f"{el.get('type')}/{el.get('id')}"
             lat = el.get("lat") or (el.get("center") or {}).get("lat")
             lon = el.get("lon") or (el.get("center") or {}).get("lon")
 
+            # A venue seen before is REFRESHED, not skipped: a bar that changed
+            # its number or website on the map kept the stale one forever, and
+            # a candidate rejected because its site was down never came back.
+            # Only rows nobody has acted on are touched, and a rejection only
+            # re-opens when the data changed and the reason was one a fresh
+            # look can overturn (REOPENABLE).
             cursor.execute("""
-                INSERT INTO crm_lead_candidates
+                INSERT INTO crm_lead_candidates AS c
                     (id, source, source_ref, name, city, state, lat, lon, phone, website,
                      amenity, raw_tags, opening_hours, tz_offset_hours, tz_name,
                      status, discovered_at)
                 VALUES (%s, 'osm', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', %s)
-                ON CONFLICT (source_ref) DO NOTHING
+                ON CONFLICT (source_ref) DO UPDATE SET
+                    raw_tags = EXCLUDED.raw_tags,
+                    opening_hours = EXCLUDED.opening_hours,
+                    website = EXCLUDED.website,
+                    phone = COALESCE(EXCLUDED.phone, c.phone),
+                    status = CASE WHEN c.status = 'rejected'
+                                   AND (c.website IS DISTINCT FROM EXCLUDED.website
+                                        OR c.phone IS DISTINCT FROM COALESCE(EXCLUDED.phone, c.phone))
+                                   AND lower(COALESCE(c.reject_reason, '')) ~ %s
+                                  THEN 'new' ELSE c.status END
+                 WHERE c.status IN ('new', 'rejected', 'retry')
+                RETURNING (xmax = 0) AS inserted
             """, (
                 generate_id(), source_ref, name, city["name"], city.get("state"),
                 lat, lon, phone, website, tags.get("amenity"),
                 json.dumps(tags)[:8000], (tags.get("opening_hours") or "").strip() or None,
                 us_tz_offset(lon, city.get("state"), lat),
                 us_tz_name(lon, city.get("state"), lat), now,
+                "^(" + "|".join(re.escape(r) for r in REOPENABLE) + ")",
             ))
-            inserted += cursor.rowcount
+            row = cursor.fetchone()
+            inserted += 1 if row and row["inserted"] else 0
 
         cursor.execute("""
             UPDATE crm_leadgen_cities
@@ -1624,14 +1811,17 @@ def judge_phone(map_phone: Optional[str], site_numbers: list, local_codes=()) ->
     if len(on_site) == 1:
         return {"phone": on_site[0], "status": "from_site",
                 "note": (f"Map listed {format_us_phone_dashed(map_phone)}; their "
-                         f"website lists {format_us_phone_dashed(on_site[0])}")}
+                         f"website lists {format_us_phone_dashed(on_site[0])}" if map_phone
+                         else f"Their website lists {format_us_phone_dashed(on_site[0])}")}
     if site_numbers:
         listed = ", ".join(format_us_phone_dashed(p) for p in site_numbers[:3])
         return {"phone": map_phone, "status": "conflict",
                 "note": (f"Their website lists {listed}, not the map's "
-                         f"{format_us_phone_dashed(map_phone)}")}
+                         f"{format_us_phone_dashed(map_phone)}" if map_phone
+                         else f"Their website lists {listed}; can't tell which is this bar")}
     return {"phone": map_phone, "status": "unconfirmed",
-            "note": "Their website shows no phone number to check it against"}
+            "note": ("Their website shows no phone number to check it against" if map_phone
+                     else "No phone number on the map or their website")}
 
 
 def _contact_urls(website: str, home: str) -> list:
@@ -1840,6 +2030,91 @@ def _verify_phones_safe(**kw) -> Optional[dict]:
         print(f"[leadgen] LEADGEN_PHONES_VERIFY_FAILED {exc}", flush=True)
 
 
+# A homepage that didn't answer for one of these reasons is tried again on a
+# later run rather than rejected: a site down for an afternoon, a rate limit,
+# a bot wall having a bad day, a network blip. Measured on 90 Austin venues,
+# 21 were "unreachable", and one of them loaded on the very next try — every
+# one of those used to be thrown away for good.
+TRANSIENT_STATUSES = {0, -1, 403, 408, 425, 429, 500, 502, 503, 504,
+                      520, 521, 522, 523, 524, 525, 526}
+ENRICH_TRIES = 3                    # then it really is rejected
+RETRY_DAYS = (1, 3)                 # after the 1st and 2nd failure
+
+
+def _ok(status: int, body: str) -> bool:
+    # Any 2xx with a body: a host answering 202 with the page in it was
+    # rejected as "unreachable (HTTP 202)".
+    return 200 <= status < 300 and bool((body or "").strip())
+
+
+def _site_root(url: str) -> str:
+    p = urllib.parse.urlsplit(url)
+    return f"{p.scheme}://{p.netloc}/"
+
+
+def _fetch_site(website: str) -> tuple[str, str, int]:
+    """(homepage html, the URL that answered, status). html is '' when
+    nothing did, and the status says why.
+
+    Three recoveries a browser makes without anyone noticing:
+    - the map's link is a stale deep page (404) → the site's own root;
+    - a certificate the browser would accept (it fetches missing
+      intermediates) but curl won't → plain http://, then reading the public
+      page without the certificate check. Reading only: nothing is sent.
+    """
+    body, status = _http(website, timeout=PAGE_TIMEOUT, verify_public=True, tls_status=True)
+    if _ok(status, body):
+        return body, website, status
+    root = _site_root(website)
+    if status in (404, 410) and root.rstrip("/") != website.rstrip("/"):
+        body2, status2 = _http(root, timeout=PAGE_TIMEOUT, verify_public=True)
+        if _ok(status2, body2):
+            return body2, root, status2
+    if status == -1:
+        if website.lower().startswith("https://"):
+            plain = "http://" + website[len("https://"):]
+            body2, status2 = _http(plain, timeout=PAGE_TIMEOUT, verify_public=True)
+            if _ok(status2, body2):
+                return body2, plain, status2
+        body2, status2 = _http(website, timeout=PAGE_TIMEOUT, verify_public=True, insecure=True)
+        if _ok(status2, body2):
+            return body2, website, status2
+    return "", website, status
+
+
+_DRINK_LINK_RE = re.compile(
+    r'href\s{0,5}=\s{0,5}["\']([^"\'#\s]{1,200})["\'][^<>]{0,300}>([^<]{0,80})', re.I)
+_DRINK_WORDS = re.compile(r"drink|cocktail|bar[-_ ]?menu|wine|beer|happy[-_ ]?hour|spirits|"
+                          r"libation|\bmenus?\b", re.I)
+
+
+def _drink_links(website: str, home: str, limit: int = 2) -> list:
+    """The site's own drinks / menu pages, drinks first. Most restaurants keep
+    the cocktail list on a menu page, not the homepage, and the drinks gate
+    only ever read the homepage and contact pages."""
+    found: list = []
+    for href, text in _DRINK_LINK_RE.findall(home or ""):
+        if not (_DRINK_WORDS.search(href) or _DRINK_WORDS.search(text)):
+            continue
+        full = urllib.parse.urljoin(website, href)
+        if (not full.lower().startswith(("http://", "https://"))
+                or domain_of(full) != domain_of(website)
+                or re.search(r"\.(pdf|jpe?g|png|gif|webp)(\?|$)", full, re.I)
+                or full in found):
+            continue
+        found.append(full)
+    found.sort(key=lambda u: 0 if re.search(r"drink|cocktail|bar|wine|beer", u, re.I) else 1)
+    return found[:limit]
+
+
+def _rejected(reason: str, status: str = "rejected") -> dict:
+    return {"status": status, "reject_reason": reason,
+            "email": None, "email_source": None, "email_kind": None,
+            "manager_name": None, "manager_role": None,
+            "manager_source": None, "manager_seen_at": None,
+            "venue_facts": None, "opener": None, "score": 0}
+
+
 def enrich_candidate(cand: dict) -> dict:
     """Crawl the venue's site for an email, then judge it. Never raises.
 
@@ -1868,14 +2143,13 @@ def enrich_candidate(cand: dict) -> dict:
     if tagged and not EMAIL_BLOCKLIST.search(tagged) and "@" in tagged:
         email, email_source = tagged.lower(), "OpenStreetMap tag"
 
-    home, status = _http(website, timeout=PAGE_TIMEOUT, verify_public=True)
+    home, website, status = _fetch_site(website)
     fetched += 1
-    if status != 200 or not home:
-        return {"status": "rejected", "reject_reason": f"site unreachable (HTTP {status})",
-                "email": None, "email_source": None, "email_kind": None,
-                "manager_name": None, "manager_role": None,
-                "manager_source": None, "manager_seen_at": None,
-                "venue_facts": None, "opener": None, "score": 0}
+    if not home:
+        # 'retry' for a failure a later run can get past; run_daily counts the
+        # tries and rejects only after ENRICH_TRIES.
+        return _rejected(f"site unreachable (HTTP {status})",
+                         "retry" if status in TRANSIENT_STATUSES else "rejected")
 
     html_seen += home[:200000]
     pages.append((website, home))
@@ -1950,34 +2224,41 @@ def enrich_candidate(cand: dict) -> dict:
         pass
 
     if chain_reason:
-        return {"status": "rejected", "reject_reason": chain_reason,
-                "email": None, "email_source": None, "email_kind": None,
-                "manager_name": None, "manager_role": None,
-                "manager_source": None, "manager_seen_at": None,
-                "venue_facts": None, "opener": None, "score": 0}
+        return _rejected(chain_reason)
     # A bar is a bar. A restaurant has to show a drinks programme — a cocktail
     # list, a full bar, taps, something — before it is worth a call. Without
     # this the wider harvest would fill the list with sandwich shops.
     amenity = (cand.get("amenity") or "").lower()
     if amenity == "restaurant":
         qualifies, reason = _restaurant_pours(html_seen, tags)
+        if not qualifies and reason and reason.startswith("restaurant with no sign"):
+            # Their drinks are usually on a menu page nobody opened yet.
+            for url in _drink_links(website, home):
+                if fetched >= MAX_PAGES_PER_SITE + 2:
+                    break
+                body, status = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
+                fetched += 1
+                if _ok(status, body):
+                    html_seen += body[:200000]
+                    qualifies, reason = _restaurant_pours(html_seen, tags)
+                    if qualifies or not reason.startswith("restaurant with no sign"):
+                        break
         if not qualifies:
-            return {"status": "rejected", "reject_reason": reason,
-                    "email": None, "email_source": None, "email_kind": None,
-                    "manager_name": None, "manager_role": None,
-                    "manager_source": None, "manager_seen_at": None,
-                    "venue_facts": None, "opener": None, "score": 0}
+            return _rejected(reason)
 
-    if not email:
-        return {"status": "rejected", "reject_reason": "no email found on site",
-                "email": None, "email_source": None, "email_kind": None,
-                "manager_name": None, "manager_role": None,
-                "manager_source": None, "manager_seen_at": None,
-                "venue_facts": None, "opener": None, "score": 0}
+    # No email is no longer a rejection. It's a CALL list: a bar whose own
+    # website vouches for its number is worth ringing whether or not it
+    # publishes an address, and on Austin 15 of 90 venues were thrown away for
+    # this alone. It still sorts below a lead with an email (score_candidate
+    # gives an email +3 to +7), and a number the site can't vouch for is still
+    # never promoted (PHONE_OK).
 
     return {
         "status": "qualified",
         "reject_reason": None,
+        # The URL that actually answered: the map's stale deep link, or http
+        # where https failed, is replaced by one that works.
+        "website": website,
         # Qualified whatever the verdict — banked, not thrown away — but only
         # PHONE_OK numbers are ever promoted to the call list.
         "phone": verdict["phone"],
@@ -2000,6 +2281,31 @@ def enrich_candidate(cand: dict) -> dict:
             **_stack_signals(html_seen))),
         "score": score_candidate(tags, email, html_seen, manager, cand.get("city")),
     }
+
+
+def _record_retry(cand: dict, reason: str) -> None:
+    """A site that didn't load: try again later, or give up after
+    ENRICH_TRIES."""
+    tries = (cand.get("enrich_attempts") or 0) + 1
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if tries >= ENRICH_TRIES:
+            cursor.execute("""
+                UPDATE crm_lead_candidates
+                   SET status = 'rejected', reject_reason = %s, enrich_attempts = %s,
+                       enriched_at = %s
+                 WHERE id = %s
+            """, (f"{reason}, {tries} tries", tries, now_iso(), cand["id"]))
+        else:
+            wait = RETRY_DAYS[min(tries - 1, len(RETRY_DAYS) - 1)]
+            cursor.execute("""
+                UPDATE crm_lead_candidates
+                   SET status = 'retry', reject_reason = %s, enrich_attempts = %s,
+                       retry_after = %s
+                 WHERE id = %s
+            """, (reason, tries,
+                  (datetime.now(timezone.utc) + timedelta(days=wait)).isoformat(), cand["id"]))
+        conn.commit()
 
 
 def _enrich_safe(cand: dict) -> Optional[dict]:
@@ -2065,17 +2371,13 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
     # An unsourced address is therefore disqualifying on its own, whatever it
     # looks like. The blocklist catches the shapes we've seen; this catches the
     # ones we haven't.
-    if not (cand.get("email_source") or "").strip():
-        cursor.execute(
-            "UPDATE crm_lead_candidates SET status='rejected', "
-            "reject_reason='email has no recorded source' WHERE id=%s", (cand["id"],))
-        return None
-    if EMAIL_BLOCKLIST.search(cand["email"] or ""):
-        cursor.execute(
-            "UPDATE crm_lead_candidates SET status='rejected', "
-            "reject_reason='email is a placeholder or machine-generated' WHERE id=%s",
-            (cand["id"],))
-        return None
+    #
+    # The ADDRESS is what goes, not the lead: since a bar with no email can be
+    # a call-only lead, an address nothing vouches for is simply dropped and
+    # the venue — whose number its own site confirmed — is still promoted.
+    if cand.get("email") and (not (cand.get("email_source") or "").strip()
+                              or EMAIL_BLOCKLIST.search(cand["email"])):
+        cand = {**cand, "email": None, "email_source": None, "email_kind": None}
 
     reason = _is_suppressed(cursor, cand["name"], cand["email"],
                             cand["phone"], cand["website"])
@@ -2098,9 +2400,9 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
     # INSERT below uses and compare that.
     loc = ", ".join(x for x in [cand["city"], cand["state"]] if x)
     cursor.execute(
-        "SELECT id FROM crm_leads WHERE LOWER(email) = LOWER(%s) "
+        "SELECT id FROM crm_leads WHERE (%s IS NOT NULL AND LOWER(email) = LOWER(%s)) "
         "OR (LOWER(name) = LOWER(%s) AND LOWER(COALESCE(loc,'')) = LOWER(%s))",
-        (cand["email"], cand["name"], loc),
+        (cand["email"], cand["email"], cand["name"], loc),
     )
     already = cursor.fetchone()
     if not already:
@@ -2123,11 +2425,12 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
 
     # Already a customer? Pitching an existing user is the worst call you can
     # make.
-    cursor.execute(
-        "SELECT id FROM users WHERE LOWER(email) = LOWER(%s) AND deleted_at IS NULL",
-        (cand["email"],),
-    )
-    if cursor.fetchone():
+    if cand["email"]:
+        cursor.execute(
+            "SELECT id FROM users WHERE LOWER(email) = LOWER(%s) AND deleted_at IS NULL",
+            (cand["email"],),
+        )
+    if cand["email"] and cursor.fetchone():
         cursor.execute(
             "UPDATE crm_lead_candidates SET status='rejected', "
             "reject_reason='already a customer' WHERE id=%s", (cand["id"],)
@@ -2138,7 +2441,8 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
     notes = (
         f"Auto-sourced {now[:10]} · {cand['amenity'] or 'bar'} · score {cand['score']}\n"
         f"{cand['website']}\n"
-        f"Email found on: {cand['email_source'] or 'site'}"
+        + (f"Email found on: {cand['email_source'] or 'site'}" if cand.get("email")
+           else "No email on their site — a call-only lead")
     )
     if cand.get("phone_status") == "from_site" and cand.get("phone_note"):
         notes += f"\nPhone taken from their website — {cand['phone_note']}"
@@ -2416,6 +2720,9 @@ def pool_depth() -> dict:
     }
 
 
+CITY_RETRY_HOURS = 20
+
+
 def _next_cities(limit: int) -> list[dict]:
     """Which cities to harvest next — the ones feeding the emptiest tabs.
 
@@ -2432,11 +2739,12 @@ def _next_cities(limit: int) -> list[dict]:
 
     with get_db() as conn:
         cursor = conn.cursor()
+        rested = (datetime.now(timezone.utc) - timedelta(hours=CITY_RETRY_HOURS)).isoformat()
         cursor.execute("""
             SELECT * FROM crm_leadgen_cities
-             WHERE enabled
+             WHERE enabled AND (harvest_failed_at IS NULL OR harvest_failed_at < %s)
              ORDER BY last_harvested_at ASC NULLS FIRST
-        """)
+        """, (rested,))
         cities = [dict(r) for r in cursor.fetchall()]
 
     def rank(city: dict):
@@ -2576,16 +2884,23 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                 except Exception as exc:
                     errors += 1
                     detail["errors"].append(f"harvest {city['name']}: {exc}")
+                    with get_db() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE crm_leadgen_cities SET harvest_failed_at = %s "
+                                       "WHERE id = %s", (now_iso(), city["id"]))
+                        conn.commit()
 
         # 3. Enrich whatever is still unexamined.
         with get_db() as conn:
             cursor = conn.cursor()
+            # New candidates, and ones whose site didn't load last time and are
+            # due another try.
             cursor.execute("""
                 SELECT * FROM crm_lead_candidates
-                 WHERE status = 'new'
-                 ORDER BY discovered_at ASC
+                 WHERE status = 'new' OR (status = 'retry' AND retry_after <= %s)
+                 ORDER BY (status = 'retry') DESC, discovered_at ASC
                  LIMIT %s
-            """, (max_enrich,))
+            """, (now_iso(), max_enrich))
             pending = [dict(r) for r in cursor.fetchall()]
 
         # Enrichment is pure network wait and each candidate is independent, so
@@ -2607,6 +2922,9 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                     errors += 1
                     continue
                 enriched += 1
+                if result["status"] == "retry":
+                    _record_retry(cand, result["reject_reason"])
+                    continue
                 if result["status"] == "qualified":
                     qualified += 1
                 with get_db() as conn:
@@ -2620,7 +2938,7 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                                    manager_source=%s, manager_seen_at=%s,
                                    venue_facts=%s, score=%s, enriched_at=%s,
                                    phone=COALESCE(%s, phone), phone_status=%s,
-                                   phone_note=%s
+                                   phone_note=%s, website=COALESCE(%s, website)
                              WHERE id=%s
                         """, (result["status"], result["reject_reason"], result["email"],
                               result["email_source"], result.get("email_kind"),
@@ -2630,21 +2948,34 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                               result.get("venue_facts"),
                               result["score"], now_iso(), result.get("phone"),
                               result.get("phone_status"), result.get("phone_note"),
-                              cand["id"]))
+                              result.get("website"), cand["id"]))
                         conn.commit()
                     except Exception:
                         # Almost always the unique-email index: another venue
-                        # already claimed this address. That's a duplicate, not
-                        # an error worth failing the run over.
+                        # already claimed this address. It used to REJECT the
+                        # venue — but one management company's info@ serves
+                        # several separate bars (Mean Eyed Cat, Lala's Little
+                        # Nugget and Lavaca Street Bar share one), each worth
+                        # its own call. Kept, without the shared address.
                         conn.rollback()
                         cursor.execute("""
                             UPDATE crm_lead_candidates
-                               SET status='rejected', reject_reason='duplicate email',
-                                   enriched_at=%s
+                               SET status=%s, reject_reason=%s, email=NULL,
+                                   email_source=NULL, email_kind=NULL, opener=%s,
+                                   manager_name=%s, manager_role=%s,
+                                   manager_source=%s, manager_seen_at=%s,
+                                   venue_facts=%s, score=%s, enriched_at=%s,
+                                   phone=COALESCE(%s, phone), phone_status=%s,
+                                   phone_note=%s, website=COALESCE(%s, website)
                              WHERE id=%s
-                        """, (now_iso(), cand["id"]))
+                        """, (result["status"], result["reject_reason"],
+                              result.get("opener"), result.get("manager_name"),
+                              result.get("manager_role"), result.get("manager_source"),
+                              result.get("manager_seen_at"), result.get("venue_facts"),
+                              max(0, result["score"] - 3), now_iso(), result.get("phone"),
+                              result.get("phone_status"), result.get("phone_note"),
+                              result.get("website"), cand["id"]))
                         conn.commit()
-                        qualified = max(0, qualified - 1)
             except Exception as exc:
                 errors += 1
                 detail["errors"].append(f"enrich {cand.get('name')}: {exc}")

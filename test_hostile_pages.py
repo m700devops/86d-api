@@ -53,6 +53,7 @@ READERS = {
     "opener": lambda h: leadgen.opener_line(h, "bar"),
     "stack signals": leadgen._stack_signals,
     "venue facts": lambda h: venue.extract_facts({}, h),
+    "drinks links": lambda h: leadgen._drink_links("https://x.com", h),
     "chain check": lambda h: leadgen.looks_like_chain("Olde Town", "https://x.com", h),
     "reply text": inbox.new_text,
     "opt-out check": inbox.looks_like_opt_out,
