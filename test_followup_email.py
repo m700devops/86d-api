@@ -3,7 +3,7 @@
 `draft-email` with `followup: true` hands the model the lead's own notes
 (call summaries, the operator's verbatim words) instead of a typed brief.
 These check what it's handed, and that the bookkeeping instructions ride
-along, without calling a model: `_ask_claude` is replaced by a recorder.
+along, without calling a model: `_claude_json` is replaced by a recorder.
 """
 import sys
 import types
@@ -75,12 +75,12 @@ def drafted(monkeypatch):
         conn = types.SimpleNamespace(cursor=lambda: _Cursor(_lead()))
         yield conn
 
-    def fake_claude(system, ask, max_tokens=0):
+    def fake_claude(system, ask, schema=None, model=None, max_tokens=0, timeout=0):
         sent.update(system=system, ask=ask)
         return {"subject": "following up", "body": "Hi Laura, ..."}
 
     monkeypatch.setattr(crm, "get_db", db)
-    monkeypatch.setattr(crm, "_ask_claude", fake_claude)
+    monkeypatch.setattr(crm, "_claude_json", fake_claude)
     return sent
 
 
@@ -88,7 +88,7 @@ def test_followup_draft_needs_no_brief(drafted):
     out = crm.draft_lead_email("L1", crm.DraftRequest(followup=True))
     assert out == {"subject": "following up", "body": "Hi Laura, ..."}
     assert "paid $800 at the vet" in drafted["ask"]
-    assert "NEVER invent a fact" in drafted["system"]   # same facts-only rules
+    assert "NEVER state a product fact" in drafted["system"]   # same facts-only rules
 
 
 def test_a_redraft_edits_the_draft_on_screen(drafted):
@@ -103,7 +103,7 @@ def test_the_drafter_is_given_the_app_store_link(drafted):
     # only: the drafter may not use a link it wasn't handed.
     assert crm.COMPANY_APP_URL.startswith("https://apps.apple.com/")
     crm.draft_lead_email("L1", crm.DraftRequest(brief="include the app store link"))
-    assert f"App Store listing: {crm.COMPANY_APP_URL}" in drafted["system"]
+    assert f"App Store: {crm.COMPANY_APP_URL}" in drafted["system"]
 
 
 def test_a_plain_draft_still_needs_a_brief(drafted):

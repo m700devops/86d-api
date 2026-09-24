@@ -89,7 +89,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   (`SPACEMAIL_IMAP_HOST`, default the SMTP host; `SPACEMAIL_IMAP_PORT` 993), finding it by the
   server's `\Sent` flag, else the usual names. Three emails reached their recipients and
   none was in Sent before this. It never raises — the mail has gone either way — and logs
-  `SENT_COPY_FAILED`; `send()` returns `saved_to`. Covered by test_mailer.py
+  `SENT_COPY_FAILED`; `send()` returns `saved_to` AND `copy_error` (`file_copy()`), and the
+  page's toast says "copy in Sent" or "NOT copied to your Sent folder: <the server's
+  reason>" — a refused copy used to be visible only in the server log.
+  `GET /v1/crm/mail/sent-check` logs in over IMAP and lists the folders and the one copies
+  go to, filing nothing. Covered by test_mailer.py
 - venue.py — what's true about a bar, for the thirty seconds before you dial: cuisine, size,
   hours (a volume proxy), how long it's been open, address. Every fact is EXTRACTED from
   either the harvested OSM tags or the venue's OWN site text, and **carries its source** —
@@ -192,7 +196,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
   test_ask.py test_apple.py test_followup_email.py test_tries.py test_dedupe.py
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
-  test_hostile_pages.py -q` (383 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_hostile_pages.py test_sent_email.py test_pitch.py -q` (406 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -650,7 +654,7 @@ capture. Don't reintroduce them or describe them as current.)
   touch. Read-only `/ask` could only answer "you should update the lead". The description
   below is the old endpoint, still live but no longer used by the page
 - **Ask AI** — the box ABOVE the search bar. `POST /v1/crm/ask {question}` hands Claude
-  (`_ask_claude`, Haiku) a text snapshot of the book — every lead (status, last outcome,
+  (`_ask_claude`) a text snapshot of the book — every lead (status, last outcome,
   calls, last touched, follow-up, contact, email, latest note) and the full touch log with
   undone dials excluded — and returns `{answer, leads}`. Every timestamp in the snapshot is
   the OPERATOR's local time (`CRM_OPERATOR_TZ`), with TODAY stated, so "who did we email last
@@ -802,28 +806,52 @@ capture. Don't reintroduce them or describe them as current.)
   gets its own undo. A contact that HAPPENED ("left a voicemail") goes through
   `_apply_call_notes()`, so it counts as a try and books the ladder exactly as Log call does;
   anything else is an EDIT — no touch, no counters, undo action `edit (AI bar)`, and one dated
-  "updated: …" line in the notes. Runs on `ANTHROPIC_ASSIST_MODEL` (default `claude-opus-5`)
-  through `_claude_json()`, not `_ask_claude()`: current models reject the `{` prefill and
-  `temperature` with a 400, so it uses structured outputs (`output_config.format`) instead,
+  "updated: …" line in the notes. Runs on `CRM_AI_MODEL` (see ONE MODEL below)
+  through `_claude_json()`, which uses structured outputs (`output_config.format`),
   `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) on Opus 5 / Fable 5.1, and
   retries a 400 once as a plain request with the schema in the prompt. Roughly 10¢ a message
-  on Opus 5 (the whole book is ~15-25k tokens); set the env var to `claude-sonnet-5` to
-  halve it
+  on Opus 5 (the whole book is ~15-25k tokens)
 - **Follow-ups rows have an Edit button** (between Email and Delete), and the details panel
   has one beside Close. Both open `leadEditCell()` — one form shared with the CRM tab, now
   with Bar and Where as well — saving through `PATCH /leads/{id}`
+- **An email in "Every attempt" opens the email itself.** Every send (now or scheduled) keeps
+  its to/subject/body in `crm_sent_emails`, keyed by the attempt's `crm_touches` id;
+  `GET /leads/{id}/touches/{touch_id}/email` returns it. Sends from before that table existed
+  come back from `crm_scheduled_emails` (a held send kept its body) or, for a send-now, from
+  the notes line — subject and address only, with `complete: false` so the page says the
+  text wasn't kept rather than showing a blank. One delegated click handler in crm.html
+  serves the CRM, Yet to Contact and Follow-ups panels. Covered by test_sent_email.py
 - **Follow-ups rows are clickable too**, opening the same full record as the CRM tab —
   `leadDetailsCell()` in crm.html, shared by CRM, Yet to Contact and Follow-ups so they can't
   drift: every field, an "Every attempt" list (each call/email in the operator's own clock,
   with its outcome), then the notes. The Email button swaps that panel for the compose box
-- **The drafting prompt is facts-only** (`_draft_system`). It is handed the product
-  description, the venue, the contact and the links from `COMPANY_WEBSITE` / `COMPANY_APP_URL`,
-  and told in the first rule never to invent a URL, price, percentage, customer count or
-  feature — with an explicit "NO LINKS ARE AVAILABLE, do not include any URL" when neither
-  env var is set. A cold email carrying a made-up link is worse than no email
-- `_ask_claude()` is the one place that knows the Anthropic headers, the `{` prefill trick and
-  what each failure should say; both the drafter and the call-notes reader go through it.
-  `ANTHROPIC_BASE_URL` overrides the host, for a gateway or a local stand-in
+- **The drafter works from a MASTER SHEET** (pitch.py). `master_sheet()` is everything it may
+  say about 86'd — owner Stephan and his direct line (910-335-2760), the four-step "how it
+  works", what's on every order, first month free with no card, then $29.99/month, the App
+  Store link and the website — each checked against this repo. `EXAMPLE_EMAIL` is the
+  owner's own email, given as the reference for substance; `STYLE` asks for more human than
+  that (open with THEM, a founder who has counted bottles at 1am, one easy next step, a
+  2-6 word subject, the App Store link in every email) and keeps the hard rule: no fact,
+  number or URL that isn't on the sheet or in WHAT WE KNOW. `_draft_system(row)` builds WHAT
+  WE KNOW from the lead's venue facts (with sources), the cached prep-sheet points and — for
+  a first email; a follow-up's ask carries its own — the logged history. **The owner's sample
+  claimed "a unique order number"; the distributor email has none** (subject "Order from
+  {bar} — {date}"), so the sheet leaves it out until one exists. Numbers and links are
+  env-overridable: COMPANY_OWNER_NAME, COMPANY_OWNER_TITLE, COMPANY_PHONE, COMPANY_PRICE,
+  COMPANY_APP_URL, COMPANY_WEBSITE. It used to be bland for three reasons: a four-sentence,
+  no-list rule that forbade the owner's own best email, no price/trial/phone, and Haiku.
+  Covered by test_pitch.py
+- **ONE MODEL for every CRM AI: `CRM_AI_MODEL` (default `claude-opus-5`) at `CRM_AI_EFFORT`
+  (default `medium`)**, the owner's call — notes reader, quick-add, prep sheet, Ask AI, AI
+  bar, inbox reader, drafter, School. A NEW env name on purpose: `ANTHROPIC_MODEL` /
+  `ANTHROPIC_ASSIST_MODEL` may still be set on Render from the Haiku days and are no longer
+  read. `_ask_claude()` was rebuilt for current models: no `{` prefill and no `temperature`
+  (both 400 on Opus 5; the parameter is accepted and ignored), JSON cut from the text blocks
+  (thinking blocks come first), `output_config.effort` sent and a 400 retried once without
+  it. `max_tokens` has a floor of `AI_MIN_TOKENS` (8000) and the timeout of 90s, because a
+  thinking model cut off at Haiku's 400 tokens answers nothing. Slower than Haiku — a notes
+  read takes seconds, not one. `ANTHROPIC_BASE_URL` overrides the host. The product's bottle
+  scanner (main.py, OpenAI → Gemini) is a separate system and unchanged
 - **An approved email can be held for the venue's quiet hour.** `send_at` on
   `POST /leads/{id}/send-email` queues it in `crm_scheduled_emails` instead of sending;
   `_scheduled_email_loop` in main.py wakes every 60s and `run_due_emails()` sends what's due.
@@ -898,10 +926,8 @@ capture. Don't reintroduce them or describe them as current.)
   `crm_lead_candidates` row that produced the lead. Without that the generator re-promotes
   the same restaurant on a later run and it reappears — the exact duplicate call that
   deleting it was meant to prevent
-- **AI is Claude only, via the raw REST API through httpx** (`ANTHROPIC_API_KEY`,
-  `ANTHROPIC_MODEL` default `claude-haiku-4-5-20251001`). It used to share the scan path's
-  OpenAI→Gemini pair on the grounds that it needed no new key; this is one short text
-  extraction per logged call and Haiku is materially cheaper. No SDK, matching how main.py
+- **AI is Claude only, via the raw REST API through httpx** (`ANTHROPIC_API_KEY`, model per
+  ONE MODEL above). It used to share the scan path's OpenAI→Gemini pair. No SDK, matching how main.py
   talks to Resend. **The scan path in main.py is unchanged and still OpenAI→Gemini** — that
   is the product's core feature, not the CRM's
 - The drawer's quick-outcome buttons (Voicemail / Manager out / Not interested) go straight
@@ -995,13 +1021,12 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - ANTHROPIC_API_KEY — the CRM's only AI call (`/debrief`, reading call notes into fields).
   Without it that endpoint 503s with "type the fields in by hand" and everything else,
   including the quick-outcome buttons, works normally. Not used by the mobile app
-- ANTHROPIC_MODEL — optional, default `claude-haiku-4-5-20251001`
-- ANTHROPIC_ASSIST_MODEL — optional, the Follow-ups AI bar's model, default `claude-opus-5`
-  (`claude-sonnet-5` is about half the cost). Any current model works: `_claude_json()`
-  sends no prefill and no temperature
+- CRM_AI_MODEL (default `claude-opus-5`) / CRM_AI_EFFORT (default `medium`) — every CRM AI.
+  ANTHROPIC_MODEL and ANTHROPIC_ASSIST_MODEL are NO LONGER READ (safe to delete on Render)
 - COMPANY_WEBSITE (default `https://my86d.com`), COMPANY_APP_URL (default the live listing,
-  `https://apps.apple.com/us/app/86d-bar-inventory/id6798359825`), COMPANY_NAME,
-  COMPANY_BLURB — the only facts the email drafter may state. COMPANY_APP_URL used to
+  `https://apps.apple.com/us/app/86d-bar-inventory/id6798359825`), COMPANY_OWNER_NAME,
+  COMPANY_OWNER_TITLE, COMPANY_PHONE, COMPANY_PRICE — override the master sheet's numbers
+  (pitch.py). COMPANY_NAME and COMPANY_BLURB are no longer read. COMPANY_APP_URL used to
   default to empty, and asking the drafter for "the link to the app" got the website
   only, because it may not include a link it wasn't given. A blank env var falls back to
   the default rather than switching the link off

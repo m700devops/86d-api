@@ -181,6 +181,16 @@ def init_crm_tables():
         # Every Message-ID the CRM sent, so a reply is tied to its lead even
         # when it comes back from a different address than it went to.
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_sent_emails (
+                touch_id TEXT PRIMARY KEY,      -- the 'email' row in crm_touches
+                lead_id TEXT NOT NULL,
+                to_addr TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                sent_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS crm_sent_messages (
                 message_id TEXT PRIMARY KEY,
                 lead_id TEXT NOT NULL,
@@ -809,11 +819,11 @@ def get_lead(lead_id: str, _: bool = Depends(require_crm_key)):
         # Every attempt to sell them, for the details drawer — undone ones
         # excluded, same as the tally.
         cursor.execute("""
-            SELECT kind, outcome, at FROM crm_touches
+            SELECT id, kind, outcome, at FROM crm_touches
              WHERE lead_id = %s AND outcome IS DISTINCT FROM 'undone'
              ORDER BY at ASC
         """, (lead_id,))
-        touches = [{"kind": t["kind"], "outcome": t["outcome"], "at": t["at"]}
+        touches = [{"id": t["id"], "kind": t["kind"], "outcome": t["outcome"], "at": t["at"]}
                    for t in cursor.fetchall()]
     lead = _lead_row(row)
     lead["window"] = _call_window(row.get("tz_offset_hours"),
@@ -821,6 +831,74 @@ def get_lead(lead_id: str, _: bool = Depends(require_crm_key)):
     lead["touches"] = touches
     lead["tries"] = _tries((t["kind"], 1) for t in touches)
     return {"lead": lead}
+
+
+def _parse_utc(value) -> Optional[datetime]:
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+_NOTE_EMAIL_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2})\] email to (\S{1,200}): (.{0,300})$", re.M)
+
+
+def _email_from_notes(notes: Optional[str], at: str) -> Optional[dict]:
+    """The note line an email left behind — for mail sent before bodies were
+    kept, it's all there is: the date, the address and the subject. The note
+    is dated in the CRM's day and the touch in UTC, so the nearest day wins."""
+    when = _parse_utc(at)
+    if not when:
+        return None
+    day, best = when.date(), None
+    for when, to, subject in _NOTE_EMAIL_RE.findall(notes or ""):
+        try:
+            gap = abs((date.fromisoformat(when) - day).days)
+        except ValueError:
+            continue
+        if gap <= 1 and (best is None or gap < best[0]):
+            best = (gap, to, subject.strip())
+    return {"to": best[1], "subject": best[2]} if best else None
+
+
+@crm_router.get("/leads/{lead_id}/touches/{touch_id}/email", response_model=dict)
+def sent_email(lead_id: str, touch_id: str, _: bool = Depends(require_crm_key)):
+    """The email behind one 'email' attempt, for the details panel.
+
+    Kept on every send since this was added. Earlier ones are recovered where
+    something still holds them: a scheduled send kept its body in
+    crm_scheduled_emails; a send-now left only its subject in the notes, and
+    the answer says so rather than pretending there's nothing.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_touches WHERE id = %s AND lead_id = %s",
+                       (touch_id, lead_id))
+        touch = cursor.fetchone()
+        if not touch or touch["kind"] != "email":
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "No email attempt with that id."})
+        cursor.execute("SELECT * FROM crm_sent_emails WHERE touch_id = %s", (touch_id,))
+        kept = cursor.fetchone()
+        if kept:
+            return {"to": kept["to_addr"], "subject": kept["subject"], "body": kept["body"],
+                    "sent_at": kept["sent_at"], "complete": True}
+        cursor.execute("""
+            SELECT to_addr, subject, body, sent_at FROM crm_scheduled_emails
+             WHERE lead_id = %s AND status = 'sent' AND sent_at IS NOT NULL
+        """, (lead_id,))
+        at = _parse_utc(touch["at"])
+        for job in cursor.fetchall():
+            sent = _parse_utc(job["sent_at"])
+            if at and sent and abs((sent - at).total_seconds()) <= 600:
+                return {"to": job["to_addr"], "subject": job["subject"], "body": job["body"],
+                        "sent_at": job["sent_at"], "complete": True}
+        cursor.execute("SELECT notes FROM crm_leads WHERE id = %s", (lead_id,))
+        row = cursor.fetchone()
+    found = _email_from_notes(row["notes"] if row else None, touch["at"]) or {}
+    return {"to": found.get("to"), "subject": found.get("subject"), "body": None,
+            "sent_at": touch["at"], "complete": False}
 
 
 @crm_router.post("/leads", response_model=dict, status_code=201)
@@ -1753,81 +1831,38 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
 # the server over SMTP closes that loop — the message goes out from the real
 # mailbox, and the same transaction stamps the lead and spends the counter.
 
-# What the model is allowed to say about the product. Everything here is
-# either a fact from the repo or an env var the operator sets — the model gets
-# no licence to invent a feature, a price, a statistic or, above all, a URL.
-# A cold email with a made-up link is worse than no email.
-COMPANY_NAME = os.getenv("COMPANY_NAME", "86'd")
-COMPANY_WEBSITE = os.getenv("COMPANY_WEBSITE", "https://my86d.com")
-# The live listing (bundle com.my86d.app, looked up on Apple's own iTunes
-# lookup API). It defaulted to empty, so asking the drafter for "the link to
-# the app" got the website only: rule 1 below forbids a link it wasn't given.
-# `or`, not a getenv default, so a blank COMPANY_APP_URL on Render can't
-# silently switch it back off.
+# What the drafter may say about the product, and how it should sound, lives
+# in pitch.py: the master sheet (every fact checked against this repo), the
+# owner's own example email, and the style guide. COMPANY_APP_URL stays here
+# for anything else that wants the link.
 COMPANY_APP_URL = (os.getenv("COMPANY_APP_URL")
                    or "https://apps.apple.com/us/app/86d-bar-inventory/id6798359825")
-COMPANY_BLURB = os.getenv("COMPANY_BLURB", "").strip()
-
-DEFAULT_BLURB = (
-    "86'd is an iPhone app that counts a bar's inventory by camera. You point "
-    "the phone at a bottle, it identifies the bottle, you tap in the count on a "
-    "number pad, and at the end it builds the order for each distributor and "
-    "emails it to them. Par levels, prices and which distributor supplies each "
-    "bottle are set once per bottle and remembered, so a re-count only asks for "
-    "the number. It keeps order history and spend by distributor. It is a "
-    "subscription, billed monthly, with a free trial."
-)
+# How much of the log a draft reads. The newest part is what matters; older
+# calls less, and the whole history can run long.
+DRAFT_LOG_CHARS = 4000
 
 
-def _draft_system(lead, sender_name: str) -> str:
-    """The brief the drafting model works from. Facts only."""
-    facts = [f"Product: {COMPANY_NAME}", COMPANY_BLURB or DEFAULT_BLURB]
-    links = []
-    if COMPANY_WEBSITE:
-        links.append(f"Website: {COMPANY_WEBSITE}")
-    if COMPANY_APP_URL:
-        links.append(f"App Store listing: {COMPANY_APP_URL}")
-    facts.append("\n".join(links) if links
-                 else "NO LINKS ARE AVAILABLE. Do not include any URL.")
+def _draft_system(row: dict, include_log: bool = True) -> str:
+    """The brief the drafting model works from: the master sheet, the style
+    guide, the owner's example, and WHAT WE KNOW about this bar — its facts
+    with their sources, the prep-sheet points, and (for a first email; a
+    follow-up carries its own) what's been logged."""
+    import pitch
+    import venue
 
-    about = [f"The recipient is {lead['name']}"]
-    if lead.get("loc"):
-        about.append(f"in {lead['loc']}")
-    who = lead.get("contact") or lead.get("manager_name")
-    if who:
-        role = lead.get("manager_role") or "the manager"
-        about.append(f"— the contact there is {who} ({role})")
-    if lead.get("opener"):
-        about.append(f". Something true about the venue, from their own website: "
-                     f"{lead['opener']}")
-
-    return f"""You write a single short sales email for a salesperson to send from their own mailbox.
-
-{chr(10).join(facts)}
-
-{' '.join(about)}.
-
-The sender is {sender_name}, who owns {COMPANY_NAME} and is writing to sell it. Write in
-their voice, first person, and sign off as them. Everything about the product comes from
-them, never from somebody at the bar.
-
-Return ONLY a JSON object: {{"subject": "...", "body": "..."}}
-
-Rules, in order of importance:
-1. NEVER invent a fact. No URL that is not listed above, no price, no
-   percentage, no customer count, no feature that is not described above. If
-   the salesperson asks for a link you have not been given, leave it out and
-   say nothing about it.
-2. Write it as one person emailing another. Plain text, no marketing voice, no
-   "I hope this email finds you well", no bullet-point feature lists, no
-   exclamation marks.
-3. Short. Four sentences or so in the body. A bar manager reads this on their
-   phone between deliveries.
-4. The subject line is specific and lowercase-ish, like a person typed it —
-   not a headline and not in Title Case.
-5. Do what the salesperson asked for in their instruction. If they say include
-   the website, include it. If they say keep it short, cut it further.
-6. Plain text only: no HTML, no markdown, no asterisks for bold."""
+    lead = _lead_row(row)
+    lines = venue.facts_to_lines(venue.loads(row.get("venue_facts")))
+    try:
+        points = json.loads(row.get("call_brief") or "[]")
+    except (TypeError, ValueError):
+        points = []
+    log = ""
+    if include_log:
+        log = (lead.get("notes") or "").strip()
+        if len(log) > DRAFT_LOG_CHARS:
+            log = "…" + log[-DRAFT_LOG_CHARS:]
+    ctx = pitch.lead_context(lead, lines, [str(p) for p in points if p][:3], log)
+    return pitch.system_prompt(ctx)
 
 
 BRIEF_SYSTEM = """You write two or three short notes for a salesperson about to phone a bar.
@@ -2087,8 +2122,6 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
     tweak edits what is on screen instead of starting over and losing the bit
     that was already right.
     """
-    import mailer
-
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
@@ -2098,16 +2131,15 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
             "error": "not_found", "message": "Lead not found"})
     lead = _lead_row(row)
 
-    sender_name = (os.getenv("SPACEMAIL_FROM_NAME")
-                   or (mailer.sender() or "").split("@")[0] or "me")
-    system = _draft_system(lead, sender_name)
+    followup = data.followup and not (data.subject or data.body)
+    system = _draft_system(row, include_log=not followup)
 
     brief = data.brief.strip()
     if not brief and not data.followup:
         raise HTTPException(status_code=422, detail={
             "error": "brief_required", "message": "Say what the email should cover."})
 
-    if data.followup and not (data.subject or data.body):
+    if followup:
         ask = _followup_ask(lead, brief)
     elif data.subject or data.body:
         ask = (f"Here is the current draft.\n\nSubject: {data.subject or ''}\n\n"
@@ -2116,7 +2148,8 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
     else:
         ask = f"Write the email. What it needs to say: {brief}"
 
-    out = _ask_claude(system, ask, max_tokens=900)
+    import pitch
+    out = _claude_json(system, ask, pitch.SCHEMA, max_tokens=AI_MIN_TOKENS, timeout=120.0)
     subject = str(out.get("subject") or "").strip()[:200]
     body = str(out.get("body") or "").strip()[:20000]
     if not subject or not body:
@@ -2143,6 +2176,14 @@ def mail_status(_: bool = Depends(require_crm_key)):
             # The page hides the "draft it for me" box rather than offering a
             # button that can only fail.
             "ai": bool(os.getenv("ANTHROPIC_API_KEY"))}
+
+
+@crm_router.get("/mail/sent-check", response_model=dict)
+def mail_sent_check(_: bool = Depends(require_crm_key)):
+    """Can the server file copies in Sent, and which folder? Logs in over
+    IMAP and looks; files nothing."""
+    import mailer
+    return mailer.check_sent_folder()
 
 
 @crm_router.post("/leads/{lead_id}/send-email", response_model=dict)
@@ -2188,7 +2229,8 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
     now = now_iso()
     with get_db() as conn:
         cursor = conn.cursor()
-        undo_id = _record_email_sent(cursor, lead_id, to, data.subject, today, now)
+        undo_id = _record_email_sent(cursor, lead_id, to, data.subject, today, now,
+                                     body=data.body)
         _remember_sent(cursor, sent.get("message_id"), lead_id, now)
         cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
         updated = cursor.fetchone()
@@ -2430,7 +2472,7 @@ def run_due_emails(limit: int = 20) -> dict:
             try:
                 _remember_sent(cursor, sent_msg.get("message_id"), job["lead_id"], now_iso())
                 _record_email_sent(cursor, job["lead_id"], job["to_addr"],
-                                   job["subject"], _today(), now_iso())
+                                   job["subject"], _today(), now_iso(), body=job["body"])
             except Exception as exc:
                 # The mail is already gone; a bookkeeping failure must not make
                 # it look unsent. Say so loudly and keep the 'sent' status.
@@ -2452,7 +2494,7 @@ def _remember_sent(cursor, message_id: Optional[str], lead_id: str, now: str) ->
 
 
 def _record_email_sent(cursor, lead_id: str, to: str, subject: str,
-                       today: str, now: str) -> str:
+                       today: str, now: str, body: Optional[str] = None) -> str:
     """Everything that happens to a lead once mail has actually gone out.
 
     Shared by the send-now path and the scheduled worker so a queued email
@@ -2478,9 +2520,16 @@ def _record_email_sent(cursor, lead_id: str, to: str, subject: str,
         if to.lower() != (lead["email"] or "").lower():
             sets.append("email = %s"); params.append(to)
 
-        _attach_touch(cursor, undo_id, _record_touch(
-            cursor, lead, "email", "emailed", lead["attempts"] or 0,
-            lead.get("tz_offset_hours")))
+        touch_id = _record_touch(cursor, lead, "email", "emailed", lead["attempts"] or 0,
+                                 lead.get("tz_offset_hours"))
+        _attach_touch(cursor, undo_id, touch_id)
+        # What was actually said, so the attempt can be opened later. Only the
+        # subject used to survive, as a line in the notes.
+        if body is not None:
+            cursor.execute("""
+                INSERT INTO crm_sent_emails (touch_id, lead_id, to_addr, subject, body, sent_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (touch_id, lead_id, to, subject.strip(), body, now))
         # Whatever was queued has now gone, so the badge comes off.
         sets.append("queued_email_at = NULL")
         params.append(lead_id)
@@ -3569,15 +3618,38 @@ Rules:
 ANTHROPIC_URL = (os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
                  + "/v1/messages")
 ANTHROPIC_VERSION = "2023-06-01"
-DEBRIEF_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+# ONE model for every AI in the CRM, at ONE effort level — the owner's call:
+# the notes reader, quick-add, the prep sheet, Ask AI, the AI bar, the inbox
+# reader, the email drafter and the School all run on it. It used to be Haiku
+# for most of them, and the drafts read like it. `CRM_AI_MODEL` is a new name
+# on purpose: ANTHROPIC_MODEL / ANTHROPIC_ASSIST_MODEL may still be set on
+# Render from the Haiku days, and reading them would quietly keep the old
+# model. The product's bottle scanner (main.py, OpenAI -> Gemini) is a
+# different system and is not affected.
+AI_MODEL = os.getenv("CRM_AI_MODEL") or "claude-opus-5"
+AI_EFFORT = os.getenv("CRM_AI_EFFORT") or "medium"
+DEBRIEF_MODEL = AI_MODEL
+# A thinking model spends tokens before it answers; the old per-call caps
+# (200-900) were sized for Haiku's bare JSON and would cut it off mid-thought.
+# Only what's used is billed, so the floor costs nothing when it isn't needed.
+AI_MIN_TOKENS = 8000
+AI_MIN_TIMEOUT = 90.0
 
 
 def _ask_claude(system: str, user: str, max_tokens: int = 400,
                 temperature: float = 0, timeout: float = 40.0) -> dict:
     """One JSON answer from Claude. Raises HTTPException when unusable.
 
-    Shared by the call-notes reader and the email drafter — one place that
-    knows the headers, the prefill trick and what each failure should say.
+    Shared by the call-notes reader, quick-add, the prep sheet, Ask AI, the
+    School and the email drafter — one place that knows the headers and what
+    each failure should say. Every caller's prompt already says "return ONLY a
+    JSON object"; the object is cut out of the reply text.
+
+    It used to prefill the reply with "{" and set a temperature, which is how
+    Haiku was kept to JSON. Current models reject both with a 400, so neither
+    is sent: `temperature` is accepted and ignored so callers don't change.
+    `output_config.effort` is sent, and a 400 is retried once without it, so
+    an API-side change to that field can't take every AI feature down.
     """
     import json as _json
 
@@ -3591,27 +3663,23 @@ def _ask_claude(system: str, user: str, max_tokens: int = 400,
                         "automatically — write it by hand."),
         })
 
-    try:
-        resp = httpx.post(
+    def send(with_effort: bool):
+        body = {"model": AI_MODEL, "max_tokens": max(max_tokens, AI_MIN_TOKENS),
+                "system": system, "messages": [{"role": "user", "content": user}]}
+        if with_effort and AI_EFFORT:
+            body["output_config"] = {"effort": AI_EFFORT}
+        return httpx.post(
             ANTHROPIC_URL,
-            headers={"x-api-key": key,
-                     "anthropic-version": ANTHROPIC_VERSION,
+            headers={"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION,
                      "content-type": "application/json"},
-            json={
-                "model": DEBRIEF_MODEL,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "system": system,
-                "messages": [
-                    {"role": "user", "content": user},
-                    # Prefilling the opening brace is what makes the reply JSON
-                    # without a tool definition: the model can only continue an
-                    # object it has already started.
-                    {"role": "assistant", "content": "{"},
-                ],
-            },
-            timeout=timeout,
-        )
+            json=body, timeout=max(timeout, AI_MIN_TIMEOUT))
+
+    try:
+        resp = send(True)
+        if resp.status_code == 400:
+            print(f"[crm] Claude refused the effort setting, retrying without: "
+                  f"{resp.text[:200]}", flush=True)
+            resp = send(False)
     except Exception as exc:
         print(f"[crm] Claude request failed: {exc}", flush=True)
         raise HTTPException(status_code=503, detail={
@@ -3631,17 +3699,20 @@ def _ask_claude(system: str, user: str, max_tokens: int = 400,
 
     try:
         body = resp.json()
-        chunks = [b.get("text", "") for b in body.get("content", []) if b.get("type") == "text"]
-        text = "{" + "".join(chunks)
-        # A prefilled reply usually ends cleanly at the closing brace, but a
-        # model can add a sentence after it. Cut at the last brace rather than
-        # failing the whole call over a trailing "Hope that helps!".
-        if not text.rstrip().endswith("}") and "}" in text:
-            text = text[:text.rindex("}") + 1]
-        return _json.loads(text)
-    except HTTPException:
-        raise
-    except Exception as exc:
+    except ValueError:
+        body = {}
+    if body.get("stop_reason") == "refusal":
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_declined", "message": "The AI declined that one — do it by hand."})
+    # Thinking blocks come first on current models; only text carries the JSON.
+    text = "".join(b.get("text", "") for b in body.get("content", [])
+                   if b.get("type") == "text")
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        if start < 0 or end < start:
+            raise ValueError("no JSON object in the reply")
+        return _json.loads(text[start:end + 1])
+    except ValueError as exc:
         print(f"[crm] Claude returned unparseable JSON: {exc}", flush=True)
         raise HTTPException(status_code=503, detail={
             "error": "ai_unreadable",
@@ -3826,7 +3897,7 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
 # Smarter model than the call-notes reader, on purpose: this one has to pick
 # the right bar out of hundreds, turn "Friday" into a date and split one
 # message across several leads — and a wrong guess writes to the CRM.
-ASSIST_MODEL = os.getenv("ANTHROPIC_ASSIST_MODEL", "claude-opus-5")
+ASSIST_MODEL = AI_MODEL
 # Server-side refusal fallbacks are documented for these models; sending the
 # parameter to any other risks a 400 for nothing.
 _FALLBACK_MODELS = {"claude-opus-5", "claude-fable-5-1"}
@@ -3852,8 +3923,8 @@ def _claude_json(system: str, user: str, schema: dict, model: Optional[str] = No
     if not key:
         raise HTTPException(status_code=503, detail={
             "error": "ai_unavailable",
-            "message": "No ANTHROPIC_API_KEY is set, so the AI bar can't run — "
-                       "use Edit on the row instead."})
+            "message": "No ANTHROPIC_API_KEY is set, so the AI can't run — "
+                       "do this one by hand."})
 
     def send(structured: bool):
         headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION,
@@ -3863,6 +3934,8 @@ def _claude_json(system: str, user: str, schema: dict, model: Optional[str] = No
         if structured:
             body["system"] = system
             body["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+            if AI_EFFORT:
+                body["output_config"]["effort"] = AI_EFFORT
             if model in _FALLBACK_MODELS:
                 # A policy decline is re-run on Anthropic's recommended model
                 # inside the same call, instead of coming back as a refusal.

@@ -100,17 +100,19 @@ def test_a_lead_with_no_touches_shows_zero(monkeypatch):
 
 def test_lead_details_list_every_attempt_oldest_first(monkeypatch):
     touches = [
-        {"kind": "call", "outcome": "callback", "at": "2026-09-22T01:14:00+00:00"},
-        {"kind": "email", "outcome": "emailed", "at": "2026-09-23T17:02:00+00:00"},
-        {"kind": "email", "outcome": "emailed", "at": "2026-09-24T15:40:00+00:00"},
+        {"id": "T1", "kind": "call", "outcome": "callback", "at": "2026-09-22T01:14:00+00:00"},
+        {"id": "T2", "kind": "email", "outcome": "emailed", "at": "2026-09-23T17:02:00+00:00"},
+        {"id": "T3", "kind": "email", "outcome": "emailed", "at": "2026-09-24T15:40:00+00:00"},
     ]
     cur = _Cursor([
         ("SELECT * FROM crm_leads WHERE id", [_row("A")]),
-        ("SELECT kind, outcome, at FROM crm_touches", touches),
+        ("SELECT id, kind, outcome, at FROM crm_touches", touches),
     ])
     _db(monkeypatch, cur)
     lead = crm.get_lead("A")["lead"]
     assert [t["kind"] for t in lead["touches"]] == ["call", "email", "email"]
+    # The id is what lets the page open an email attempt's text.
+    assert [t["id"] for t in lead["touches"]] == ["T1", "T2", "T3"]
     assert lead["tries"] == {"total": 3, "call": 1, "email": 2, "fb": 0}
-    history = next(q for q in cur.seen if q.startswith("SELECT kind, outcome, at"))
+    history = next(q for q in cur.seen if q.startswith("SELECT id, kind, outcome, at"))
     assert "'undone'" in history and "ORDER BY at ASC" in history

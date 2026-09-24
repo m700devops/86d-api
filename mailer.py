@@ -132,8 +132,9 @@ def send(to: str, subject: str, body: str,
     except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
         raise MailFailed(f"Couldn't reach {HOST}:{PORT} — {exc}")
 
+    saved_to, copy_error = file_copy(msg)
     return {"message_id": msg["Message-ID"], "to": to, "from": USER,
-            "saved_to": save_to_sent(msg)}
+            "saved_to": saved_to, "copy_error": copy_error}
 
 
 def _sent_folder(imap) -> Optional[str]:
@@ -159,7 +160,17 @@ def save_to_sent(msg: EmailMessage) -> Optional[str]:
 
     Never raises: the mail has gone, and failing here would tell the caller it
     hadn't — the one lie the send path must never tell. Returns the folder it
-    landed in, or None (logged).
+    landed in, or None (logged). `file_copy()` also says why.
+    """
+    return file_copy(msg)[0]
+
+
+def file_copy(msg: EmailMessage) -> tuple:
+    """(folder it landed in, None) or (None, the reason in plain words).
+
+    The reason goes back to the page with the send. It used to reach only the
+    server log as SENT_COPY_FAILED, so a mailbox refusing the copy looked
+    exactly like one that took it: "Sent to …", and an empty Sent folder.
     """
     try:
         with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT,
@@ -168,18 +179,48 @@ def save_to_sent(msg: EmailMessage) -> Optional[str]:
             imap.login(USER, PASSWORD)
             folder = _sent_folder(imap)
             if not folder:
-                print("[mailer] SENT_COPY_FAILED no Sent folder found", flush=True)
-                return None
+                why = "the mailbox has no Sent folder the server would name"
+                print(f"[mailer] SENT_COPY_FAILED {why}", flush=True)
+                return None, why
             quoted = f'"{folder}"' if " " in folder else folder
-            status, _ = imap.append(quoted, "\\Seen", imaplib.Time2Internaldate(time.time()),
-                                    msg.as_bytes())
+            status, data = imap.append(quoted, "\\Seen", imaplib.Time2Internaldate(time.time()),
+                                       msg.as_bytes())
             if status != "OK":
-                print(f"[mailer] SENT_COPY_FAILED append to {folder}: {status}", flush=True)
-                return None
-            return folder
+                why = f"{IMAP_HOST} refused the copy into {folder}: {_said(data) or status}"
+                print(f"[mailer] SENT_COPY_FAILED {why}", flush=True)
+                return None, why
+            return folder, None
     except Exception as exc:
-        print(f"[mailer] SENT_COPY_FAILED {exc}", flush=True)
-        return None
+        why = f"couldn't file it on {IMAP_HOST}:{IMAP_PORT} — {exc}"
+        print(f"[mailer] SENT_COPY_FAILED {why}", flush=True)
+        return None, why
+
+
+def _said(data) -> str:
+    return " ".join(d.decode(errors="replace") if isinstance(d, bytes) else str(d)
+                    for d in (data or []) if d)[:200]
+
+
+def check_sent_folder() -> dict:
+    """Log in over IMAP and say which folder copies would go to, without
+    filing anything. For `GET /v1/crm/mail/sent-check`."""
+    if not is_configured():
+        return {"ok": False, "error": "No mailbox is configured."}
+    try:
+        with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT,
+                               ssl_context=ssl.create_default_context(),
+                               timeout=TIMEOUT) as imap:
+            imap.login(USER, PASSWORD)
+            status, rows = imap.list()
+            folders = [r.decode(errors="replace") if isinstance(r, bytes) else str(r)
+                       for r in (rows or [])]
+            folder = _sent_folder(imap)
+    except Exception as exc:
+        return {"ok": False, "host": f"{IMAP_HOST}:{IMAP_PORT}",
+                "error": f"couldn't log in over IMAP — {exc}"}
+    return {"ok": bool(folder), "host": f"{IMAP_HOST}:{IMAP_PORT}", "folder": folder,
+            "folders": folders[:40],
+            "error": None if folder else "no Sent folder found among these"}
 
 
 def fetch_recent(days: int = 3, limit: int = 60) -> list:
