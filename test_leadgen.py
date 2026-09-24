@@ -15,6 +15,7 @@ Pure function of (crawled text, OSM tags) — no DB, network or clock — so it'
 tested directly here rather than through enrich_candidate(), which crawls a
 real site.
 """
+import json
 import sys
 import types
 
@@ -26,6 +27,7 @@ if "database" not in sys.modules:
 
 from leadgen import (  # noqa: E402
     _restaurant_pours, _on_tourist_strip, score_candidate, ASIAN_CUISINE_HINTS,
+    _map_fit_penalty, _rescore_map_penalties_once,
 )
 
 
@@ -211,6 +213,113 @@ def test_asian_cuisine_lowers_score_but_does_not_zero_it():
     western = score_candidate(tags_western, None, "")
     asian = score_candidate(tags_asian, None, "")
     assert asian == western - 2   # a penalty, not a rejection
+
+
+
+# ── One-time rescore of rows scored before the map penalties existed ──────────
+
+class _FakeCursor:
+    """Just enough of a DB cursor for `_rescore_map_penalties_once()`: one
+    marker table, candidate rows, lead rows, and the queries it runs."""
+
+    def __init__(self, cands, leads):
+        self.cands = {c["id"]: c for c in cands}
+        self.leads = {l["id"]: l for l in leads}
+        self.markers = set()
+        self._result = []
+
+    def execute(self, sql, params=()):
+        s = " ".join(sql.split())
+        self._result = []
+        if s.startswith("CREATE TABLE"):
+            return
+        if s.startswith("INSERT INTO crm_leadgen_oneshots"):
+            if params[0] not in self.markers:
+                self.markers.add(params[0])
+                self._result = [{"name": params[0]}]
+        elif s.startswith("SELECT c.id"):
+            (cutoff,) = params
+            for c in self.cands.values():
+                if c["status"] not in ("qualified", "promoted"):
+                    continue
+                if not c["enriched_at"] or c["enriched_at"] >= cutoff:
+                    continue
+                lead = self.leads.get(c.get("promoted_lead_id"))
+                unworked = bool(lead and lead["status"] == "new"
+                                and lead["last_touch_at"] is None)
+                self._result.append({**c, "lead_unworked": unworked})
+        elif s.startswith("UPDATE crm_lead_candidates"):
+            self.cands[params[1]]["score"] += params[0]
+        elif s.startswith("UPDATE crm_leads"):
+            lead = self.leads[params[1]]
+            lead["lead_score"] = (lead["lead_score"] or 0) + params[0]
+        elif s.startswith("UPDATE crm_leadgen_oneshots"):
+            return
+        else:
+            raise AssertionError(f"unexpected SQL: {s}")
+
+    def fetchone(self):
+        return self._result[0] if self._result else None
+
+    def fetchall(self):
+        return list(self._result)
+
+
+_OLD = "2026-09-20T10:00:00+00:00"
+_NEW = "2026-09-25T10:00:00+00:00"
+_STRIP = json.dumps({"addr:street": "Las Vegas Blvd S"})
+_SUSHI = json.dumps({"cuisine": "sushi"})
+
+
+def _cand(id, status, tags, enriched=_OLD, lead=None, score=10, city="Las Vegas"):
+    return {"id": id, "status": status, "city": city, "raw_tags": tags,
+            "enriched_at": enriched, "promoted_lead_id": lead, "score": score}
+
+
+def _lead(id, status="new", touched=None, score=10):
+    return {"id": id, "status": status, "last_touch_at": touched, "lead_score": score}
+
+
+def test_rescore_applies_penalty_to_banked_and_unworked_rows():
+    cur = _FakeCursor(
+        [_cand("banked", "qualified", _STRIP),
+         _cand("sushi", "promoted", _SUSHI, lead="L1", city="Denver")],
+        [_lead("L1")])
+    assert _rescore_map_penalties_once(cur) == (2, 1)
+    assert cur.cands["banked"]["score"] == 6    # tourist strip, -4
+    assert cur.cands["sushi"]["score"] == 8     # Asian cuisine, -2
+    assert cur.leads["L1"]["lead_score"] == 8
+
+
+def test_rescore_never_touches_a_worked_lead():
+    cur = _FakeCursor(
+        [_cand("called", "promoted", _STRIP, lead="L1"),
+         _cand("dead", "promoted", _STRIP, lead="L2")],
+        [_lead("L1", touched="2026-09-22T20:00:00+00:00"), _lead("L2", status="dead")])
+    assert _rescore_map_penalties_once(cur) == (0, 0)
+    assert cur.leads["L1"]["lead_score"] == 10
+    assert cur.leads["L2"]["lead_score"] == 10
+
+
+def test_rescore_skips_rows_already_scored_with_the_penalty():
+    cur = _FakeCursor([_cand("fresh", "qualified", _STRIP, enriched=_NEW)], [])
+    assert _rescore_map_penalties_once(cur) == (0, 0)
+    assert cur.cands["fresh"]["score"] == 10
+
+
+def test_rescore_runs_only_once():
+    cur = _FakeCursor([_cand("banked", "qualified", _STRIP)], [])
+    assert _rescore_map_penalties_once(cur) == (1, 0)
+    assert _rescore_map_penalties_once(cur) is None   # the next boot
+    assert cur.cands["banked"]["score"] == 6          # charged once, not twice
+
+
+def test_rescore_uses_the_same_numbers_as_score_candidate():
+    tags = {"amenity": "bar", "cuisine": "sushi", "addr:street": "Las Vegas Blvd S"}
+    plain = {"amenity": "bar"}
+    assert (score_candidate(tags, None, "", city="Las Vegas")
+            - score_candidate(plain, None, "", city="Las Vegas")
+            == _map_fit_penalty(tags, "Las Vegas") == -6)
 
 
 if __name__ == "__main__":

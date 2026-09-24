@@ -1886,8 +1886,57 @@ def send_slots(lead_id: str, _: bool = Depends(require_crm_key)):
     }
 
 
+FOLLOWUP_OUTCOME = {
+    "answered": "spoke with someone",
+    "voicemail": "left a voicemail",
+    "no_answer": "called, nobody picked up",
+    "gatekeeper": "the manager wasn't in",
+    "callback": "they asked for a callback",
+    "not_interested": "they said they weren't interested",
+}
+# The newest part of the log is what a follow-up is about; older calls matter
+# less and the whole history can run long.
+FOLLOWUP_NOTES_CHARS = 4000
+
+
+def _followup_ask(lead: dict, brief: str = "") -> str:
+    """The drafting request for a follow-up, built from what's been LOGGED.
+
+    The notes are the operator's own record — call summaries, their verbatim
+    words, and machine lines from the lead generator (where the email was
+    found, the website). The model is told to write only from what was
+    actually said or done with a person, never from the bookkeeping.
+    """
+    notes = (lead.get("notes") or "").strip()
+    if len(notes) > FOLLOWUP_NOTES_CHARS:
+        notes = "…" + notes[-FOLLOWUP_NOTES_CHARS:]
+    lines = ["Write a FOLLOW-UP email to this venue, based on what has been logged about it."]
+    if lead.get("contact"):
+        lines.append(f"Contact: {lead['contact']}")
+    outcome = FOLLOWUP_OUTCOME.get(lead.get("last_outcome") or "")
+    if outcome:
+        date = lead.get("call_date") or lead.get("email_date") or ""
+        lines.append(f"Last contact: {outcome}" + (f" ({date})" if date else ""))
+    lines.append("Salesperson's log, oldest first:\n" + (notes or "(nothing logged)"))
+    lines.append(
+        "How to use the log: refer back to what was actually discussed — who "
+        "they spoke to, what that person said or asked for, any personal detail "
+        "worth a friendly nod — and answer what they asked where the product "
+        "facts allow. Only state things the log says; if it is unclear whether "
+        "something was said, leave it out. Ignore bookkeeping lines (where the "
+        "email or website was found, attempt numbers, lead-generator notes) — "
+        "never mention them. If nobody was reached, keep it to a short note "
+        "saying you tried calling and why you're reaching out.")
+    if brief:
+        lines.append(f"Also: {brief}")
+    return "\n\n".join(lines)
+
+
 class DraftRequest(BaseModel):
-    brief: str = Field(min_length=1, max_length=2000)
+    brief: str = Field(default="", max_length=2000)
+    # The Follow-ups tab's Email button: write a follow-up from what's been
+    # logged on this lead, with no brief needed.
+    followup: bool = False
     # Present on a revision: the draft on screen right now, which the model
     # edits rather than replacing from scratch.
     subject: Optional[str] = Field(default=None, max_length=200)
@@ -1920,12 +1969,19 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
                    or (mailer.sender() or "").split("@")[0] or "me")
     system = _draft_system(lead, sender_name)
 
-    if data.subject or data.body:
+    brief = data.brief.strip()
+    if not brief and not data.followup:
+        raise HTTPException(status_code=422, detail={
+            "error": "brief_required", "message": "Say what the email should cover."})
+
+    if data.followup and not (data.subject or data.body):
+        ask = _followup_ask(lead, brief)
+    elif data.subject or data.body:
         ask = (f"Here is the current draft.\n\nSubject: {data.subject or ''}\n\n"
                f"{data.body or ''}\n\n---\n\nChange it as follows, keeping "
-               f"everything else as it is: {data.brief}")
+               f"everything else as it is: {brief}")
     else:
-        ask = f"Write the email. What it needs to say: {data.brief}"
+        ask = f"Write the email. What it needs to say: {brief}"
 
     out = _ask_claude(system, ask, max_tokens=900)
     subject = str(out.get("subject") or "").strip()[:200]
