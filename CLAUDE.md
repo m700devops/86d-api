@@ -473,8 +473,13 @@ capture. Don't reintroduce them or describe them as current.)
   That is how warm leads quietly die
 - `q` searches name, town, contact, email and phone. The phone match strips punctuation on
   both sides, so "6157429095" finds "+1-615-742-9095"
-- Stage counts on the tabs are for the WHOLE pipeline, never for the current filter — a tab
-  that renumbers itself when you click it is unreadable
+- **Two buttons only: Open and Dead** (`status=open` on `/leads` means `status <> 'dead'`).
+  Every lead is Open until they said no — not interested, already have a system or an app,
+  don't call again — and the debrief/quick-add prompts send exactly those to `dead`. The five
+  stage chips this replaced (In play / Not called yet / Won / Dead / Everything) made the
+  operator remember what each held. Typing a search looks across both
+- Counts on the two buttons are for the WHOLE pipeline, never for the current filter — a
+  button that renumbers itself when you click it is unreadable
 - Eight columns, not ten: the contact's name sits under the bar's, and last-touch/next-due are
   one column. At ten the action buttons fell off the right-hand edge, and the buttons are the
   point of the screen
@@ -657,6 +662,14 @@ capture. Don't reintroduce them or describe them as current.)
   `status` explicitly, and `_apply_call_notes` uses it when the model supplies a valid one,
   falling back to the old status-based guess only when it doesn't (an older extraction, or a
   model that skips the field)
+- **`no_answer` is its own outcome, and nobody-picked-up is never "answered".** There was no
+  outcome for a call that rang out with no way to leave a message, so it had nowhere to land:
+  Pig & the Sprout, noted "no one picked up the phone, and you can't leave a message", was
+  logged Answered — which also stopped its retry ladder. `_no_answer_outcome()` reads the
+  operator's RAW notes and overrides the model when it says "answered" or nothing (never a
+  callback/not-interested, since those mean a person spoke). The fallback no longer guesses
+  "answered" from status=contacted. `_reconcile_no_answer()` runs every boot and re-files
+  rows logged before this, reading only the latest note line
 - **`POST /v1/crm/leads/quick-add` is the same idea for a call to a bar that was never in
   the pipeline at all** — cold-found on the operator's own initiative, a referral, a walk-in.
   `/debrief` only ever updates a lead that already exists; this describes the call in plain

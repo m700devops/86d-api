@@ -266,6 +266,48 @@ def init_crm_tables():
         print(f"[crm] CRM_TABLES_READY tables={found} timezone={os.getenv('CRM_TIMEZONE', 'UTC')} "
               f"api_key_set={bool(os.getenv('CRM_API_KEY'))}", flush=True)
 
+    try:
+        _reconcile_no_answer()
+    except Exception as e:  # a repair pass must never stop the CRM booting
+        print(f"[crm] NO_ANSWER_RECONCILE_FAILED {e!r}", flush=True)
+
+
+def _reconcile_no_answer() -> int:
+    """Re-file calls logged "answered" whose own note says nobody picked up.
+
+    Before "no_answer" existed, a rang-out call had nowhere to land and came
+    out as "answered" — which also stopped the retry ladder, since _cadence
+    treats "answered" as reached. Reads only the LATEST note line (the call
+    that set last_outcome), so an older no-answer followed by a real
+    conversation stays "answered". Idempotent: a fixed row no longer matches.
+    """
+    fixed = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, notes, followup_date FROM crm_leads "
+                       "WHERE last_outcome = 'answered'")
+        for row in cursor.fetchall():
+            lines = [l for l in (row["notes"] or "").splitlines() if l.strip()]
+            outcome = _no_answer_outcome(lines[-1]) if lines else None
+            if not outcome:
+                continue
+            cursor.execute("""
+                UPDATE crm_leads SET last_outcome = %s,
+                       followup_date = COALESCE(followup_date, %s), updated_at = %s
+                 WHERE id = %s
+            """, (outcome, _today(), now_iso(), row["id"]))
+            cursor.execute("""
+                UPDATE crm_touches SET outcome = %s, connected = FALSE
+                 WHERE id = (SELECT id FROM crm_touches
+                              WHERE lead_id = %s AND outcome = 'answered'
+                              ORDER BY at DESC LIMIT 1)
+            """, (outcome, row["id"]))
+            fixed += 1
+        conn.commit()
+    if fixed:
+        print(f"[crm] NO_ANSWER_RECONCILED rows={fixed}", flush=True)
+    return fixed
+
 
 # ============== MODELS ==============
 
@@ -362,7 +404,35 @@ CONNECTED_OUTCOMES = {"answered", "gatekeeper", "callback", "not_interested"}
 # values, TouchLogged's Literal, and what DEBRIEF_SYSTEM/QUICK_ADD_SYSTEM are
 # now asked for directly (see _apply_call_notes). One set so all three ways
 # of logging a call agree on the vocabulary.
-TOUCH_OUTCOMES = {"answered", "voicemail", "gatekeeper", "not_interested", "callback"}
+TOUCH_OUTCOMES = {"answered", "voicemail", "no_answer", "gatekeeper", "not_interested",
+                  "callback"}
+
+# "Nobody picked up" in the operator's own words. There was no outcome for
+# this at all, so a call that rang out with no way to leave a message had
+# nowhere to land — the model either left the field blank (and the fallback
+# guessed "answered" from status=contacted) or called it "answered" outright.
+# Pig & the Sprout was logged "Answered" from notes reading "no one picked up
+# the phone, and you can't leave a message". Checked against the raw notes so
+# it holds even when the model gets it wrong.
+_LEFT_MESSAGE_RE = re.compile(
+    r"\bleft (?:a |them a |him a |her a )?(?:voice ?mail|vm|message)\b", re.I)
+_NO_ANSWER_RE = re.compile(
+    r"\b(?:no ?one|nobody|no body)\b[^.;]{0,40}?\b(?:pick(?:ed|s)? ?up|answer(?:ed|s)?)\b"
+    r"|\bno answer\b|\bdid(?:n'?t| not) (?:pick up|answer)\b|\bunanswered\b"
+    r"|\brang out\b|\bjust rang\b|\bstraight to (?:voice ?mail|vm)\b"
+    r"|\b(?:can'?t|cannot|couldn'?t|could not|unable to) leave (?:a )?(?:voice ?mail|message|vm)\b"
+    r"|\bmailbox (?:is |was )?full\b|\bno (?:voice ?mail|vm)\b",
+    re.I)
+
+
+def _no_answer_outcome(raw_text: str) -> Optional[str]:
+    """What the notes say when nobody was reached, or None if they don't."""
+    text = raw_text or ""
+    if _LEFT_MESSAGE_RE.search(text):
+        return "voicemail"
+    if _NO_ANSWER_RE.search(text):
+        return "no_answer"
+    return None
 
 # Columns a PATCH is allowed to write. `id`, `created_at` and `updated_at` are
 # not in here on purpose — an allowlist beats filtering a denylist when the
@@ -554,16 +624,20 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     lead you spoke to on Tuesday and didn't set a follow-up for is invisible,
     which is how warm leads quietly die.
     """
-    if status is not None and status not in VALID_STATUSES:
+    # "open" is the CRM tab's default: every lead that isn't dead. The tab has
+    # two buttons, Open and Dead — a lead only leaves Open when they said no.
+    if status is not None and status != "open" and status not in VALID_STATUSES:
         raise HTTPException(status_code=422, detail={
             "error": "invalid_status",
-            "message": f"status must be one of {', '.join(VALID_STATUSES)}",
+            "message": f"status must be 'open' or one of {', '.join(VALID_STATUSES)}",
         })
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
     where, params = ["1=1"], []
-    if status:
+    if status == "open":
+        where.append("status <> 'dead'")
+    elif status:
         where.append("status = %s"); params.append(status)
     if q and q.strip():
         # Name, town, contact, email or phone — whichever the operator happens
@@ -606,6 +680,7 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     return {"leads": leads, "count": len(leads), "matching": matching,
             "offset": offset, "limit": limit,
             "counts": {**{k: by_status.get(k, 0) for k in VALID_STATUSES},
+                       "open": everything - by_status.get("dead", 0),
                        "all": everything}}
 
 
@@ -1378,7 +1453,8 @@ def call_queue(limit: int = 50, _: bool = Depends(require_crm_key)):
 
 class TouchLogged(BaseModel):
     kind: Literal["call", "email", "fb"]
-    outcome: Optional[Literal["answered", "voicemail", "gatekeeper", "not_interested", "callback"]] = None
+    outcome: Optional[Literal["answered", "voicemail", "no_answer", "gatekeeper",
+                              "not_interested", "callback"]] = None
     followup_in_days: Optional[int] = Field(default=None, ge=0, le=365)
     note: Optional[str] = Field(default=None, max_length=2000)
     status: Optional[LeadStatus] = None
@@ -1427,6 +1503,7 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
             # A call that reached a human has, at minimum, contacted them.
             new_status = {"not_interested": "dead", "callback": "warm",
                           "answered": "contacted", "voicemail": "contacted",
+                          "no_answer": "contacted",
                           "gatekeeper": "contacted"}.get(data.outcome)
         if new_status and lead["status"] == "new":
             sets.append("status = %s"); params.append(new_status)
@@ -3017,7 +3094,7 @@ They sell 86'd, an iPhone app for bar inventory, to independent bars and restaur
 
 Return ONLY a JSON object with these keys (omit any you cannot determine — never guess):
   "status": one of "new","contacted","warm","won","dead"
-  "outcome": one of "answered","voicemail","gatekeeper","not_interested","callback" —
+  "outcome": one of "answered","voicemail","no_answer","gatekeeper","not_interested","callback" —
     what SPECIFICALLY happened on this call, not to be confused with status. A voicemail and
     an actual conversation can both land status "contacted", and outcome is the only field
     that still tells them apart — getting this vague is exactly the bug it exists to prevent.
@@ -3029,10 +3106,13 @@ Return ONLY a JSON object with these keys (omit any you cannot determine — nev
 
 Rules:
 - "not interested", "hung up", "don't call again", "no thanks" -> status "dead", outcome "not_interested"
+- they already have a system / app / software for inventory, or are happy with how they do it now -> status "dead", outcome "not_interested"
 - an agreed callback, a demo booked, real interest -> status "warm", outcome "callback"
 - reached the decision maker, had a real conversation, no clear next step -> status "contacted", outcome "answered"
 - signed up, bought, installed -> status "won", outcome "answered"
-- left a voicemail, no answer, nobody picked up -> status "contacted", outcome "voicemail"
+- left a voicemail -> status "contacted", outcome "voicemail"
+- nobody picked up and NO message was left (rang out, no voicemail, mailbox full) -> status "contacted", outcome "no_answer"
+- "answered" means a real person picked up and spoke. If nobody picked up it is NEVER "answered"
 - spoke to staff/a gatekeeper, the decision maker wasn't in or available -> status "contacted", outcome "gatekeeper"
 - "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
 """
@@ -3182,12 +3262,23 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
     # answer" landed status=contacted (correctly) and last_outcome=answered
     # (wrong) — indistinguishable on screen from an actual conversation.
     outcome_guess = extracted.get("outcome")
+    # The operator's own words beat the model on one question: did anybody
+    # pick up. Only overrides "answered" or a blank — a callback or a "not
+    # interested" is something a person said, so somebody did answer.
+    heard = _no_answer_outcome(raw_text) if kind == "call" else None
+    if heard and (outcome_guess == "answered" or outcome_guess not in TOUCH_OUTCOMES):
+        outcome_guess = heard
     if outcome_guess not in TOUCH_OUTCOMES:
         # Older extractions, or a model that skipped the field: fall back to
-        # the coarse guess rather than losing the outcome entirely.
+        # the coarse guess rather than losing the outcome entirely. Never to
+        # "answered" from status=contacted alone — contacted also covers a
+        # call nobody picked up, and guessing "answered" there is what put a
+        # rang-out call on screen as a conversation.
         if status == "dead":
             outcome_guess = "not_interested"
-        elif status in ("warm", "won", "contacted"):
+        elif status == "warm":
+            outcome_guess = "callback"
+        elif status == "won":
             outcome_guess = "answered"
         else:
             outcome_guess = None
@@ -3308,16 +3399,19 @@ Return ONLY a JSON object with these keys (omit any you truly cannot find):
   "contact": the person they spoke to, with role if given (e.g. "Taylor (bartender)")
   "decision_makers": who makes the buying decision, with role if given (e.g. "Mallory and Mike (owners)")
   "status": one of "new","contacted","warm","won","dead"
-  "outcome": one of "answered","voicemail","gatekeeper","not_interested","callback"
+  "outcome": one of "answered","voicemail","no_answer","gatekeeper","not_interested","callback"
   "followup_in_days": integer number of days until the agreed follow-up
   "next_step": the concrete next action, one short sentence (e.g. "Email the owners")
   "summary": one or two clean sentences recording what happened, keeping every useful detail
 
 Rules:
 - "not interested", "hung up", "don't call again" -> status "dead", outcome "not_interested"
+- they already have a system / app / software for inventory, or are happy with how they do it now -> status "dead", outcome "not_interested"
 - an agreed callback, a demo booked, real interest -> status "warm", outcome "callback"
 - reached the decision maker, real conversation, no clear next step -> status "contacted", outcome "answered"
-- left a voicemail, nobody picked up -> status "contacted", outcome "voicemail"
+- left a voicemail -> status "contacted", outcome "voicemail"
+- nobody picked up and NO message was left (rang out, no voicemail, mailbox full) -> status "contacted", outcome "no_answer"
+- "answered" means a real person picked up and spoke. If nobody picked up it is NEVER "answered"
 - spoke to staff/bartender/gatekeeper, the decision maker wasn't there -> status "contacted", outcome "gatekeeper"
 - "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
 """

@@ -46,13 +46,12 @@
   .pipebar{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
   .pipebar input{flex:1;min-width:220px}
   .pipebar button{flex:none;white-space:nowrap}
-  /* Read-only — nothing here is a button. Five pill toggles used to sit here,
-     each one a decision to make before the actual table even loaded; this is
-     just where things stand, at a glance, while the table below always shows
-     the one stage that needs a human: who's in play. */
-  .glance{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;
-          font-size:12px;color:var(--text3)}
-  .glance b{color:var(--text);font-size:14px;font-weight:700;margin-right:4px}
+  /* Open / Dead — the CRM tab's only two views. */
+  .glance{display:flex;gap:8px;margin-bottom:14px}
+  .glance button{font-size:14px;font-weight:700;padding:9px 18px;border-radius:10px}
+  .glance button b{margin-left:6px;color:var(--text3);font-weight:700}
+  .glance button.on{border-color:var(--accent);background:#FF6B351A;color:var(--accent)}
+  .glance button.on b{color:var(--accent)}
   .st{display:inline-block;font-size:10px;font-weight:800;letter-spacing:0.5px;
       padding:2px 8px;border-radius:5px;border:1px solid var(--line2);color:var(--text2)}
   .st-new{color:var(--text2)}
@@ -1319,9 +1318,11 @@ $('zones').onclick=async e=>{
       <textarea placeholder="spoke to Dave the GM, still counting on a clipboard, wants me to call back Tuesday, his email is dave@thebar.com"></textarea>
       <div class="row">
         <button class="go" data-save>Save &amp; next</button>
-        <button data-outcome="voicemail" data-note="Left a voicemail, no answer.">Voicemail</button>
+        <button data-outcome="no_answer" data-note="Nobody picked up, no message left.">No answer</button>
+        <button data-outcome="voicemail" data-note="Left a voicemail.">Voicemail</button>
         <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
         <button data-outcome="not_interested" data-note="Not interested, asked not to be called again.">Not interested</button>
+        <button data-outcome="not_interested" data-note="Already has a system/app for inventory.">Has a system</button>
         <button data-cancel>Cancel</button>
       </div>
       <div class="applied hide"></div>
@@ -1403,61 +1404,37 @@ async function drawerAction(dr,e){
    stops the same bar being rung twice, and follow-ups only shows what's due.
    Without this, a bar you spoke to on Tuesday and forgot to book a callback
    for is invisible — which is how warm leads quietly die. */
-// Opens on the people you've actually spoken to, not on 312 cold names.
-let PIPE={q:'',offset:0};
+/* Two buttons: Open and Dead. Every lead is Open until they told you no —
+   not interested, already have a system or an app, don't call again — and
+   only then does it move to Dead. The five stage chips it replaced (In play,
+   Not called yet, Won, Dead, Everything) asked the operator to remember what
+   each one held; "is this one still worth a call or not" is the only
+   question the tab actually answers. Typing a search looks in both. */
+let PIPE={view:'open',q:'',offset:0};
 let pipeTimer=null;
 
-/* No stage buttons: a row of five pill toggles was five decisions to make
-   before the actual work — the table — even loaded. Instead, one table with
-   one rule. Empty search box: show who's IN PLAY (contacted or warm) —
-   that's the only stage this screen exists for, since the Call list already
-   owns "not called yet" and duplicating its 195-row list here was pure
-   noise. Typed a search: widen to every stage at once, because finding one
-   specific bar shouldn't depend on first guessing which chip it's filed
-   under. STAGES still drives the read-only glance line below the table. */
-const STAGES=[
-  ['working','in play',        'contacted,warm'],
-  ['new',    'not called yet', 'new'],
-  ['won',    'won',            'won'],
-  ['dead',   'dead',           'dead'],
-];
 // The edit form still writes one real status at a time.
 const STATUSES=[['','Everything'],['new','Not called'],['contacted','Contacted'],
                 ['warm','Warm'],['won','Won'],['dead','Dead']];
 
 async function loadPipeline(){
   const searching=!!PIPE.q;
-  const statuses=searching?[]:['contacted','warm'];
   const qs=new URLSearchParams();
-  if(statuses.length===1) qs.set('status',statuses[0]);
+  if(!searching) qs.set('status',PIPE.view);
   if(PIPE.q) qs.set('q',PIPE.q);
-  qs.set('offset',PIPE.offset); qs.set('limit',searching||statuses.length>1?400:100);
+  qs.set('offset',PIPE.offset); qs.set('limit',100);
   const d=await api('/leads?'+qs);
-  if(statuses.length>1){
-    d.leads=d.leads.filter(l=>statuses.includes(l.status));
-    // The server counted before this filter ran, so its totals describe a
-    // different list than the one on screen. Saying "showing 1-318 of 318"
-    // over seven rows is the page contradicting itself.
-    d.count=d.leads.length;
-    d.matching=statuses.reduce((n,x)=>n+(d.counts[x]??0),0);
-  }
 
-  const tally=key=>{
-    const st=STAGES.find(x=>x[0]===key);
-    if(!st||!st[2]) return d.counts.all??0;
-    return st[2].split(',').reduce((n,x)=>n+(d.counts[x]??0),0);
-  };
-  // Plain numbers, not buttons — nothing here is clickable, it's just where
-  // things stand. Search for a name and this keeps showing the whole
-  // book's shape even while the table below is narrowed to matches.
-  $('pipeStats').innerHTML=STAGES.map(([key,label])=>
-    `<span><b>${tally(key)}</b> ${esc(label)}</span>`).join('')
-    + `<span><b>${d.counts.all??0}</b> everything</span>`;
+  const open=d.counts.open??((d.counts.all??0)-(d.counts.dead??0));
+  $('pipeStats').innerHTML=[['open','Open',open],['dead','Dead',d.counts.dead??0]]
+    .map(([key,label,n])=>`<button data-view="${key}"
+       class="${!searching&&PIPE.view===key?'on':''}">${label} <b>${n}</b></button>`).join('');
 
   if(!d.leads.length){
     $('pipeBody').innerHTML=`<div class="card muted">${
       searching ? 'Nothing matches “'+esc(PIPE.q)+'”.'
-             : 'Nobody in play right now — log a call from the Call list and they show up here.'}</div>`;
+        : PIPE.view==='dead' ? 'Nobody has said no yet.'
+        : 'Nothing open.'}</div>`;
     return;
   }
 
@@ -1488,7 +1465,8 @@ async function loadPipeline(){
 // last_outcome always carries the real answer; it just wasn't being shown
 // anywhere before this.
 const OUTCOME_LABEL = {
-  answered: 'Answered', voicemail: 'Voicemail', gatekeeper: 'Manager out',
+  answered: 'Answered', voicemail: 'Voicemail', no_answer: 'No answer',
+  gatekeeper: 'Manager out',
   not_interested: 'Not interested', callback: 'Asked for a callback',
   logged: 'Logged',
 };
@@ -1539,6 +1517,12 @@ function pipeRow(l,n){
   </tr>`;
 }
 
+$('pipeStats').onclick=e=>{
+  const b=e.target.closest('button[data-view]'); if(!b) return;
+  PIPE.view=b.dataset.view; PIPE.offset=0;
+  if(PIPE.q){ PIPE.q=''; $('pipeSearch').value=''; }
+  loadPipeline().catch(x=>toast(x.message));
+};
 $('pipeSearch').oninput=e=>{
   // Debounced: every keystroke is a query otherwise, and the table redrawing
   // under your fingers is worse than waiting a moment for it.
@@ -1617,9 +1601,11 @@ $('pipeBody').onclick=async e=>{
       <textarea rows="3" placeholder="spoke to Dave, wants a callback Tuesday"></textarea>
       <div class="row">
         <button class="go" data-save>Save</button>
-        <button data-outcome="voicemail" data-note="Left a voicemail, no answer.">Voicemail</button>
+        <button data-outcome="no_answer" data-note="Nobody picked up, no message left.">No answer</button>
+        <button data-outcome="voicemail" data-note="Left a voicemail.">Voicemail</button>
         <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
         <button data-outcome="not_interested" data-note="Not interested.">Not interested</button>
+        <button data-outcome="not_interested" data-note="Already has a system/app for inventory.">Has a system</button>
         <button data-cancel>Cancel</button>
       </div>
       <div class="applied hide"></div></td>`;

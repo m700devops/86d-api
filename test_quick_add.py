@@ -144,7 +144,10 @@ def test_apply_call_notes_on_an_existing_lead_matches_debrief_shape():
     assert applied["attempt"] == 1
     assert applied["status"] == "warm"
     assert applied["outcome"] == "callback"
-    assert applied["followup_date"] == "2026-09-25"
+    # +3 days from the real clock in the CRM's zone — this was a hardcoded
+    # date that only passed on the day it was written.
+    expected = (crm.datetime.now(crm._reset_tz()) + crm.timedelta(days=3)).strftime("%Y-%m-%d")
+    assert applied["followup_date"] == expected
     assert counters["daily_calls_remaining"] == 24
     assert undo_id
 
@@ -192,8 +195,47 @@ def test_apply_call_notes_falls_back_to_status_guess_when_model_omits_outcome():
     extracted = {"status": "warm", "summary": "Sounded interested."}
     updated, applied, _, _ = crm._apply_call_notes(
         cur, lead, extracted, "raw text", "call", "2026-09-22", "2026-09-22T12:00:00Z")
-    assert updated["last_outcome"] == "answered"
-    assert applied["outcome"] == "answered"
+    assert updated["last_outcome"] == "callback"
+    assert applied["outcome"] == "callback"
+
+
+def test_nobody_picked_up_is_never_answered_even_if_the_model_says_so():
+    # Pig & the Sprout: "no one picked up the phone, and you can't leave a
+    # message" was logged "Answered". The operator's own words win.
+    cur = _FakeCursor()
+    lead = _lead()
+    text = "no one picked up the phone, and you cant leave a message"
+    extracted = {"status": "contacted", "outcome": "answered", "summary": text}
+    updated, applied, _, _ = crm._apply_call_notes(
+        cur, lead, extracted, text, "call", "2026-09-22", "2026-09-22T12:00:00Z")
+    assert updated["last_outcome"] == "no_answer"
+    # Nobody reached, so the retry ladder still schedules the next try.
+    assert applied["followup_date"]
+
+
+def test_contacted_with_no_outcome_is_not_guessed_as_answered():
+    cur = _FakeCursor()
+    lead = _lead()
+    updated, _, _, _ = crm._apply_call_notes(
+        cur, lead, {"status": "contacted"}, "called them", "call",
+        "2026-09-22", "2026-09-22T12:00:00Z")
+    assert updated["last_outcome"] != "answered"
+
+
+def test_a_real_callback_is_not_overridden_by_no_answer_wording():
+    cur = _FakeCursor()
+    lead = _lead()
+    text = "nobody answered the first time, called back and Dave wants a demo Tuesday"
+    updated, _, _, _ = crm._apply_call_notes(
+        cur, lead, {"status": "warm", "outcome": "callback"}, text, "call",
+        "2026-09-22", "2026-09-22T12:00:00Z")
+    assert updated["last_outcome"] == "callback"
+
+
+def test_left_a_voicemail_stays_voicemail():
+    assert crm._no_answer_outcome("left a voicemail, no answer") == "voicemail"
+    assert crm._no_answer_outcome("rang out, mailbox full") == "no_answer"
+    assert crm._no_answer_outcome("talked to the owner") is None
 
 
 def test_apply_call_notes_falls_back_to_raw_text_when_model_gives_no_summary():
