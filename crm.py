@@ -18,7 +18,7 @@ import os
 import re
 import secrets
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -563,6 +563,10 @@ UNDO_COLUMNS = (
     "status", "contact", "phone", "email", "call_date", "email_date",
     "followup_date", "notes", "last_touch_at", "attempts", "last_outcome",
     "updated_at",
+    # The AI bar can rename a lead or fix its town. Snapshots taken before
+    # these were added simply lack them, and undo only restores what a
+    # snapshot holds.
+    "name", "loc",
 )
 
 
@@ -1972,8 +1976,8 @@ def _followup_ask(lead: dict, brief: str = "") -> str:
         lines.append(f"Contact: {lead['contact']}")
     outcome = FOLLOWUP_OUTCOME.get(lead.get("last_outcome") or "")
     if outcome:
-        date = lead.get("call_date") or lead.get("email_date") or ""
-        lines.append(f"Last contact: {outcome}" + (f" ({date})" if date else ""))
+        when = lead.get("call_date") or lead.get("email_date") or ""
+        lines.append(f"Last contact: {outcome}" + (f" ({when})" if when else ""))
     lines.append("Salesperson's log, oldest first:\n" + (notes or "(nothing logged)"))
     lines.append(
         "How to use the log: refer back to what was actually discussed — who "
@@ -2504,6 +2508,11 @@ def undo_touch(undo_id: str, _: bool = Depends(require_crm_key)):
             cursor.execute(
                 "UPDATE crm_touches SET outcome = 'undone', connected = FALSE WHERE id = %s",
                 (undo["touch_id"],))
+        elif (undo["action"] or "").startswith("edit"):
+            # An edit (the AI bar's) never logged a touch, so there is none to
+            # mark. The newest-touch fallback below would pick the lead's last
+            # REAL call and quietly un-count it.
+            pass
         else:
             cursor.execute("""
                 UPDATE crm_touches SET outcome = 'undone', connected = FALSE
@@ -3579,6 +3588,252 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
             "counters": _counters_row(counters) if counters else None}
 
 
+# ============== AI BAR (Follow-ups) ==============
+#
+# A box above the Follow-ups list: "Barrel House — Laura's cell is
+# 720-242-9667, call her back Friday", "Olde Town said no", "push everything
+# overdue to Monday". Claude reads the whole book, works out which bars the
+# message means, and proposes changes; assist.py checks every one before it
+# is written (nothing a name, phone or email the operator didn't type), and
+# each lead changed gets its own undo. See assist.py.
+#
+# Smarter model than the call-notes reader, on purpose: this one has to pick
+# the right bar out of hundreds, turn "Friday" into a date and split one
+# message across several leads — and a wrong guess writes to the CRM.
+ASSIST_MODEL = os.getenv("ANTHROPIC_ASSIST_MODEL", "claude-opus-5")
+# Server-side refusal fallbacks are documented for these models; sending the
+# parameter to any other risks a 400 for nothing.
+_FALLBACK_MODELS = {"claude-opus-5", "claude-fable-5-1"}
+
+
+def _claude_json(system: str, user: str, schema: dict, model: Optional[str] = None,
+                 max_tokens: int = 16000, timeout: float = 120.0) -> dict:
+    """One schema-shaped JSON answer from a current Claude model.
+
+    NOT `_ask_claude()`: current models reject both things that helper leans
+    on — an assistant prefill and `temperature` — with a 400. Structured
+    outputs (`output_config.format`) do the prefill's job instead: the reply
+    is guaranteed to parse against `schema`. A 400 is retried once as a plain
+    request with the schema spelled out in the prompt, so an API-side schema
+    rule can't take the bar down.
+    """
+    import json as _json
+
+    import httpx
+
+    model = model or ASSIST_MODEL
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_unavailable",
+            "message": "No ANTHROPIC_API_KEY is set, so the AI bar can't run — "
+                       "use Edit on the row instead."})
+
+    def send(structured: bool):
+        headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION,
+                   "content-type": "application/json"}
+        body = {"model": model, "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": user}]}
+        if structured:
+            body["system"] = system
+            body["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+            if model in _FALLBACK_MODELS:
+                # A policy decline is re-run on Anthropic's recommended model
+                # inside the same call, instead of coming back as a refusal.
+                body["fallbacks"] = "default"
+                headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
+        else:
+            body["system"] = (system + "\n\nReturn ONLY a JSON object matching this "
+                              "JSON schema:\n" + _json.dumps(schema))
+        return httpx.post(ANTHROPIC_URL, headers=headers, json=body, timeout=timeout)
+
+    try:
+        resp = send(True)
+        if resp.status_code == 400:
+            print(f"[crm] AI bar: structured request refused, retrying plain: "
+                  f"{resp.text[:200]}", flush=True)
+            resp = send(False)
+    except Exception as exc:
+        print(f"[crm] AI bar request failed: {exc}", flush=True)
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_unavailable", "message": "Couldn't reach the AI — try again."})
+
+    if resp.status_code != 200:
+        detail = resp.text[:160]
+        print(f"[crm] AI bar HTTP {resp.status_code}: {detail}", flush=True)
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_unavailable",
+            "message": f"The AI returned {resp.status_code} — {detail}"})
+
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    stop = body.get("stop_reason")
+    if stop == "refusal":
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_declined",
+            "message": "The AI declined that one — make the change with Edit."})
+    if stop == "max_tokens":
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_truncated",
+            "message": "The AI ran out of room — try it as a shorter message."})
+    # Thinking blocks come first on current models; only text carries the JSON.
+    text = "".join(b.get("text", "") for b in body.get("content", [])
+                   if b.get("type") == "text")
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        if start < 0 or end < start:
+            raise ValueError("no JSON object in the reply")
+        return _json.loads(text[start:end + 1])
+    except ValueError as exc:
+        print(f"[crm] AI bar returned unparseable JSON: {exc}", flush=True)
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_unreadable",
+            "message": "The AI's answer didn't parse — try again."})
+
+
+def _apply_assist_change(cursor, lead, clean: dict, today: str, now: str) -> str:
+    """Write one lead's checked change from the AI bar; return its undo id.
+
+    A contact that HAPPENED ("called, left a voicemail") goes through
+    `_apply_call_notes()`, the write /debrief and quick-add share, so it
+    counts as a try, spends the day's counters and books the ladder's next
+    attempt exactly as the Log call button would. Anything else is an edit:
+    no touch, no counters, its own undo, and one dated line in the notes
+    saying what changed, so the history shows it.
+    """
+    import assist as _assist
+
+    fields = {k: clean[k] for k in ("name", "loc", "status", "contact", "phone",
+                                    "email", "followup_date") if k in clean}
+    if fields.get("phone"):
+        digits = normalize_us_phone(fields["phone"])
+        if digits:
+            fields["phone"] = format_us_phone_dashed(digits)
+    note = clean.get("note")
+
+    if "logged" in clean:
+        lg = clean["logged"]
+        extracted = {"status": fields.get("status"), "outcome": lg["outcome"],
+                     "summary": lg["summary"] or None}
+        for f in ("contact", "email", "phone"):
+            if f in fields:
+                extracted[f] = fields[f]
+        if fields.get("followup_date"):
+            extracted["followup_in_days"] = (
+                date.fromisoformat(fields["followup_date"]) - date.fromisoformat(today)).days
+        _, _, undo_id, _ = _apply_call_notes(
+            cursor, lead, extracted, lg["their_words"], lg["kind"], today, now)
+        # What the call-notes write doesn't cover. Still under the same undo:
+        # the snapshot was taken before any of this.
+        extra: dict = {k: fields[k] for k in ("name", "loc") if k in fields}
+        if "followup_date" in fields and fields["followup_date"] is None:
+            extra["followup_date"] = None
+        if lg["kind"] == "email" and not lg["outcome"]:
+            extra["last_outcome"] = "emailed"   # what the Send button records
+        line = f"[{today}] note: {note}" if note else None
+    else:
+        undo_id = _snapshot(cursor, lead, "edit (AI bar)", counters_spent=0)
+        extra = fields
+        bits = _assist.describe({k: v for k, v in clean.items() if k not in ("logged", "note")})
+        if bits:
+            line = f"[{today}] updated: {' · '.join(bits)}" + (f" — {note}" if note else "")
+        else:
+            line = f"[{today}] note: {note}" if note else None
+
+    # Column names come from the fixed lists above, never from the model.
+    sets = [f"{col} = %s" for col in extra]
+    params: list = list(extra.values())
+    if line:
+        sets.append("notes = COALESCE(notes || E'\\n', '') || %s")
+        params.append(line)
+    if sets:
+        sets.append("updated_at = %s")
+        params += [now, lead["id"]]
+        cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s", params)
+    return undo_id
+
+
+class AssistTurn(BaseModel):
+    you: str = Field(default="", max_length=2000)
+    ai: str = Field(default="", max_length=4000)
+
+
+class AssistRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    # The last few exchanges, so "her", "that one" and "yes, the Denver one"
+    # resolve. Kept by the page, not the server.
+    history: list[AssistTurn] = Field(default_factory=list, max_length=6)
+    # Whichever row's panel is open on screen — what a message naming no bar
+    # is about.
+    focus_lead_id: Optional[str] = Field(default=None, max_length=64)
+
+
+@crm_router.post("/assist", response_model=dict)
+def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
+    """Plain English in, checked CRM changes out, each with its own undo."""
+    import assist as _assist
+
+    text = data.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail={
+            "error": "empty", "message": "Type what happened or what to change."})
+    today = _today()
+    today_d = date.fromisoformat(today)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, name, loc, status, contact, phone, email, followup_date,
+                   last_outcome, last_touch_at, notes, manager_name
+              FROM crm_leads
+             ORDER BY COALESCE(last_touch_at, '') DESC, created_at DESC
+             LIMIT 2000
+        """)
+        leads = cursor.fetchall()
+        tries = _touch_counts(cursor, [l["id"] for l in leads])
+
+    book, back = _assist.snapshot(leads, tries, today, data.focus_lead_id)
+    history = [t.model_dump() for t in data.history][-4:]
+    out = _claude_json(_assist.SYSTEM,
+                       _assist.user_message(book, _assist.dates_table(today_d), text, history),
+                       _assist.SCHEMA)
+
+    reply = str(out.get("reply") or "").strip()[:2000]
+    question = out.get("question")
+    question = str(question).strip()[:1000] if question else None
+    proposed = out.get("changes") if isinstance(out.get("changes"), list) else []
+
+    now = now_iso()
+    applied: list = []
+    skipped: list = []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for change in proposed[:_assist.MAX_CHANGES]:
+            if not isinstance(change, dict):
+                continue
+            alias = str(change.get("lead") or "").strip()
+            lead_id = back.get(alias)
+            if not lead_id:
+                skipped.append({"lead": None, "why": f"couldn't match {alias!r} to a lead"})
+                continue
+            cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (lead_id,))
+            lead = cursor.fetchone()
+            if not lead:
+                skipped.append({"lead": None, "why": "that lead has since been deleted"})
+                continue
+            clean, problems = _assist.clean_change(change, lead, text, today_d)
+            skipped += [{"lead": lead["name"], "why": p} for p in problems]
+            if not clean:
+                continue
+            undo_id = _apply_assist_change(cursor, lead, clean, today, now)
+            applied.append({"lead_id": lead_id, "name": lead["name"],
+                            "changed": _assist.describe(clean), "undo_id": undo_id})
+        conn.commit()
+
+    return {"reply": reply, "question": question, "applied": applied, "skipped": skipped}
+
+
 # ============== ASK AI ==============
 #
 # A question box above the CRM tab's search: "how many people did I call",
@@ -4037,6 +4292,44 @@ def _clean(v, limit: int = 300) -> Optional[str]:
 
 
 @crm_router.post("/leads/quick-add", response_model=dict, status_code=201)
+def _find_existing_lead(cursor, name: str, loc: Optional[str], phone: Optional[str],
+                        email: Optional[str]):
+    """The lead already in the book for this bar, locked, or None.
+
+    Same phone and the same name (leadgen.same_venue: "Olde Town Tavern & Grill"
+    is "Olde Town Tavern"), else the same email, else the same name in the
+    same town. Quick-add used to skip this and create a second row for a bar
+    the generator had already put on the call list: the copy with the call
+    landed in the CRM tab, and the never-called copy stayed on the call list.
+    The one someone has worked wins, then the oldest.
+    """
+    from leadgen import same_venue
+
+    found = []
+    digits = re.sub(r"\D", "", phone or "")[-10:]
+    if len(digits) == 10:
+        cursor.execute(
+            "SELECT * FROM crm_leads "
+            "WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = %s",
+            (digits,))
+        found = [r for r in cursor.fetchall() if same_venue(r["name"], name)]
+    if not found and email:
+        cursor.execute("SELECT * FROM crm_leads WHERE LOWER(email) = LOWER(%s)", (email,))
+        found = cursor.fetchall()
+    city = (loc or "").split(",")[0].strip().lower()
+    if not found and city:
+        cursor.execute(
+            "SELECT * FROM crm_leads "
+            "WHERE split_part(LOWER(COALESCE(loc, '')), ',', 1) = %s", (city,))
+        found = [r for r in cursor.fetchall() if same_venue(r["name"], name)]
+    if not found:
+        return None
+    best = min(found, key=lambda r: (not (r["last_touch_at"] or r["status"] != "new"),
+                                     r["created_at"] or ""))
+    cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (best["id"],))
+    return cursor.fetchone()
+
+
 def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
     """Describe a call to a bar that isn't in the CRM yet — paste whatever you
     have — and get back a new lead with the call logged and every detail kept.
@@ -4090,19 +4383,39 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
 
     today = _today()
     now = now_iso()
-    lead_id = generate_id()
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO crm_leads (id, name, loc, status, source, attempts, notes,
-                                   created_at, updated_at)
-            VALUES (%s, %s, %s, 'new', 'manual', 0, %s, %s, %s)
-            RETURNING *
-        """, (lead_id, name, loc, "\n".join(details) or None, now, now))
-        lead = cursor.fetchone()
+        # A bar already in the book gets the call logged on ITS row — never a
+        # second row for the same venue.
+        lead = _find_existing_lead(cursor, name, loc, extracted.get("phone"),
+                                   _clean(extracted.get("email"), 320))
+        matched = lead is not None
+        if not matched:
+            cursor.execute("""
+                INSERT INTO crm_leads (id, name, loc, status, source, attempts, notes,
+                                       created_at, updated_at)
+                VALUES (%s, %s, %s, 'new', 'manual', 0, %s, %s, %s)
+                RETURNING *
+            """, (generate_id(), name, loc, "\n".join(details) or None, now, now))
+            lead = cursor.fetchone()
 
         updated, applied, undo_id, counters = _apply_call_notes(
             cursor, lead, extracted, data.text, "call", today, now)
+        if matched:
+            # After the call's own note, and still under its undo: the
+            # snapshot was taken before either.
+            sets, params = [], []
+            if details:
+                sets.append("notes = COALESCE(notes || E'\\n', '') || %s")
+                params.append(" · ".join(details))
+            if loc and not updated.get("loc"):
+                sets.append("loc = %s")
+                params.append(loc)
+            if sets:
+                cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s "
+                               "RETURNING *", params + [lead["id"]])
+                updated = cursor.fetchone()
+            applied["matched_existing"] = lead["name"]
         conn.commit()
 
     if found_via:

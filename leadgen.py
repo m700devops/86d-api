@@ -432,6 +432,18 @@ def init_leadgen_tables():
 
         moved = _reconcile_timezones(cursor)
         bad_cands, bad_leads = _reconcile_bad_emails(cursor)
+        conn.commit()
+        # In its own transaction: it deletes rows, and a failure here must cost
+        # only the de-duplication, never the boot or the fixes above.
+        try:
+            folded = _reconcile_duplicate_leads(cursor)
+            conn.commit()
+            if folded:
+                print(f"[leadgen] LEADGEN_DEDUPED folded {folded} never-called duplicate "
+                      f"lead(s) into the lead already in play", flush=True)
+        except Exception as exc:
+            conn.rollback()
+            print(f"[leadgen] LEADGEN_DEDUPE_FAILED {exc}", flush=True)
         briefed = _backfill_venue_facts(cursor)
         if briefed:
             print(f"[leadgen] built call facts for {briefed} existing leads", flush=True)
@@ -520,6 +532,124 @@ def _rescore_map_penalties_once(cursor) -> Optional[tuple[int, int]]:
                    (f"candidates={cands} leads={leads}", "rescore_map_penalties_2026_09"))
     print(f"[leadgen] LEADGEN_RESCORE_DONE candidates={cands} leads={leads}", flush=True)
     return cands, leads
+
+
+# Words that say what KIND of place it is, not which one. "Olde Town Tavern
+# & Grill" and "Olde Town Tavern" are the same bar; the words that tell a
+# venue apart are what's left once these are gone.
+_GENERIC_NAME_WORDS = {
+    "the", "and", "of", "at", "on", "bar", "bars", "pub", "tavern", "grill", "grille",
+    "restaurant", "lounge", "kitchen", "cafe", "saloon", "tap", "taproom", "taphouse",
+    "brewing", "brewery", "brewpub", "cantina", "club", "eatery", "bistro", "diner",
+    "co", "company", "inc", "llc", "ltd",
+}
+
+
+def _name_words(name: Optional[str]) -> list:
+    return re.findall(r"[a-z0-9]+", (name or "").lower().replace("&", " and "))
+
+
+def same_venue(a: Optional[str], b: Optional[str]) -> bool:
+    """Whether two names plausibly belong to one venue.
+
+    Compared on the distinctive words only, and one set inside the other is
+    enough: "Olde Town Tavern & Grill" and "Olde Town Tavern" match. Two bars
+    one owner runs off one phone — "Blue Room" and "The Monkey Bar" — don't,
+    which is why a shared phone alone never makes a duplicate. A name made of
+    nothing but generic words ("The Tavern") has to match exactly.
+    """
+    wa, wb = _name_words(a), _name_words(b)
+    ca = {w for w in wa if w not in _GENERIC_NAME_WORDS and len(w) > 1}
+    cb = {w for w in wb if w not in _GENERIC_NAME_WORDS and len(w) > 1}
+    if not ca or not cb:
+        return bool(wa) and wa == wb
+    return ca <= cb or cb <= ca
+
+
+def _phone10(phone: Optional[str]) -> str:
+    digits = re.sub(r"\D", "", phone or "")[-10:]
+    return digits if len(digits) == 10 else ""
+
+
+def _worked(row: dict) -> bool:
+    return bool(row.get("last_touch_at")) or (row.get("status") or "new") != "new"
+
+
+def duplicate_folds(rows: list) -> list:
+    """(keeper_id, duplicate_id) for every never-called copy of a bar that's
+    already in the book: same phone number and the same name by `same_venue`.
+
+    The keeper is the lead someone has worked, else the oldest. Only a
+    never-contacted, auto-sourced copy is ever folded away — two worked rows,
+    or the operator's own entries, are left for a person to sort out.
+    """
+    groups: dict = {}
+    for row in rows:
+        key = _phone10(row.get("phone"))
+        if key:
+            groups.setdefault(key, []).append(row)
+    folds = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        keeper = min(group, key=lambda r: (not _worked(r), r.get("created_at") or ""))
+        for row in group:
+            if (row["id"] != keeper["id"] and not _worked(row)
+                    and row.get("source") == "leadgen"
+                    and same_venue(row.get("name"), keeper.get("name"))):
+                folds.append((keeper["id"], row["id"]))
+    return folds
+
+
+def _reconcile_duplicate_leads(cursor) -> int:
+    """Fold never-called copies of a bar into the lead already in play.
+
+    The same venue could land twice: quick-add created a fresh row for a bar
+    the generator had already put on the call list, and the generator's own
+    check never compared phone numbers, so a map listing named a little
+    differently from the one the operator logged ("Olde Town Tavern" /
+    "Olde Town Tavern & Grill") came through as a new bar. The copy nobody
+    had called sat on the call list while the real one, with the call on it,
+    was in the CRM tab.
+
+    What the copy knew and the keeper doesn't (email, hours, timezone, the
+    venue's facts, a manager's name) is filled in first; its candidate and
+    any queued email move to the keeper, so the generator can't promote it
+    again and nothing scheduled is lost. Idempotent and cheap, so every boot.
+    """
+    cursor.execute("""
+        SELECT id, name, phone, status, last_touch_at, source, created_at
+          FROM crm_leads WHERE phone IS NOT NULL
+    """)
+    folds = duplicate_folds(cursor.fetchall())
+    for keeper_id, dup_id in folds:
+        cursor.execute("""
+            UPDATE crm_leads k SET
+                email = COALESCE(k.email, d.email),
+                email_kind = COALESCE(k.email_kind, d.email_kind),
+                loc = COALESCE(k.loc, d.loc),
+                opening_hours = COALESCE(k.opening_hours, d.opening_hours),
+                tz_offset_hours = COALESCE(k.tz_offset_hours, d.tz_offset_hours),
+                tz_name = COALESCE(k.tz_name, d.tz_name),
+                venue_facts = COALESCE(k.venue_facts, d.venue_facts),
+                opener = COALESCE(k.opener, d.opener),
+                lead_score = COALESCE(k.lead_score, d.lead_score),
+                manager_role = CASE WHEN k.manager_name IS NULL
+                                    THEN d.manager_role ELSE k.manager_role END,
+                manager_source = CASE WHEN k.manager_name IS NULL
+                                      THEN d.manager_source ELSE k.manager_source END,
+                manager_seen_at = CASE WHEN k.manager_name IS NULL
+                                       THEN d.manager_seen_at ELSE k.manager_seen_at END,
+                manager_name = COALESCE(k.manager_name, d.manager_name)
+              FROM crm_leads d
+             WHERE k.id = %s AND d.id = %s
+        """, (keeper_id, dup_id))
+        cursor.execute("UPDATE crm_lead_candidates SET promoted_lead_id = %s "
+                       "WHERE promoted_lead_id = %s", (keeper_id, dup_id))
+        cursor.execute("UPDATE crm_scheduled_emails SET lead_id = %s WHERE lead_id = %s",
+                       (keeper_id, dup_id))
+        cursor.execute("DELETE FROM crm_leads WHERE id = %s", (dup_id,))
+    return len(folds)
 
 
 def _backfill_venue_facts(cursor) -> int:
@@ -1620,7 +1750,19 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
         "OR (LOWER(name) = LOWER(%s) AND LOWER(COALESCE(loc,'')) = LOWER(%s))",
         (cand["email"], cand["name"], loc),
     )
-    if cursor.fetchone():
+    already = cursor.fetchone()
+    if not already:
+        # The same phone and the same name is the same bar, however the map
+        # spells it. Email and exact name+town missed "Olde Town Tavern"
+        # already in the book as "Olde Town Tavern & Grill", and it went
+        # straight back onto the call list. A shared phone alone isn't enough:
+        # one owner can run two bars off one number.
+        cursor.execute(
+            "SELECT name FROM crm_leads "
+            "WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = %s",
+            (clean_phone,))
+        already = any(same_venue(r["name"], cand["name"]) for r in cursor.fetchall())
+    if already:
         cursor.execute(
             "UPDATE crm_lead_candidates SET status='rejected', "
             "reject_reason='already in pipeline' WHERE id=%s", (cand["id"],)
