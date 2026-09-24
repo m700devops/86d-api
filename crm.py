@@ -1763,7 +1763,9 @@ def _draft_system(lead, sender_name: str) -> str:
 
 {' '.join(about)}.
 
-The sender is {sender_name}. Sign off as them.
+The sender is {sender_name}, who owns {COMPANY_NAME} and is writing to sell it. Write in
+their voice, first person, and sign off as them. Everything about the product comes from
+them, never from somebody at the bar.
 
 Return ONLY a JSON object: {{"subject": "...", "body": "..."}}
 
@@ -1980,6 +1982,13 @@ def _followup_ask(lead: dict, brief: str = "") -> str:
         lines.append(f"Last contact: {outcome}" + (f" ({when})" if when else ""))
     lines.append("Salesperson's log, oldest first:\n" + (notes or "(nothing logged)"))
     lines.append(
+        "Whose log this is: the SENDER's. Every call and email in it was made by "
+        "the sender, who owns 86'd. A person named in it (\"spoke to Lesley\") is "
+        "someone at the bar the sender talked to — they did not tell anyone about "
+        "86'd, and the email must never say or imply they did. If a staff member "
+        "pointed the sender to the owner or manager, the email is to that person, "
+        "and says so plainly: \"I spoke with Lesley at the bar, and she said you're "
+        "the one to talk to about inventory.\"\n\n"
         "How to use the log: refer back to what was actually discussed — who "
         "they spoke to, what that person said or asked for, any personal detail "
         "worth a friendly nod — and answer what they asked where the product "
