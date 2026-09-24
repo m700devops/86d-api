@@ -701,6 +701,7 @@
     <section data-panel="users" class="hide">
       <div class="pipebar">
         <input id="usersSearch" placeholder="Search a customer by business, manager, name or email…">
+        <button id="usersRefresh">Refresh</button>
       </div>
       <div class="zt" id="usersTabs"></div>
       <div id="usersBody"></div>
@@ -1984,6 +1985,14 @@ function userRow(u,n){
 $('usersTabs').onclick=e=>{
   const b=e.target.closest('button[data-status]'); if(!b) return;
   USERS.status=b.dataset.status; USERS.offset=0; loadUsers().catch(x=>toast(x.message));
+};
+// New signups land in the app, not here, so the list only changes when it's
+// re-read. Keeps the current search and filter.
+$('usersRefresh').onclick=async()=>{
+  const b=$('usersRefresh'); b.disabled=true; b.textContent='Refreshing…';
+  try{ await loadUsers(); toast('Customers up to date'); }
+  catch(e){ toast(e.message); }
+  finally{ b.disabled=false; b.textContent='Refresh'; }
 };
 $('usersSearch').oninput=e=>{
   clearTimeout(usersTimer);
