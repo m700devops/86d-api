@@ -31,8 +31,10 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
 import urllib.parse
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -40,8 +42,8 @@ from database import get_db
 from helpers import generate_id, now_iso
 from callwindow import ZONE_OFFSETS, SERVICES, bucket_of, all_buckets
 import venue as venue_facts
-from contacts import email_kind, find_manager
-from phones import normalize_us_phone, is_toll_free
+from contacts import email_kind, find_manager, strip_non_content
+from phones import normalize_us_phone, is_toll_free, format_us_phone_dashed
 
 # ── Tunables ────────────────────────────────────────────────────────────────
 
@@ -100,7 +102,7 @@ TEAM_PATHS = ["/about-us", "/our-team", "/team", "/about", "/staff"]
 
 # Anchor text or href that suggests a page carrying an address.
 CONTACT_LINK_RE = re.compile(
-    r'href=["\']([^"\']{1,200})["\'][^>]*>(?:[^<]{0,80})'
+    r'href=["\']([^"\']{1,200})["\'][^>]{0,500}>(?:[^<]{0,80})'
     r'(contact|about|info|reach us|get in touch|private|events|book)',
     re.I,
 )
@@ -109,11 +111,19 @@ PAGE_TIMEOUT = 12          # per request; a bar site that's slower isn't worth i
 MAX_PAGES_PER_SITE = 6     # hard ceiling so one bad domain can't eat a run
 ENRICH_WORKERS = int(os.getenv("LEADGEN_ENRICH_WORKERS", "8"))
 
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-MAILTO_RE = re.compile(r'mailto:\s*([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})', re.I)
+# Every repeat bounded, and the local part may only START where a run of
+# address characters starts (the lookbehind). Unbounded, a page with a long
+# run of letters and no '@' — a minified blob, an inline SVG path — was
+# re-scanned from every character in it: quadratic, holding the GIL, which
+# on one 800KB page is minutes of a server answering nothing.
+_LOCAL = r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]{1,64}"
+EMAIL_RE = re.compile(_LOCAL + r"@[A-Za-z0-9.\-]{1,190}\.[A-Za-z]{2,24}")
+MAILTO_RE = re.compile(
+    r'mailto:\s{0,5}([A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,190}\.[A-Za-z]{2,24})', re.I)
 # Obfuscated forms — "info [at] barname [dot] com" and friends.
 OBFUSCATED_RE = re.compile(
-    r"([A-Za-z0-9._%+\-]+)\s*(?:\[at\]|\(at\)|\s+at\s+)\s*([A-Za-z0-9.\-]+)\s*(?:\[dot\]|\(dot\)|\s+dot\s+)\s*([A-Za-z]{2,})",
+    r"(" + _LOCAL + r")\s{0,3}(?:\[at\]|\(at\)|\s{1,3}at\s{1,3})\s{0,3}([A-Za-z0-9.\-]{1,190}?)"
+    r"\s{0,3}(?:\[dot\]|\(dot\)|\s{1,3}dot\s{1,3})\s{0,3}([A-Za-z]{2,24})",
     re.I,
 )
 
@@ -338,7 +348,10 @@ def init_leadgen_tables():
                               ("email_kind", "TEXT"), ("tz_name", "TEXT"),
                               ("venue_facts", "TEXT"),
                               ("manager_name", "TEXT"), ("manager_role", "TEXT"),
-                              ("manager_source", "TEXT"), ("manager_seen_at", "TEXT")]:
+                              ("manager_source", "TEXT"), ("manager_seen_at", "TEXT"),
+                              # Whether the venue's own site vouches for the
+                              # number: see judge_phone().
+                              ("phone_status", "TEXT"), ("phone_note", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'crm_lead_candidates' AND column_name = %s
@@ -459,6 +472,12 @@ def init_leadgen_tables():
             # Rolls the marker back with the updates, so the next boot retries.
             conn.rollback()
             print(f"[leadgen] LEADGEN_RESCORE_FAILED {exc}", flush=True)
+
+        # Numbers that predate the website check are NOT checked here. Doing
+        # it at boot — every unchecked number at once, 8 crawls in parallel —
+        # is what took the server down: a 0.5-CPU instance spent on crawling
+        # can't answer anything else, and a restart started it all over
+        # again. main.py's _phone_check_loop trickles through them instead.
 
         print(f"[leadgen] LEADGEN_TABLES_READY cities={city_count} "
               f"bucket_target={BUCKET_TARGET} max_active={MAX_ACTIVE} "
@@ -1042,10 +1061,7 @@ def us_tz_offset(lon: Optional[float], state: Optional[str] = None,
 # ("Please use the format email@example.com"), analytics payloads, widget
 # config, commented-out markup from a previous designer. Scanning them is how
 # a crawler ends up with machine-shaped addresses nobody can reply to.
-_NON_CONTENT_RE = re.compile(
-    r"<script\b[^>]*>.*?</script\s*>|<style\b[^>]*>.*?</style\s*>|<!--.*?-->",
-    re.I | re.S,
-)
+# Stripped by contacts.strip_non_content(), a linear scan.
 
 
 def extract_emails(html: str) -> list[str]:
@@ -1071,7 +1087,7 @@ def extract_emails(html: str) -> list[str]:
     # mailto: first — it's a link a human put there on purpose.
     for m in MAILTO_RE.findall(html or ""):
         add(m)
-    visible = _NON_CONTENT_RE.sub(" ", html or "")
+    visible = strip_non_content(html)
     for m in EMAIL_RE.findall(visible):
         add(m)
     for user, dom, tld in OBFUSCATED_RE.findall(visible):
@@ -1092,7 +1108,7 @@ def extract_emails(html: str) -> list[str]:
 # Things worth mentioning in an opener, cheapest signal first.
 OPENER_SIGNALS = [
     (re.compile(r"craft cocktail|cocktail program|mixolog", re.I), "craft cocktail program"),
-    (re.compile(r"\d{2,}\s*(taps|beers on tap|draft lines)", re.I), "a big tap list"),
+    (re.compile(r"(?<!\d)\d{2,3}\s{0,3}(taps|beers on tap|draft lines)", re.I), "a big tap list"),
     (re.compile(r"whisk(e)?y (bar|list|selection)|bourbon (bar|list)", re.I), "a whiskey list"),
     (re.compile(r"tequila|mezcal (bar|list)", re.I), "an agave list"),
     (re.compile(r"wine (list|bar|cellar)", re.I), "a wine list"),
@@ -1508,6 +1524,322 @@ out center tags;
 
 # ── Stage 2+3: enrich and qualify ───────────────────────────────────────────
 
+# ── Is the number really theirs? ────────────────────────────────────────────
+#
+# The phone comes off the map, and the map ages: bars change numbers, old ones
+# get reassigned to somebody's house, a mapper types in an owner's cell.
+# Measured on 102 real Denver bars (2026-09-24): where the bar's own website
+# listed a number, the map's disagreed about one time in five, and one map
+# entry carried a Chicago area code. phones.py can only prove a number is
+# SHAPED right. This proves it's theirs: a number reaches the call list only if
+# the venue's own site shows it, or was taken from the site. The rule the email
+# already follows — provenance, not plausibility.
+
+PHONE_OK = ("confirmed", "from_site")
+
+_TEL_HREF_RE = re.compile(r"""href\s{0,5}=\s{0,5}["']\s{0,5}tel:([^"']{1,60})["']""", re.I)
+_JSON_PHONE_RE = re.compile(
+    r'"(?:telephone|phone|phoneNumber|phone_number)"\s*:\s*"([^"]{7,40})"', re.I)
+# Every repeat here is BOUNDED, and none sits beside another that can match the
+# same characters. The first version of this pattern had a lazy [^>]*? before
+# an optional group and a greedy [^>]* after it, which backtracks
+# quadratically on a tag that runs on without a '>' — and Python's re holds
+# the GIL while it grinds, so one bad page froze the whole server, product API
+# included. test_phone_check.py times these against hostile input.
+_ITEMPROP_PHONE_RE = re.compile(
+    r"""itemprop\s{0,5}=\s{0,5}["']telephone["']([^>]{0,400})>([^<]{0,40})""", re.I)
+_CONTENT_ATTR_RE = re.compile(r"""content\s{0,5}=\s{0,5}["']([^"']{0,60})["']""", re.I)
+# How much of one page the phone check reads: the top and the bottom, because
+# a bar's number is in its header or its footer. 800KB of page-builder output
+# is what curl's cap allows, not what any number needs, and every regex below
+# runs over whatever it's handed.
+SITE_HTML_HEAD = 150_000
+SITE_HTML_TAIL = 100_000
+
+
+def _head_and_tail(html: str) -> str:
+    if len(html) <= SITE_HTML_HEAD + SITE_HTML_TAIL:
+        return html
+    return html[:SITE_HTML_HEAD] + " " + html[-SITE_HTML_TAIL:]
+
+
+def site_phones(html: Optional[str]) -> list:
+    """Every dialable number a venue's own page publishes, best evidence first.
+
+    A tel: link (a number somebody deliberately made tappable), then
+    structured data — schema.org `telephone` and site builders' own JSON, read
+    even inside <script> because it's the venue's own listing, unlike the
+    developer placeholders that keep emails out of scripts — then the visible
+    text. Toll-free lines are left out: on one bar they're a platform or a
+    head office, never the bar.
+    """
+    html = _head_and_tail(html or "")
+    raw = [urllib.parse.unquote(t) for t in _TEL_HREF_RE.findall(html)]
+    raw += _JSON_PHONE_RE.findall(html)
+    for attrs, text in _ITEMPROP_PHONE_RE.findall(html):
+        content = _CONTENT_ATTR_RE.search(attrs)
+        raw += [content.group(1) if content else "", text]
+    visible = re.sub(r"<[^<>]{0,2000}>", " ", strip_non_content(html))
+    raw += _PHONE_IN_TEXT.findall(visible)
+    out: list = []
+    for r in raw:
+        digits = normalize_us_phone(r) if r else None
+        if digits and not is_toll_free(digits) and digits not in out:
+            out.append(digits)
+    return out
+
+
+def local_area_codes(phones) -> set:
+    """The area codes a metro's bars actually use, read off every candidate
+    harvested there, so there's no area-code table to keep current: Denver's
+    come out as 303 and 720 because that's what Denver's bars list. With too
+    few candidates to tell it's empty, and the map number's own code is all
+    that counts as local."""
+    counts = Counter(p[:3] for p in phones if p and len(p) == 10)
+    total = sum(counts.values())
+    if total < 20:
+        return set()
+    return {code for code, n in counts.items() if n >= max(2, total * 0.02)}
+
+
+def judge_phone(map_phone: Optional[str], site_numbers: list, local_codes=()) -> dict:
+    """Which number may be dialled, and why: {phone, status, note}.
+
+    confirmed    the map's number is on their site.
+    from_site    it isn't, but the site shows exactly one local number: that
+                 one. A venue keeps its own site current; nobody keeps its map
+                 entry current.
+    conflict     the site shows numbers, but not the map's and not exactly one
+                 local one — another location's line, a group office, two we
+                 can't choose between. Not dialled.
+    unconfirmed  the site shows no number at all. Not dialled either: an
+                 unchecked map number is wrong about one time in five.
+    """
+    local = set(local_codes or ())
+    if map_phone:
+        local.add(map_phone[:3])
+    if map_phone and map_phone in site_numbers:
+        return {"phone": map_phone, "status": "confirmed", "note": None}
+    on_site = [p for p in site_numbers if p[:3] in local]
+    if len(on_site) == 1:
+        return {"phone": on_site[0], "status": "from_site",
+                "note": (f"Map listed {format_us_phone_dashed(map_phone)}; their "
+                         f"website lists {format_us_phone_dashed(on_site[0])}")}
+    if site_numbers:
+        listed = ", ".join(format_us_phone_dashed(p) for p in site_numbers[:3])
+        return {"phone": map_phone, "status": "conflict",
+                "note": (f"Their website lists {listed}, not the map's "
+                         f"{format_us_phone_dashed(map_phone)}")}
+    return {"phone": map_phone, "status": "unconfirmed",
+            "note": "Their website shows no phone number to check it against"}
+
+
+def _contact_urls(website: str, home: str) -> list:
+    """The venue's own contact-ish links, then the usual guessed paths."""
+    urls: list = []
+    for href, _kind in CONTACT_LINK_RE.findall(home or ""):
+        if href.startswith(("mailto:", "tel:", "#", "javascript:")):
+            continue
+        full = urllib.parse.urljoin(website, href)
+        # http(s) only — urljoin will happily carry a file:// or data: href
+        # straight through from the page.
+        if not full.lower().startswith(("http://", "https://")):
+            continue
+        # Stay on the venue's own site; an off-site link is a social profile
+        # or a booking platform, not their contact page.
+        if domain_of(full) != domain_of(website):
+            continue
+        if full not in urls:
+            urls.append(full)
+    for path in CONTACT_PATHS:
+        full = website.rstrip("/") + path
+        if full not in urls:
+            urls.append(full)
+    return urls
+
+
+def find_site_phones(website: str, map_phone: Optional[str] = None,
+                     budget: int = 3) -> tuple[list, bool]:
+    """(numbers the venue's site publishes, whether it loaded at all): the
+    homepage, then contact pages until the map's number turns up or `budget`
+    pages are spent."""
+    home, status = _http(website, timeout=PAGE_TIMEOUT, verify_public=True)
+    if status != 200 or not home:
+        return [], False
+    numbers = site_phones(home)
+    for url in _contact_urls(website, home)[:budget]:
+        if map_phone and map_phone in numbers:
+            break
+        body, status = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
+        if status == 200 and body:
+            numbers += [p for p in site_phones(body) if p not in numbers]
+    return numbers, True
+
+
+def _local_codes_by_city(cursor, cities) -> dict:
+    cities = sorted({c for c in cities if c})
+    if not cities:
+        return {}
+    cursor.execute("SELECT city, phone FROM crm_lead_candidates WHERE city = ANY(%s)",
+                   (cities,))
+    by_city: dict = {}
+    for r in cursor.fetchall():
+        by_city.setdefault(r["city"], []).append(r["phone"])
+    return {c: local_area_codes(p) for c, p in by_city.items()}
+
+
+_verify_lock = threading.Lock()
+
+
+# The re-check is a background chore sharing a 0.5-CPU box with the product
+# API, so it goes slowly on purpose: a small batch, two sites at a time, and a
+# deadline after which no new site is started. What's left waits for the next
+# batch; nothing is lost by being late, because an unchecked lead just isn't
+# offered for dialling yet.
+VERIFY_WORKERS = max(1, int(os.getenv("LEADGEN_VERIFY_WORKERS", "2")))
+VERIFY_BATCH = max(1, int(os.getenv("LEADGEN_VERIFY_BATCH", "20")))
+VERIFY_BUDGET_S = max(10, int(os.getenv("LEADGEN_VERIFY_BUDGET_S", "90")))
+
+
+def verify_phones(lead_limit: int = VERIFY_BATCH, bank_limit: int = VERIFY_BATCH,
+                  budget_s: int = VERIFY_BUDGET_S) -> dict:
+    """Check numbers taken off the map before the website check existed.
+
+    Never-called leads on the call list first. One whose number their site
+    shows is marked confirmed; one their site corrects gets the site's number,
+    with the map's kept in the notes; one their site can't vouch for goes back
+    to the bank, off the call list, so a checked lead is promoted into its
+    place. Worked leads are left alone — whoever rang them already knows. Then
+    banked candidates, best first, so the next promotions are checked too.
+
+    Only rows with no phone_status are looked at, so it costs nothing once
+    done, and every write re-checks that the row is still unworked: the
+    operator may ring a lead in the minutes the crawl takes.
+
+    One BATCH per call, not everything: `lead_limit` + `bank_limit` rows at
+    most, and no site started after `budget_s` seconds. Rows not reached keep
+    phone_status NULL and are picked up by the next batch.
+    """
+    if not _verify_lock.acquire(blocking=False):
+        return {"skipped": "a check is already running"}
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT l.id AS lead_id, c.id, c.city, c.website, c.phone
+                  FROM crm_leads l
+                  JOIN crm_lead_candidates c ON c.promoted_lead_id = l.id
+                 WHERE l.source = 'leadgen' AND l.phone_status IS NULL
+                   AND l.status = 'new' AND l.last_touch_at IS NULL
+                 LIMIT %s
+            """, (lead_limit,))
+            leads = [dict(r) for r in cursor.fetchall()]
+            cursor.execute("""
+                SELECT id, city, website, phone FROM crm_lead_candidates
+                 WHERE status = 'qualified' AND phone_status IS NULL
+                 ORDER BY score DESC LIMIT %s
+            """, (bank_limit,))
+            bank = [dict(r) for r in cursor.fetchall()]
+            codes = _local_codes_by_city(cursor, [r["city"] for r in leads + bank])
+
+        deadline = time.monotonic() + budget_s
+
+        def check(row):
+            if time.monotonic() > deadline:
+                return row, None
+            map_phone = normalize_us_phone(row.get("phone"))
+            try:
+                numbers, loaded = find_site_phones(row["website"], map_phone)
+            except Exception:
+                numbers, loaded = [], False
+            verdict = judge_phone(map_phone, numbers, codes.get(row.get("city"), set()))
+            if not loaded:
+                verdict = {**verdict, "status": "unconfirmed",
+                           "note": "Their website didn't load when the number was checked"}
+            return row, verdict
+
+        with ThreadPoolExecutor(max_workers=VERIFY_WORKERS) as pool:
+            lead_results = [r for r in pool.map(check, leads) if r[1]]
+            bank_results = [r for r in pool.map(check, bank) if r[1]]
+
+        tally: Counter = Counter()
+        now = now_iso()
+        with get_db() as conn:
+            cursor = conn.cursor()
+            for row, v in lead_results:
+                tally[v["status"]] += 1
+                _apply_lead_verdict(cursor, row, v, now, tally)
+            for row, v in bank_results:
+                cursor.execute("""
+                    UPDATE crm_lead_candidates
+                       SET phone = %s, phone_status = %s, phone_note = %s
+                     WHERE id = %s AND phone_status IS NULL
+                """, (v["phone"] or row["phone"], v["status"], v["note"], row["id"]))
+            conn.commit()
+        out = {"leads_checked": len(lead_results), "bank_checked": len(bank_results),
+               **dict(tally)}
+        print(f"[leadgen] LEADGEN_PHONES_VERIFIED {out}", flush=True)
+        return out
+    finally:
+        _verify_lock.release()
+
+
+def _apply_lead_verdict(cursor, row: dict, v: dict, now: str, tally: Counter) -> None:
+    """One call-list lead's verdict. Every write is conditional on the lead
+    still being unchecked and unworked."""
+    unworked = ("phone_status IS NULL AND status = 'new' AND last_touch_at IS NULL")
+    if v["status"] in PHONE_OK:
+        if v["status"] == "from_site":
+            cursor.execute(f"""
+                UPDATE crm_leads
+                   SET phone = %s, phone_status = %s, phone_note = %s, updated_at = %s,
+                       notes = COALESCE(notes || E'\\n', '') || %s
+                 WHERE id = %s AND {unworked}
+            """, (v["phone"], v["status"], v["note"], now,
+                  f"[{now[:10]}] Phone corrected from their website — {v['note']}",
+                  row["lead_id"]))
+        else:
+            cursor.execute(f"UPDATE crm_leads SET phone_status = %s WHERE id = %s AND {unworked}",
+                           (v["status"], row["lead_id"]))
+        cursor.execute("UPDATE crm_lead_candidates SET phone = %s, phone_status = %s, "
+                       "phone_note = %s WHERE id = %s", (v["phone"], v["status"], v["note"], row["id"]))
+        return
+    # Their site can't vouch for it: off the call list and back to the bank.
+    # Not if an email is queued to them — that row stays, and the call list
+    # hides it by its status instead.
+    cursor.execute(f"DELETE FROM crm_leads WHERE id = %s AND {unworked} "
+                   "AND queued_email_at IS NULL", (row["lead_id"],))
+    if cursor.rowcount:
+        cursor.execute("""
+            UPDATE crm_lead_candidates
+               SET status = 'qualified', promoted_lead_id = NULL, promoted_at = NULL,
+                   phone_status = %s, phone_note = %s
+             WHERE id = %s
+        """, (v["status"], v["note"], row["id"]))
+        tally["off_call_list"] += 1
+    else:
+        cursor.execute(f"UPDATE crm_leads SET phone_status = %s, phone_note = %s "
+                       f"WHERE id = %s AND {unworked}", (v["status"], v["note"], row["lead_id"]))
+
+
+def phone_check_step() -> int:
+    """One background batch; how many rows it checked (0 = nothing left).
+    Call-list leads before banked candidates: an unchecked lead is hidden from
+    the call list, so those are the ones someone is waiting on."""
+    out = _verify_phones_safe(bank_limit=0) or {}
+    if not out.get("leads_checked") and not out.get("skipped"):
+        out = _verify_phones_safe(lead_limit=0) or {}
+    return out.get("leads_checked", 0) + out.get("bank_checked", 0)
+
+
+def _verify_phones_safe(**kw) -> Optional[dict]:
+    try:
+        return verify_phones(**kw)
+    except Exception as exc:
+        print(f"[leadgen] LEADGEN_PHONES_VERIFY_FAILED {exc}", flush=True)
+
+
 def enrich_candidate(cand: dict) -> dict:
     """Crawl the venue's site for an email, then judge it. Never raises.
 
@@ -1553,28 +1885,7 @@ def enrich_candidate(cand: dict) -> dict:
             email, email_source = emails[0], website
 
     if not email:
-        import urllib.parse
-        candidates_urls: list[str] = []
-        for href, _kind in CONTACT_LINK_RE.findall(home):
-            if href.startswith(("mailto:", "tel:", "#", "javascript:")):
-                continue
-            full = urllib.parse.urljoin(website, href)
-            # http(s) only — urljoin will happily carry a file:// or data: href
-            # straight through from the page.
-            if not full.lower().startswith(("http://", "https://")):
-                continue
-            # Stay on the venue's own site; an off-site link is a social
-            # profile or a booking platform, not their contact page.
-            if domain_of(full) != domain_of(website):
-                continue
-            if full not in candidates_urls:
-                candidates_urls.append(full)
-        for path in CONTACT_PATHS:
-            full = website.rstrip("/") + path
-            if full not in candidates_urls:
-                candidates_urls.append(full)
-
-        for url in candidates_urls:
+        for url in _contact_urls(website, home):
             if fetched >= MAX_PAGES_PER_SITE:
                 break
             body, status = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
@@ -1613,6 +1924,24 @@ def enrich_candidate(cand: dict) -> dict:
             if manager:
                 break
 
+    # Is the map's number theirs? The pages already fetched first; a contact
+    # page or two more only if it hasn't turned up and there's budget left.
+    numbers: list = []
+    for _url, body in pages:
+        numbers += [p for p in site_phones(body) if p not in numbers]
+    if cand.get("phone") not in numbers:
+        seen_urls = {u for u, _ in pages}
+        for url in _contact_urls(website, home):
+            if cand.get("phone") in numbers or fetched >= MAX_PAGES_PER_SITE:
+                break
+            if url in seen_urls:
+                continue
+            body, status = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
+            fetched += 1
+            if status == 200 and body:
+                numbers += [p for p in site_phones(body) if p not in numbers]
+    verdict = judge_phone(cand.get("phone"), numbers, cand.get("local_codes") or ())
+
     chain_reason = looks_like_chain(cand["name"], website, html_seen)
     tags = {}
     try:
@@ -1649,6 +1978,11 @@ def enrich_candidate(cand: dict) -> dict:
     return {
         "status": "qualified",
         "reject_reason": None,
+        # Qualified whatever the verdict — banked, not thrown away — but only
+        # PHONE_OK numbers are ever promoted to the call list.
+        "phone": verdict["phone"],
+        "phone_status": verdict["status"],
+        "phone_note": verdict["note"],
         "email": email,
         "email_source": email_source,
         "email_kind": email_kind(email),
@@ -1806,6 +2140,8 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
         f"{cand['website']}\n"
         f"Email found on: {cand['email_source'] or 'site'}"
     )
+    if cand.get("phone_status") == "from_site" and cand.get("phone_note"):
+        notes += f"\nPhone taken from their website — {cand['phone_note']}"
     if cand.get("manager_name"):
         # Dated on purpose. A name read off a website is only ever "this is
         # what their site said on this day".
@@ -1817,9 +2153,9 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
                                source, tz_offset_hours, opening_hours, opener,
                                lead_score, email_kind, manager_name, manager_role,
                                manager_source, manager_seen_at, tz_name, venue_facts,
-                               created_at, updated_at)
+                               phone_status, phone_note, created_at, updated_at)
         VALUES (%s, %s, %s, 'new', %s, %s, %s, 'leadgen', %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (lead_id, cand["name"], loc, cand["phone"], cand["email"], notes,
           cand.get("tz_offset_hours"), cand.get("opening_hours"),
           cand.get("opener"), cand.get("score"),
@@ -1832,6 +2168,7 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
           cand.get("venue_facts") or venue_facts.dumps(
               venue_facts.extract_facts(_cand_tags(cand), "",
                                         cand.get("opening_hours"))),
+          cand.get("phone_status"), cand.get("phone_note"),
           now, now))
     cursor.execute("""
         UPDATE crm_lead_candidates
@@ -1975,11 +2312,12 @@ def promote_leads(limit: int = DAILY_TARGET) -> int:
         if not any(deficits.values()):
             return 0
 
+        # Only numbers the venue's own site vouches for. The rest stay banked.
         cursor.execute("""
             SELECT * FROM crm_lead_candidates
-             WHERE status = 'qualified'
+             WHERE status = 'qualified' AND phone_status IN %s
              ORDER BY score DESC, discovered_at ASC
-        """)
+        """, (PHONE_OK,))
         # Bank the candidates by the cell they would land in. Best-first within
         # each cell, preserved from the query order.
         by_bucket: dict = {b: [] for b in all_buckets()}
@@ -2042,7 +2380,17 @@ def pool_depth() -> dict:
             "WHERE status = 'new' AND last_touch_at IS NULL"
         )
         active = cursor.fetchone()["n"]
-    qualified = by_status.get("qualified", 0)
+    # Banked candidates their site can't vouch for are kept but never promoted,
+    # so they aren't stock. Counting them made a bank look deep that couldn't
+    # fill one cell, and the harvest that would have fixed it never ran.
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) AS n FROM crm_lead_candidates
+             WHERE status = 'qualified'
+               AND (phone_status IS NULL OR phone_status IN %s)
+        """, (PHONE_OK,))
+        qualified = cursor.fetchone()["n"]
     counts = bucket_counts()
     deficits = {b: max(0, BUCKET_TARGET - n) for b, n in counts.items()}
     headroom = sum(deficits.values())
@@ -2183,6 +2531,10 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
         #    and metering that out 25 a day would leave the tabs unusable for a
         #    fortnight. In steady state the two coincide anyway — the cap means
         #    only as many leads can land as were called off the list.
+        # Banked candidates enriched before the website check can't be promoted
+        # until their number is checked; check enough of the best to fill the
+        # holes. A no-op once the bank is all checked.
+        verify_phones(lead_limit=0, bank_limit=max(60, headroom * 2))
         promoted = promote_leads(headroom)
 
         # 2. Top the bank back up if it's getting shallow, or if what's banked
@@ -2241,6 +2593,10 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
         from concurrent.futures import ThreadPoolExecutor
         results: list[tuple[dict, dict]] = []
         if pending:
+            with get_db() as conn:
+                codes = _local_codes_by_city(conn.cursor(), [c.get("city") for c in pending])
+            for c in pending:
+                c["local_codes"] = codes.get(c.get("city"), set())
             with ThreadPoolExecutor(max_workers=ENRICH_WORKERS) as pool:
                 for cand, result in zip(pending, pool.map(_enrich_safe, pending)):
                     results.append((cand, result))
@@ -2262,7 +2618,9 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                                    email_source=%s, email_kind=%s, opener=%s,
                                    manager_name=%s, manager_role=%s,
                                    manager_source=%s, manager_seen_at=%s,
-                                   venue_facts=%s, score=%s, enriched_at=%s
+                                   venue_facts=%s, score=%s, enriched_at=%s,
+                                   phone=COALESCE(%s, phone), phone_status=%s,
+                                   phone_note=%s
                              WHERE id=%s
                         """, (result["status"], result["reject_reason"], result["email"],
                               result["email_source"], result.get("email_kind"),
@@ -2270,7 +2628,9 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                               result.get("manager_role"), result.get("manager_source"),
                               result.get("manager_seen_at"),
                               result.get("venue_facts"),
-                              result["score"], now_iso(), cand["id"]))
+                              result["score"], now_iso(), result.get("phone"),
+                              result.get("phone_status"), result.get("phone_note"),
+                              cand["id"]))
                         conn.commit()
                     except Exception:
                         # Almost always the unique-email index: another venue

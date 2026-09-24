@@ -97,6 +97,8 @@ async def lifespan(app: FastAPI):
     # must never touch the product API.
     asyncio.create_task(_leadgen_daily_loop())
     asyncio.create_task(_scheduled_email_loop())
+    asyncio.create_task(_inbox_loop())
+    asyncio.create_task(_phone_check_loop())
     # Cold-call school refresh: every few days at 10am Asia/Manila. Own try,
     # own loop — nothing here may affect the product API or the CRM.
     try:
@@ -2988,6 +2990,47 @@ async def _scheduled_email_loop():
         except Exception as e:
             print(f"[crm] scheduled email loop error: {e}", flush=True)
         await asyncio.sleep(60)
+
+
+async def _inbox_loop():
+    """Read replies from bars into the CRM, around the clock.
+
+    The operator is asleep through most of the US day; a reply saying "Brent
+    left, talk to Jed" or "not interested" should be on the lead by morning,
+    not waiting to be pasted in. crm.process_inbox() reads the mailbox
+    read-only and records each message once, so a restart never double-reads.
+    """
+    await asyncio.sleep(90)
+    every = max(1, int(os.getenv("CRM_INBOX_POLL_MINUTES", "5"))) * 60
+    while True:
+        try:
+            from crm import process_inbox
+            await asyncio.to_thread(process_inbox)
+        except Exception as e:
+            print(f"[crm] INBOX_LOOP_ERROR {e}", flush=True)
+        await asyncio.sleep(every)
+
+
+async def _phone_check_loop():
+    """Check call-list numbers against each venue's own website, a small batch
+    at a time.
+
+    This used to be one thread started at boot that crawled every unchecked
+    number at once, and it took the whole server down: on 0.5 CPU, eight
+    parallel crawls leave nothing for requests, and each restart began it
+    again. Now one batch (leadgen.VERIFY_BATCH, two sites at a time, a hard
+    time budget) and a pause, in a worker thread so the event loop keeps
+    answering. Once nothing is left unchecked it only looks twice an hour.
+    """
+    await asyncio.sleep(180)
+    while True:
+        checked = 0
+        try:
+            import leadgen
+            checked = await asyncio.to_thread(leadgen.phone_check_step)
+        except Exception as e:
+            print(f"[leadgen] PHONE_CHECK_LOOP_ERROR {e}", flush=True)
+        await asyncio.sleep(45 if checked else 1800)
 
 
 async def _school_refresh_loop():

@@ -110,3 +110,13 @@ def test_a_plain_draft_still_needs_a_brief(drafted):
     with pytest.raises(HTTPException) as e:
         crm.draft_lead_email("L1", crm.DraftRequest(brief="   "))
     assert e.value.status_code == 422
+
+
+def test_the_drafter_knows_the_sender_owns_86d_and_made_the_calls(drafted):
+    # A draft opened "Lesley told me about 86'd" — Lesley was the bartender the
+    # owner spoke to, who pointed him at Brent. The model hadn't been told the
+    # log is the sender's, or that the sender owns the product.
+    crm.draft_lead_email("L1", crm.DraftRequest(followup=True))
+    assert "who owns 86'd" in drafted["system"]
+    assert "Whose log this is: the SENDER's" in drafted["ask"]
+    assert "never say or imply they did" in drafted["ask"]
