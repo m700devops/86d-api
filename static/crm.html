@@ -760,12 +760,12 @@
           the one-tap distributor emails."</em></p>
         <textarea id="brainNotes" rows="6" maxlength="8000"
           placeholder="Type instructions for the AI, one per line…"></textarea>
-        <div class="row" style="margin-top:8px;align-items:center;gap:10px">
+        <div style="display:flex;margin-top:8px;align-items:center;gap:10px;flex-wrap:wrap">
           <button class="go" id="brainSave">Save instructions</button>
           <span class="muted" id="brainSaved" style="font-size:13px"></span></div>
       </div>
       <div class="card" style="margin-top:12px">
-        <div class="row" style="justify-content:space-between;align-items:center;gap:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
           <strong>What it has learned from your calls</strong>
           <button id="brainRefresh">Re-learn now</button></div>
         <p class="hint" style="margin:4px 0 8px" id="brainWhen"></p>
@@ -1774,7 +1774,7 @@ function leadDetailsCell(l, cols){
     ${f('Bar',l.name)}${f('Where',l.loc)}${f('Stage',l.status)}
     ${f('Last touch',[outcomeLabel(l.last_outcome),(l.last_touch_at||'').slice(0,10)].filter(Boolean).join(' · '))}
     ${f('Tries',t.total?`${t.total}${why?' ('+why+')':''}`:'')}${f('Call back',l.followup_date)}
-    ${f('Spoke to',l.contact)}${f('Phone',l.phone_dial||l.phone)}
+    ${f('Ask for',l.contact)}${f('Phone',l.phone_dial||l.phone)}
     ${f('Phone check',l.phone_note||phoneCheck(l))}${f('Email',l.email)}
     ${f('Manager',l.manager_name&&`${l.manager_name}${l.manager_role?' ('+l.manager_role+')':''}`)}
     <p class="hint" style="margin:10px 0 4px">Every attempt <span class="muted">(your time)</span></p>
@@ -2212,7 +2212,7 @@ function replyBox(dr){
     <div class="hint" style="margin:0 0 4px">Reply drafted — edit it, then send. Nothing goes out until you press Send.</div>
     <input data-rsubject value="${esc(dr.subject||'')}" style="width:100%;margin-bottom:6px">
     <textarea data-rbody rows="8" style="width:100%">${esc(dr.body||'')}</textarea>
-    <div class="row" style="margin-top:6px;gap:8px">
+    <div style="display:flex;margin-top:6px;gap:8px;flex-wrap:wrap">
       <button class="go" data-away-send>Send reply</button>
       <button data-away-draft>Redraft</button></div></div>`;
 }

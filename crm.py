@@ -2096,7 +2096,8 @@ def refresh_playbook(force: bool = False) -> dict:
         if not force and row.get("playbook") and (fresh or quiet):
             return {"skipped": "nothing new to learn since the last refresh"}
         try:
-            out = _claude_json(_pb.SYSTEM, digest, _pb.SCHEMA, purpose="playbook")
+            # A background job reading up to 150 bars' notes: give it room.
+            out = _claude_json(_pb.SYSTEM, digest, _pb.SCHEMA, timeout=300.0, purpose="playbook")
             pb = _pb.clean(out, names)
             error = None
         except HTTPException as exc:
