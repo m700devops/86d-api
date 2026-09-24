@@ -818,6 +818,15 @@ function toast(m,undoId){
   clearTimeout(toast._t);
   toast._t=setTimeout(()=>t.classList.remove('show'),undoId?10000:2000);
 }
+/* What a send says: where it went, and whether the copy reached Sent. A
+   refused copy used to be silent — only the server log knew — so an empty
+   Sent folder looked like the fix hadn't worked. */
+function sentNote(s){
+  if(!s) return 'Sent';
+  if(s.saved_to) return `Sent to ${s.to} · copy in ${s.saved_to}`;
+  if(s.copy_error) return `Sent to ${s.to} — but NOT copied to your Sent folder: ${s.copy_error}`;
+  return 'Sent to '+s.to;
+}
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 async function api(path,opts={}){
@@ -1516,7 +1525,7 @@ async function drawerAction(dr,e){
         send_at:chosenTime(dr)})});
       toast(r.queued
         ? `Queued for ${r.venue_time} their time (${r.your_time} yours)`
-        : 'Sent to '+r.sent.to, r.undo_id);
+        : sentNote(r.sent), r.undo_id);
       await loadCalls();
     }catch(err){
       btn.disabled=false; refreshSendLabel(dr);
@@ -2002,7 +2011,7 @@ async function pipeDrawer(dr,e){
         send_at:chosenTime(dr)})});
       toast(r.queued
         ? `Queued for ${r.venue_time} their time (${r.your_time} yours)`
-        : 'Sent to '+r.sent.to, r.undo_id);
+        : sentNote(r.sent), r.undo_id);
       await loadPipeline();
     }catch(err){ b.disabled=false; refreshSendLabel(dr); fail(err.message); }
     return;
@@ -2326,7 +2335,7 @@ async function followupDrawer(dr,e){
       send_at:chosenTime(dr)})});
     toast(r.queued
       ? `Queued for ${r.venue_time} their time (${r.your_time} yours)`
-      : 'Sent to '+r.sent.to, r.undo_id);
+      : sentNote(r.sent), r.undo_id);
     await loadFollowups();
   }catch(err){
     b.disabled=false; refreshSendLabel(dr);
