@@ -57,7 +57,7 @@ def test_what_we_know_is_only_whats_on_file():
          "opener": "a big tap list"},
         [{"text": "open since 2014", "source": "their website"}],
         ["busy Sundays"], "[2026-09-25] call: spoke with Lesley")
-    assert "Lesley (the person we spoke to)" in ctx
+    assert "Decision maker — write to them: Lesley" in ctx
     assert "open since 2014 (from their website)" in ctx
     assert "busy Sundays" in ctx and "spoke with Lesley" in ctx
     thin = pitch.lead_context({"name": "Nowhere Bar"})
@@ -239,3 +239,108 @@ def test_the_angle_follows_the_state_tip_credit():
     assert pitch.state_angle("Austin") is None and pitch.state_angle(None) is None
     ctx = pitch.lead_context({"name": "Shiner's Saloon", "loc": "Austin, TX"})
     assert "Angle for this state: TX allows a tip credit" in ctx
+
+
+# ── every draft ends with the owner's signature, and goes to the decision maker ─
+
+SIG = "Stephan Khouri\nOwner of 86'd Bar inventory\nWebsite: My86d.com"
+
+
+def test_the_signature_is_the_owners_exact_words():
+    assert pitch.SIGNATURE == SIG
+    assert pitch.EXAMPLE_EMAIL.endswith("Best,\n" + SIG)
+    assert "Stephan Khouri / Owner of 86'd Bar inventory / Website: My86d.com" in pitch.master_sheet()
+
+
+def test_sign_replaces_whatever_sign_off_the_model_wrote():
+    for body in ("Hi Laura,\n\nBody.\n\nBest,\nStephan\nOwner of 86'd",
+                 "Hi Laura,\n\nBody.\n\nBest,\n— Stephan\n910-335-2760\nmy86d.com",
+                 "Hi Laura,\n\nBody.\n\nBest,\n" + SIG,
+                 "Hi Laura,\n\nBody.\n\nBest,\n" + SIG + "\n\n"):
+        assert pitch.sign(body) == "Hi Laura,\n\nBody.\n\nBest,\n" + SIG, body
+
+
+def test_signing_twice_changes_nothing():
+    once = pitch.sign("Hi Laura,\n\nBody.\n\nThanks,")
+    assert pitch.sign(once) == once and once.count("Stephan Khouri") == 1
+
+
+def test_no_closing_word_still_ends_with_the_signature():
+    assert pitch.sign("Hi Laura,\n\nWorth a look before your next order day?") == (
+        "Hi Laura,\n\nWorth a look before your next order day?\n\n" + SIG)
+
+
+def test_a_ps_moves_above_the_sign_off():
+    out = pitch.sign("Hi Laura,\n\nBody.\n\nThanks,\nStephan\n\nP.S. Hope the cat's ok.")
+    assert out == "Hi Laura,\n\nBody.\n\nP.S. Hope the cat's ok.\n\nThanks,\n" + SIG
+
+
+def test_the_body_keeps_a_phone_line_that_is_not_the_sign_off():
+    out = pitch.sign("Hi Laura,\n\nCall me directly at 910-335-2760.\n\nBest,")
+    assert "Call me directly at 910-335-2760." in out
+
+
+def test_who_decides_comes_before_who_picked_up():
+    lead = {"name": "Barrel House", "contact": "Laura Keene (owner)",
+            "notes": "[2026-09-20] call — Spoke to: Jake (bartender) · Your notes: Laura orders"}
+    assert pitch.decision_maker(lead) == ("Laura Keene (owner)", "")
+    ctx = pitch.lead_context(lead)
+    assert "Decision maker — write to them: Laura Keene (owner)" in ctx
+    assert "Spoke to on the phone (not the decision maker): Jake (bartender)" in ctx
+    site = pitch.decision_maker({"manager_name": "Ed Park", "manager_role": "GM"})
+    assert site == ("Ed Park", " (GM, per their website — may have moved on)")
+    assert pitch.decision_maker({}) == (None, "")
+
+
+def test_first_names_skip_roles():
+    assert pitch.first_name("Laura Keene (owner)") == "Laura"
+    assert pitch.first_name("GM Brent") == "Brent"
+    assert pitch.first_name("the owner") is None and pitch.first_name("bar manager") is None
+
+
+def test_the_greeting_goes_to_the_decision_maker():
+    assert pitch.address_to("Hi Jake,\n\nBody.", "Laura") == "Hi Laura,\n\nBody."
+    assert pitch.address_to("Hi there,\n\nBody.", "Laura") == "Hi Laura,\n\nBody."
+    assert pitch.address_to("Laura — quick one.\n\nBody.", "Laura") == "Laura — quick one.\n\nBody."
+    assert pitch.address_to("Your Sunday count.\n\nBody.", "Laura").startswith("Hi Laura,\n\nYour")
+    assert pitch.address_to("Hi there,\n\nBody.", None) == "Hi there,\n\nBody."
+
+
+def test_the_style_writes_to_the_decision_maker_and_never_signs():
+    p = pitch.system_prompt()
+    assert "Write to the DECISION MAKER" in p and "A REPLY is the exception" in p
+    assert "never write one" in p and "No P.S." in p
+
+
+def test_a_first_email_is_signed_and_greets_the_decision_maker(drafted, monkeypatch):
+    import types as _t
+    monkeypatch.setattr(crm, "_claude_json", lambda *a, **k: {
+        "subject": "Rioja's Sunday count", "body": "Hi Jake,\n\nBody.\n\nThanks,\nStephan"})
+
+    class _Cur:
+        def execute(self, *a): pass
+        def fetchone(self): return _lead(contact="Alex Ruiz (GM)")
+
+    monkeypatch.setattr(crm, "get_db", contextmanager(lambda: (yield _t.SimpleNamespace(cursor=lambda: _Cur())))) 
+    out = crm.draft_lead_email("L1", crm.DraftRequest(brief="first email"))
+    assert out["body"] == "Hi Alex,\n\nBody.\n\nThanks,\n" + SIG
+
+
+def test_a_reply_answers_whoever_wrote(drafted, monkeypatch):
+    monkeypatch.setattr(crm, "_inbox_mail", lambda mid: {
+        "message_id": mid, "from_name": "Jed", "from_addr": "jed@fbrmgmt.com",
+        "subject": "q", "body_text": "Two locations?"})
+    monkeypatch.setattr(crm, "_claude_json", lambda *a, **k: {"subject": "Re: q", "body": "Hi Jed,\n\nYes."})
+    out = crm.draft_lead_email("L1", crm.DraftRequest(reply_to="<r@x>"))
+    assert out["body"] == "Hi Jed,\n\nYes.\n\n" + SIG          # not re-addressed to the lead's contact
+
+
+def test_a_revision_keeps_its_greeting(drafted, monkeypatch):
+    monkeypatch.setattr(crm, "_claude_json", lambda *a, **k: {"subject": "s", "body": "Hi Jed,\n\nShorter."})
+    out = crm.draft_lead_email("L1", crm.DraftRequest(brief="shorter", subject="s", body="Hi Jed,\n\nLong."))
+    assert out["body"].startswith("Hi Jed,")
+
+
+def test_the_page_gets_the_same_signature():
+    import mailer
+    assert crm.mail_status(True)["signature"] == SIG

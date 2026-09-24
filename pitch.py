@@ -29,6 +29,10 @@ PRICE = os.getenv("COMPANY_PRICE") or "$29.99/month"
 APP_URL = (os.getenv("COMPANY_APP_URL")
            or "https://apps.apple.com/us/app/86d-bar-inventory/id6798359825")
 WEBSITE = os.getenv("COMPANY_WEBSITE") or "https://my86d.com"
+# The sign-off, exactly as the owner wants it on every email. `sign()` puts it
+# at the end of every draft in code — a prompt can only ask; this guarantees.
+SIGNATURE = ((os.getenv("COMPANY_SIGNATURE") or "").replace("\\n", "\n").strip()
+             or "Stephan Khouri\nOwner of 86'd Bar inventory\nWebsite: My86d.com")
 
 # The owner's own email, sent as the example of what good looks like. Given
 # to the model as a reference for substance and structure, not a template to
@@ -53,8 +57,7 @@ The first month is free, with no credit card required. Just download and go. Aft
 If you have any questions, call me directly at {OWNER_PHONE}.
 
 Best,
-{OWNER_NAME}
-{OWNER_TITLE}"""
+{SIGNATURE}"""
 
 
 # States with NO tip credit: tipped staff earn the full minimum wage, so an
@@ -90,7 +93,8 @@ def master_sheet() -> str:
     how to answer the usual pushback, and what we ask for."""
     return f"""WHO IS WRITING
 - {OWNER_NAME}, who built 86'd and owns it. Founder writing to a bar, not a sales team.
-- Direct line: {OWNER_PHONE}. Sign-off: "{OWNER_NAME}" then "{OWNER_TITLE}".
+- Direct line: {OWNER_PHONE}.
+- Every email ends with his signature, added automatically: {SIGNATURE.replace(chr(10), " / ")}.
 
 WHAT 86'D IS
 - An iPhone app (iOS only, no Android) for bar inventory and distributor ordering.
@@ -195,7 +199,16 @@ The modern part:
   no "Quick question", no emoji.
 - Mobile-length: they read this on a phone between deliveries. A first email about as long
   as the EXAMPLE or shorter; a follow-up half that.
-- Optional P.S. only if there is a genuinely personal line to put in it.
+- No P.S.: the email ends with the signature, so a personal line belongs in the body.
+
+Who it's to:
+- Write to the DECISION MAKER — the owner, GM or bar manager who counts and orders. When
+  WHAT WE KNOW names them, greet them by first name ("Hi Laura,").
+- If we only spoke to someone else (a bartender, a host), still write to the decision maker,
+  and mention that person only as the connection ("Jake mentioned you handle the ordering").
+- If no decision maker is named, write for the owner or whoever does the ordering: greet
+  with "Hi there," and make the first line a one-sentence ask to pass it to them.
+- A REPLY is the exception: answer whoever wrote to us.
 
 Hard rules:
 1. NEVER state a product fact, price, number or URL that is not in the MASTER SHEET, and
@@ -214,11 +227,12 @@ def lead_context(lead: dict, fact_lines: Optional[list] = None,
     where it came from, so the model can personalise without inventing."""
     out = [f"Venue: {lead.get('name') or 'the bar'}"
            + (f", {lead['loc']}" if lead.get("loc") else "")]
-    who = lead.get("contact") or lead.get("manager_name")
-    if who:
-        role = lead.get("manager_role") or ("the person we spoke to" if lead.get("contact")
-                                            else "listed on their website")
-        out.append(f"Contact: {who} ({role})")
+    dm, dm_note = decision_maker(lead)
+    if dm:
+        out.append(f"Decision maker — write to them: {dm}{dm_note}")
+    spoke = spoke_to(lead)
+    if spoke and first_name(spoke) != first_name(dm or ""):
+        out.append(f"Spoke to on the phone (not the decision maker): {spoke}")
     angle = state_angle(lead.get("loc"))
     if angle:
         out.append(f"Angle for this state: {angle}")
@@ -245,7 +259,7 @@ def system_prompt(knowledge: str = "", winners: Optional[list] = None) -> str:
     it at a tenth of the price. What's specific to one bar goes in the user
     message (`user_prompt`)."""
     parts = [f"""You write one sales email for {OWNER_NAME}, who owns 86'd, to send from his own
-mailbox to a bar. First person, in his voice, signed as him.
+mailbox to a bar. First person, in his voice.
 
 === MASTER SHEET (the only product facts you may use) ===
 {master_sheet()}"""]
@@ -260,8 +274,9 @@ be more personal than it where WHAT WE KNOW allows) ===
                      "worked. They were to OTHER bars, so never reuse a venue, name or detail "
                      f"from them) ===\n{shown}")
     parts.append(f"=== {STYLE}")
-    parts.append('Return a JSON object with "subject" and "body". The body is the whole email, '
-                 "sign-off included.")
+    parts.append('Return a JSON object with "subject" and "body". The body runs from the greeting '
+                 'to the closing word ("Thanks," or "Best,") and stops there: his signature is '
+                 "added underneath automatically, so never write one.")
     return "\n\n".join(parts)
 
 
@@ -279,3 +294,99 @@ SCHEMA = {
     "required": ["subject", "body"],
     "additionalProperties": False,
 }
+
+
+# ── who the email is to, and how it ends ────────────────────────────────────
+
+_SPOKE_RE = re.compile(r"Spoke to: ([^·\n]{2,80})")
+_ROLE_WORDS = {"the", "owner", "owners", "gm", "manager", "bar", "general", "head", "a", "an",
+               "bartender", "host", "hostess", "staff", "team", "someone", "unknown", "n/a"}
+
+
+def decision_maker(lead: dict) -> tuple:
+    """(who to write to, a note on where the name came from). The contact on
+    a lead is who we ask for — the owner or whoever orders, as the call notes
+    record it. A manager read off their own website comes second, flagged,
+    because those names go stale."""
+    contact = str(lead.get("contact") or "").strip()
+    if contact:
+        return contact[:80], ""
+    manager = str(lead.get("manager_name") or "").strip()
+    if manager:
+        role = str(lead.get("manager_role") or "manager").strip()
+        return manager[:80], f" ({role}, per their website — may have moved on)"
+    return None, ""
+
+
+def spoke_to(lead: dict) -> Optional[str]:
+    """Who actually picked up on the most recent call that recorded it."""
+    found = _SPOKE_RE.findall(lead.get("notes") or "")
+    return found[-1].strip(" .;")[:80] if found else None
+
+
+def first_name(name: Optional[str]) -> Optional[str]:
+    """"Laura Keene (owner)" -> "Laura", "GM Brent" -> "Brent". None for a
+    role with no name in it ("the owner", "bar manager")."""
+    for word in re.findall(r"[A-Za-z][A-Za-z'’-]*", (name or "").split("(")[0]):
+        if word.lower() not in _ROLE_WORDS:
+            return word[:1].upper() + word[1:]
+    return None
+
+
+_GREETING_RE = re.compile(r"^(?:hi|hey|hello|dear|good (?:morning|afternoon|evening))\b[^\n]{0,60}$", re.I)
+
+
+def address_to(body: str, first: Optional[str]) -> str:
+    """Make sure an outreach draft greets the decision maker. A greeting to
+    someone else ("Hi Jake," when Laura decides, or "Hi there,") becomes
+    "Hi Laura,"; a first line that already names them is left alone."""
+    if not first:
+        return body
+    lines = (body or "").strip("\n").split("\n")
+    head = lines[0].strip() if lines else ""
+    if re.search(rf"\b{re.escape(first)}\b", head, re.I):
+        return "\n".join(lines)
+    if _GREETING_RE.match(head):
+        lines[0] = f"Hi {first},"
+    else:
+        lines = [f"Hi {first},", ""] + lines
+    return "\n".join(lines)
+
+
+_SIGNOFF_RE = re.compile(
+    r"^\s*(?:[-—–]+\s*)?(?:stephan(?:\s+khouri)?|khouri|owner(?:,?\s+(?:of\s+)?86.?d[^\n]{0,40})?|"
+    r"founder[^\n]{0,40}|86.?d(?:\s+bar\s+inventory)?|(?:website:\s*)?(?:https?://)?(?:www\.)?my86d\.com/?|"
+    r"(?:phone|cell|direct|mobile|tel)\b[^\n]{0,40}|\(?910\)?[-.\s]?335[-.\s]?2760)\s*$", re.I)
+_CLOSING_RE = re.compile(r"^\s*(?:thanks|thank you|many thanks|cheers|best|best regards|regards|"
+                         r"kind regards|warm regards|warmly|talk soon|speak soon|all the best)"
+                         r"[,.!]?\s*$", re.I)
+_PS_RE = re.compile(r"^\s*p\.?\s?s\b", re.I)
+
+
+def sign(body: str) -> str:
+    """Every draft ends with SIGNATURE, exactly once.
+
+    Whatever sign-off the model (or an earlier draft being revised) left at
+    the end is taken off first — "Stephan", "Owner of 86'd", the website, a
+    phone line, the full signature itself — so a redraft never signs twice.
+    The closing word ("Thanks,") stays and the signature goes right under
+    it. A trailing P.S. is kept, but above the closing: the email has to end
+    with the signature.
+    """
+    text = (body or "").replace("\r\n", "\n").strip()
+    paras = re.split(r"\n[ \t]*\n", text)
+    ps = ""
+    if len(paras) > 1 and _PS_RE.match(paras[-1]):
+        ps = paras.pop().strip()
+    lines = "\n\n".join(paras).split("\n")
+    sig_lines = {l.strip().lower() for l in SIGNATURE.split("\n") if l.strip()}
+    while lines and (not lines[-1].strip() or _SIGNOFF_RE.match(lines[-1])
+                     or lines[-1].strip().lower() in sig_lines):
+        lines.pop()
+    closing = lines.pop().strip() if lines and _CLOSING_RE.match(lines[-1]) else ""
+    out = "\n".join(lines).rstrip()
+    if ps:
+        out = (out + "\n\n" + ps).strip()
+    if closing:
+        return (out + "\n\n" if out else "") + closing + "\n" + SIGNATURE
+    return (out + "\n\n" if out else "") + SIGNATURE

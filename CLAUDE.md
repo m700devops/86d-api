@@ -312,7 +312,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_order_numbers.py test_rehearsal.py -q` (522 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_lead_finding.py test_order_numbers.py test_rehearsal.py -q` (536 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -1041,6 +1041,23 @@ capture. Don't reintroduce them or describe them as current.)
   STYLE) and is cached; `pitch.user_prompt()` carries WHAT WE KNOW and the ask. Every draft
   goes through `_write_draft()`. `DraftRequest.reply_to` (an inbox Message-ID) drafts a reply
   from their own words. Covered by test_pitch.py
+- **Every email draft ends with the owner's signature, and outreach goes to the DECISION
+  MAKER.** `pitch.SIGNATURE` is exactly "Stephan Khouri / Owner of 86'd Bar inventory /
+  Website: My86d.com" (three lines; `COMPANY_SIGNATURE` overrides, `\n` for line breaks).
+  `pitch.sign()` enforces it in `_write_draft()` — in CODE, because a prompt can only ask:
+  whatever sign-off the model or an earlier draft left ("Stephan", "Owner of 86'd", a phone
+  line, the website, the full signature) is taken off the end first, so a revision never signs
+  twice; the closing word ("Thanks,") stays with the signature right under it; a trailing P.S.
+  moves ABOVE the closing, because the email has to end with the signature. The prompt tells
+  the model to stop at the closing word. Who it's to: `pitch.decision_maker()` — the lead's
+  `contact` (who we ask for: the owner / whoever orders, as call notes record it), else a
+  manager from their own site, flagged "may have moved on"; `spoke_to()` (the latest "Spoke
+  to:") is shown as "not the decision maker". STYLE: greet the decision maker by first name,
+  mention the person who picked up only as the connection, "Hi there," plus a one-line ask to
+  pass it on when nobody's named. `address_to()` enforces the greeting on a FRESH outreach draft
+  (first email, follow-up); a reply answers whoever wrote, and a revision keeps its greeting.
+  The compose box's hand-written starting text uses the same first-name greeting and the same
+  signature (`/mail/status` returns it). Covered by test_pitch.py
 - **ONE MODEL for every CRM AI: `CRM_AI_MODEL` (default `claude-opus-5`) at `CRM_AI_EFFORT`
   (default `medium`)**, the owner's call — notes reader, quick-add, prep sheet, Ask AI, AI
   bar, inbox reader, drafter, School. A NEW env name on purpose: `ANTHROPIC_MODEL` /
@@ -1249,7 +1266,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   ANTHROPIC_MODEL and ANTHROPIC_ASSIST_MODEL are NO LONGER READ (safe to delete on Render)
 - COMPANY_WEBSITE (default `https://my86d.com`), COMPANY_APP_URL (default the live listing,
   `https://apps.apple.com/us/app/86d-bar-inventory/id6798359825`), COMPANY_OWNER_NAME,
-  COMPANY_OWNER_TITLE, COMPANY_PHONE, COMPANY_PRICE — override the master sheet's numbers
+  COMPANY_OWNER_TITLE, COMPANY_PHONE, COMPANY_PRICE, COMPANY_SIGNATURE — override the master
+  sheet's numbers and the email signature
   (pitch.py). COMPANY_NAME and COMPANY_BLURB are no longer read. COMPANY_APP_URL used to
   default to empty, and asking the drafter for "the link to the app" got the website
   only, because it may not include a link it wasn't given. A blank env var falls back to
