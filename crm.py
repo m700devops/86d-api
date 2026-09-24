@@ -3615,6 +3615,12 @@ def _apple_config() -> dict:
         cfg.update({k: v for k, v in env.items() if v})
     cfg["source"] = "env" if from_env else ("saved" if key else None)
     cfg["connected"] = bool(cfg.get("issuer_id") and cfg.get("key_id") and cfg.get("private_key"))
+    # Diagnostic only, never a substitute for `connected`: which of the three
+    # Render env vars this process can actually see right now, so the page
+    # can say "APPLE_KEY_ID isn't set" instead of a bare connect form when an
+    # operator swears they set it — a name typo or the wrong Render service
+    # is the far more common cause than anything in this file.
+    cfg["env_seen"] = {k: bool(env[k]) for k in ("issuer_id", "key_id", "private_key")}
     return cfg
 
 
@@ -3700,6 +3706,7 @@ def _apple_status(cfg: dict) -> dict:
     return {
         "connected": cfg["connected"], "source": cfg.get("source"),
         "key_unreadable": bool(cfg.get("key_unreadable")),
+        "env_seen": cfg.get("env_seen"),
         "issuer_id": cfg.get("issuer_id"), "key_id": cfg.get("key_id"),
         "app": {"id": cfg.get("app_id"), "name": cfg.get("app_name"),
                 "bundle_id": cfg.get("bundle_id")} if cfg.get("app_id") else None,
