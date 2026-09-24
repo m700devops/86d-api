@@ -1462,7 +1462,7 @@ let pipeTimer=null;
 
 // The edit form still writes one real status at a time.
 const STATUSES=[['','Everything'],['new','Not called'],['contacted','Contacted'],
-                ['warm','Warm'],['won','Won'],['dead','Dead']];
+                ['warm','Warm'],['won','Won'],['dead','Not Interested']];
 
 async function loadPipeline(){
   const yet=TAB==='yet', {S, body}=leadList();
@@ -1478,7 +1478,7 @@ async function loadPipeline(){
     $('yetCount').textContent=`${d.counts.untouched??d.matching} not contacted yet`;
   }else{
   const open=d.counts.open??0;
-  $('pipeStats').innerHTML=[['open','Open',open],['dead','Dead',d.counts.dead??0]]
+  $('pipeStats').innerHTML=[['open','Open',open],['dead','Not Interested',d.counts.dead??0]]
     .map(([key,label,n])=>`<button data-view="${key}"
        class="${!searching&&PIPE.view===key?'on':''}">${label} <b>${n}</b></button>`).join('');
   }
