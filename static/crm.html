@@ -919,8 +919,8 @@ $('startBtn').onclick=async()=>{
    what's wrong with it and Claude changes that bit rather than starting over.
    Either way the draft lands in the same two fields you can edit by hand, and
    nothing sends until you press Send. */
-function composeDrawer(addr, contact){
-  return `<td colspan="8">
+function composeDrawer(addr, contact, cols=8){
+  return `<td colspan="${cols}">
     <p class="hint">Sending as <strong>${esc(MAIL.from||'')}</strong>. Nothing goes until you press Send.</p>
     <div class="mailrow"><label>To</label><input data-to value="${esc(addr)}"></div>
     ${MAIL.ai?`<div class="aibox">
@@ -1885,7 +1885,8 @@ function miniTable(list){
   if(!list.length) return '<p class="muted">Nothing here.</p>';
   return `<div class="sheetwrap"><table class="sheet">
     <thead><tr><th></th><th>BAR</th><th>PHONE</th><th>TRY</th><th>DUE</th><th>ACTIONS</th></tr></thead>
-    <tbody>${list.map((l,i)=>`<tr data-id="${esc(l.id)}">
+    <tbody>${list.map((l,i)=>`<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}"
+        data-name="${esc(l.name)}" data-contact="${esc(l.contact||'')}">
       <td class="rownum">${i+1}</td>
       <td class="nm">${esc(l.name)}
         ${l.last_outcome?`<div class="sub">${esc(outcomeLabel(l.last_outcome))}</div>`:''}</td>
@@ -1893,6 +1894,7 @@ function miniTable(list){
       <td>${l.attempts?`<span class="tries">${l.attempts}</span>`:'<span class="muted">—</span>'}</td>
       <td class="muted">${esc(l.followup_date||'')}</td>
       <td><div class="acts"><button class="go" data-act="log">Log call</button>
+          <button data-act="email">Email</button>
           <button class="del" data-act="del">Delete</button></div></td>
     </tr>`).join('')}</tbody></table></div>`;
 }
@@ -1926,9 +1928,11 @@ async function loadFollowups(){
 ['fOverdue','fToday'].forEach(id=>{
   const el=$(id); if(!el) return;
   el.onclick=async e=>{
+    const dr=e.target.closest('.drawer'); if(dr) return followupDrawer(dr,e);
     const dig=e.target.closest('.digits'); if(dig) return copyDigits(dig);
     const btn=e.target.closest('button[data-act]'); if(!btn) return;
-    const leadId=btn.closest('tr').dataset.id;
+    const tr=btn.closest('tr'); const leadId=tr.dataset.id;
+    if(btn.dataset.act==='email') return openFollowupEmail(tr);
     if(btn.dataset.act==='del'){
       if(!confirm('Delete this lead?')) return;
       try{await api('/leads/'+leadId,{method:'DELETE'});toast('Deleted');await loadFollowups();}
@@ -1943,6 +1947,62 @@ async function loadFollowups(){
     catch(err){ toast(err.message); }
   };
 });
+
+/* Follow-up email: Claude reads what's been logged on this lead (the call
+   summaries and the operator's own words) and drafts from that straight
+   away. Same compose box as the other tabs — edit it, ask for a change, or
+   pick a time — and nothing goes until Send is pressed. */
+async function openFollowupEmail(tr){
+  const next=tr.nextElementSibling;
+  if(next && next.classList.contains('drawer')){ next.remove(); return; }
+  const addr=tr.dataset.email;
+  if(!addr) return toast(`No email on file for ${tr.dataset.name} — add one with Edit on the CRM tab`);
+  if(!MAIL.configured) return toast('No mailbox is set up on the server, so this can\u2019t send');
+  const d=document.createElement('tr');
+  d.className='drawer mailer'; d.dataset.mode='mail';
+  d.innerHTML=composeDrawer(addr, tr.dataset.contact, 6);
+  tr.after(d);
+  wireSlots(d); loadSlots(d, tr.dataset.id);
+  if(!MAIL.ai) return;
+  const box=d.querySelector('.applied'); const btn=d.querySelector('[data-draft]');
+  box.className='applied'; box.textContent='Reading your notes and drafting a follow-up…';
+  btn.disabled=true;
+  try{
+    const r=await api(`/leads/${tr.dataset.id}/draft-email`,
+      {method:'POST',body:JSON.stringify({followup:true})});
+    d.querySelector('[data-subject]').value=r.subject;
+    d.querySelector('[data-body]').value=r.body;
+    d.dataset.drafted='1';
+    d.querySelector('[data-brief]').placeholder='Not right? Say what to change — "shorter", "mention the free trial", "he asked about price"';
+    btn.textContent='Redraft';
+    box.textContent='Drafted from your notes. Read it, edit anything, then Send.';
+  }catch(err){
+    box.className='applied err'; box.textContent=err.message;
+  }finally{ btn.disabled=false; }
+}
+
+async function followupDrawer(dr,e){
+  const id=dr.previousElementSibling.dataset.id;
+  if(e.target.closest('[data-cancel]')) return dr.remove();
+  if(e.target.closest('[data-draft]')) return runDraft(dr, id);
+  if(!e.target.closest('[data-send]')) return;
+  const b=dr.querySelector('[data-send]'); b.disabled=true;
+  b.textContent=chosenTime(dr)?'Scheduling…':'Sending…';
+  try{
+    const r=await api(`/leads/${id}/send-email`,{method:'POST',body:JSON.stringify({
+      to:dr.querySelector('[data-to]').value.trim(),
+      subject:dr.querySelector('[data-subject]').value.trim(),
+      body:dr.querySelector('[data-body]').value,
+      send_at:chosenTime(dr)})});
+    toast(r.queued
+      ? `Queued for ${r.venue_time} their time (${r.your_time} yours)`
+      : 'Sent to '+r.sent.to, r.undo_id);
+    await loadFollowups();
+  }catch(err){
+    b.disabled=false; refreshSendLabel(dr);
+    const box=dr.querySelector('.applied'); box.className='applied err'; box.textContent=err.message;
+  }
+}
 
 const tile=(n,l)=>`<div class="stat"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
 

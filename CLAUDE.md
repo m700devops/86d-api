@@ -153,7 +153,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
   test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
-  test_ask.py test_apple.py -q` (333 tests)
+  test_ask.py test_apple.py test_followup_email.py -q` (345 tests)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -655,6 +655,13 @@ capture. Don't reintroduce them or describe them as current.)
   brief and it edits that draft instead of writing a new one — a tweak like "shorter" must
   not lose the part that was already right. The operator can still type over any of it, and
   nothing sends until Send is pressed
+- **Follow-ups rows carry an Email button** (between Log call and Delete). It opens the same
+  compose box and immediately calls `draft-email` with `followup: true` and no brief:
+  `_followup_ask()` hands Claude the lead's own log — call summaries, the operator's verbatim
+  words, last outcome and contact — told to write only from what was actually said and to
+  ignore bookkeeping lines ("Email found on", attempt numbers). Redraft, scheduling and Send
+  are the normal compose-box path; nothing sends until Send. Sending does NOT clear
+  `followup_date`, so the row stays until a call is logged. Covered by test_followup_email.py
 - **The drafting prompt is facts-only** (`_draft_system`). It is handed the product
   description, the venue, the contact and the links from `COMPANY_WEBSITE` / `COMPANY_APP_URL`,
   and told in the first rule never to invent a URL, price, percentage, customer count or
