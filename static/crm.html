@@ -22,8 +22,8 @@
   header h1{font-size:20px;margin:0;letter-spacing:-0.4px}
   header .sub{color:var(--text3);font-size:12px}
 
-  #pipeBody tr[data-id]{cursor:pointer}
-  #pipeBody tr[data-id]:hover td{background:#ffffff08}
+  #pipeBody tr[data-id],#yetBody tr[data-id]{cursor:pointer}
+  #pipeBody tr[data-id]:hover td,#yetBody tr[data-id]:hover td{background:#ffffff08}
   .card.muted .hint{margin-top:8px}
   .card.muted button.go{margin-top:4px}
 
@@ -59,6 +59,11 @@
   .pipebar button{flex:none;white-space:nowrap}
   /* Open / Dead — the CRM tab's only two views. */
   .stands{font-size:13px;line-height:1.35;min-width:220px}
+  /* Clickable column header — styled as a header, not a button. */
+  .thsort{background:none;border:0;padding:0;font:inherit;color:inherit;letter-spacing:inherit;
+          cursor:pointer;white-space:nowrap}
+  .thsort span{margin-left:4px;color:var(--text3)}
+  .thsort:hover,.thsort.on,.thsort.on span{color:var(--accent)}
   .stands .err{font-weight:600}
   .glance{display:flex;gap:8px;margin-bottom:14px}
   .glance button{font-size:14px;font-weight:700;padding:9px 18px;border-radius:10px}
@@ -447,6 +452,8 @@
         <div class="menu hide" id="menu" role="menu">
           <button data-tab="school" role="menuitem">School
             <em>warm up and learn before you dial</em></button>
+          <button data-tab="yet" role="menuitem">Yet to Contact
+            <em>bars on the list nobody has called or emailed yet</em></button>
           <button data-tab="apple" role="menuitem">Apple Analytics
             <em>App Store impressions, downloads, sessions, crashes</em></button>
           <button data-tab="users" role="menuitem">Customers
@@ -701,9 +708,20 @@
     <section data-panel="users" class="hide">
       <div class="pipebar">
         <input id="usersSearch" placeholder="Search a customer by business, manager, name or email…">
+        <button id="usersRefresh">Refresh</button>
       </div>
       <div class="zt" id="usersTabs"></div>
       <div id="usersBody"></div>
+    </section>
+
+    <!-- Every lead nobody has called or emailed yet. The CRM tab only shows
+         bars you've actually logged; these are the rest, same row buttons. -->
+    <section data-panel="yet" class="hide">
+      <div class="pipebar">
+        <input id="yetSearch" placeholder="Search a bar, town, email or phone number…">
+      </div>
+      <div class="muted" id="yetCount" style="margin:0 0 12px;font-size:13px"></div>
+      <div id="yetBody"></div>
     </section>
 
     <!-- App Store Connect's App Analytics for the 86'd app, pulled with the
@@ -825,7 +843,7 @@ function switchTab(b){
     .forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
-    apple:loadApple,users:loadUsers,
+    apple:loadApple,users:loadUsers,yet:loadPipeline,
     school:loadSchoolPanel}[TAB])()
     .catch(e=>toast(e.message));
 }
@@ -1427,8 +1445,19 @@ async function drawerAction(dr,e){
    only then does it move to Dead. The five stage chips it replaced (In play,
    Not called yet, Won, Dead, Everything) asked the operator to remember what
    each one held; "is this one still worth a call or not" is the only
-   question the tab actually answers. Typing a search looks in both. */
-let PIPE={view:'open',q:'',offset:0};
+   question the tab actually answers. Typing a search looks in both.
+
+   Only bars you've WORKED are here — a call or email logged. The ones nobody
+   has contacted yet live in the burger's Yet to Contact tab, which renders
+   through this same function and the same row buttons (TAB decides which). */
+let PIPE={view:'open',q:'',offset:0,first:''};
+// Click STAGE to float one stage to the top; each click moves to the next,
+// then back to the normal order (most recently worked first).
+const STAGE_CYCLE=['','warm','contacted','won'];
+const STAGE_NAME={warm:'Warm',contacted:'Contacted',won:'Won'};
+let YET={q:'',offset:0};
+const leadList=()=>TAB==='yet'
+  ? {S:YET, body:$('yetBody')} : {S:PIPE, body:$('pipeBody')};
 let pipeTimer=null;
 
 // The edit form still writes one real status at a time.
@@ -1436,42 +1465,53 @@ const STATUSES=[['','Everything'],['new','Not called'],['contacted','Contacted']
                 ['warm','Warm'],['won','Won'],['dead','Dead']];
 
 async function loadPipeline(){
-  const searching=!!PIPE.q;
+  const yet=TAB==='yet', {S, body}=leadList();
+  const searching=!!S.q;
   const qs=new URLSearchParams();
-  if(!searching) qs.set('status',PIPE.view);
-  if(PIPE.q) qs.set('q',PIPE.q);
-  qs.set('offset',PIPE.offset); qs.set('limit',100);
+  qs.set('status', yet?'untouched':searching?'worked':PIPE.view);
+  if(S.q) qs.set('q',S.q);
+  if(!yet&&PIPE.first) qs.set('first',PIPE.first);
+  qs.set('offset',S.offset); qs.set('limit',100);
   const d=await api('/leads?'+qs);
 
-  const open=d.counts.open??((d.counts.all??0)-(d.counts.dead??0));
+  if(yet){
+    $('yetCount').textContent=`${d.counts.untouched??d.matching} not contacted yet`;
+  }else{
+  const open=d.counts.open??0;
   $('pipeStats').innerHTML=[['open','Open',open],['dead','Dead',d.counts.dead??0]]
     .map(([key,label,n])=>`<button data-view="${key}"
        class="${!searching&&PIPE.view===key?'on':''}">${label} <b>${n}</b></button>`).join('');
+  }
 
   if(!d.leads.length){
-    $('pipeBody').innerHTML=`<div class="card muted">${
-      searching ? 'Nothing matches “'+esc(PIPE.q)+'”.'
+    body.innerHTML=`<div class="card muted">${
+      searching ? 'Nothing matches “'+esc(S.q)+'”.'
+        : yet ? 'Everyone has been contacted.'
         : PIPE.view==='dead' ? 'Nobody has said no yet.'
-        : 'Nothing open.'}</div>`;
+        : 'Nothing logged yet — log a call from the Call list and it shows up here.'}</div>`;
     return;
   }
 
-  $('pipeBody').innerHTML=`
+  body.innerHTML=`
     <div class="zone"><div class="sheetwrap">
       <table class="sheet">
         <thead><tr>
-          <th></th><th>BAR</th><th>STAGE</th><th>PHONE</th><th>WHERE THINGS STAND</th><th></th>
+          <th></th><th>BAR</th>
+          <th>${yet?'STAGE':`<button class="thsort ${PIPE.first?'on':''}" data-sortstage
+               title="Click to put a stage at the top">STAGE ${PIPE.first
+               ?`<span>· ${esc(STAGE_NAME[PIPE.first])} first</span>`:'<span>⇅</span>'}</button>`}</th>
+          <th>PHONE</th><th>WHERE THINGS STAND</th><th></th>
         </tr></thead>
-        <tbody>${d.leads.map((l,i)=>pipeRow(l,PIPE.offset+i+1)).join('')}</tbody>
+        <tbody>${d.leads.map((l,i)=>pipeRow(l,S.offset+i+1)).join('')}</tbody>
       </table>
     </div></div>
     <div class="pipefoot">
       <span>${d.count===d.matching
         ? `${d.matching} lead${d.matching===1?'':'s'}`
-        : `Showing ${PIPE.offset+1}–${PIPE.offset+d.count} of ${d.matching}`}</span>
+        : `Showing ${S.offset+1}–${S.offset+d.count} of ${d.matching}`}</span>
       <span>
-        <button data-page="-1" ${PIPE.offset?'':'disabled'}>← Back</button>
-        <button data-page="1" ${PIPE.offset+d.count<d.matching?'':'disabled'}>More →</button>
+        <button data-page="-1" ${S.offset?'':'disabled'}>← Back</button>
+        <button data-page="1" ${S.offset+d.count<d.matching?'':'disabled'}>More →</button>
       </span>
     </div>`;
 }
@@ -1634,8 +1674,13 @@ $('pipeSearch').oninput=e=>{
 
 $('pipeBody').onclick=async e=>{
   const page=e.target.closest('button[data-page]');
-  if(page){ PIPE.offset=Math.max(0,PIPE.offset+(+page.dataset.page)*100);
+  if(page){ const {S}=leadList(); S.offset=Math.max(0,S.offset+(+page.dataset.page)*100);
             return loadPipeline().catch(x=>toast(x.message)); }
+  if(e.target.closest('[data-sortstage]')){
+    PIPE.first=STAGE_CYCLE[(STAGE_CYCLE.indexOf(PIPE.first)+1)%STAGE_CYCLE.length];
+    PIPE.offset=0;
+    return loadPipeline().catch(x=>toast(x.message));
+  }
 
   const cp=e.target.closest('[data-act="copy"]'); if(cp) return copyDigits(cp);
   const dig=e.target.closest('.digits'); if(dig) return copyDigits(dig);
@@ -1722,6 +1767,16 @@ $('pipeBody').onclick=async e=>{
     setTimeout(()=>{ wireSlots(d); loadSlots(d, id); }, 0);
   }
   tr.after(d);
+};
+
+// Yet to Contact uses the CRM tab's row buttons verbatim — Log, Email, Edit,
+// Delete, click-a-row for details — so the two tabs can't drift apart.
+$('yetBody').onclick=$('pipeBody').onclick;
+$('yetSearch').oninput=e=>{
+  clearTimeout(pipeTimer);
+  const v=e.target.value;
+  pipeTimer=setTimeout(()=>{ YET.q=v; YET.offset=0;
+    loadPipeline().catch(x=>toast(x.message)); }, 250);
 };
 
 async function pipeDrawer(dr,e){
@@ -1984,6 +2039,14 @@ function userRow(u,n){
 $('usersTabs').onclick=e=>{
   const b=e.target.closest('button[data-status]'); if(!b) return;
   USERS.status=b.dataset.status; USERS.offset=0; loadUsers().catch(x=>toast(x.message));
+};
+// New signups land in the app, not here, so the list only changes when it's
+// re-read. Keeps the current search and filter.
+$('usersRefresh').onclick=async()=>{
+  const b=$('usersRefresh'); b.disabled=true; b.textContent='Refreshing…';
+  try{ await loadUsers(); toast('Customers up to date'); }
+  catch(e){ toast(e.message); }
+  finally{ b.disabled=false; b.textContent='Refresh'; }
 };
 $('usersSearch').oninput=e=>{
   clearTimeout(usersTimer);

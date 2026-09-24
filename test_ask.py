@@ -97,3 +97,50 @@ def test_ask_with_no_answer_from_model_says_so(monkeypatch):
     monkeypatch.setattr(crm, "_ask_claude", lambda *a, **k: {})
     out = crm.ask_crm(crm.AskCRM(question="anything?"))
     assert out["answer"] and out["leads"] == []
+
+
+# ── /leads views: the CRM tab vs Yet to Contact ─────────────────────────────
+
+class _LeadsCursor:
+    """Records list_leads' SQL; answers counts with 0 and the page with []."""
+    def __init__(self): self.sql = []; self._last = ""
+    def execute(self, sql, params=None): self.sql.append(sql); self._last = sql
+    def fetchone(self): return {"n": 0}
+    def fetchall(self): return []
+
+
+def _list(monkeypatch, status):
+    cur = _LeadsCursor()
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
+    out = crm.list_leads(status=status, q=None, limit=100, offset=0)
+    return cur, out
+
+
+def test_open_view_is_worked_and_not_dead(monkeypatch):
+    cur, out = _list(monkeypatch, "open")
+    page = cur.sql[0]
+    assert "status <> 'dead'" in page and "NOT (status = 'new' AND last_touch_at IS NULL)" in page
+    assert {"open", "untouched", "worked", "all"} <= set(out["counts"])
+
+
+def test_untouched_view_is_never_contacted(monkeypatch):
+    cur, _ = _list(monkeypatch, "untouched")
+    assert "(status = 'new' AND last_touch_at IS NULL)" in cur.sql[0]
+    assert "NOT (status" not in cur.sql[0].split("WHERE", 1)[1].split("AND (LOWER")[0]
+
+
+def test_unknown_view_is_rejected(monkeypatch):
+    import pytest
+    with pytest.raises(crm.HTTPException):
+        _list(monkeypatch, "bogus")
+
+
+def test_first_floats_one_stage_to_the_top_and_ignores_junk(monkeypatch):
+    cur = _LeadsCursor()
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur))
+    crm.list_leads(status="open", q=None, first="warm", limit=100, offset=0)
+    assert "ORDER BY (status = %s) DESC" in cur.sql[1]
+    cur2 = _LeadsCursor()
+    monkeypatch.setattr(crm, "get_db", lambda: _Conn(cur2))
+    crm.list_leads(status="open", q=None, first="'; DROP TABLE x;--", limit=100, offset=0)
+    assert "(status = %s) DESC" not in cur2.sql[1]     # not a stage -> ignored, never interpolated
