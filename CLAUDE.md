@@ -25,7 +25,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   it shares a process and a database with the product API but is not part of the product.
   Nothing in the inventory/scan/order paths reads from it. See the CRM section below
 - static/crm.html — the CRM UI, served at `/crm`. **Three tabs only** — Call list, CRM,
-  Follow-ups — with School, Numbers, Customers and Lead engine behind a burger top right:
+  Follow-ups — with School, Apple Analytics and Customers behind a burger top right:
   those are looked at occasionally and thought about once, and in the tab row they competed
   with the three things a working day actually needs. The burger turns orange when the open
   page lives inside it. Single self-contained file, no build step;
@@ -39,6 +39,36 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   now gets a one-line status instead of a table, not a wall of leads that aren't callable yet.
   Undo still works — the 10-second Undo on the toast after every logged call — it just isn't
   a permanent banner anymore
+- **The burger holds School, Apple Analytics and Customers.** Numbers (funnel, connect rate by
+  hour, attribution re-match) and Lead engine (run now, bank health, restaurant recheck) were
+  removed from the PAGE at the operator's request; every endpoint behind them is still live
+  (`/funnel`, `/dialstats`, `/attribution/rematch`, `/leadgen/health`, `/leadgen/run`,
+  `/leadgen/recheck-restaurants`), and the daily 6pm run and the Call list's empty-list
+  auto-fill still keep leads coming without anyone opening a panel
+- apple.py — **Apple Analytics**: App Store Connect's App Analytics (impressions, product
+  page views, conversion, downloads, proceeds, sessions, installs, deletions, crashes) via
+  Apple's **Analytics Reports API**. There is no "give me the dashboard" call: the app gets
+  ONE ongoing report request (`ensure_report_request`, reused if it exists — Apple allows one
+  per app), Apple then produces a daily INSTANCE per report as gzipped TSVs behind pre-signed
+  URLs (downloaded WITHOUT the bearer token), and `sync()` imports each instance once
+  (`crm_apple_instances`) into `crm_apple_metrics (report, day, dim, metric, value)`. Only
+  "Standard" reports — the "Detailed" variants hold the same numbers split finer and would
+  double every total. Report columns vary, so `aggregate()` never assumes them: a column is
+  a metric if its name says it counts something, and the numbers split by the first present
+  of `DIM_PREFERENCE` (Event, Download Type, …). **The first reports take Apple about 1–2
+  days after connecting**; the tab says so instead of looking broken. `summarize()` ends its
+  windows at the LATEST day Apple has reported, not today — the newest day or two are never
+  in yet and would read as a collapse. A tile whose rows Apple didn't report shows "—", never
+  0. Auth is an ES256 JWT (python-jose, already a dependency) from the team key's Issuer ID,
+  Key ID and .p8. Routes in crm.py: `GET /v1/crm/apple` (status + tiles + tables; starts a
+  background import when data is older than `APPLE_STALE_HOURS`), `POST /apple/connect`
+  (checks the key against Apple BEFORE saving, so a typo fails with Apple's reason),
+  `/apple/sync`, `/apple/disconnect`. The .p8 is stored Fernet-encrypted with a key derived
+  from `SECRET_KEY` and never returned to the page; rotating `SECRET_KEY` makes it unreadable
+  and the tab asks to reconnect. Env vars `APPLE_ISSUER_ID` / `APPLE_KEY_ID` /
+  `APPLE_PRIVATE_KEY` (+ optional `APPLE_APP_ID`) override the saved key. The key needs the
+  **Admin** role, because creating the report request does. Covered by test_apple.py; grep
+  Render logs for `APPLE_SYNC`
 - static/icon.png, static/favicon.png — the app logo, copied from the mobile repo's assets and
   served via the allowlisted `/crm/{asset}` route (NOT a directory mount — that would be one
   traversal away from serving the repo). Re-copy from 86d-mobile/assets when rebranding
@@ -79,7 +109,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
 - coach.py — cold-call PRACTICE, opened via **School** in the burger menu (`data-panel`
-  section, same as Numbers/Customers/Lead engine — it used to live inline in the Call list
+  section, same as Apple Analytics/Customers — it used to live inline in the Call list
   tab behind a "Warm up first" button, which put practice above the actual dial list; moving
   it behind the menu is what let the Call list tab shrink to one button and one table).
   Prompts for the drills and for "The Holdout", a game where
@@ -114,7 +144,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
-  test_leadgen.py test_quick_add.py test_coach.py test_school.py -q`
+  test_leadgen.py test_quick_add.py test_coach.py test_school.py test_ask.py
+  test_apple.py -q`
 - test_leadgen.py — `_restaurant_pours()`, the restaurant liquor gate, pure (crawled text +
   OSM tags in, a yes/no and a reason out). Stubs `database` in `sys.modules` the same way
   test_callnow.py stubs it for crm
@@ -284,7 +315,8 @@ capture. Don't reintroduce them or describe them as current.)
   candidate's site is exactly the kind of network-heavy work the harvest cap exists to avoid
   doing needlessly — so it's a manual action: `POST /v1/crm/leadgen/recheck-restaurants`
   (poll the same path with GET), background-threaded like `/leadgen/fill` but under its own
-  lock, and a button in the Lead engine panel. It never touches a lead someone has already
+  lock (the Lead engine panel that had a button for it was removed from the page — call the
+  endpoint directly). It never touches a lead someone has already
   called or logged — only banked candidates and promoted-but-`last_touch_at IS NULL` leads,
   which it deletes the same way the operator's own Delete button does (retiring the
   candidate too, so the generator can't re-promote the same venue tomorrow)
@@ -308,10 +340,17 @@ capture. Don't reintroduce them or describe them as current.)
 - **Scoring favours venues LIKELY TO STILL COUNT BY HAND.** `POS_STACK_HINTS` (Resy,
   OpenTable, Tock, SevenRooms, Toast) is the strongest negative: a venue taking bookings
   through a platform is running a stack that probably came with something claiming to do
-  inventory. `UPSCALE_HINTS` (tasting menu, sommelier) is a gentler one.
+  inventory. `UPSCALE_HINTS` (tasting menu, sommelier) is a gentler one, same as
+  `ASIAN_CUISINE_HINTS` (read straight off the OSM `cuisine` tag, no crawl needed) — per
+  Stephan's own sales experience, an Asian restaurant runs a materially higher rate of
+  already having some system in place. `_on_tourist_strip()` is the same idea again, from a
+  fourth signal: an address on a curated list of tourist strips (Las Vegas Blvd, Lower
+  Broadway, Bourbon St, ...) keyed by `(city, street)` so "Broadway" only counts against
+  Nashville, not the dozen other seeded metros with an ordinary street by that name.
   `NEIGHBOURHOOD_HINTS` (pool table, happy hour, dive, tavern) is the positive. None of them
-  EXCLUDE anything — a fine-dining room can still be on a clipboard and stays on the list;
-  they only decide order, which is what matters when fifty names are in front of you
+  EXCLUDE anything — a fine-dining room, a sushi bar, or a Broadway honky-tonk can still be
+  on a clipboard and stays on the list; they only decide order, which is what matters when
+  fifty names are in front of you
 - A personal mailbox (`dave@divebar.com`) scores +4 and a named manager +5: both mean the
   call has somewhere to land, and both are rare enough to be worth putting first
 - **An email with no recorded `email_source` is never promoted, whatever it looks like.**
@@ -383,7 +422,7 @@ capture. Don't reintroduce them or describe them as current.)
   domain, then unique normalized business_name, recording WHICH method matched. Conservative
   on purpose: a wrong attribution points the next 5,000 touches at the wrong city
 - `GET /v1/crm/users?status=&q=&limit=&offset=` — the **Customers** page (behind the burger,
-  beside Numbers): everyone who actually downloaded the app and made an account, which is the
+  beside Apple Analytics): everyone who actually downloaded the app and made an account, which is the
   other side of the pipeline tab (everyone who HASN'T). Reads straight from `users`, not
   `crm_leads` — most rows never touched the pipeline at all, since an organic download signs
   up with no call or email behind it. No touch/log/email actions — the calling workflow lives
@@ -464,13 +503,35 @@ capture. Don't reintroduce them or describe them as current.)
   stops the same bar being rung twice — and Follow-ups only shows what's due, so before this
   tab existed a bar you spoke to on Tuesday and forgot to book a callback for was invisible.
   That is how warm leads quietly die
+- **Ask AI** — the box ABOVE the search bar. `POST /v1/crm/ask {question}` hands Claude
+  (`_ask_claude`, Haiku) a text snapshot of the book — every lead (status, last outcome,
+  calls, last touched, follow-up, contact, email, latest note) and the full touch log with
+  undone dials excluded — and returns `{answer, leads}`. Every timestamp in the snapshot is
+  the OPERATOR's local time (`CRM_OPERATOR_TZ`), with TODAY stated, so "who did we email last
+  Thursday" resolves against their calendar. Leads are aliased L1, L2… to save tokens; the
+  server maps them back and drops any alias the model invented. **The model never writes
+  SQL**: the same database holds customer accounts and password hashes, and a snapshot of
+  CRM rows is all a sales question needs. Read-only — nothing on this path writes. Covered
+  by test_ask.py
 - `q` searches name, town, contact, email and phone. The phone match strips punctuation on
   both sides, so "6157429095" finds "+1-615-742-9095"
-- Stage counts on the tabs are for the WHOLE pipeline, never for the current filter — a tab
-  that renumbers itself when you click it is unreadable
+- **Two buttons only: Open and Dead** (`status=open` on `/leads` means `status <> 'dead'`).
+  Every lead is Open until they said no — not interested, already have a system or an app,
+  don't call again — and the debrief/quick-add prompts send exactly those to `dead`. The five
+  stage chips this replaced (In play / Not called yet / Won / Dead / Everything) made the
+  operator remember what each held. Typing a search looks across both
+- Counts on the two buttons are for the WHOLE pipeline, never for the current filter — a
+  button that renumbers itself when you click it is unreadable
 - Eight columns, not ten: the contact's name sits under the bar's, and last-touch/next-due are
   one column. At ten the action buttons fell off the right-hand edge, and the buttons are the
   point of the screen
+- **WHERE THINGS STAND is two plain lines: what happened last, then what's next** (`standing()`
+  in crm.html). Last: "Nobody picked up · yesterday", "Laura asked for a callback · today",
+  "Already has a system" (a not_interested whose notes say so). Next: "Try again (attempt 2
+  of 6) today", "Call Laura back Sunday", "Call back for the manager tomorrow", in red when
+  overdue, and "No follow-up set — pick a date" in red when someone was reached and nothing
+  is scheduled — the warm lead that quietly dies. Hover shows the latest note. It replaced a
+  single line like "call back 2026-09-25 — Answered · 1 try"
 - **WHERE THINGS STAND shows `last_outcome`, not just a bare date.** A STAGE badge of
   CONTACTED covers a voicemail, a gatekeeper, and an actual conversation alike (`log_touch`
   in crm.py lands all three on "contacted") — the badge alone can't answer "did I actually
@@ -650,6 +711,14 @@ capture. Don't reintroduce them or describe them as current.)
   `status` explicitly, and `_apply_call_notes` uses it when the model supplies a valid one,
   falling back to the old status-based guess only when it doesn't (an older extraction, or a
   model that skips the field)
+- **`no_answer` is its own outcome, and nobody-picked-up is never "answered".** There was no
+  outcome for a call that rang out with no way to leave a message, so it had nowhere to land:
+  Pig & the Sprout, noted "no one picked up the phone, and you can't leave a message", was
+  logged Answered — which also stopped its retry ladder. `_no_answer_outcome()` reads the
+  operator's RAW notes and overrides the model when it says "answered" or nothing (never a
+  callback/not-interested, since those mean a person spoke). The fallback no longer guesses
+  "answered" from status=contacted. `_reconcile_no_answer()` runs every boot and re-files
+  rows logged before this, reading only the latest note line
 - **`POST /v1/crm/leads/quick-add` is the same idea for a call to a bar that was never in
   the pipeline at all** — cold-found on the operator's own initiative, a referral, a walk-in.
   `/debrief` only ever updates a lead that already exists; this describes the call in plain
@@ -672,6 +741,12 @@ capture. Don't reintroduce them or describe them as current.)
   `leadgen.find_email_on_site()` reads it the same way `enrich_candidate` does — homepage,
   the site's own contact links, then the guessed paths, capped at 4 pages so the click
   stays a few seconds. Where it was found is echoed in `applied.email_found_on` and noted
+- **The operator's own words are saved verbatim on every logged call** (`— Your notes: …`
+  after the summary, flattened to one line so each call stays one note entry). The summary
+  is a model's rewrite and drops whatever doesn't fit a field: The Barrel House lost "Laura
+  just paid $800 at the vet for her cat" and "she thinks I should patent it" — the details a
+  callback opens with. Skipped only when the raw text IS the summary. The prompts also now
+  ask the summary to keep personal details, but the verbatim copy is the guarantee
 - **Everything the model finds is kept, labelled, in the notes** — decision makers, who
   was spoken to, next step, address, other phones, website, where the email came from.
   crm_leads has no columns for most of these, and "CONTACTED" alone tells the operator
@@ -713,6 +788,9 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   LEADGEN_ENRICH_WORKERS (8),
   LEADGEN_RUN_HOUR (18 = 6pm, local) — optional lead generator tuning. No API key needed: the
   generator uses OpenStreetMap, which has neither keys nor billing
+- APPLE_ISSUER_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY (+ optional APPLE_APP_ID) — optional; the
+  Apple Analytics tab's App Store Connect team key. Unset is fine: the tab's Connect form
+  saves the key instead (encrypted). `\n` in APPLE_PRIVATE_KEY is accepted
 - SENTRY_DSN — optional, error visibility only
 - CONFIDENCE_THRESHOLD, LEVEL_DEADBAND — optional tuning, see AI Vision Rules above
 

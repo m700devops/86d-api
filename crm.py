@@ -266,6 +266,52 @@ def init_crm_tables():
         print(f"[crm] CRM_TABLES_READY tables={found} timezone={os.getenv('CRM_TIMEZONE', 'UTC')} "
               f"api_key_set={bool(os.getenv('CRM_API_KEY'))}", flush=True)
 
+    try:
+        _reconcile_no_answer()
+    except Exception as e:  # a repair pass must never stop the CRM booting
+        print(f"[crm] NO_ANSWER_RECONCILE_FAILED {e!r}", flush=True)
+    try:
+        init_apple_tables()
+    except Exception as e:  # Apple Analytics is optional; never block the CRM
+        print(f"[crm] APPLE_TABLES_FAILED {e!r}", flush=True)
+
+
+def _reconcile_no_answer() -> int:
+    """Re-file calls logged "answered" whose own note says nobody picked up.
+
+    Before "no_answer" existed, a rang-out call had nowhere to land and came
+    out as "answered" — which also stopped the retry ladder, since _cadence
+    treats "answered" as reached. Reads only the LATEST note line (the call
+    that set last_outcome), so an older no-answer followed by a real
+    conversation stays "answered". Idempotent: a fixed row no longer matches.
+    """
+    fixed = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, notes, followup_date FROM crm_leads "
+                       "WHERE last_outcome = 'answered'")
+        for row in cursor.fetchall():
+            lines = [l for l in (row["notes"] or "").splitlines() if l.strip()]
+            outcome = _no_answer_outcome(lines[-1]) if lines else None
+            if not outcome:
+                continue
+            cursor.execute("""
+                UPDATE crm_leads SET last_outcome = %s,
+                       followup_date = COALESCE(followup_date, %s), updated_at = %s
+                 WHERE id = %s
+            """, (outcome, _today(), now_iso(), row["id"]))
+            cursor.execute("""
+                UPDATE crm_touches SET outcome = %s, connected = FALSE
+                 WHERE id = (SELECT id FROM crm_touches
+                              WHERE lead_id = %s AND outcome = 'answered'
+                              ORDER BY at DESC LIMIT 1)
+            """, (outcome, row["id"]))
+            fixed += 1
+        conn.commit()
+    if fixed:
+        print(f"[crm] NO_ANSWER_RECONCILED rows={fixed}", flush=True)
+    return fixed
+
 
 # ============== MODELS ==============
 
@@ -362,7 +408,35 @@ CONNECTED_OUTCOMES = {"answered", "gatekeeper", "callback", "not_interested"}
 # values, TouchLogged's Literal, and what DEBRIEF_SYSTEM/QUICK_ADD_SYSTEM are
 # now asked for directly (see _apply_call_notes). One set so all three ways
 # of logging a call agree on the vocabulary.
-TOUCH_OUTCOMES = {"answered", "voicemail", "gatekeeper", "not_interested", "callback"}
+TOUCH_OUTCOMES = {"answered", "voicemail", "no_answer", "gatekeeper", "not_interested",
+                  "callback"}
+
+# "Nobody picked up" in the operator's own words. There was no outcome for
+# this at all, so a call that rang out with no way to leave a message had
+# nowhere to land — the model either left the field blank (and the fallback
+# guessed "answered" from status=contacted) or called it "answered" outright.
+# Pig & the Sprout was logged "Answered" from notes reading "no one picked up
+# the phone, and you can't leave a message". Checked against the raw notes so
+# it holds even when the model gets it wrong.
+_LEFT_MESSAGE_RE = re.compile(
+    r"\bleft (?:a |them a |him a |her a )?(?:voice ?mail|vm|message)\b", re.I)
+_NO_ANSWER_RE = re.compile(
+    r"\b(?:no ?one|nobody|no body)\b[^.;]{0,40}?\b(?:pick(?:ed|s)? ?up|answer(?:ed|s)?)\b"
+    r"|\bno answer\b|\bdid(?:n'?t| not) (?:pick up|answer)\b|\bunanswered\b"
+    r"|\brang out\b|\bjust rang\b|\bstraight to (?:voice ?mail|vm)\b"
+    r"|\b(?:can'?t|cannot|couldn'?t|could not|unable to) leave (?:a )?(?:voice ?mail|message|vm)\b"
+    r"|\bmailbox (?:is |was )?full\b|\bno (?:voice ?mail|vm)\b",
+    re.I)
+
+
+def _no_answer_outcome(raw_text: str) -> Optional[str]:
+    """What the notes say when nobody was reached, or None if they don't."""
+    text = raw_text or ""
+    if _LEFT_MESSAGE_RE.search(text):
+        return "voicemail"
+    if _NO_ANSWER_RE.search(text):
+        return "no_answer"
+    return None
 
 # Columns a PATCH is allowed to write. `id`, `created_at` and `updated_at` are
 # not in here on purpose — an allowlist beats filtering a denylist when the
@@ -554,16 +628,20 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     lead you spoke to on Tuesday and didn't set a follow-up for is invisible,
     which is how warm leads quietly die.
     """
-    if status is not None and status not in VALID_STATUSES:
+    # "open" is the CRM tab's default: every lead that isn't dead. The tab has
+    # two buttons, Open and Dead — a lead only leaves Open when they said no.
+    if status is not None and status != "open" and status not in VALID_STATUSES:
         raise HTTPException(status_code=422, detail={
             "error": "invalid_status",
-            "message": f"status must be one of {', '.join(VALID_STATUSES)}",
+            "message": f"status must be 'open' or one of {', '.join(VALID_STATUSES)}",
         })
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
     where, params = ["1=1"], []
-    if status:
+    if status == "open":
+        where.append("status <> 'dead'")
+    elif status:
         where.append("status = %s"); params.append(status)
     if q and q.strip():
         # Name, town, contact, email or phone — whichever the operator happens
@@ -606,6 +684,7 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     return {"leads": leads, "count": len(leads), "matching": matching,
             "offset": offset, "limit": limit,
             "counts": {**{k: by_status.get(k, 0) for k in VALID_STATUSES},
+                       "open": everything - by_status.get("dead", 0),
                        "all": everything}}
 
 
@@ -1378,7 +1457,8 @@ def call_queue(limit: int = 50, _: bool = Depends(require_crm_key)):
 
 class TouchLogged(BaseModel):
     kind: Literal["call", "email", "fb"]
-    outcome: Optional[Literal["answered", "voicemail", "gatekeeper", "not_interested", "callback"]] = None
+    outcome: Optional[Literal["answered", "voicemail", "no_answer", "gatekeeper",
+                              "not_interested", "callback"]] = None
     followup_in_days: Optional[int] = Field(default=None, ge=0, le=365)
     note: Optional[str] = Field(default=None, max_length=2000)
     status: Optional[LeadStatus] = None
@@ -1427,6 +1507,7 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
             # A call that reached a human has, at minimum, contacted them.
             new_status = {"not_interested": "dead", "callback": "warm",
                           "answered": "contacted", "voicemail": "contacted",
+                          "no_answer": "contacted",
                           "gatekeeper": "contacted"}.get(data.outcome)
         if new_status and lead["status"] == "new":
             sets.append("status = %s"); params.append(new_status)
@@ -3017,7 +3098,7 @@ They sell 86'd, an iPhone app for bar inventory, to independent bars and restaur
 
 Return ONLY a JSON object with these keys (omit any you cannot determine — never guess):
   "status": one of "new","contacted","warm","won","dead"
-  "outcome": one of "answered","voicemail","gatekeeper","not_interested","callback" —
+  "outcome": one of "answered","voicemail","no_answer","gatekeeper","not_interested","callback" —
     what SPECIFICALLY happened on this call, not to be confused with status. A voicemail and
     an actual conversation can both land status "contacted", and outcome is the only field
     that still tells them apart — getting this vague is exactly the bug it exists to prevent.
@@ -3025,14 +3106,19 @@ Return ONLY a JSON object with these keys (omit any you cannot determine — nev
   "email": a corrected or newly learned email address
   "phone": a corrected or newly learned phone number
   "followup_in_days": integer number of days until the agreed follow-up
-  "summary": one clean sentence recording what happened
+  "summary": one or two sentences recording what happened. Keep personal details the
+    person shared (their pets, family, plans, what they said about the product) — the
+    salesperson opens the next call with those
 
 Rules:
 - "not interested", "hung up", "don't call again", "no thanks" -> status "dead", outcome "not_interested"
+- they already have a system / app / software for inventory, or are happy with how they do it now -> status "dead", outcome "not_interested"
 - an agreed callback, a demo booked, real interest -> status "warm", outcome "callback"
 - reached the decision maker, had a real conversation, no clear next step -> status "contacted", outcome "answered"
 - signed up, bought, installed -> status "won", outcome "answered"
-- left a voicemail, no answer, nobody picked up -> status "contacted", outcome "voicemail"
+- left a voicemail -> status "contacted", outcome "voicemail"
+- nobody picked up and NO message was left (rang out, no voicemail, mailbox full) -> status "contacted", outcome "no_answer"
+- "answered" means a real person picked up and spoke. If nobody picked up it is NEVER "answered"
 - spoke to staff/a gatekeeper, the decision maker wasn't in or available -> status "contacted", outcome "gatekeeper"
 - "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
 """
@@ -3182,12 +3268,23 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
     # answer" landed status=contacted (correctly) and last_outcome=answered
     # (wrong) — indistinguishable on screen from an actual conversation.
     outcome_guess = extracted.get("outcome")
+    # The operator's own words beat the model on one question: did anybody
+    # pick up. Only overrides "answered" or a blank — a callback or a "not
+    # interested" is something a person said, so somebody did answer.
+    heard = _no_answer_outcome(raw_text) if kind == "call" else None
+    if heard and (outcome_guess == "answered" or outcome_guess not in TOUCH_OUTCOMES):
+        outcome_guess = heard
     if outcome_guess not in TOUCH_OUTCOMES:
         # Older extractions, or a model that skipped the field: fall back to
-        # the coarse guess rather than losing the outcome entirely.
+        # the coarse guess rather than losing the outcome entirely. Never to
+        # "answered" from status=contacted alone — contacted also covers a
+        # call nobody picked up, and guessing "answered" there is what put a
+        # rang-out call on screen as a conversation.
         if status == "dead":
             outcome_guess = "not_interested"
-        elif status in ("warm", "won", "contacted"):
+        elif status == "warm":
+            outcome_guess = "callback"
+        elif status == "won":
             outcome_guess = "answered"
         else:
             outcome_guess = None
@@ -3227,6 +3324,14 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
     if kind == "call":
         stamp += f" · attempt {attempt}"
     note = f"{stamp}: {summary}"
+    # The operator's OWN words, verbatim, every time. The summary is a
+    # model's one-or-two-sentence rewrite and it drops whatever doesn't fit a
+    # field — The Barrel House lost "Laura just paid $800 at the vet for her
+    # cat" and "she thinks I should patent it", which are exactly what a
+    # callback opens with. Flattened to one line so each call stays one entry.
+    said = re.sub(r"\s+", " ", raw_text or "").strip()[:4000]
+    if said and said.lower() != summary.lower():
+        note += f" — Your notes: {said}"
     sets.append("notes = COALESCE(notes || E'\\n', '') || %s"); params.append(note)
     applied["note"] = note
 
@@ -3275,6 +3380,384 @@ def debrief_lead(lead_id: str, data: Debrief, _: bool = Depends(require_crm_key)
             "counters": _counters_row(counters) if counters else None}
 
 
+# ============== ASK AI ==============
+#
+# A question box above the CRM tab's search: "how many people did I call",
+# "who did we leave a voicemail on the 22nd", "who did we email last
+# Thursday". Claude is handed a snapshot of the book — every lead and the
+# full call/email log — and answers from that alone. It is deliberately NOT
+# allowed to write SQL: the same database holds customer accounts and
+# password hashes, and a snapshot of CRM rows is all a sales question needs.
+# Read-only by construction: nothing here writes anything.
+
+ASK_SYSTEM = """You answer questions about a salesperson's CRM. They sell 86'd, an iPhone
+app for bar inventory, to independent bars and restaurants, mostly by cold-calling.
+
+You are given a snapshot: TODAY, a LEADS table and a TOUCHES log (every call and email
+logged, newest first). Answer ONLY from the snapshot. Never invent a lead, a number,
+a date or a name. If the snapshot can't answer it, say so plainly.
+
+Meanings:
+- A touch's outcome: answered = a person picked up and spoke; voicemail = left a
+  message; no_answer = nobody picked up, no message left; gatekeeper = spoke to staff,
+  decision maker not in; not_interested = said no (lead is dead); callback = asked to
+  be called back / showed interest; logged = recorded with no specific outcome.
+- Lead status: new = never worked; contacted; warm = interested; won = signed up;
+  dead = said no. "Open" means anything not dead.
+- All dates and times are the salesperson's own local time (given in TODAY). Resolve
+  "today", "yesterday", "last Thursday", "this week" against TODAY. "Last Thursday" is
+  the most recent Thursday before today.
+- Count carefully. When asked "how many", give the number first.
+
+Return ONLY a JSON object:
+  "answer": the answer in plain, short sentences (no markdown tables). Lead with the
+            direct answer. At most ~6 short lines.
+  "leads": the ids (like "L12") of the leads the answer is about, most relevant first,
+           or [] if it isn't about particular leads. At most 50."""
+
+
+def _ask_when(iso: Optional[str], tz) -> str:
+    """A stored UTC ISO timestamp as the operator's local 'YYYY-MM-DD Thu 2:05pm'."""
+    if not iso:
+        return ""
+    try:
+        when = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return str(iso)[:16]
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    local = when.astimezone(tz)
+    return local.strftime("%Y-%m-%d %a ") + local.strftime("%I:%M%p").lstrip("0").lower()
+
+
+def _ask_snapshot(leads: list, touches: list, now: datetime, tz) -> tuple[str, dict]:
+    """Everything Ask AI may see, as compact text, plus alias -> lead id.
+
+    Leads get short aliases (L1, L2 ...) instead of their ids: the ids are
+    long and would be repeated on every touch line, which is most of the
+    tokens for no information.
+    """
+    alias: dict = {}
+    back: dict = {}
+    for i, lead in enumerate(leads, 1):
+        alias[lead["id"]] = f"L{i}"
+        back[f"L{i}"] = lead["id"]
+
+    def clip(v, n):
+        v = (v or "").replace("\n", " ").replace("|", "/").strip()
+        return v[:n]
+
+    lines = [f"TODAY: {now.astimezone(tz).strftime('%Y-%m-%d %A %I:%M%p')} "
+             f"(salesperson's local time, {getattr(tz, 'key', 'UTC')})", "",
+             "LEADS (id | name | where | status | last outcome | calls | last touched | "
+             "follow-up | contact | email | latest note)"]
+    for lead in leads:
+        notes = [n for n in (lead.get("notes") or "").splitlines() if n.strip()]
+        lines.append(" | ".join([
+            alias[lead["id"]], clip(lead.get("name"), 60), clip(lead.get("loc"), 40),
+            lead.get("status") or "", lead.get("last_outcome") or "",
+            str(lead.get("attempts") or 0), _ask_when(lead.get("last_touch_at"), tz),
+            lead.get("followup_date") or "", clip(lead.get("contact"), 40),
+            clip(lead.get("email"), 60), clip(notes[-1] if notes else "", 700),
+        ]))
+    lines += ["", "TOUCHES (when | lead | kind | outcome | attempt #)"]
+    for t in touches:
+        lines.append(" | ".join([
+            _ask_when(t.get("at"), tz), alias.get(t.get("lead_id"), "?"),
+            t.get("kind") or "", t.get("outcome") or "", str(t.get("attempt") or ""),
+        ]))
+    return "\n".join(lines), back
+
+
+class AskCRM(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+
+
+@crm_router.post("/ask", response_model=dict)
+def ask_crm(data: AskCRM, _: bool = Depends(require_crm_key)):
+    """Plain-English questions about the CRM, answered from a snapshot of it."""
+    tz = _operator_tz()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, name, loc, status, last_outcome, attempts, last_touch_at,
+                   followup_date, contact, email, phone, notes
+              FROM crm_leads
+             ORDER BY COALESCE(last_touch_at, '') DESC, created_at DESC
+             LIMIT 2000
+        """)
+        leads = cursor.fetchall()
+        # Undone touches never happened as far as the operator is concerned.
+        cursor.execute("""
+            SELECT lead_id, kind, outcome, attempt, at FROM crm_touches
+             WHERE outcome IS DISTINCT FROM 'undone'
+             ORDER BY at DESC LIMIT 3000
+        """)
+        touches = cursor.fetchall()
+
+    snapshot, back = _ask_snapshot(leads, touches, datetime.now(timezone.utc), tz)
+    out = _ask_claude(ASK_SYSTEM, f"{snapshot}\n\nQUESTION: {data.question.strip()}",
+                      max_tokens=900, timeout=60.0)
+
+    answer = str(out.get("answer") or "").strip()[:3000] or "I couldn't work that out."
+    by_id = {l["id"]: l for l in leads}
+    picked = []
+    for a in (out.get("leads") or [])[:50]:
+        lead = by_id.get(back.get(str(a).strip()))
+        if lead and lead not in picked:
+            picked.append(lead)
+    return {"answer": answer, "leads": [{
+        "id": l["id"], "name": l["name"], "loc": l["loc"], "status": l["status"],
+        "last_outcome": l["last_outcome"], "last_touch_at": l["last_touch_at"],
+        "phone_dial": format_us_phone_dashed(phone_digits(l.get("phone"))),
+    } for l in picked]}
+
+
+# ============== APPLE ANALYTICS ==============
+#
+# The burger menu's Apple Analytics tab: App Store Connect's App Analytics
+# numbers for the 86'd app, pulled through Apple's Analytics Reports API (see
+# apple.py for how that API works and why the first data takes a day or two).
+#
+# Credentials: the team API key's Issuer ID, Key ID and .p8 private key. Env
+# vars win when set (APPLE_ISSUER_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY /
+# APPLE_APP_ID); otherwise the page's Connect form saves them here. The .p8 is
+# stored ENCRYPTED with a key derived from SECRET_KEY and is never sent back
+# to the page — the page only ever learns whether a key is set. Rotating
+# SECRET_KEY makes a saved key unreadable; the tab then asks to reconnect.
+
+import apple as _apple
+
+APPLE_STALE_HOURS = 6        # opening the tab re-syncs when data is older than this
+_apple_lock = threading.Lock()
+_apple_state: dict = {"running": False}
+
+
+def init_apple_tables():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_apple_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                issuer_id TEXT, key_id TEXT, private_key_enc TEXT,
+                app_ref TEXT, app_id TEXT, app_name TEXT, bundle_id TEXT,
+                request_id TEXT,
+                last_sync_at TEXT, last_sync_ok BOOLEAN, last_error TEXT,
+                updated_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_apple_instances (
+                id TEXT PRIMARY KEY, report TEXT, processing_date TEXT, imported_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_apple_metrics (
+                report TEXT NOT NULL, day TEXT NOT NULL, dim TEXT NOT NULL,
+                metric TEXT NOT NULL, value DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (report, day, dim, metric)
+            )
+        """)
+        conn.commit()
+
+
+def _apple_fernet():
+    import base64
+    import hashlib
+
+    from cryptography.fernet import Fernet
+    from auth import SECRET_KEY
+    return Fernet(base64.urlsafe_b64encode(
+        hashlib.sha256(("86d-apple-analytics:" + SECRET_KEY).encode()).digest()))
+
+
+def _apple_config() -> dict:
+    """Saved config merged with env overrides. `private_key` is decrypted."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_apple_config WHERE id = 1")
+        row = dict(cursor.fetchone() or {})
+    key = None
+    if row.get("private_key_enc"):
+        try:
+            key = _apple_fernet().decrypt(row["private_key_enc"].encode()).decode()
+        except Exception:
+            key = None
+            row["key_unreadable"] = True
+    env = {"issuer_id": os.getenv("APPLE_ISSUER_ID"), "key_id": os.getenv("APPLE_KEY_ID"),
+           "private_key": os.getenv("APPLE_PRIVATE_KEY"), "app_ref": os.getenv("APPLE_APP_ID")}
+    from_env = bool(env["issuer_id"] and env["key_id"] and env["private_key"])
+    cfg = {**row, "private_key": key}
+    if from_env:
+        cfg.update({k: v for k, v in env.items() if v})
+    cfg["source"] = "env" if from_env else ("saved" if key else None)
+    cfg["connected"] = bool(cfg.get("issuer_id") and cfg.get("key_id") and cfg.get("private_key"))
+    return cfg
+
+
+def _apple_save(**fields):
+    fields["updated_at"] = now_iso()
+    cols = list(fields)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO crm_apple_config (id, {', '.join(cols)})
+            VALUES (1, {', '.join(['%s'] * len(cols))})
+            ON CONFLICT (id) DO UPDATE SET {', '.join(f'{c} = EXCLUDED.{c}' for c in cols)}
+        """, [fields[c] for c in cols])
+        conn.commit()
+
+
+def _apple_client(cfg: dict) -> "_apple.ASC":
+    return _apple.ASC(cfg["key_id"], cfg["issuer_id"], cfg["private_key"])
+
+
+def _apple_sync_job():
+    """One background import. Errors are stored for the page, never raised."""
+    try:
+        cfg = _apple_config()
+        if not cfg["connected"]:
+            return
+        asc = _apple_client(cfg)
+        app_id = cfg.get("app_id")
+        if not app_id:
+            app = _apple.resolve_app(asc, cfg.get("app_ref"))
+            app_id = app["id"]
+            _apple_save(app_id=app_id, app_name=app["name"], bundle_id=app["bundle_id"])
+        request_id = _apple.ensure_report_request(asc, app_id, cfg.get("request_id"))
+        if request_id != cfg.get("request_id"):
+            _apple_save(request_id=request_id)
+
+        def already(inst_id):
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1 FROM crm_apple_instances WHERE id = %s", (inst_id,))
+                return cursor.fetchone() is not None
+
+        def save(inst_id, report, pdate, totals):
+            with get_db() as conn:
+                cursor = conn.cursor()
+                for (day, dim, metric), value in totals.items():
+                    cursor.execute("""
+                        INSERT INTO crm_apple_metrics (report, day, dim, metric, value)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (report, day, dim, metric) DO UPDATE SET value = EXCLUDED.value
+                    """, (report[:200], day, dim[:200], metric[:120], value))
+                cursor.execute("""
+                    INSERT INTO crm_apple_instances (id, report, processing_date, imported_at)
+                    VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING
+                """, (inst_id, report[:200], pdate, now_iso()))
+                conn.commit()
+
+        result = _apple.sync(asc, request_id, already, save)
+        _apple_save(last_sync_at=now_iso(), last_sync_ok=True, last_error=None)
+        print(f"[crm] APPLE_SYNC ok reports={result['reports']} imported={result['imported']} "
+              f"partial={result['partial']}", flush=True)
+    except _apple.AppleError as e:
+        _apple_save(last_sync_at=now_iso(), last_sync_ok=False, last_error=str(e)[:500])
+        print(f"[crm] APPLE_SYNC failed: {e}", flush=True)
+    except Exception as e:
+        _apple_save(last_sync_at=now_iso(), last_sync_ok=False,
+                    last_error=f"Unexpected error: {e!r}"[:500])
+        print(f"[crm] APPLE_SYNC crashed: {e!r}", flush=True)
+    finally:
+        _apple_state["running"] = False
+
+
+def _apple_start_sync() -> bool:
+    with _apple_lock:
+        if _apple_state["running"]:
+            return False
+        _apple_state["running"] = True
+    threading.Thread(target=_apple_sync_job, daemon=True, name="apple-sync").start()
+    return True
+
+
+def _apple_status(cfg: dict) -> dict:
+    return {
+        "connected": cfg["connected"], "source": cfg.get("source"),
+        "key_unreadable": bool(cfg.get("key_unreadable")),
+        "issuer_id": cfg.get("issuer_id"), "key_id": cfg.get("key_id"),
+        "app": {"id": cfg.get("app_id"), "name": cfg.get("app_name"),
+                "bundle_id": cfg.get("bundle_id")} if cfg.get("app_id") else None,
+        "reports_requested": bool(cfg.get("request_id")),
+        "last_sync_at": cfg.get("last_sync_at"), "last_sync_ok": cfg.get("last_sync_ok"),
+        "last_error": cfg.get("last_error"), "syncing": _apple_state["running"],
+    }
+
+
+@crm_router.get("/apple", response_model=dict)
+def apple_analytics(window: int = 30, _: bool = Depends(require_crm_key)):
+    """Status + everything imported so far. Kicks off a sync when stale."""
+    window = 7 if window <= 7 else 90 if window >= 90 else 30
+    cfg = _apple_config()
+    if cfg["connected"]:
+        last = cfg.get("last_sync_at")
+        stale = True
+        if last:
+            try:
+                age = datetime.now(timezone.utc) - datetime.fromisoformat(last.replace("Z", "+00:00"))
+                stale = age > timedelta(hours=APPLE_STALE_HOURS)
+            except ValueError:
+                pass
+        if stale:
+            _apple_start_sync()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT report, day, dim, metric, value FROM crm_apple_metrics "
+                       "WHERE day >= %s",
+                       ((datetime.now(timezone.utc) - timedelta(days=2 * window + 10)).strftime("%Y-%m-%d"),))
+        rows = [dict(r) for r in cursor.fetchall()]
+    return {**_apple_status(_apple_config()), **_apple.summarize(rows, window)}
+
+
+class AppleConnect(BaseModel):
+    issuer_id: str = Field(min_length=8, max_length=100)
+    key_id: str = Field(min_length=4, max_length=40)
+    private_key: str = Field(min_length=40, max_length=10000)
+    app: Optional[str] = Field(default=None, max_length=200)
+
+
+@crm_router.post("/apple/connect", response_model=dict)
+def apple_connect(data: AppleConnect, _: bool = Depends(require_crm_key)):
+    """Check the key against Apple RIGHT NOW, then save it and start importing.
+
+    Checking first means a typo'd Issuer ID fails here, with Apple's reason,
+    instead of being saved and failing silently in the background later.
+    """
+    key = _apple.normalize_key(data.private_key)
+    asc = _apple.ASC(data.key_id.strip(), data.issuer_id.strip(), key)
+    try:
+        app = _apple.resolve_app(asc, data.app)
+    except _apple.AppleError as e:
+        raise HTTPException(status_code=422, detail={"error": "apple_rejected", "message": str(e)})
+    _apple_save(issuer_id=data.issuer_id.strip(), key_id=data.key_id.strip(),
+                private_key_enc=_apple_fernet().encrypt(key.encode()).decode(),
+                app_ref=(data.app or "").strip() or None, app_id=app["id"],
+                app_name=app["name"], bundle_id=app["bundle_id"], request_id=None,
+                last_sync_at=None, last_sync_ok=None, last_error=None)
+    _apple_start_sync()
+    return {"ok": True, "app": app}
+
+
+@crm_router.post("/apple/sync", response_model=dict)
+def apple_sync(_: bool = Depends(require_crm_key)):
+    if not _apple_config()["connected"]:
+        raise HTTPException(status_code=409, detail={
+            "error": "not_connected", "message": "Connect your Apple API key first."})
+    return {"started": _apple_start_sync(), "syncing": True}
+
+
+@crm_router.post("/apple/disconnect", response_model=dict)
+def apple_disconnect(_: bool = Depends(require_crm_key)):
+    """Forget the saved key. Imported numbers stay — they're yours either way."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM crm_apple_config WHERE id = 1")
+        conn.commit()
+    return {"ok": True}
+
+
 # ============== AI QUICK ADD ==============
 #
 # A call that already happened to a bar that was never in the pipeline at
@@ -3308,16 +3791,21 @@ Return ONLY a JSON object with these keys (omit any you truly cannot find):
   "contact": the person they spoke to, with role if given (e.g. "Taylor (bartender)")
   "decision_makers": who makes the buying decision, with role if given (e.g. "Mallory and Mike (owners)")
   "status": one of "new","contacted","warm","won","dead"
-  "outcome": one of "answered","voicemail","gatekeeper","not_interested","callback"
+  "outcome": one of "answered","voicemail","no_answer","gatekeeper","not_interested","callback"
   "followup_in_days": integer number of days until the agreed follow-up
   "next_step": the concrete next action, one short sentence (e.g. "Email the owners")
-  "summary": one or two clean sentences recording what happened, keeping every useful detail
+  "summary": one or two clean sentences recording what happened, keeping every useful detail —
+    including personal details the person shared (pets, family, plans, what they said about
+    the product), which the salesperson opens the next call with
 
 Rules:
 - "not interested", "hung up", "don't call again" -> status "dead", outcome "not_interested"
+- they already have a system / app / software for inventory, or are happy with how they do it now -> status "dead", outcome "not_interested"
 - an agreed callback, a demo booked, real interest -> status "warm", outcome "callback"
 - reached the decision maker, real conversation, no clear next step -> status "contacted", outcome "answered"
-- left a voicemail, nobody picked up -> status "contacted", outcome "voicemail"
+- left a voicemail -> status "contacted", outcome "voicemail"
+- nobody picked up and NO message was left (rang out, no voicemail, mailbox full) -> status "contacted", outcome "no_answer"
+- "answered" means a real person picked up and spoke. If nobody picked up it is NEVER "answered"
 - spoke to staff/bartender/gatekeeper, the decision maker wasn't there -> status "contacted", outcome "gatekeeper"
 - "next week" is 7 days, "tomorrow" is 1, "Monday" is 3 unless told otherwise
 """

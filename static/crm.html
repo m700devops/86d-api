@@ -43,9 +43,28 @@
   .startbtn.on{background:var(--surface2);border-color:var(--line2);color:var(--text);
                font-size:13px;font-weight:700;padding:9px 15px}
 
+  /* Ask AI: questions about the book, answered from a snapshot of it. Sits
+     above the plain search because it's the more useful of the two. */
+  .askbar{display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+  .askbar input{flex:1;min-width:220px;border-color:#FF6B3555}
+  .askbar button{flex:none;white-space:nowrap}
+  .askout{background:var(--surface);border:1px solid #FF6B3544;border-radius:12px;
+          padding:14px 16px;margin-bottom:14px}
+  .askout .q{font-size:12px;color:var(--text3);margin-bottom:6px}
+  .askout .a{font-size:15px;line-height:1.5;white-space:pre-wrap}
+  .askout table{margin-top:12px}
+  .askout .x{float:right;background:none;border:none;color:var(--text3);font-size:16px;padding:0 4px}
   .pipebar{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
   .pipebar input{flex:1;min-width:220px}
   .pipebar button{flex:none;white-space:nowrap}
+  /* Open / Dead — the CRM tab's only two views. */
+  .stands{font-size:13px;line-height:1.35;min-width:220px}
+  .stands .err{font-weight:600}
+  .glance{display:flex;gap:8px;margin-bottom:14px}
+  .glance button{font-size:14px;font-weight:700;padding:9px 18px;border-radius:10px}
+  .glance button b{margin-left:6px;color:var(--text3);font-weight:700}
+  .glance button.on{border-color:var(--accent);background:#FF6B351A;color:var(--accent)}
+  .glance button.on b{color:var(--accent)}
   .st{display:inline-block;font-size:10px;font-weight:800;letter-spacing:0.5px;
       padding:2px 8px;border-radius:5px;border:1px solid var(--line2);color:var(--text2)}
   .st-new{color:var(--text2)}
@@ -82,6 +101,17 @@
   table.sheet tr:nth-child(even) td{background:#131313}
   table.sheet tr:hover td{background:#1C1C1C}
   table.sheet td:last-child,table.sheet th:last-child{border-right:0}
+  /* ACTIONS pinned to the right edge of the scroll area. Half-width windows
+     (or anything narrower than the full table) push the buttons off-screen
+     behind horizontal scroll — sticky keeps Log call/Email/Delete/Skip
+     reachable without having to find and drag a scrollbar to get to them.
+     Each state needs its own explicit background (not just position:sticky)
+     or the columns scrolling underneath show through the pinned cell. */
+  table.sheet td:last-child:not([colspan]){position:sticky;right:0;z-index:1;
+        background:var(--surface);box-shadow:-8px 0 8px -8px rgba(0,0,0,.5)}
+  table.sheet tr:nth-child(even) td:last-child:not([colspan]){background:#131313}
+  table.sheet tr:hover td:last-child:not([colspan]){background:#1C1C1C}
+  table.sheet th:last-child{position:sticky;right:0;z-index:2}
   .rownum{color:var(--text3);width:34px;text-align:right;font-variant-numeric:tabular-nums}
   .nm{font-weight:600;white-space:nowrap;max-width:230px;overflow:hidden;text-overflow:ellipsis}
   /* Digits only, monospace, one click to copy — it goes straight into CloudTalk. */
@@ -116,6 +146,24 @@
   .tries{display:inline-block;min-width:20px;text-align:center;font-weight:700;
          font-size:11px;color:var(--wait);border:1px solid #FFB02044;border-radius:5px;
          padding:1px 5px}
+  /* The address, expandable for more about the venue, plus a straight link out
+     to Google Maps — a name and a town aren't enough to find the place. */
+  .whereBtn{background:none;border:none;padding:0;color:inherit;font:inherit;
+            cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px}
+  .whereBtn:hover{color:var(--text)}
+  .maplink{margin-left:7px;font-size:11px;color:var(--text3);text-decoration:none;
+           border-bottom:1px dotted var(--text3)}
+  .maplink:hover{color:var(--accent);border-color:var(--accent)}
+  .wherebox .pts{display:flex;flex-direction:column;gap:5px;margin-bottom:9px}
+  .wherebox .pt{font-size:14px;color:var(--text);line-height:1.45;
+                padding-left:14px;position:relative}
+  .wherebox .pt::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;
+                        border-radius:50%;background:var(--accent)}
+  .wherebox .fx{display:flex;gap:7px;flex-wrap:wrap}
+  .wherebox .fx span{font-size:11px;color:var(--text2);background:var(--surface2);
+                     border:1px solid var(--line);border-radius:999px;padding:3px 9px}
+  .wherebox .fx span i{color:var(--text3);font-style:normal;font-size:10px}
+  .wherebox .none{font-size:12px;color:var(--text3)}
   .acts{display:flex;gap:6px;white-space:nowrap}
   button{font:inherit;background:var(--surface2);color:var(--text);border:1px solid var(--line2);
          border-radius:7px;padding:6px 11px;cursor:pointer}
@@ -197,6 +245,33 @@
   .tabs button{border-radius:999px}
   .tabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+  /* Apple Analytics. One tile per App Store Connect overview metric: label,
+     compact value, change vs the previous window (green/red by whether that
+     direction is GOOD — more crashes is red), and a per-day bar trend in the
+     muted ink with the latest day in the accent. */
+  .applehead{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  .applehead > div:first-child{flex:1;min-width:180px}
+  .applehead .small{font-size:12px}
+  .aseg{display:flex;gap:4px}
+  .aseg button{padding:6px 11px;font-size:12px;white-space:nowrap}
+  .aseg button.on{border-color:var(--accent);color:var(--accent);background:#FF6B351A}
+  .agrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-bottom:22px}
+  .atile{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 14px 10px}
+  .atile .al{font-size:12px;color:var(--text2)}
+  .atile .av{font-size:26px;font-weight:650;letter-spacing:-0.5px;margin-top:2px}
+  .atile .delta{font-size:12px;font-weight:600;margin-top:2px;color:var(--text2)}
+  .atile .delta span{font-weight:400;color:var(--text3);margin-left:4px}
+  .atile .delta.good{color:var(--go)} .atile .delta.bad{color:var(--stop)}
+  .spark{display:flex;align-items:flex-end;gap:2px;height:34px;margin-top:10px}
+  .spark i{flex:1;background:var(--line2);border-radius:2px 2px 0 0;min-width:2px}
+  .spark i:hover{background:var(--text3)}
+  .spark i.now{background:var(--accent)}
+  .applesub{font-size:13px;letter-spacing:1px;color:var(--text3);margin:0 0 10px;font-weight:700}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .applehow{margin:8px 0 14px;padding-left:20px;color:var(--text2);font-size:13px;line-height:1.6}
+  .applegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+  .applegrid label,.applefile{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--text2)}
+  .applefile{margin-top:10px}
   .stat{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px}
   .stat .n{font-size:21px;font-weight:700;letter-spacing:-0.5px}
   .stat .l{font-size:10px;letter-spacing:1.2px;color:var(--text3);font-weight:700;margin-top:2px}
@@ -372,12 +447,10 @@
         <div class="menu hide" id="menu" role="menu">
           <button data-tab="school" role="menuitem">School
             <em>warm up and learn before you dial</em></button>
-          <button data-tab="numbers" role="menuitem">Numbers
-            <em>funnel, connect rates, what's working</em></button>
+          <button data-tab="apple" role="menuitem">Apple Analytics
+            <em>App Store impressions, downloads, sessions, crashes</em></button>
           <button data-tab="users" role="menuitem">Customers
             <em>everyone who signed up in the app</em></button>
-          <button data-tab="engine" role="menuitem">Lead engine
-            <em>where tomorrow's leads come from</em></button>
         </div>
       </div>
     </div>
@@ -581,6 +654,11 @@
     </section>
 
     <section data-panel="pipeline" class="hide">
+      <div class="askbar">
+        <input id="askInput" placeholder="Ask AI — how many did I call today? who got a voicemail yesterday? who did we email last Thursday?">
+        <button class="go" id="askBtn">Ask AI</button>
+      </div>
+      <div id="askOut" class="askout hide"></div>
       <div class="pipebar">
         <input id="pipeSearch" placeholder="Search a bar, town, contact, email or phone number…">
         <button class="go" id="pipeAdd">Add a lead</button>
@@ -596,7 +674,7 @@
         </div>
         <div class="applied hide" id="pipeAddResult"></div>
       </div>
-      <div class="zt" id="pipeTabs"></div>
+      <div class="glance" id="pipeStats"></div>
       <div id="pipeBody"></div>
     </section>
 
@@ -617,29 +695,6 @@
       </div>
     </section>
 
-    <section data-panel="numbers" class="hide">
-      <div class="card"><strong>Today</strong>
-        <div class="grid" style="margin-top:12px" id="nToday"></div></div>
-      <div class="card"><strong>Signups</strong>
-        <div class="grid" style="margin-top:12px" id="nUsers"></div></div>
-      <div class="card"><strong>Activation — signed up but never finished a count</strong>
-        <div class="grid" style="margin-top:12px" id="nAct"></div></div>
-      <div class="card"><strong>What's actually connecting</strong>
-        <p class="muted" style="margin:4px 0 0;font-size:12px" id="dialAdvice"></p>
-        <div class="tablewrap" style="margin-top:12px">
-          <table class="sheet"><thead><tr>
-            <th>HOUR (LOCAL)</th><th>DIALS</th><th>CONNECTED</th><th>RATE</th>
-          </tr></thead><tbody id="dialHours"></tbody></table></div>
-        <div class="tablewrap" style="margin-top:12px">
-          <table class="sheet"><thead><tr>
-            <th>ATTEMPT</th><th>DIALS</th><th>CONNECTED</th><th>RATE</th>
-          </tr></thead><tbody id="dialAttempts"></tbody></table></div>
-      </div>
-      <div class="card"><strong>What outreach produced</strong>
-        <div class="grid" style="margin-top:12px" id="nChan"></div>
-        <div style="margin-top:12px"><button id="rematch">Re-run matching</button></div></div>
-    </section>
-
     <!-- Read-only roster: who actually signed up, not who to work. The
          pipeline tab is the list with actions on it; this one just answers
          "did it work" one account at a time instead of as a funnel total. -->
@@ -651,36 +706,34 @@
       <div id="usersBody"></div>
     </section>
 
-    <section data-panel="engine" class="hide">
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-          <strong>Lead engine</strong>
-          <button id="runNow">Run now</button>
+    <!-- App Store Connect's App Analytics for the 86'd app, pulled with the
+         team API key. See apple.py for how Apple's report API works. -->
+    <section data-panel="apple" class="hide">
+      <div id="appleConnect" class="card hide">
+        <strong>Connect your App Store Connect API key</strong>
+        <ol class="applehow">
+          <li>In <b>App Store Connect</b> go to <b>Users and Access → Integrations →
+            App Store Connect API → Team Keys</b>.</li>
+          <li>Click <b>+</b>, name it “86'd CRM”, give it <b>Admin</b> access (Apple requires
+            Admin to turn on analytics reports), and generate.</li>
+          <li>Copy the <b>Issuer ID</b> (top of that page) and the key's <b>Key ID</b>, then
+            <b>Download</b> the .p8 file — Apple only lets you download it once.</li>
+        </ol>
+        <div class="applegrid">
+          <label>Issuer ID<input id="apIssuer" placeholder="69a6de7e-…" autocomplete="off"></label>
+          <label>Key ID<input id="apKey" placeholder="2X9R4HXF34" autocomplete="off"></label>
+          <label>App (optional)<input id="apApp" placeholder="bundle ID or Apple ID — blank if it's your only app" autocomplete="off"></label>
         </div>
-        <p class="muted" style="margin:6px 0 0;font-size:12px">
-          Runs at 6pm daily and keeps every tab topped up to 50 leads — eight
-          tabs, so up to 400 in the bank, but you only ever see one tab at a
-          time. The emptiest tab is always filled first. Work leads off and the
-          spots refill.</p>
-        <div id="engineBanner" style="margin-top:12px"></div>
-        <div class="grid" style="margin-top:12px" id="engineStats"></div>
-        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-            <strong style="font-size:13px">Restaurant liquor gate</strong>
-            <button id="recheckBtn" class="del">Recheck existing restaurant leads</button>
-          </div>
-          <p class="muted" style="margin:6px 0 0;font-size:12px">
-            One-time cleanup: re-crawls every banked or never-called restaurant
-            lead against today's (tighter) liquor gate and drops the ones that no
-            longer clear it — same as the old "pizzeria with no bar" bug. Never
-            touches a lead someone's already called.</p>
-          <div id="recheckResult" style="margin-top:8px"></div>
-        </div>
-        <div class="tablewrap" style="margin-top:14px">
-          <table class="sheet"><thead><tr>
-            <th>TAB</th><th>EASTERN</th><th>CENTRAL</th><th>MOUNTAIN</th><th>PACIFIC</th>
-          </tr></thead><tbody id="engineBuckets"></tbody></table></div>
+        <label class="applefile">Private key (.p8)
+          <input type="file" id="apFile" accept=".p8,text/plain">
+          <textarea id="apPem" rows="4" placeholder="…or paste the whole file here, including the BEGIN and END lines"></textarea>
+        </label>
+        <div class="row"><button class="go" id="apSave">Connect</button></div>
+        <p class="muted" style="font-size:12px;margin:8px 0 0">The key is checked with Apple
+          before it's saved, stored encrypted, and never shown again on this page.</p>
+        <div class="applied hide" id="apResult"></div>
       </div>
+      <div id="appleBody"></div>
     </section>
 
   </div>
@@ -772,7 +825,7 @@ function switchTab(b){
     .forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
-    numbers:loadNumbers,users:loadUsers,engine:loadEngine,
+    apple:loadApple,users:loadUsers,
     school:loadSchoolPanel}[TAB])()
     .catch(e=>toast(e.message));
 }
@@ -817,8 +870,32 @@ async function undoTouch(id){
    above the table explains or decides anything; there's nothing to do but
    press the button and start dialing the first row. */
 let NOWDATA=null, nowTimer=null;
+// Skip is NOT delete: the lead stays exactly as it is in the database — still
+// bankable, still promotable, nothing about it changes server-side. It just
+// stops showing up in THIS session's list, because the operator looked at it
+// and decided "not this one, not right now" rather than "never call this
+// place again." Clears on page reload, and never survives a real refresh of
+// the underlying data — it's a filter over what /now returns, not a status.
+let SKIPPED=new Set();
 
-$('startBtn').onclick=()=>loadCalls();
+// Silent success reads as broken: if the list happens to come back looking
+// identical to what was already on screen (same "nobody's in a window"
+// message, or the same names in the same order), a click that does nothing
+// visible is indistinguishable from a click that did nothing at all. Say
+// what happened every time, and surface a real failure instead of it
+// vanishing into an unhandled rejection.
+$('startBtn').onclick=async()=>{
+  const btn=$('startBtn');
+  btn.disabled=true; const was=btn.textContent; btn.textContent='Checking…';
+  try{
+    const d=await loadCalls();
+    toast(d.ready_count ? `${d.ready_count} ready to call now`
+        : d.list_empty ? 'List is empty — filling it now'
+        : !d.dialable_total ? 'Nothing on the list has a dialable number'
+        : `Nobody's in a window right now — ${d.soon_count} coming up`);
+  }catch(err){ toast(err.message); }
+  finally{ btn.disabled=false; btn.textContent=was; }
+};
 
 /* The compose box. Say what the email needs to say and Claude writes it; say
    what's wrong with it and Claude changes that bit rather than starting over.
@@ -953,6 +1030,8 @@ function stopNowTimer(){ if(nowTimer){ clearInterval(nowTimer); nowTimer=null; }
 
 async function loadNow(){
   const d=await api('/now'); NOWDATA=d;
+  d.ready=d.ready.filter(l=>!SKIPPED.has(l.id));
+  d.ready_count=d.ready.length;
 
   if(!d.ready.length){
     stopNowTimer();
@@ -977,7 +1056,7 @@ async function loadNow(){
     }
     // Windows open and shut on the clock — keep checking even while empty.
     if(!nowTimer) nowTimer=setInterval(()=>{ if(TAB==='calls') loadNow(); }, 60000);
-    return;
+    return d;
   }
 
   $('zones').innerHTML=`
@@ -998,10 +1077,11 @@ async function loadNow(){
 
   // Windows open and shut on the clock, so a list left sitting goes stale.
   if(!nowTimer) nowTimer=setInterval(()=>{ if(TAB==='calls') loadNow(); }, 60000);
+  return d;
 }
 
 async function loadCalls(){
-  await loadNow();
+  return loadNow();
 }
 
 /* Why this row is where it is. The list reorders itself for reasons the
@@ -1024,6 +1104,22 @@ function ask(l){
             : `their site, ${l.manager_age_days}d ago`;
   return `<div class="ask">Ask if ${esc(l.manager_name)} is still ${esc(l.manager_role||'there')}`
        + (age?` <span class="age">— ${esc(age)}</span>`:'') + '</div>';
+}
+
+/* venue_facts is a JSON blob of {key: {value, source}} written at promote
+   time from OSM tags (see venue.py) — the street half of the address lives
+   in there as "address"; loc is always just "City, ST". Parsed defensively:
+   an older row or a hand-entered lead may carry no venue_facts at all. */
+function venueFacts(l){
+  try{ return JSON.parse(l.venue_facts||'{}')||{}; }catch{ return {}; }
+}
+function fullAddress(l){
+  const street=(venueFacts(l).address||{}).value;
+  return street ? `${street}, ${l.loc||''}` : (l.loc||'—');
+}
+function mapsUrl(l){
+  return 'https://www.google.com/maps/search/?api=1&query='
+       + encodeURIComponent(`${l.name} ${fullAddress(l)}`);
 }
 
 function row(l,n,calling){
@@ -1050,14 +1146,46 @@ function row(l,n,calling){
       : when}</td>
     <td>${tries?`<span class="tries">${tries}</span>`:'<span class="muted">—</span>'}</td>
     <td><span class="em" title="${esc(l.email||'')}">${esc(l.email||'')}</span></td>
-    <td class="muted">${esc(l.loc||'')}${calling&&l.zone
-      ? `<div class="opener" style="color:var(--text3)">${esc(l.zone)}</div>`:''}</td>
+    <td class="muted">
+      <button class="whereBtn" data-act="where" title="Show more about this venue">${esc(fullAddress(l))}</button>
+      <a class="maplink" href="${esc(mapsUrl(l))}" target="_blank" rel="noopener">Map</a>
+      ${calling&&l.zone
+        ? `<div class="opener" style="color:var(--text3)">${esc(l.zone)}</div>`:''}</td>
     <td><div class="acts">
       <button class="go" data-act="log">Log call</button>
       <button data-act="mail">Email</button>
       <button class="del" data-act="del">Delete</button>
+      <button data-act="skip">Skip</button>
     </div></td>
   </tr>`;
+}
+
+/* What's actually known about the venue, expanded on click from the WHERE
+   cell. Facts are extracted and attributable (see venue.py) — never
+   generated — so this can't assert something wrong about a place the
+   operator is about to call. Cached client-side per lead: it's the same
+   data on every click, and the server itself caches the model-written
+   points, so this just avoids a redundant round trip within one session. */
+const WHERE_INFO={};
+async function loadWhereInfo(id, box){
+  if(WHERE_INFO[id]) return renderWhereInfo(box, WHERE_INFO[id]);
+  try{
+    const d=await api(`/leads/${id}/brief`);
+    WHERE_INFO[id]=d;
+    renderWhereInfo(box, d);
+  }catch(err){ box.innerHTML=`<div class="none">${esc(err.message)}</div>`; }
+}
+function renderWhereInfo(box, d){
+  if(!d.facts.length && !d.points.length){
+    box.innerHTML='<div class="none">Nothing on file beyond the address — '
+      +'the map entry is bare and their site gave nothing up.</div>';
+    return;
+  }
+  box.innerHTML=
+    (d.points.length?`<div class="pts">${d.points.map(p=>
+      `<div class="pt">${esc(p)}</div>`).join('')}</div>`:'')
+    +`<div class="fx">${d.facts.map(f=>
+      `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`;
 }
 
 const MAIL_SUBJECT = "Following up — 86'd bar inventory";
@@ -1151,6 +1279,34 @@ $('zones').onclick=async e=>{
     catch(err){ toast(err.message); }
     return;
   }
+  if(btn.dataset.act==='skip'){
+    // No API call — skip touches nothing about the lead. It stays 'new',
+    // still shows up for anyone else pulling the list, still gets called
+    // tomorrow if nobody skips it again. This just removes it from THIS
+    // screen for the rest of the session, so the row disappears without
+    // any round trip to wait on.
+    SKIPPED.add(id);
+    const row=$('zones').querySelector('.zbar .when');
+    tr.remove();
+    if(row && NOWDATA){
+      NOWDATA.ready_count=Math.max(0,(NOWDATA.ready_count||1)-1);
+      row.textContent=`${NOWDATA.ready_count} in their window right now · best first`;
+    }
+    if(!$('zones').querySelector('tbody tr')) loadCalls();
+    toast('Skipped for this session');
+    return;
+  }
+  if(btn.dataset.act==='where'){
+    if(tr.nextElementSibling?.classList.contains('drawer')){
+      tr.nextElementSibling.remove(); return;
+    }
+    const d=document.createElement('tr');
+    d.className='drawer info';
+    d.innerHTML=`<td colspan="8"><div class="wherebox"><div class="none">Reading up on them…</div></div></td>`;
+    tr.after(d);
+    loadWhereInfo(id, d.querySelector('.wherebox'));
+    return;
+  }
   if(btn.dataset.act==='mail'){
     const addr=tr.dataset.email;
     if(!addr) return toast('No email address on this one');
@@ -1180,9 +1336,11 @@ $('zones').onclick=async e=>{
       <textarea placeholder="spoke to Dave the GM, still counting on a clipboard, wants me to call back Tuesday, his email is dave@thebar.com"></textarea>
       <div class="row">
         <button class="go" data-save>Save &amp; next</button>
-        <button data-outcome="voicemail" data-note="Left a voicemail, no answer.">Voicemail</button>
+        <button data-outcome="no_answer" data-note="Nobody picked up, no message left.">No answer</button>
+        <button data-outcome="voicemail" data-note="Left a voicemail.">Voicemail</button>
         <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
         <button data-outcome="not_interested" data-note="Not interested, asked not to be called again.">Not interested</button>
+        <button data-outcome="not_interested" data-note="Already has a system/app for inventory.">Has a system</button>
         <button data-cancel>Cancel</button>
       </div>
       <div class="applied hide"></div>
@@ -1264,57 +1422,37 @@ async function drawerAction(dr,e){
    stops the same bar being rung twice, and follow-ups only shows what's due.
    Without this, a bar you spoke to on Tuesday and forgot to book a callback
    for is invisible — which is how warm leads quietly die. */
-// Opens on the people you've actually spoken to, not on 312 cold names.
-let PIPE={stage:'working',q:'',offset:0};
+/* Two buttons: Open and Dead. Every lead is Open until they told you no —
+   not interested, already have a system or an app, don't call again — and
+   only then does it move to Dead. The five stage chips it replaced (In play,
+   Not called yet, Won, Dead, Everything) asked the operator to remember what
+   each one held; "is this one still worth a call or not" is the only
+   question the tab actually answers. Typing a search looks in both. */
+let PIPE={view:'open',q:'',offset:0};
 let pipeTimer=null;
 
-/* Six stage chips was five too many to scan mid-thought. The list really
-   answers three questions — who's live, who hasn't been called, who's done —
-   so those are the chips, with the raw stages folded underneath. */
-const STAGES=[
-  ['working','In play',       'contacted,warm', 'people you have actually spoken to'],
-  ['new',    'Not called yet','new',            'still on the call list'],
-  ['won',    'Won',           'won',            'signed up'],
-  ['dead',   'Dead',          'dead',           'do not call again'],
-  ['',       'Everything',    '',               'every lead, any stage'],
-];
 // The edit form still writes one real status at a time.
 const STATUSES=[['','Everything'],['new','Not called'],['contacted','Contacted'],
                 ['warm','Warm'],['won','Won'],['dead','Dead']];
 
 async function loadPipeline(){
-  const stage=STAGES.find(x=>x[0]===PIPE.stage)||STAGES[0];
-  const statuses=stage[2]?stage[2].split(','):[];
+  const searching=!!PIPE.q;
   const qs=new URLSearchParams();
-  // "In play" spans two stages, so it's fetched wide and narrowed here rather
-  // than making someone click two chips to see one idea.
-  if(statuses.length===1) qs.set('status',statuses[0]);
+  if(!searching) qs.set('status',PIPE.view);
   if(PIPE.q) qs.set('q',PIPE.q);
-  qs.set('offset',PIPE.offset); qs.set('limit',statuses.length>1?400:100);
+  qs.set('offset',PIPE.offset); qs.set('limit',100);
   const d=await api('/leads?'+qs);
-  if(statuses.length>1){
-    d.leads=d.leads.filter(l=>statuses.includes(l.status));
-    // The server counted before this filter ran, so its totals describe a
-    // different list than the one on screen. Saying "showing 1-318 of 318"
-    // over seven rows is the page contradicting itself.
-    d.count=d.leads.length;
-    d.matching=statuses.reduce((n,x)=>n+(d.counts[x]??0),0);
-  }
 
-  const tally=key=>{
-    const st=STAGES.find(x=>x[0]===key);
-    if(!st||!st[2]) return d.counts.all??0;
-    return st[2].split(',').reduce((n,x)=>n+(d.counts[x]??0),0);
-  };
-  $('pipeTabs').innerHTML=STAGES.map(([key,label,,why])=>`
-    <button data-status="${esc(key)}" class="${key===PIPE.stage?'on':''}" title="${esc(why)}">
-      ${esc(label)} <span class="c">${tally(key)}</span>
-    </button>`).join('');
+  const open=d.counts.open??((d.counts.all??0)-(d.counts.dead??0));
+  $('pipeStats').innerHTML=[['open','Open',open],['dead','Dead',d.counts.dead??0]]
+    .map(([key,label,n])=>`<button data-view="${key}"
+       class="${!searching&&PIPE.view===key?'on':''}">${label} <b>${n}</b></button>`).join('');
 
   if(!d.leads.length){
     $('pipeBody').innerHTML=`<div class="card muted">${
-      PIPE.q ? 'Nothing matches “'+esc(PIPE.q)+'”.'
-             : 'No leads at this stage yet.'}</div>`;
+      searching ? 'Nothing matches “'+esc(PIPE.q)+'”.'
+        : PIPE.view==='dead' ? 'Nobody has said no yet.'
+        : 'Nothing open.'}</div>`;
     return;
   }
 
@@ -1345,11 +1483,74 @@ async function loadPipeline(){
 // last_outcome always carries the real answer; it just wasn't being shown
 // anywhere before this.
 const OUTCOME_LABEL = {
-  answered: 'Answered', voicemail: 'Voicemail', gatekeeper: 'Manager out',
+  answered: 'Answered', voicemail: 'Voicemail', no_answer: 'No answer',
+  gatekeeper: 'Manager out',
   not_interested: 'Not interested', callback: 'Asked for a callback',
   logged: 'Logged',
 };
 const outcomeLabel = o => o ? (OUTCOME_LABEL[o] || o) : '';
+
+/* WHERE THINGS STAND, as two plain lines: what happened last, and what's next.
+   It used to be one line like "call back 2026-09-25 — Answered · 1 try": a raw
+   date, "call back" whether a person asked for one or nobody picked up, and
+   nothing to say it was overdue. Hover shows the latest note. */
+const MAX_ATTEMPTS=6;   // crm.py MAX_ATTEMPTS: 5 retries on the ladder, then retired
+function niceDay(ymd){
+  if(!ymd) return '';
+  const d=new Date(ymd+'T12:00:00'), t=new Date(); t.setHours(12,0,0,0);
+  const diff=Math.round((d-t)/86400000);
+  if(diff===0) return 'today';
+  if(diff===1) return 'tomorrow';
+  if(diff===-1) return 'yesterday';
+  const txt=d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+  return diff>1&&diff<7 ? d.toLocaleDateString('en-US',{weekday:'long'}) : txt;
+}
+function latestNote(l){
+  const lines=(l.notes||'').split('\n').filter(x=>x.trim());
+  const last=lines[lines.length-1]||'';
+  // "[date] call · attempt N: summary — Your notes: …" -> the summary part
+  return last.replace(/^\[[^\]]*\][^:]*:\s*/,'').split(' — Your notes:')[0].trim();
+}
+function standing(l){
+  const note=latestNote(l);
+  const when=niceDay((l.last_touch_at||'').slice(0,10));
+  const who=l.contact?l.contact.split(/[(,]/)[0].trim():'';
+  const hasSystem=/already (?:has|have|uses?|using|got)|has a system|have a system|using (?:an? )?(?:app|system|software)/i.test(l.notes||'');
+  const last={
+    answered:`Talked to ${who||'someone'}`,
+    callback:`${who||'They'} asked for a callback`,
+    voicemail:'Left a voicemail',
+    no_answer:'Nobody picked up',
+    gatekeeper:"Manager wasn't in",
+    not_interested:hasSystem?'Already has a system':'Said no',
+    logged:'Logged a call',
+  }[l.last_outcome];
+  const out={last:'', next:'', lastTone:'', nextTone:'muted', note};
+  if(l.status==='won'){ out.last=last?`${last} · ${when}`:'Signed up'; out.next='Customer — signed up';
+    out.nextTone='win-good'; return out; }
+  if(l.status==='dead'){ out.last=(last||'Said no')+(when?` · ${when}`:''); out.next="Don't call again";
+    out.nextTone='muted'; return out; }
+  if(!l.last_touch_at&&!l.last_outcome){ out.last='Not called yet'; out.lastTone='muted';
+    out.next=l.queued_email_at?'Email queued':'On the call list'; return out; }
+  out.last=(last||'Called')+(when?` · ${when}`:'');
+
+  const tries=l.attempts||0;
+  const reached=['answered','callback','gatekeeper'].includes(l.last_outcome);
+  const due=l.followup_date, today=new Date().toISOString().slice(0,10);
+  if(l.queued_email_at){ out.next='Email queued to send'; }
+  else if(due){
+    const overdue=due<today, isToday=due===today;
+    const verb=l.last_outcome==='callback'&&who?`Call ${who} back`
+             : l.last_outcome==='gatekeeper'?'Call back for the manager'
+             : reached?'Follow up'
+             : `Try again (attempt ${Math.min(tries+1,MAX_ATTEMPTS)} of ${MAX_ATTEMPTS})`;
+    out.next=overdue?`${verb} — overdue since ${niceDay(due)}`:`${verb} ${niceDay(due)}`;
+    out.nextTone=overdue?'err':isToday?'win-good':'muted';
+  }
+  else if(reached){ out.next='No follow-up set — pick a date'; out.nextTone='err'; }
+  else out.next=`${tries} tr${tries===1?'y':'ies'} so far`;
+  return out;
+}
 
 function pipeRow(l,n){
   /* Two lines per row instead of eight columns. Everything that was a column
@@ -1361,21 +1562,7 @@ function pipeRow(l,n){
           : (l.manager_name ? `ask if ${l.manager_name} is still ${l.manager_role||'there'}` : '');
   const sub=[who, l.email, l.loc].filter(Boolean).join(' · ');
 
-  // The one thing that matters per row: what happens next, or that nothing is.
-  // A bare date used to be the whole answer — "last touched 2026-09-22" says
-  // a call happened, not whether anyone was reached, which is the actual
-  // question a CONTACTED badge leaves open.
-  const outcome=outcomeLabel(l.last_outcome);
-  let stands, tone='muted';
-  if(l.followup_date){
-    stands=`call back ${l.followup_date}`+(outcome?` — ${outcome}`:'');
-    tone='win-good';
-  }
-  else if(l.queued_email_at){ stands='email queued'; tone='muted'; }
-  else if(touch){ stands=outcome?`${outcome} · ${touch}`:`last touched ${touch}`; tone='muted'; }
-  else { stands='never contacted'; tone='muted'; }
-  const tries=l.attempts?` · ${l.attempts} tr${l.attempts>1?'ies':'y'}`:'';
-
+  const st=standing(l);
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}"
               data-contact="${esc(l.contact||'')}">
     <td class="rownum">${n}</td>
@@ -1386,7 +1573,9 @@ function pipeRow(l,n){
       ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`
         +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button></div>`
       : '<span class="muted">no number</span>'}</td>
-    <td><span class="${tone}">${esc(stands)}</span><span class="muted">${esc(tries)}</span></td>
+    <td class="stands" title="${esc(st.note)}">
+      <div class="${st.lastTone}">${esc(st.last)}</div>
+      <div class="${st.nextTone}">${esc(st.next)}</div></td>
     <td><div class="acts">
       <button class="go" data-act="log">Log</button>
       <button data-act="mail">Email</button>
@@ -1396,10 +1585,44 @@ function pipeRow(l,n){
   </tr>`;
 }
 
-$('pipeTabs').onclick=e=>{
-  const b=e.target.closest('button[data-status]'); if(!b) return;
-  PIPE.stage=b.dataset.status; PIPE.offset=0; loadPipeline().catch(x=>toast(x.message));
+$('pipeStats').onclick=e=>{
+  const b=e.target.closest('button[data-view]'); if(!b) return;
+  PIPE.view=b.dataset.view; PIPE.offset=0;
+  if(PIPE.q){ PIPE.q=''; $('pipeSearch').value=''; }
+  loadPipeline().catch(x=>toast(x.message));
 };
+/* Ask AI. Nothing it returns is trusted as markup — the answer is set as
+   text and every lead field goes through esc(). */
+async function askAI(){
+  const q=$('askInput').value.trim(); if(!q) return;
+  const box=$('askOut'), btn=$('askBtn');
+  box.classList.remove('hide');
+  box.innerHTML=`<div class="q">${esc(q)}</div><div class="a muted">Thinking…</div>`;
+  btn.disabled=true;
+  try{
+    const r=await api('/ask',{method:'POST',body:JSON.stringify({question:q})});
+    box.innerHTML=`<button class="x" data-close title="Close">×</button>
+      <div class="q">${esc(q)}</div><div class="a"></div>
+      ${r.leads.length?`<div class="sheetwrap"><table class="sheet"><thead><tr>
+        <th>BAR</th><th>WHERE</th><th>PHONE</th><th>STAGE</th><th>LAST</th></tr></thead><tbody>
+        ${r.leads.map(l=>`<tr>
+          <td class="nm">${esc(l.name)}</td><td class="muted">${esc(l.loc||'')}</td>
+          <td>${l.phone_dial?`<span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`:''}</td>
+          <td><span class="st st-${esc(l.status)}">${esc((l.status||'').toUpperCase())}</span></td>
+          <td class="muted">${esc(outcomeLabel(l.last_outcome))}</td></tr>`).join('')}
+      </tbody></table></div>`:''}`;
+    box.querySelector('.a').textContent=r.answer;
+  }catch(err){
+    box.innerHTML=`<div class="q">${esc(q)}</div><div class="a err">${esc(err.message)}</div>`;
+  }finally{ btn.disabled=false; }
+}
+$('askBtn').onclick=askAI;
+$('askInput').onkeydown=e=>{ if(e.key==='Enter') askAI(); };
+$('askOut').onclick=e=>{
+  if(e.target.closest('[data-close]')){ $('askOut').classList.add('hide'); return; }
+  const d=e.target.closest('.digits'); if(d) copyDigits(d);
+};
+
 $('pipeSearch').oninput=e=>{
   // Debounced: every keystroke is a query otherwise, and the table redrawing
   // under your fingers is worse than waiting a moment for it.
@@ -1478,9 +1701,11 @@ $('pipeBody').onclick=async e=>{
       <textarea rows="3" placeholder="spoke to Dave, wants a callback Tuesday"></textarea>
       <div class="row">
         <button class="go" data-save>Save</button>
-        <button data-outcome="voicemail" data-note="Left a voicemail, no answer.">Voicemail</button>
+        <button data-outcome="no_answer" data-note="Nobody picked up, no message left.">No answer</button>
+        <button data-outcome="voicemail" data-note="Left a voicemail.">Voicemail</button>
         <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
         <button data-outcome="not_interested" data-note="Not interested.">Not interested</button>
+        <button data-outcome="not_interested" data-note="Already has a system/app for inventory.">Has a system</button>
         <button data-cancel>Cancel</button>
       </div>
       <div class="applied hide"></div></td>`;
@@ -1664,40 +1889,7 @@ async function loadFollowups(){
   };
 });
 
-/* ── numbers ──────────────────────────────────────────────────────────── */
 const tile=(n,l)=>`<div class="stat"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
-async function loadNumbers(){
-  const [f,c,ds]=await Promise.all([api('/funnel'),api('/counters'),api('/dialstats')]);
-  $('dialAdvice').textContent=ds.advice;
-  const maxH=Math.max(0,...ds.by_hour.map(h=>h.connect_pct));
-  const line=(label,r,hi)=>`<tr><td>${esc(label)}</td><td>${r.dials}</td><td>${r.connects}</td>
-    <td class="${hi?'win-good':''}">${r.connect_pct}%</td></tr>`;
-  $('dialHours').innerHTML=ds.by_hour.length
-    ? ds.by_hour.map(h=>line(h.hour_label||h.hour,h,h.connect_pct===maxH&&maxH>0)).join('')
-    : '<tr><td colspan="4" class="muted">No calls logged yet.</td></tr>';
-  $('dialAttempts').innerHTML=ds.by_attempt.length
-    ? ds.by_attempt.map(a=>line('Attempt '+a.attempt,a,false)).join('')
-    : '<tr><td colspan="4" class="muted">No calls logged yet.</td></tr>';
-  $('nToday').innerHTML=[tile(c.counters.daily_calls_remaining,'CALLS LEFT'),
-    tile(c.counters.daily_emails_remaining,'EMAILS LEFT'),
-    tile(c.counters.touch_ticker_remaining,'TOUCHES LEFT'),
-    tile(c.counters.downloads_confirmed,'DOWNLOADS')].join('');
-  $('nUsers').innerHTML=[tile(f.users.total,'SIGNUPS'),tile(f.users.paying,'PAYING'),
-    tile(f.users.trial_to_paid_pct+'%','TRIAL → PAID'),
-    tile(f.trials_ending['0-3_days'],'ENDING ≤3 DAYS')].join('');
-  $('nAct').innerHTML=[tile(f.activation.started_a_count,'STARTED A COUNT'),
-    tile(f.activation.completed_a_count,'FINISHED ONE'),
-    tile(f.activation.never_started_pct+'%','NEVER STARTED'),
-    tile(f.activation.started_but_never_finished,'STALLED')].join('');
-  $('nChan').innerHTML=[tile(f.pipeline.total,'LEADS'),
-    tile(f.pipeline.converted_to_signup,'BECAME SIGNUPS'),
-    tile(f.channels.called_win_pct+'%','CALL WIN RATE'),
-    tile(f.channels.emailed_win_pct+'%','EMAIL WIN RATE')].join('');
-}
-$('rematch').onclick=async()=>{
-  try{const r=await api('/attribution/rematch',{method:'POST'});
-      toast(`Matched ${r.matched}`); await loadNumbers();}catch(e){toast(e.message)}
-};
 
 /* ── customers (app users) ────────────────────────────────────────────────
    Everyone who actually downloaded the app and made an account — separate
@@ -1812,89 +2004,126 @@ $('usersBody').onclick=async e=>{
   catch(err){ toast(err.message); }
 };
 
-/* ── lead engine ──────────────────────────────────────────────────────── */
-async function loadEngine(){
-  const d=await api('/leadgen/health');
-  /* A full list is the healthy resting state, so it reads as a plain note
-     rather than a warning — nothing is wrong when you have work waiting. */
-  const msg = d.warnings.length ? esc(d.warnings.join(' ')) : esc(d.note);
-  $('engineBanner').innerHTML=`<div class="banner ${d.warnings.length?(d.stale?'bad':''):'ok'}">${msg}</div>`;
-  $('engineStats').innerHTML=[
-    tile(`${d.pool.active_leads}/${d.pool.max_active}`,'CALL LIST'),
-    tile(d.pool.headroom,'SPOTS OPEN'),
-    tile(d.pool.qualified,'BANKED'),
-    tile(d.pool.days_of_runway,'DAYS OF WORK'),
-    tile(d.cities.unharvested,'CITIES LEFT')].join('');
+/* ── Apple Analytics ──────────────────────────────────────────────────────
+   App Store Connect's App Analytics, imported by the server from Apple's
+   Analytics Reports API (apple.py). Headline tiles first — the same metrics,
+   in the same order, as App Store Connect's own overview — then every report
+   Apple produced as a plain table, so nothing it reports is left out. */
+let APPLE={window:30}, appleTimer=null;
 
-  /* Which tabs are actually stocked. The totals above can look healthy while
-     the tab you're about to open is empty, and that's the only number that
-     decides whether there's anything to call. */
-  const zones=[-5,-6,-7,-8];
-  const cell=b=>{
-    const full=b.count>=d.pool.bucket_target;
-    const col=full?'var(--go)':(b.count>=d.pool.bucket_target/2?'var(--wait)':'var(--stop)');
-    return `<td style="color:${col};font-weight:700">${b.count}`
-         + (full?'':` <span class="muted" style="font-weight:400">/${d.pool.bucket_target}</span>`)
-         + '</td>';
-  };
-  $('engineBuckets').innerHTML=[['lunch','Open for lunch'],['dinner','Dinner only']]
-    .map(([key,label])=>`<tr><td>${label}</td>`
-      + zones.map(z=>cell(d.pool.buckets.find(b=>b.service===key&&b.zone===z)
-                          ||{count:0})).join('')
-      + '</tr>').join('');
-}
-$('runNow').onclick=async()=>{
-  const b=$('runNow'); b.disabled=true; b.textContent='Running…';
-  try{const r=await api('/leadgen/run',{method:'POST'});
-      toast(`Added ${r.promoted} leads`); await loadEngine();}
-  catch(e){toast(e.message)}finally{b.disabled=false;b.textContent='Run now'}
+const compact=(v,unit)=>{
+  if(v==null) return '—';
+  if(unit==='%') return v.toFixed(1)+'%';
+  const a=Math.abs(v);
+  const s=a>=1e6?(v/1e6).toFixed(1).replace(/\.0$/,'')+'M'
+         :a>=1e4?(v/1e3).toFixed(1).replace(/\.0$/,'')+'K'
+         :Math.round(v).toLocaleString();
+  return unit==='$'?'$'+s:s;
+};
+const agoShort=iso=>{
+  if(!iso) return 'never';
+  const m=Math.round((Date.now()-new Date(iso))/60000);
+  return m<1?'just now':m<60?`${m} min ago`:m<1440?`${Math.round(m/60)}h ago`:`${Math.round(m/1440)}d ago`;
 };
 
-// The gate re-crawls sites, so this is the same "too slow for one request,
-// start it and poll" shape as startFill() above, just against its own
-// endpoint — a recheck and a fill are different jobs and shouldn't share a
-// lock or a status line.
-let recheckTimer=null;
-function renderRecheckResult(last){
-  if(!last) return;
-  if(last.error){
-    $('recheckResult').innerHTML=`<div class="banner bad">Recheck failed: ${esc(last.error)}</div>`;
+function appleTile(k,win){
+  const unit=k.unit||(k.key==='proceeds'?'$':'');
+  let delta='';
+  if(k.change_pct!=null){
+    const up=k.change_pct>0, flat=k.change_pct===0;
+    const good=flat?null:(up===k.up_is_good);
+    const sign=up?'+':'';
+    delta=`<div class="delta ${good==null?'':good?'good':'bad'}">${sign}${k.change_pct}${k.change_is_points?' pts':'%'}
+      <span>vs previous ${win} days</span></div>`;
+  }else if(k.value!=null){
+    delta=`<div class="delta"><span>no earlier data to compare</span></div>`;
+  }
+  const daily=k.daily||[];
+  const max=Math.max(0,...daily.map(d=>d.value));
+  const bars=daily.length&&max>0?`<div class="spark" role="img" aria-label="${esc(k.label)} per day">${
+    daily.map((d,i)=>`<i style="height:${Math.max(2,d.value/max*100)}%"
+      class="${i===daily.length-1?'now':''}" title="${esc(d.day)}: ${esc(compact(d.value,unit))}"></i>`).join('')}</div>`:'';
+  return `<div class="atile"><div class="al">${esc(k.label)}</div>
+    <div class="av">${esc(compact(k.value,unit))}</div>${delta}${bars}</div>`;
+}
+
+async function loadApple(){
+  const d=await api('/apple?window='+APPLE.window);
+  $('appleConnect').classList.toggle('hide', d.connected);
+  if(!d.connected){
+    $('appleBody').innerHTML = d.key_unreadable
+      ? '<div class="banner bad">The saved key can no longer be read (the server\'s SECRET_KEY changed). Connect it again below.</div>' : '';
     return;
   }
-  const removed=last.banked_rejected+last.leads_removed;
-  $('recheckResult').innerHTML=`<div class="banner ${removed?'':'ok'}">`
-    + `Checked ${last.checked} · dropped ${last.banked_rejected} from the bank`
-    + ` · removed ${last.leads_removed} never-called lead${last.leads_removed===1?'':'s'}`
-    + `</div>`;
-}
-async function startRecheck(){
-  const b=$('recheckBtn'); b.disabled=true; b.textContent='Rechecking…';
-  try{
-    const r=await api('/leadgen/recheck-restaurants',{method:'POST'});
-    if(!r.started && !r.running) toast(r.note||'Could not start');
-  }catch(err){
-    b.disabled=false; b.textContent='Recheck existing restaurant leads';
-    return toast('Could not start: '+err.message);
-  }
-  if(recheckTimer) clearInterval(recheckTimer);
-  recheckTimer=setInterval(async()=>{
-    let st;
-    try{ st=await api('/leadgen/recheck-restaurants'); }catch{ return; }
-    if(!st.running){
-      clearInterval(recheckTimer); recheckTimer=null;
-      b.disabled=false; b.textContent='Recheck existing restaurant leads';
-      renderRecheckResult(st.last_run);
-      if(st.last_run && !st.last_run.error){
-        const removed=st.last_run.banked_rejected+st.last_run.leads_removed;
-        toast(removed?`Removed ${removed} non-liquor restaurant lead${removed===1?'':'s'}`
-                     :'Nothing needed removing');
-      }
-      if(TAB==='calls') loadCalls();
-    }
-  }, 4000);
-}
-$('recheckBtn').onclick=startRecheck;
+  const win=d.window||APPLE.window;
+  const head=`<div class="applehead">
+      <div><strong>${esc(d.app?.name||'Your app')}</strong>
+        <span class="muted">${esc(d.app?.bundle_id||'')}</span></div>
+      <div class="aseg">${[7,30,90].map(w=>`<button data-win="${w}" class="${w===win?'on':''}">${w} days</button>`).join('')}</div>
+      <div class="muted small">${d.syncing?'Importing from Apple…':'Synced '+esc(agoShort(d.last_sync_at))}
+        ${d.through?` · data through ${esc(d.through)}`:''}</div>
+      <div class="row" style="margin:0">
+        <button id="apSync" ${d.syncing?'disabled':''}>${d.syncing?'Importing…':'Sync now'}</button>
+        ${d.source==='saved'?'<button class="del" id="apDisconnect">Disconnect</button>':''}
+      </div>
+    </div>`;
+  const err=d.last_error?`<div class="banner bad">${esc(d.last_error)}</div>`:'';
+  const has=d.kpis&&d.kpis.some(k=>k.value!=null);
+  const wait=!has?`<div class="banner">${d.syncing?'Importing from Apple — this can take a minute.'
+      :'No numbers yet. After you first connect, Apple takes about 1–2 days to produce the '
+      +'first reports. This tab imports them automatically whenever you open it.'}</div>`:'';
+  const tiles=has?`<div class="agrid">${d.kpis.map(k=>appleTile(k,win)).join('')}</div>`:'';
+  const tables=(d.reports||[]).map(r=>`<div class="zbar"><span class="name">${esc(r.report.toUpperCase())}</span></div>
+    <div class="zone"><div class="sheetwrap"><table class="sheet"><thead><tr>
+      <th>WHAT</th><th>MEASURE</th><th>LAST 7 DAYS</th><th>LAST ${win} DAYS</th><th>PREVIOUS ${win} DAYS</th><th>CHANGE</th>
+    </tr></thead><tbody>${r.rows.map(x=>{
+      const ch=x.previous?((x.current-x.previous)/x.previous*100):null;
+      return `<tr><td>${esc(x.dim)}</td><td class="muted">${esc(x.metric)}</td>
+        <td class="num">${esc(compact(x.last7))}</td><td class="num">${esc(compact(x.current))}</td>
+        <td class="num muted">${esc(compact(x.previous))}</td>
+        <td class="num muted">${ch==null?'—':(ch>0?'+':'')+ch.toFixed(0)+'%'}</td></tr>`;}).join('')}
+    </tbody></table></div></div>`).join('<div style="height:14px"></div>');
+  $('appleBody').innerHTML=head+err+wait+tiles
+    +(tables?`<h3 class="applesub">Everything Apple reported</h3>${tables}`:'');
 
+  // Poll while an import runs, stop the moment it's done or you leave.
+  clearTimeout(appleTimer);
+  if(d.syncing) appleTimer=setTimeout(()=>{ if(TAB==='apple') loadApple().catch(()=>{}); }, 5000);
+}
+
+$('appleBody').onclick=async e=>{
+  const w=e.target.closest('[data-win]');
+  if(w){ APPLE.window=+w.dataset.win; return loadApple().catch(x=>toast(x.message)); }
+  if(e.target.id==='apSync'){
+    try{ await api('/apple/sync',{method:'POST'}); toast('Importing from Apple'); await loadApple(); }
+    catch(x){ toast(x.message); }
+  }
+  if(e.target.id==='apDisconnect'){
+    if(!confirm('Forget the saved Apple key? Numbers already imported stay.')) return;
+    try{ await api('/apple/disconnect',{method:'POST'}); toast('Disconnected'); await loadApple(); }
+    catch(x){ toast(x.message); }
+  }
+};
+$('apFile').onchange=async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  $('apPem').value=await f.text();
+};
+$('apSave').onclick=async()=>{
+  const btn=$('apSave'), box=$('apResult');
+  const body={issuer_id:$('apIssuer').value.trim(), key_id:$('apKey').value.trim(),
+              private_key:$('apPem').value.trim(), app:$('apApp').value.trim()||null};
+  if(!body.issuer_id||!body.key_id||!body.private_key)
+    return toast('Issuer ID, Key ID and the .p8 key are all needed');
+  btn.disabled=true; btn.textContent='Checking with Apple…'; box.className='applied hide';
+  try{
+    const r=await api('/apple/connect',{method:'POST',body:JSON.stringify(body)});
+    $('apPem').value=''; $('apFile').value='';
+    toast('Connected to '+(r.app.name||'your app'));
+    await loadApple();
+  }catch(x){
+    box.className='applied err'; box.textContent=x.message;
+  }finally{ btn.disabled=false; btn.textContent='Connect'; }
+};
 
 /* ── practice ─────────────────────────────────────────────────────────────
    Warm-up inside the Call list tab. The surface is one headline, one button

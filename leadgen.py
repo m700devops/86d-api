@@ -908,6 +908,20 @@ UPSCALE_HINTS = re.compile(
     r"|wine pairing|dress code|jacket required|omakase|degustation",
     re.I,
 )
+# Same idea again, read straight off the OSM `cuisine` tag instead of crawled
+# text — no site fetch needed, it's already on the harvested candidate. Per
+# Stephan's own sales experience: an Asian restaurant (sushi bar, ramen shop,
+# izakaya, hot pot, ...) runs a materially higher rate of already having SOME
+# system in place — POS-bundled inventory, a supplier relationship through a
+# restaurant group — than an ordinary neighbourhood bar does. Gentler weight,
+# same as UPSCALE_HINTS: plenty still count sake and well liquor by hand, and
+# they stay on the list, just lower.
+ASIAN_CUISINE_HINTS = re.compile(
+    r"\basian\b|\bchinese\b|\bjapanese\b|\bsushi\b|\bthai\b|\bvietnamese\b"
+    r"|\bkorean\b|\bkorean_bbq\b|\bdim_sum\b|\bramen\b|\bteppanyaki\b|\bhibachi\b"
+    r"|\bpho\b|\bhot_pot\b|\bhotpot\b|\bizakaya\b|\bdumpling\b|\bpan_asian\b",
+    re.I,
+)
 # The opposite end, and the sweet spot for this product: a room with a real
 # liquor inventory and nobody to count it but the manager, after close, by
 # hand. These are the calls that go well.
@@ -924,6 +938,48 @@ NEIGHBOURHOOD_NAME = re.compile(
     r"|\bcantina\b|\bbrewhouse\b|\bpourhouse\b|\btaproom\b",
     re.I,
 )
+
+# The tourist strip in each metro, keyed by the same city name `_seed_cities`
+# stores on every harvested candidate. A bar on Las Vegas Blvd or Lower
+# Broadway isn't independent in the way a neighbourhood dive is — it's a
+# resort concierge program or a bar built for a bachelorette crawl, with
+# volume and turnover that already justified buying SOME system, whatever
+# it is. Keyed by CITY rather than a bare street-name regex on purpose:
+# "Broadway" alone is also a perfectly ordinary street in a dozen other
+# seeded metros, and matching it there would penalize an actual
+# neighbourhood bar for sharing a street name with Nashville's. Like
+# POS_STACK_HINTS, this is a SCORING PENALTY, not a reject — an
+# independently-run dive that happens to sit on one of these blocks stays
+# on the list, just further down it. Not exhaustive; add a metro's strip
+# here as it comes up rather than guessing every one in advance.
+TOURIST_STRIP_STREETS = {
+    "las vegas": (r"\blas vegas blvd\b", r"\bfremont st(?:reet)?\b"),
+    "nashville": (r"\bbroadway\b", r"\b(?:lower\s+)?2nd\s+ave\b"),
+    "new orleans": (r"\bbourbon st(?:reet)?\b", r"\bdecatur st(?:reet)?\b"),
+    "austin": (r"\b(?:e\.?\s*|east\s+)?6th\s+st(?:reet)?\b", r"\brainey st(?:reet)?\b"),
+    "memphis": (r"\bbeale st(?:reet)?\b",),
+    "san antonio": (r"\briver\s*walk\b",),
+    "orlando": (r"\bicon\s*park\b", r"\binternational\s+dr(?:ive)?\b"),
+    "chicago": (r"\brush st(?:reet)?\b",),
+}
+
+
+def _on_tourist_strip(tags: dict, city: Optional[str]) -> bool:
+    """Whether the venue's OWN street address falls on a known tourist strip.
+
+    Reads `addr:street` off the map tags, never inferred from the city or
+    venue name alone — a bar two blocks off Broadway is a different bar
+    from one on it.
+    """
+    if not city:
+        return False
+    streets = TOURIST_STRIP_STREETS.get(city.strip().lower())
+    if not streets:
+        return False
+    addr = (tags.get("addr:street") or "").lower()
+    if not addr:
+        return False
+    return any(re.search(p, addr) for p in streets)
 
 
 def _stack_signals(site_html: str) -> dict:
@@ -942,7 +998,8 @@ def _stack_signals(site_html: str) -> dict:
 
 
 def score_candidate(tags: dict, email: Optional[str], site_html: str,
-                    manager: Optional[dict] = None) -> int:
+                    manager: Optional[dict] = None,
+                    city: Optional[str] = None) -> int:
     """How well this fits a bar-inventory pitch. Higher is better.
 
     Two things were added once the call list started sorting by this rather
@@ -954,6 +1011,10 @@ def score_candidate(tags: dict, email: Optional[str], site_html: str,
     inventory and, most likely, a clipboard. Neither is a rule — plenty of
     fancy rooms still count by hand, and they stay on the list — but when
     there are fifty names in front of you, order matters more than inclusion.
+    A tourist-strip address is the same idea from a different signal: not the
+    venue's own words, but WHERE it is. Asian cuisine (OSM `cuisine` tag) is
+    the same idea from a THIRD signal — not words, not location, but what
+    kind of restaurant it is.
 
     REACH. A name to ask for and a human's mailbox both mean the call has
     somewhere to land, and both are rare enough to be worth putting first.
@@ -994,8 +1055,12 @@ def score_candidate(tags: dict, email: Optional[str], site_html: str,
         score += 2
     if site_html and UPSCALE_HINTS.search(site_html):
         score -= 2
+    if ASIAN_CUISINE_HINTS.search(tags.get("cuisine") or ""):
+        score -= 2
     if site_html and POS_STACK_HINTS.search(site_html):
         score -= 3
+    if _on_tourist_strip(tags, city):
+        score -= 4           # Vegas Strip, Lower Broadway — already has a system
     return score
 
 
@@ -1365,7 +1430,7 @@ def enrich_candidate(cand: dict) -> dict:
             # into "what are you using now?" without knowing their site runs
             # Toast is how you get told something you could have read.
             **_stack_signals(html_seen))),
-        "score": score_candidate(tags, email, html_seen, manager),
+        "score": score_candidate(tags, email, html_seen, manager, cand.get("city")),
     }
 
 
