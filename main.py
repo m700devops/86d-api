@@ -23,6 +23,10 @@ from helpers import (
 )
 from models import *
 from seed_data import SEED_PRODUCTS
+from apple_auth import (
+    AppleAuthError, fetch_apple_keys, is_private_relay, verify_identity_token,
+    DEFAULT_BUNDLE_ID as APPLE_DEFAULT_BUNDLE_ID,
+)
 from crm import crm_router, init_crm_tables
 from leadgen import init_leadgen_tables
 import google.generativeai as genai
@@ -388,6 +392,20 @@ def login(credentials: UserLogin):
         )
         row = cursor.fetchone()
 
+        # An Apple-only account has no password_hash at all. Guard the null
+        # explicitly: passlib raises on a None hash, and a bare truthiness
+        # slip here would be the difference between "no password" and "any
+        # password works".
+        if row and not row["password_hash"]:
+            _record_login_failure(email)
+            # Registration already tells callers when an email is taken, so
+            # naming the provider leaks nothing new and saves someone staring
+            # at "invalid password" for an account that never had one.
+            raise HTTPException(status_code=401, detail={
+                "error": "use_apple_signin",
+                "message": "This account was created with Sign in with Apple — use that button to sign in."
+            })
+
         if not row or not verify_password(credentials.password, row["password_hash"]):
             _record_login_failure(email)
             raise HTTPException(status_code=401, detail={
@@ -417,6 +435,160 @@ def login(credentials: UserLogin):
             "refresh_token": refresh_token,
             "expires_in": 3600
         }
+
+@v1_router.post("/auth/apple", response_model=TokenResponse)
+def apple_sign_in(request: AppleSignInRequest):
+    """Sign in (or sign up) with Apple.
+
+    Replaces five fields and a password with one Face ID tap, which is the
+    single biggest piece of friction between opening this app and having an
+    account. There is no client secret to configure: the identity token is a
+    JWT signed by Apple, verified against Apple's published keys with our own
+    bundle id as the audience.
+
+    Matching is on Apple's `sub`, never the email. The email can be a Hide My
+    Email relay alias, the user can turn that off later, and either way it is
+    not a stable identifier; `sub` is stable for this app forever.
+    """
+    try:
+        claims = verify_identity_token(
+            request.identity_token,
+            fetch_apple_keys(),
+            os.getenv("APPLE_BUNDLE_ID", APPLE_DEFAULT_BUNDLE_ID),
+        )
+    except AppleAuthError as e:
+        print(f"[apple] rejected sign-in: {e}", flush=True)
+        raise HTTPException(status_code=401, detail={
+            "error": "apple_token_invalid",
+            "message": "Could not verify that Apple sign-in. Please try again."
+        })
+
+    subject = claims["sub"]
+    email = (claims.get("email") or "").lower().strip()
+    now = now_iso()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # business_name comes back on purpose: the client shows its
+        # "what's your bar called?" step only when this is still empty.
+        user_columns = """id, email, name, business_name, subscription_status, subscription_tier,
+                          trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at"""
+
+        # 1. Returning Apple user.
+        cursor.execute(
+            f"SELECT {user_columns} FROM users WHERE apple_subject = %s AND deleted_at IS NULL",
+            (subject,)
+        )
+        row = cursor.fetchone()
+
+        # 2. Existing password account on the same address — link rather than
+        #    collide. Without this, someone who registered with an email and
+        #    later taps the Apple button hits a UNIQUE violation on an account
+        #    that is plainly theirs.
+        if not row and email:
+            cursor.execute(
+                f"SELECT {user_columns} FROM users WHERE email = %s AND deleted_at IS NULL",
+                (email,)
+            )
+            row = cursor.fetchone()
+            if row:
+                cursor.execute(
+                    "UPDATE users SET apple_subject = %s, updated_at = %s WHERE id = %s",
+                    (subject, now, row["id"])
+                )
+                conn.commit()
+
+        # 3. Brand new account.
+        if not row:
+            if not request.terms_accepted:
+                raise HTTPException(status_code=400, detail={
+                    "error": "terms_not_accepted",
+                    "message": "You must accept the terms of service to create an account"
+                })
+            if not email:
+                # Apple omits the email if the user has revoked this app's
+                # access and re-authorized in an unusual state. Nothing here
+                # can invent one, and email is the account's identity.
+                raise HTTPException(status_code=400, detail={
+                    "error": "apple_no_email",
+                    "message": "Apple didn't share an email address. Sign up with an email instead."
+                })
+
+            user_id = generate_id()
+            trial_ends = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            cursor.execute("""
+                INSERT INTO users (id, email, password_hash, name, business_name, apple_subject,
+                                   auth_provider, terms_accepted_at, privacy_accepted_at,
+                                   trial_started_at, trial_ends_at, subscription_status,
+                                   subscription_tier, created_at, updated_at)
+                VALUES (%s, %s, NULL, %s, %s, %s, 'apple', %s, %s, %s, %s, 'trial', 'starter', %s, %s)
+            """, (
+                user_id, email, request.name, request.business_name, subject,
+                now, now, now, trial_ends, now, now,
+            ))
+            conn.commit()
+
+            if is_private_relay(email):
+                # Worth a log line: this address was never published by the
+                # venue, so /v1/crm/attribution/rematch cannot match it to a
+                # lead by email and will fall back to the business name.
+                print(f"[apple] new account on a Hide My Email alias (user {user_id})", flush=True)
+
+            return {
+                "user": {
+                    "id": user_id,
+                    "email": email,
+                    "name": request.name,
+                    "business_name": request.business_name,
+                    "subscription_status": "trial",
+                    "subscription_tier": "starter",
+                    "trial_ends_at": trial_ends,
+                    "terms_accepted_at": now,
+                    "privacy_accepted_at": now,
+                    "created_at": now,
+                },
+                "access_token": create_access_token(user_id),
+                "refresh_token": create_refresh_token(user_id),
+                "expires_in": 3600,
+            }
+
+        # Returning user: fill in anything Apple gave us that we don't have
+        # yet. Only ever fills blanks — a name the user has since edited in
+        # Settings must not be overwritten by the one Apple cached at signup.
+        fills, params = [], []
+        if request.name:
+            fills.append("name = COALESCE(NULLIF(name, ''), %s)")
+            params.append(request.name)
+        if request.business_name:
+            fills.append("business_name = COALESCE(NULLIF(business_name, ''), %s)")
+            params.append(request.business_name)
+        if fills:
+            params.extend([now, row["id"]])
+            cursor.execute(
+                f"UPDATE users SET {', '.join(fills)}, updated_at = %s WHERE id = %s",
+                tuple(params)
+            )
+            conn.commit()
+
+        return {
+            "user": {
+                "id": row["id"],
+                "email": row["email"],
+                "name": row["name"] or request.name,
+                "business_name": row["business_name"] or request.business_name,
+                "subscription_status": row["subscription_status"] or "trial",
+                "subscription_tier": row["subscription_tier"] or "starter",
+                "trial_ends_at": row["trial_ends_at"],
+                "terms_accepted_at": row["terms_accepted_at"],
+                "privacy_accepted_at": row["privacy_accepted_at"],
+                "created_at": row["created_at"],
+            },
+            "access_token": create_access_token(row["id"]),
+            "refresh_token": create_refresh_token(row["id"]),
+            "expires_in": 3600,
+        }
+
 
 @v1_router.post("/auth/refresh", response_model=RefreshResponse)
 def refresh_token(refresh_data: RefreshRequest):
@@ -3200,7 +3372,12 @@ def delete_user(request: DeleteAccountRequest, user_id: str = Depends(get_curren
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
-        if not verify_password(request.password, row["password_hash"]):
+        # An Apple-only account has no password to re-confirm. The caller is
+        # already holding a valid access token for this exact user, and
+        # guideline 5.1.1(ix) requires deletion to be possible in-app — so
+        # demanding a password that cannot exist would just make the account
+        # undeletable.
+        if row["password_hash"] and not verify_password(request.password, row["password_hash"]):
             raise HTTPException(status_code=401, detail={"error": "invalid_password", "message": "Password is incorrect"})
         cursor.execute("""
             UPDATE users SET deleted_at = %s, email = CONCAT(email, '.deleted.', %s), updated_at = %s
@@ -3881,33 +4058,63 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
         print(f"[analyze_bottle] total timeout exceeded ({TOTAL_SCAN_TIMEOUT_SEC}s)", flush=True)
         return JSONResponse(status_code=200, content=None)
 
-# ============== MARKET PULSE ENDPOINT ==============
+# ============== APP FUNNEL EVENTS ==============
 
-@app.get("/market-pulse")
-def market_pulse():
-    """Free daily market briefing for agents — become infrastructure"""
-    return {
-        "date": datetime.now(timezone.utc).isoformat(),
-        "pulse": {
-            "trending_skills": ["backend APIs", "automation", "Claude integrations"],
-            "rate_benchmarks": {
-                "backend_api": "$50-500",
-                "automation_script": "$30-200",
-                "code_review": "$30-100"
-            },
-            "opportunity_alerts": [
-                "High demand for x402 payment integration",
-                "Underserved: agent-to-agent escrow",
-                "Emerging: multi-agent workflow orchestration"
-            ],
-            "platform_updates": [
-                "Moltbook verification challenges active",
-                "ClawTasks expanding to Solana bounties"
-            ]
-        },
-        "source": "reefbackend",
-        "subscribe": "Reply with your handle to join distribution list"
-    }
+# The five steps between opening the app and having an account. Everything
+# after this point is already measurable from `users`, `inventory_sessions`
+# and /v1/crm/funnel; none of it is, which is why "does the sign-up screen
+# lose people" has never had an answer.
+APP_EVENTS = {
+    "app_opened",
+    "login_viewed",
+    "register_viewed",
+    "register_submitted",
+    "register_succeeded",
+}
+
+
+@v1_router.post("/events", status_code=202)
+def record_app_events(batch: AppEventBatch, authorization: str = Header(None)):
+    """Record client funnel events. Unauthenticated, allowlisted, best-effort.
+
+    Unauthenticated because the events worth having happen before the account
+    exists. A bearer token is read when one is present so post-sign-up events
+    carry a user_id, but a bad or expired token is ignored rather than
+    rejected — losing a metric must never surface as an error in the app.
+
+    Returns 202 whatever happens: analytics is not worth failing a user's
+    session over, and the client treats this as fire-and-forget.
+    """
+    events = [e for e in batch.events if e in APP_EVENTS]
+    if not events:
+        return {"accepted": 0}
+
+    user_id = None
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer":
+            claims = get_token_claims(token, "access")
+            if claims:
+                user_id = claims.get("sub")
+
+    now = now_iso()
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            for event in events:
+                cursor.execute("""
+                    INSERT INTO app_events
+                        (id, anon_id, user_id, event, platform, app_version, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (str(uuid.uuid4()), batch.anon_id, user_id, event,
+                      batch.platform, batch.app_version, now))
+            conn.commit()
+    except Exception as e:
+        print(f"[events] failed to record {len(events)} event(s): {e}", flush=True)
+        return {"accepted": 0}
+
+    return {"accepted": len(events)}
+
 
 # ============== INCLUDE V1 ROUTER ==============
 

@@ -108,6 +108,14 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - leadgen.py — the daily lead generator: harvest (OpenStreetMap/Overpass) → enrich (crawl
   the venue's site for an email) → qualify (drop chains, score) → promote (top N into
   crm_leads each morning). See the LEAD GENERATOR section below
+- apple_auth.py — Sign in with Apple identity-token verification. Pure over (token, keys,
+  bundle id), so it is tested without a database, a network or a real Apple account — which
+  matters more here than elsewhere, because a token that verifies IS the user. Needs NO API
+  key and no secret: the token is an RS256 JWT signed by Apple, checked against Apple's
+  published JWKS with our own bundle id as the audience, so there is no env var that can be
+  left unset in production and quietly disable the check. The algorithm is pinned to RS256
+  from the header before decoding — accepting the header's own `alg` is how an `alg=none`
+  or an HS256-signed-with-the-public-key forgery gets in. Covered by test_apple_auth.py
 - coach.py — cold-call PRACTICE, opened via **School** in the burger menu (`data-panel`
   section, same as Apple Analytics/Customers — it used to live inline in the Call list
   tab behind a "Warm up first" button, which put practice above the actual dial list; moving
@@ -144,8 +152,14 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   validator, call-window/service-band logic, timezone assignment, and manager/email
   classification, all pure. Run them: `pytest test_level_classifier.py test_phones.py
   test_callwindow.py test_timezones.py test_contacts.py test_venue.py test_callnow.py
-  test_leadgen.py test_quick_add.py test_coach.py test_school.py test_ask.py
-  test_apple.py -q`
+  test_apple_auth.py test_leadgen.py test_quick_add.py test_coach.py test_school.py
+  test_ask.py test_apple.py -q` (333 tests)
+- test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
+  path), including the forgeries it must reject: another app's audience, a wrong issuer,
+  an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
+  HS256 token signed with the public key as its secret. Not to be confused with apple.py
+  below — same word, unrelated features: this one is auth.py-adjacent and pure over
+  (token, keys, bundle id); apple.py talks to App Store Connect for the CRM's analytics tab
 - test_leadgen.py — `_restaurant_pours()`, the restaurant liquor gate, pure (crawled text +
   OSM tags in, a yes/no and a reason out). Stubs `database` in `sys.modules` the same way
   test_callnow.py stubs it for crm
@@ -181,6 +195,20 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 
 ## Key API Routes (all under /v1)
 - POST /auth/register, /auth/login, /auth/refresh
+- POST /auth/apple — Sign in with Apple. Matched on Apple's `sub`, NEVER the email: the
+  address can be a Hide My Email relay alias, the user can switch it off later, and it is
+  not a stable identifier. An existing password account on the same address is LINKED
+  rather than colliding, and keeps its password. An Apple-only account has a NULL
+  `password_hash` — `/auth/login` and `DELETE /users/me` both guard that null explicitly,
+  since passlib raises on a None hash and a truthiness slip there is the difference between
+  "no password" and "any password works". Deletion skips the password re-confirmation for
+  those accounts; requiring a password that cannot exist would make them undeletable, which
+  guideline 5.1.1(ix) does not allow
+- POST /events — five allowlisted client funnel events (app_opened, login_viewed,
+  register_viewed, register_submitted, register_succeeded). Unauthenticated because the
+  events worth having happen before an account exists; kept safe by a fixed event list, a
+  capped batch and no free-form properties column. Always answers 202 — a lost metric must
+  never surface as an error in the app
 - GET/POST /products, GET /products/search, GET /products/barcode/{upc}
 - POST /products/{product_id}/merge — merges a duplicate product into a target (aliases, par_levels, distributors)
 - GET/POST /locations, GET/POST /locations/{id}/par-levels
@@ -453,6 +481,11 @@ capture. Don't reintroduce them or describe them as current.)
   handling elsewhere: the account simply can't log in again and its email frees up. A hard
   `DELETE FROM users` was never an option here anyway — `locations.user_id` is a real foreign
   key, so it would fail outright the moment the account has any
+- `GET /v1/crm/app-funnel?days=` — the steps BEFORE an account exists, from `app_events`.
+  `/funnel` starts at `users` and measures forward; this measures up to that same point, so
+  together they cover download → paying customer with no blind segment. Counts DISTINCT
+  INSTALLS, not raw events — someone who opens the sign-up form four times is one person
+  deciding, not four
 - `GET/POST /v1/crm/suppressions` — do-not-call. Checked at promote time, so a suppressed
   venue can never re-enter the pipeline through the generator either
 - `GET /v1/crm/leadgen/export.csv?scope=today|queue|all` — for an auto-dialer
@@ -800,6 +833,9 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   LEADGEN_ENRICH_WORKERS (8),
   LEADGEN_RUN_HOUR (18 = 6pm, local) — optional lead generator tuning. No API key needed: the
   generator uses OpenStreetMap, which has neither keys nor billing
+- APPLE_BUNDLE_ID — optional, the audience Apple identity tokens must carry (default
+  `com.my86d.app`). There is no Apple secret to set: leaving this unset uses the real bundle
+  id, never a weaker check
 - APPLE_ISSUER_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY (+ optional APPLE_APP_ID) — optional; the
   Apple Analytics tab's App Store Connect team key. Unset is fine: the tab's Connect form
   saves the key instead (encrypted). `\n` in APPLE_PRIVATE_KEY is accepted

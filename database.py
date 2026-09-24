@@ -473,7 +473,11 @@ def init_db():
         conn.commit()
 
         # Migrate users: add business_name, manager_name, stripe_customer_id, trial_reminder_sent_at, password_changed_at columns if absent
-        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT")]:
+        # auth_provider/apple_subject carry Sign in with Apple: apple_subject is
+        # the stable per-app user id Apple returns, and is what a returning
+        # sign-in is matched on — not the email, which the user can rotate or
+        # hide behind a relay alias at any time.
+        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'users' AND column_name = %s
@@ -596,6 +600,57 @@ def init_db():
                 print(f"[db] migrated locations: added {col} {col_def}", flush=True)
         conn.commit()
 
+
+        # An account created through Sign in with Apple has no password at all,
+        # so password_hash can no longer be NOT NULL. Every path that compares
+        # a password guards for the null (see login and delete_user in main.py)
+        # — a null hash must read as "this account has no password", never as
+        # "any password will do".
+        cursor.execute("""
+            SELECT is_nullable FROM information_schema.columns
+            WHERE table_name = 'users' AND column_name = 'password_hash'
+        """)
+        row = cursor.fetchone()
+        if row and row["is_nullable"] == "NO":
+            cursor.execute("ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL")
+            print("[db] migrated users: password_hash is now nullable (social sign-in)", flush=True)
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_apple_subject
+            ON users(apple_subject) WHERE apple_subject IS NOT NULL AND deleted_at IS NULL
+        """)
+        conn.commit()
+
+        # App funnel events. The product API can only see a user once the row
+        # exists, so everything before that — opened the app, reached the
+        # sign-up form, abandoned it — was invisible. These five events fill in
+        # exactly that gap and nothing more.
+        #
+        # anon_id is a per-install random id, not a device identifier: it exists
+        # so one install's open → view → submit can be joined into a funnel, and
+        # it is regenerated if the app is reinstalled. There is deliberately no
+        # free-form properties column — the write route is unauthenticated (a
+        # pre-signup event has no user to authenticate), and a JSON blob on an
+        # open endpoint is somebody else's storage.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_events (
+                id TEXT PRIMARY KEY,
+                anon_id TEXT NOT NULL,
+                user_id TEXT,
+                event TEXT NOT NULL,
+                platform TEXT,
+                app_version TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_app_events_event_created
+            ON app_events(event, created_at)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_app_events_anon
+            ON app_events(anon_id)
+        """)
+        conn.commit()
 
         # Seed products — always runs but is idempotent (checks name+brand before insert)
         seed_products(conn)

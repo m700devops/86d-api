@@ -1200,6 +1200,69 @@ def funnel(_: bool = Depends(require_crm_key)):
         }
 
 
+# ============== APP FUNNEL (pre-signup) ==============
+
+@crm_router.get("/app-funnel", response_model=dict)
+def app_funnel(days: int = 30, _: bool = Depends(require_crm_key)):
+    """The steps before an account exists, from the app_events table.
+
+    /funnel starts at `users` and measures forward. This starts at the app
+    icon being tapped and measures up to that same point, so the two together
+    cover download → paying customer with no blind segment in the middle.
+
+    Counts are DISTINCT INSTALLS, not raw events: someone who opens the
+    sign-up form four times is one person deciding, not four. Rates are
+    step-over-previous-step, because that is where a fix goes.
+    """
+    days = max(1, min(days, 365))
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT event, COUNT(DISTINCT anon_id) AS installs, COUNT(*) AS events
+              FROM app_events
+             WHERE created_at >= %s
+             GROUP BY event
+        """, (since,))
+        rows = {r["event"]: r for r in cursor.fetchall()}
+
+    def installs(event: str) -> int:
+        row = rows.get(event)
+        return int(row["installs"]) if row else 0
+
+    opened = installs("app_opened")
+    reg_viewed = installs("register_viewed")
+    reg_submitted = installs("register_submitted")
+    reg_succeeded = installs("register_succeeded")
+
+    def pct(n: int, d: int):
+        return round(n * 100.0 / d, 1) if d else None
+
+    return {
+        "days": days,
+        "steps": {
+            "opened_app": opened,
+            "saw_login": installs("login_viewed"),
+            "reached_signup": reg_viewed,
+            "submitted_signup": reg_submitted,
+            "created_account": reg_succeeded,
+        },
+        "step_rates_pct": {
+            "opened_to_signup_form": pct(reg_viewed, opened),
+            "form_to_submitted": pct(reg_submitted, reg_viewed),
+            "submitted_to_created": pct(reg_succeeded, reg_submitted),
+            "opened_to_created": pct(reg_succeeded, opened),
+        },
+        # The two numbers this endpoint exists to produce. The first is the
+        # cost of the sign-up wall; the second is the cost of the form itself
+        # (a submit that never became an account is a validation failure, a
+        # duplicate email or a dead connection).
+        "abandoned_at_form": max(0, reg_viewed - reg_submitted),
+        "failed_after_submit": max(0, reg_submitted - reg_succeeded),
+    }
+
+
 # ============== USERS (app customers) ==============
 
 # The three subscription_status values billing_webhook (main.py) ever writes.
