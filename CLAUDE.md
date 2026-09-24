@@ -605,7 +605,10 @@ capture. Don't reintroduce them or describe them as current.)
   Pacific ones in their lull are both good calls, and the zone stops mattering once you know
   it's their quiet half hour
 - The page refreshes this every 60s while it's on screen. Windows open and shut on the clock,
-  so a list left sitting goes stale under you
+  so a list left sitting goes stale under you. **The refresh (`refreshNowQuietly`) skips while any drawer is
+  open or focus is in the list, and keeps the scroll position when it redraws** — it used to
+  redraw the whole table on the clock, destroying an open Log box and everything typed in it
+  and jumping the page mid-call
 - **`CRM_OPERATOR_TZ` (default `Asia/Manila`) is where the caller is.** The operator is in
   Iloilo, UTC+8, so the entire US calling day lands in the middle of their night — US Eastern
   afternoon is roughly 2-4am there. The page dropped its persistent "your clock" readout when

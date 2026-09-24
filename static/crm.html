@@ -1071,6 +1071,21 @@ async function runDraft(dr, id){
 
 function stopNowTimer(){ if(nowTimer){ clearInterval(nowTimer); nowTimer=null; } }
 
+/* The 60-second refresh must never pull the list out from under someone
+   mid-call. It used to redraw the whole table on the clock, which destroyed
+   an open Log box — and everything typed in it — and jumped the page. Now it
+   waits while any drawer is open or focus is in the list, and keeps the
+   scroll position when it does redraw. */
+function callsBusy(){
+  return !!document.querySelector('#zones tr.drawer') || $('zones').contains(document.activeElement);
+}
+async function refreshNowQuietly(){
+  if(TAB!=='calls' || callsBusy()) return;
+  const y=window.scrollY;
+  await loadNow();
+  window.scrollTo(0, y);
+}
+
 async function loadNow(){
   const d=await api('/now'); NOWDATA=d;
   d.ready=d.ready.filter(l=>!SKIPPED.has(l.id));
@@ -1098,7 +1113,7 @@ async function loadNow(){
         + d.rest_count + ' outside a window. Press the button again once one opens.</p></div>';
     }
     // Windows open and shut on the clock — keep checking even while empty.
-    if(!nowTimer) nowTimer=setInterval(()=>{ if(TAB==='calls') loadNow(); }, 60000);
+    if(!nowTimer) nowTimer=setInterval(refreshNowQuietly, 60000);
     return d;
   }
 
@@ -1119,7 +1134,7 @@ async function loadNow(){
     </div></div>`;
 
   // Windows open and shut on the clock, so a list left sitting goes stale.
-  if(!nowTimer) nowTimer=setInterval(()=>{ if(TAB==='calls') loadNow(); }, 60000);
+  if(!nowTimer) nowTimer=setInterval(refreshNowQuietly, 60000);
   return d;
 }
 
