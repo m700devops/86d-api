@@ -49,8 +49,40 @@ _ROLE_THEN_NAME = re.compile(
 # "owner Dave Smith" / "our general manager Dave Smith"
 _ROLE_SPACE_NAME = re.compile(rf"\b({_ROLE_ALT})\s+({_NAME})\b")
 
-_TAG_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.I | re.S)
-_ANY_TAG = re.compile(r"<[^>]+>")
+# `[^<>]`, not `[^>]`: a tag stops at the next '<' too, so a page of '<'
+# with no '>' is one pass, not a re-scan from every '<' to the end.
+_ANY_TAG = re.compile(r"<[^<>]{0,2000}>")
+_BREAK_TAG = re.compile(r"<\s{0,5}(br|/p|/div|/li|/h[1-6]|/td|/tr)\b[^<>]{0,500}>", re.I)
+# Script and style bodies and HTML comments — never the venue's own words —
+# stripped by a scan, not a `.*?` regex: that one re-scanned to the end of the
+# page from every unclosed `<!--` or `<script>`, quadratic on a page that has
+# many, and re holds the GIL the whole time. An unclosed block runs to the end
+# of the page, which is what a browser does with it too.
+_NON_CONTENT_OPEN_RE = re.compile(r"<(script|style)\b|<!--", re.I)
+
+
+def strip_non_content(html: str) -> str:
+    html = html or ""
+    lower = html.lower()
+    out, pos = [], 0
+    while True:
+        m = _NON_CONTENT_OPEN_RE.search(html, pos)
+        if not m:
+            out.append(html[pos:])
+            break
+        out.append(html[pos:m.start()])
+        closer = "-->" if m.group(0) == "<!--" else "</" + m.group(1).lower()
+        end = lower.find(closer, m.end())
+        if end < 0:
+            break
+        end = lower.find(">", end + len(closer) - 1)
+        if end < 0:
+            break
+        out.append(" ")
+        pos = end + 1
+    return "".join(out)
+
+
 _WS = re.compile(r"[ \t ]+")
 
 # Words that look like names to a regex but never are. Mostly the surrounding
@@ -76,8 +108,8 @@ def _visible_text(html: str) -> str:
     """
     if not html:
         return ""
-    text = _TAG_RE.sub(" ", html)
-    text = re.sub(r"<\s*(br|/p|/div|/li|/h[1-6]|/td|/tr)\s*[^>]*>", "\n", text, flags=re.I)
+    text = strip_non_content(html)
+    text = _BREAK_TAG.sub("\n", text)
     text = _ANY_TAG.sub(" ", text)
     # Full entity decoding, not a handful of replacements: "Sarah Chen &mdash;
     # Beverage Director" is a real shape and a hand-rolled list missed it.

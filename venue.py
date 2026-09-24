@@ -23,6 +23,8 @@ import json
 import re
 from typing import Optional
 
+from contacts import strip_non_content
+
 # Phrases a venue writes about itself. Each pattern captures the number or
 # name that makes the fact concrete, so nothing is reported vaguely.
 _SITE_PATTERNS = [
@@ -45,14 +47,14 @@ _SITE_FLAGS = [
     ("multiple_locations", re.compile(r"our locations|all locations|other locations", re.I)),
 ]
 
-_TAG_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.I | re.S)
-_ANY_TAG = re.compile(r"<[^>]+>")
+# Linear on any page: see contacts.strip_non_content and test_hostile_pages.py.
+_ANY_TAG = re.compile(r"<[^<>]{0,2000}>")
 
 
 def _visible(html: str) -> str:
     if not html:
         return ""
-    text = _TAG_RE.sub(" ", html)
+    text = strip_non_content(html)
     text = _ANY_TAG.sub(" ", text)
     return re.sub(r"\s+", " ", text)
 
