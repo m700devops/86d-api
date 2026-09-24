@@ -18,6 +18,7 @@ ran on the cheapest model. crm.py sends this through `_claude_json` on a
 stronger one. Covered by test_pitch.py.
 """
 import os
+import re
 from typing import Optional
 
 OWNER_NAME = os.getenv("COMPANY_OWNER_NAME") or "Stephan"
@@ -55,9 +56,37 @@ Best,
 {OWNER_TITLE}"""
 
 
+# States with NO tip credit: tipped staff earn the full minimum wage, so an
+# hour spent counting bottles has a real, quotable labour cost. The strongest
+# angle there (86d-leads' pitch-angle rule, extended to every such state). In
+# tip-credit states the labour story is weaker: lead with time and accuracy.
+NO_TIP_CREDIT = {"AK", "CA", "MN", "MT", "NV", "OR", "WA"}
+
+
+def state_of(loc: Optional[str]) -> Optional[str]:
+    """"Austin, TX" -> "TX"."""
+    m = re.search(r",\s*([A-Z]{2})\s*$", (loc or "").strip())
+    return m.group(1) if m else None
+
+
+def state_angle(loc: Optional[str]) -> Optional[str]:
+    st = state_of(loc)
+    if not st:
+        return None
+    if st in NO_TIP_CREDIT:
+        return (f"{st} has no tip credit: whoever counts is paid full minimum wage for it, so "
+                "the hours the count takes are real money. Lead with the time and the labour.")
+    return (f"{st} allows a tip credit, so the labour-cost story is weaker there. Lead with "
+            "time back and orders that come in right.")
+
+
 def master_sheet() -> str:
-    """Who we are and what's true about the product. The ONLY product facts
-    the model may state."""
+    """Everything the AI may say about 86'd, and how to sell it honestly.
+
+    The FACTS sections are the only product facts any AI may state; every one
+    was checked against the code (see the module docstring). The rest is how an
+    owner would brief a new rep: who we're for, what hurts, what we can't do,
+    how to answer the usual pushback, and what we ask for."""
     return f"""WHO IS WRITING
 - {OWNER_NAME}, who built 86'd and owns it. Founder writing to a bar, not a sales team.
 - Direct line: {OWNER_PHONE}. Sign-off: "{OWNER_NAME}" then "{OWNER_TITLE}".
@@ -78,18 +107,61 @@ DETAILS THAT ARE TRUE
 - Every order goes out with the restaurant's name and the bar manager's name on it, and
   the bar gets a copy.
 - Each bottle's distributor, price and par level are set once; the app remembers them,
-  so the next count only asks for the number.
+  so the next count only asks for the number. The first count builds the book as you go:
+  there's no setup day.
 - Every order is saved: order history, spend by distributor, most-ordered items.
 - Staff names can be recorded against a count ("who counted this"); no extra logins.
 - Works across more than one bar on one account.
+- Nothing to buy or install beyond the app: no scale, no scanner, no hardware.
 
 PRICE
 - First month free. No credit card needed to start: download and go.
-- After that, {PRICE}. Cancel any time.
+- After that, {PRICE}. Cancel any time, from the app.
 
 LINKS (the only URLs that exist; never invent another)
 - App Store: {APP_URL}
-- Website: {WEBSITE}"""
+- Website: {WEBSITE}
+
+WHAT IT DOES NOT DO (never claim or imply otherwise)
+- No Android version. Whoever counts needs an iPhone.
+- It doesn't connect to a POS or read sales; the count is what's on the shelf.
+- It doesn't measure how full a bottle is: the count is tapped in by hand.
+- It doesn't order through distributor websites or portals: it emails the order to the
+  rep or the distributor's order address, the way most bars already order.
+- No customer numbers, testimonials, case studies or percentages exist to quote. Never
+  say "bars like yours", "hundreds of bars" or any figure beyond the price and the
+  10-15 minutes.
+
+WHO IT'S FOR
+- Independent bars and restaurants with a full bar: one to a few locations, buying from
+  their own distributor reps. Not chains with a corporate purchasing team.
+- The person who counts and orders: usually the owner, the GM or the bar manager — not
+  whoever answers the phone. Ask for them by role if there's no name.
+- Best fit: still counting on paper or a spreadsheet, and ordering by text, phone or email
+  to each rep separately.
+
+PAINS TO ASK ABOUT (as questions, never as statements about their bar)
+- How long the weekly count takes, when it happens, and who does it.
+- How orders go out today: texts and emails to each rep, typed up after the count.
+- Where the prices live: old invoices, a spreadsheet, someone's head.
+- Running out of a top seller on a Friday, or money sitting on the shelf from over-ordering.
+- What happens to the process when the person who does it leaves.
+
+HONEST ANSWERS TO THE USUAL PUSHBACK
+- "We already have a system." Ask what it is and how long a count takes with it. If it
+  works for them, say so and leave the door open. 86'd is for teams still counting by hand.
+- "I don't have time." That's the point: the count and the orders take 10-15 minutes. Offer
+  a five-minute call outside service, or just the link to try it on the next count.
+- "What does it cost?" {PRICE} after the free first month; no card to start.
+- "My staff use Android." It's iPhone only for now: whoever counts needs an iPhone.
+- "I order through my rep." Nothing changes with the rep: the app emails them the order.
+- "Send me something." Send the App Store link and one line on how it works, and ask when
+  to follow up.
+
+WHAT WE ASK FOR (one per email or call, never all three)
+- Try it on their next count: download from the App Store, first month free, no card.
+- A short call with {OWNER_NAME} to see it: {OWNER_PHONE}.
+- The name of whoever counts and orders, and when they're in."""
 
 
 STYLE = """HOW TO WRITE IT — founder to bar person, 2026, not a 2015 sales template
@@ -144,6 +216,9 @@ def lead_context(lead: dict, fact_lines: Optional[list] = None,
         role = lead.get("manager_role") or ("the person we spoke to" if lead.get("contact")
                                             else "listed on their website")
         out.append(f"Contact: {who} ({role})")
+    angle = state_angle(lead.get("loc"))
+    if angle:
+        out.append(f"Angle for this state: {angle}")
     if lead.get("opener"):
         out.append(f"From their own website: {lead['opener']}")
     for line in fact_lines or []:
