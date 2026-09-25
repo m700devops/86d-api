@@ -751,18 +751,7 @@
       <div id="askOut" class="askout hide"></div>
       <div class="pipebar">
         <input id="pipeSearch" placeholder="Search a bar, town, contact, email or phone number…">
-        <button class="go" id="pipeAdd">Add a lead</button>
-      </div>
-      <div class="card hide" id="pipeAddPanel" style="margin:10px 0">
-        <p class="hint">Paste or type everything — the bar, their listing, who you spoke to,
-          what happened. It sorts it into the lead, logs the call, and if there's no email it
-          goes and finds one on their website.</p>
-        <textarea id="pipeAddText" rows="5" placeholder="Murphy's Pub, Nashville. Talked to Sarah the bartender, owner is Dave, she said email him — address is on their website"></textarea>
-        <div class="row">
-          <button class="go" id="pipeAddSave">Add lead</button>
-          <button id="pipeAddCancel">Cancel</button>
-        </div>
-        <div class="applied hide" id="pipeAddResult"></div>
+        <button class="go" id="pipeLookup">Look Up</button>
       </div>
       <div class="glance" id="pipeStats"></div>
       <div id="pipeBody"></div>
@@ -2252,57 +2241,19 @@ async function pipeDrawer(dr,e){
   }
 }
 
-// A bare name-only prompt() used to be the whole "Add a lead" flow, which
-// left every real field ("fill the rest in with Edit") for later. This
-// creates the lead AND logs the call that prompted adding it, in the same
-// step, through the same AI reader /debrief uses on an existing lead — so
-// a call to a bar that was never in the pipeline has somewhere to go
-// besides typed-in-by-hand.
-//
-// The bar name is its own field, typed directly, NOT pulled from the free
-// text by the model. It used to be: real notes pasted straight off a
-// website's contact block ("Olde Town Tavern & Grill at (720) 242-9667...
-// Website: Olde Town Tavern & Grill, Called this place...") came back
-// "couldn't tell which bar this was" — messy pasted text plus an
-// instruction to never guess is exactly what makes a cautious model
-// withhold a name that's sitting right there. A required field can't fail
-// to arrive; the model only extracts what's genuinely optional now.
-$('pipeAdd').onclick=()=>{
-  const box=$('pipeAddPanel');
-  box.classList.toggle('hide');
-  if(!box.classList.contains('hide')){
-    $('pipeAddText').value='';
-    $('pipeAddResult').className='applied hide';
-    $('pipeAddText').focus();
-  }
-};
-$('pipeAddCancel').onclick=()=>{ $('pipeAddPanel').classList.add('hide'); };
-$('pipeAddSave').onclick=async()=>{
-  const text=$('pipeAddText').value.trim();
-  const box=$('pipeAddResult'); box.className='applied hide';
-  if(!text){ box.className='applied err'; box.textContent='Say what happened on the call.';
-             return $('pipeAddText').focus(); }
-  const btn=$('pipeAddSave'); btn.disabled=true; btn.textContent='Adding… (checking their website)';
-  try{
-    const r=await api('/leads/quick-add',{method:'POST',body:JSON.stringify({text})});
-    box.className='applied';
-    // A bar already in the book gets the call on its existing row, and the
-    // message says so — otherwise "Added" would read like a second copy.
-    box.textContent=(r.applied.matched_existing
-        ? `${r.lead.name} was already in your book — logged the call on it`
-        : `Added ${r.lead.name}`)
-      +`${r.applied.status?' — '+r.applied.status:''}.`
-      +(r.applied.followup_date?` Follow up ${r.applied.followup_date}.`:'')
-      +(r.applied.email_found_on?` Found ${r.lead.email} on their site.`:'')
-      +(r.applied.email_lookup?` Email: ${r.applied.email_lookup}.`:'');
-    toast(r.applied.matched_existing?'Call logged':'Lead added', r.undo_id);
-    $('pipeAddText').value='';
-    PIPE.q=''; $('pipeSearch').value=''; PIPE.offset=0;
-    await loadPipeline();
-  }catch(err){
-    box.className='applied err'; box.textContent=err.message;
-  }finally{ btn.disabled=false; btn.textContent='Add lead'; }
-};
+// "Look Up" finds what's typed in the search box now, without waiting for
+// the typing pause. It was "Add a lead", which opened a paste box the owner
+// found didn't add anything; a new bar is added by telling the AI in the box
+// above (it creates the lead and logs the call — /assist, see CLAUDE.md).
+function lookUp(){
+  clearTimeout(pipeTimer);
+  const v=$('pipeSearch').value.trim();
+  if(!v){ $('pipeSearch').focus(); return toast('Type a bar, town, contact, email or phone to look up'); }
+  PIPE.q=v; PIPE.offset=0;
+  loadPipeline().catch(x=>toast(x.message));
+}
+$('pipeLookup').onclick=lookUp;
+$('pipeSearch').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); lookUp(); } };
 
 /* ── follow-ups ───────────────────────────────────────────────────────── */
 function tryCell(l){
