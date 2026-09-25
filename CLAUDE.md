@@ -1281,9 +1281,12 @@ capture. Don't reintroduce them or describe them as current.)
   `/debrief` only ever updates a lead that already exists; this describes the call in plain
   words and creates the lead AND logs that first call in one step, sharing `_apply_call_notes()`
   (extracted from `/debrief`'s body) so a brand-new lead gets the exact same undo/counter/
-  cadence handling an old one's touch gets, not a thinner copy of it. On the CRM tab, "Add a
-  lead" opens this (a bare `prompt()` for a name used to be the whole flow, leaving every
-  real field for later "Edit")
+  cadence handling an old one's touch gets, not a thinner copy of it. **The CRM tab no longer
+  has an "Add a lead" button** (2026-09-25, the owner's call): it opened a paste box the
+  owner found didn't add anything, and is now **Look Up** beside the search box — it runs
+  the search on what's typed (Enter does the same). New bars are added by telling the AI
+  (the Ask AI box on the CRM tab or Follow-ups' bar, `/assist` → `_quick_add()`); the
+  `/leads/quick-add` route itself is unchanged
 - **Quick-add takes ONE paste box — no separate name field.** The name comes from the model
   (`QUICK_ADD_SYSTEM` tells it the venue is almost always the first thing in pasted notes and
   to always return it), then `_name_from_text()` (the text before the first phone number,
