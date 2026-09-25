@@ -18,8 +18,17 @@ if not DATABASE_URL:
 # Pool is lazy-initialised on first get_db() call and rebuilt automatically
 # after all retries are exhausted on a dead-connection burst.
 
+POOL_MAX = 10
+# How long a request waits for a free connection when all POOL_MAX are in use.
+# psycopg2's pool doesn't wait at all — getconn() on a full pool raises
+# PoolError at once — so a burst of more than ten requests (the threadpool runs
+# up to forty) turned straight into 500s on scans and logins. The semaphore
+# makes the eleventh caller queue for a moment instead.
+POOL_WAIT_SECONDS = float(os.getenv("DB_POOL_WAIT_SECONDS", "15"))
+
 _pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 _pool_lock = threading.Lock()
+_slots = threading.BoundedSemaphore(POOL_MAX)
 
 _CONN_ERRORS = (psycopg2.OperationalError, psycopg2.InterfaceError)
 _BACKOFF = (0.3, 0.6)   # seconds between attempts 1→2 and 2→3
@@ -33,7 +42,7 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
         if _pool is None:
             _pool = psycopg2.pool.ThreadedConnectionPool(
                 minconn=1,
-                maxconn=10,
+                maxconn=POOL_MAX,
                 dsn=DATABASE_URL,
                 keepalives=1,
                 keepalives_idle=30,
@@ -79,12 +88,28 @@ def get_db():
       - Any OperationalError/InterfaceError → rollback, drop the conn, re-raise
         (no retry — the caller's transaction is already broken)
       - Any other exception → rollback, return conn to pool normally, re-raise
+
+    With every connection in use, a caller waits up to POOL_WAIT_SECONDS for
+    one to come back rather than failing on the spot.
     """
+    if not _slots.acquire(timeout=POOL_WAIT_SECONDS):
+        print(f"[db] DB_POOL_WAIT_TIMEOUT all {POOL_MAX} connections busy for "
+              f"{POOL_WAIT_SECONDS:g}s", flush=True)
+        raise psycopg2.pool.PoolError("timed out waiting for a free database connection")
+    try:
+        with _borrowed() as (conn, pool):
+            yield conn
+    finally:
+        _slots.release()
+
+
+@contextmanager
+def _borrowed():
+    """The pool half of get_db(): acquire, validate, hand out, give back.
+    Only ever entered while holding one of the POOL_MAX slots."""
     conn = None
     pool = None
     last_error: Exception = Exception("unreachable")
-
-    # TODO: handle psycopg2.pool.PoolError (all 10 conns checked out) at scale
     for attempt in range(3):
         try:
             pool = _get_pool()
@@ -110,7 +135,7 @@ def get_db():
 
     # ── User code ────────────────────────────────────────────────────────────
     try:
-        yield conn
+        yield conn, pool
     except _CONN_ERRORS:
         # Broken mid-transaction — drop this conn, don't return it to pool
         try:
@@ -129,7 +154,16 @@ def get_db():
         raise
     finally:
         if conn is not None and pool is not None:
-            pool.putconn(conn)
+            try:
+                pool.putconn(conn)
+            except psycopg2.pool.PoolError:
+                # The pool was drained (closed) by another thread while this
+                # one held a connection. The work here already succeeded —
+                # don't turn it into a 500 on the way out; just close the conn.
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 
 def init_db():
@@ -477,7 +511,9 @@ def init_db():
         # the stable per-app user id Apple returns, and is what a returning
         # sign-in is matched on — not the email, which the user can rotate or
         # hide behind a relay alias at any time.
-        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT")]:
+        # password_reset_attempts: wrong reset codes against the current one —
+        # the code is thrown away after RESET_MAX_ATTEMPTS (main.reset_password).
+        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT"), ("password_reset_attempts", "INTEGER DEFAULT 0")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'users' AND column_name = %s
@@ -501,6 +537,40 @@ def init_db():
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER")
                 print(f"[db] migrated {table}: added {col} INTEGER", flush=True)
+        conn.commit()
+
+        # Accounts deleted from the CRM before it freed their address still hold
+        # it under users' UNIQUE email index, so that person can never sign up
+        # again. Free them the way the app's own delete does. Idempotent.
+        cursor.execute("""
+            UPDATE users SET email = CONCAT(email, '.deleted.', SUBSTRING(id FROM 1 FOR 8))
+             WHERE deleted_at IS NOT NULL AND email NOT LIKE '%%.deleted.%%'
+        """)
+        if cursor.rowcount:
+            print(f"[db] freed the email of {cursor.rowcount} deleted account(s)", flush=True)
+        conn.commit()
+
+        # One row per (order the app is sending, distributor, exact items): the
+        # claim that stops a retry emailing a distributor the same order twice.
+        # The app tags each order with a client_ref; a send whose response was
+        # lost (bar wifi, a timeout) is retried under the same ref, and a
+        # distributor already 'sent' under it is skipped. See
+        # main.send_order_emails.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS order_sends (
+                user_id TEXT NOT NULL,
+                client_ref TEXT NOT NULL,
+                distributor_id TEXT NOT NULL,
+                items_hash TEXT NOT NULL,
+                status TEXT NOT NULL,           -- sending | sent | failed
+                order_number INTEGER,
+                email TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, client_ref, distributor_id, items_hash)
+            )
+        """)
         conn.commit()
 
         # Migrate par_levels: add full_quantity, current_stock, price columns if absent
