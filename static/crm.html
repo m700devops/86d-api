@@ -291,6 +291,15 @@
   .atile .av{font-size:26px;font-weight:650;letter-spacing:-0.5px;margin-top:2px}
   .atile .delta{font-size:12px;font-weight:600;margin-top:2px;color:var(--text2)}
   .atile .delta span{font-weight:400;color:var(--text3);margin-left:4px}
+  /* The scanner's head-to-head: one row per measure, one column per AI, so two
+     AIs sit side by side even on a phone. Not the call list's pinned action
+     column — here the last column is just the other AI. */
+  table.sheet.vs td:last-child,table.sheet.vs th:last-child{position:static;box-shadow:none}
+  table.sheet.vs td:first-child{color:var(--text2)}
+  table.sheet.vs td.num{text-align:right;white-space:nowrap}
+  table.sheet.vs th.num{text-align:right}
+  .scannotes{font-size:12px;margin-top:14px;line-height:1.5}
+  .scannotes p{margin:0 0 6px}
   .atile .delta.good{color:var(--go)} .atile .delta.bad{color:var(--stop)}
   .spark{display:flex;align-items:flex-end;gap:2px;height:34px;margin-top:10px}
   .spark i{flex:1;background:var(--line2);border-radius:2px 2px 0 0;min-width:2px}
@@ -479,6 +488,8 @@
             <em>App Store impressions, downloads, sessions, crashes</em></button>
           <button data-tab="users" role="menuitem">Customers
             <em>everyone who signed up in the app</em></button>
+          <button data-tab="scanner" role="menuitem">Scanner
+            <em>how well each AI reads bottles, and how fast</em></button>
           <button data-tab="school" role="menuitem">School
             <em>warm up and learn before you dial</em></button>
           <button data-tab="yet" role="menuitem">Yet to Contact
@@ -828,6 +839,11 @@
       <div id="appleBody"></div>
     </section>
 
+    <!-- How each AI reads bottles, from the app's own scan log (scanstats.py). -->
+    <section data-panel="scanner" class="hide">
+      <div id="scannerBody"></div>
+    </section>
+
   </div>
 </div>
 <div id="toast"></div>
@@ -949,7 +965,7 @@ function switchTab(b){
     .forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
-    apple:loadApple,users:loadUsers,yet:loadPipeline,brain:loadBrain,
+    apple:loadApple,users:loadUsers,yet:loadPipeline,brain:loadBrain,scanner:loadScanner,
     school:loadSchoolPanel}[TAB])()
     .catch(e=>toast(e.message));
 }
@@ -2754,6 +2770,79 @@ $('apSave').onclick=async()=>{
   }catch(x){
     box.className='applied err'; box.textContent=x.message;
   }finally{ btn.disabled=false; btn.textContent='Connect'; }
+};
+
+/* ── the scanner ───────────────────────────────────────────────────────────
+   How each AI reads bottles (GET /scanner, scanstats.py on the server). Both
+   AIs read every photo, so they're compared on the same photos. It shows
+   counts, not a verdict: until enough disagreements have been settled by
+   staff, it says so rather than naming a winner. */
+const SCANNER={days:30};
+const AI_NAME={openai:'OpenAI',gemini:'Gemini'};
+const secs=ms=>ms==null?'—':(ms<10000?(ms/1000).toFixed(1):String(Math.round(ms/1000)))+'s';
+const pct=(n,d)=>d?Math.round(n*100/d)+'%':'—';
+
+async function loadScanner(){
+  const d=await api('/scanner?days='+SCANNER.days);
+  const o=d.overall;
+  const head=`<div class="applehead">
+      <div><strong>Bottle scanner</strong>
+        <span class="muted">both AIs read every photo; this is how each did</span></div>
+      <div class="aseg">${[7,30,90].map(w=>`<button data-sdays="${w}" class="${w===d.days?'on':''}">${w} days</button>`).join('')}</div>
+    </div>`;
+  if(!o.scans){
+    $('scannerBody').innerHTML=head+`<div class="banner">No scans in the last ${d.days} days yet.</div>`;
+    return;
+  }
+  const tile=(label,value,sub)=>`<div class="atile"><div class="al">${esc(label)}</div>
+    <div class="av">${esc(value)}</div>${sub?`<div class="delta"><span>${esc(sub)}</span></div>`:''}</div>`;
+  const tiles=`<div class="agrid">
+    ${tile('Scans', compact(o.scans), `${compact(o.identified)} identified`)}
+    ${tile('Asked for a retake', pct(o.retakes,o.scans), `${compact(o.retakes)} couldn't read the label`)}
+    ${tile('Typical wait', secs(o.wait_median_ms), `1 in 10 took over ${secs(o.wait_p90_ms)}`)}
+    ${tile('Removed by staff', pct(o.removed,o.identified), `${compact(o.removed)} of ${compact(o.identified)} identified`)}
+  </div>`;
+  // One row per measure, one column per AI: the head-to-head reads across.
+  const ms=d.models;
+  const line=(label,cell)=>`<tr><td>${label}</td>${ms.map(m=>`<td class="num">${cell(m)}</td>`).join('')}</tr>`;
+  const table=`<div class="zbar"><span class="name">EACH AI, ON THE SAME PHOTOS</span></div>
+    <div class="zone"><div class="sheetwrap"><table class="sheet vs"><thead><tr><th></th>${
+      ms.map(m=>`<th class="num">${esc((AI_NAME[m.provider]||m.provider).toUpperCase())}</th>`).join('')}
+    </tr></thead><tbody>
+      ${line('Model', m=>`<span class="muted">${esc(m.model)}</span>`)}
+      ${line('Replies', m=>compact(m.answers))}
+      ${line("Couldn't read the label", m=>`${pct(m.unreadable,m.answers)} <span class="muted">(${compact(m.unreadable)})</span>`)}
+      ${line('When they disagreed', m=>m.disputes_won+m.disputes_lost
+          ?`${m.disputes_won} right · ${m.disputes_lost} wrong`:'—')}
+      ${line('Removed by staff', m=>m.shown?`${pct(m.removed,m.shown)} <span class="muted">(${compact(m.removed)} of ${compact(m.shown)})</span>`:'—')}
+      ${line('Typical time', m=>secs(m.median_ms))}
+      ${line('Slowest 1 in 10', m=>secs(m.p90_ms))}
+    </tbody></table></div></div>`;
+  const fails=Object.entries(d.failures||{}).map(([p,f])=>{
+    const n=Object.values(f).reduce((a,b)=>a+b,0);
+    return `${esc(AI_NAME[p]||p)} failed ${n} time${n===1?'':'s'} (${
+      Object.entries(f).map(([k,v])=>`${esc(k)} ×${v}`).join(', ')})`;}).join(' · ');
+  const early=d.thin?`<div class="banner">Only ${d.settled} disagreement${d.settled===1?' has':'s have'}
+    been settled by staff so far — too few to say which AI is more accurate. The numbers are real, just early.</div>`:'';
+  const late=o.late_contradicted;
+  const notes=`<div class="muted scannotes">
+    <p><b>Couldn't read</b>: the AI couldn't make out the label, so it named nothing rather than guess.</p>
+    <p><b>When they disagreed</b>: the two read different bottles, the row was flagged, and someone
+      settled it. Tapping "this row is right" counts as right for the AI whose reading was shown and
+      wrong for the other; removing the row counts as wrong for the one shown.</p>
+    <p><b>Removed by staff</b>: of the rows an AI's reading went on, the ones deleted afterwards.
+      Usually a wrong bottle, sometimes a duplicate or a mis-tap.</p>
+    ${late?`<p><b>Answered without waiting</b> (from the bar's own list, or after the short wait): the
+      other AI disagreed afterwards ${late} time${late===1?'':'s'}, and staff removed
+      ${o.late_contradicted_removed} of those rows.</p>`:''}
+    ${fails?`<p>${fails}.</p>`:''}
+    ${d.capped?'<p>Only the most recent 20,000 scans are counted.</p>':''}
+  </div>`;
+  $('scannerBody').innerHTML=head+early+tiles+table+notes;
+}
+$('scannerBody').onclick=e=>{
+  const w=e.target.closest('[data-sdays]');
+  if(w){ SCANNER.days=+w.dataset.sdays; loadScanner().catch(x=>toast(x.message)); }
 };
 
 /* ── practice ─────────────────────────────────────────────────────────────

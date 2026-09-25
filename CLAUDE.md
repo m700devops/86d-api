@@ -39,7 +39,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   now gets a one-line status instead of a table, not a wall of leads that aren't callable yet.
   Undo still works — the 10-second Undo on the toast after every logged call — it just isn't
   a permanent banner anymore
-- **The burger holds School, Yet to Contact, Apple Analytics and Customers.** Numbers (funnel, connect rate by
+- **The burger holds School, Yet to Contact, Apple Analytics, Customers, Scanner and AI Brain.**
+  Scanner is the bottle scanner's report card (see "The Scanner page" under AI Vision Rules).
+  Numbers (funnel, connect rate by
   hour, attribution re-match) and Lead engine (run now, bank health, restaurant recheck) were
   removed from the PAGE at the operator's request; every endpoint behind them is still live
   (`/funnel`, `/dialstats`, `/attribution/rematch`, `/leadgen/health`, `/leadgen/run`,
@@ -227,6 +229,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   On a free-tier service that's spun down at 10am, the refresh runs when it next wakes.
   See test_school.py
 - seed_data.py — default product catalog
+- scanstats.py — the scanner's report card, pure: `summarize(rows, days)` over scan_events +
+  scan_outcomes, per AI model — replies, couldn't-read, flagged disagreements settled right or
+  wrong, rows removed by staff, reply time. Feeds `GET /v1/crm/scanner` (crm.py) and the CRM
+  page's Scanner tab. See "The Scanner page" under AI Vision Rules. Covered by test_scanstats.py
 - test_level_classifier.py — unit tests for helpers.py level logic
 - test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone
   validator, call-window/service-band logic, timezone assignment, and manager/email
@@ -238,7 +244,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py -q` (666 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_second_opinion.py test_scanstats.py -q` (685 tests; test_timezones.py needs a dummy
+  `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
   image last, temperature 0, strict schema, no SDK retries, one shared client, the plain-request
@@ -246,6 +253,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_second_opinion.py — the second opinion: `helpers.answers_agree`, the pure `_decide`, and
   `_run_providers` with fake providers on REAL delays (fast path, wait window, failures, a rejected
   key, the total cap cancelling both calls, the one-bar inference). Every rule was mutation-checked
+- test_scanstats.py — the scanner report (`scanstats.summarize`, row by row: which evidence counts
+  as right, wrong or nothing), the outcome route and the CRM report route with a faked database.
+  Every rule was mutation-checked; the whole path was also run against a real Postgres upgraded
+  from the previous schema, through uvicorn, with the page opened in Chromium
 - test_match_key.py — `helpers.product_match_key`, sizes, and the generated prompt product list;
   pure (no database). The matcher's SQL was checked against a real Postgres, not in this suite
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
@@ -355,10 +366,32 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   (`_record_scan_event`, never fails a scan; `SCAN_EVENT_FAILED` if it does). The response carries
   `scan_id`; the app keeps it on the bottle row and `PUT /inventory/draft` records the product that
   row holds now in `final_product_id` (`_scan_finals`, after the draft's own commit, in its own
-  try — `SCAN_FINALS_FAILED`). **matched_product_id vs final_product_id is scan accuracy**, per
-  model and prompt: `SELECT model, count(*) FILTER (WHERE final_product_id = matched_product_id)
-  * 1.0 / count(*) FROM scan_events WHERE final_product_id IS NOT NULL GROUP BY model`. The request
-  takes an optional `location_id` (older app builds don't send it). No image is stored
+  try — `SCAN_FINALS_FAILED`). **`final_product_id` is NOT an accuracy measure**: the app can't
+  change a row's product (only a Pricing merge re-points it), the draft sync writes it seconds after
+  the scan — before anyone has looked — and a row removed later keeps it. Comparing it with
+  `matched_product_id` reads ~100% whatever the scanner does. Accuracy comes from what staff DO
+  with the row: see the next two bullets. The request takes an optional `location_id` (older app
+  builds don't send it). No image is stored
+- **`POST /v1/scans/{scan_id}/outcome` — what the bartender did with a scanned row** (`removed`:
+  deleted it, the only way the app offers to fix a wrong bottle; `confirmed`: tapped "this row is
+  right" on a row the two AIs read differently). The app sends it from `removeBottle` and the check
+  chip (86d-mobile). Stored in its own table, `scan_outcomes` (scan_id, user_id, outcome), because a
+  removal can land before the scan's scan_events row exists (that row is written once the second
+  opinion is in). Latest outcome wins, only for the user who first reported one (the upsert's
+  `WHERE`). Fire-and-forget: 202 always, `SCAN_OUTCOME_FAILED` in the log
+- **The Scanner page** (CRM burger → Scanner; `GET /v1/crm/scanner?days=7|30|90`, `scanstats.py`):
+  both AIs read every photo, so they're compared on the SAME photos — one row per measure, one
+  column per AI: replies, couldn't read the label, WHEN THEY DISAGREED (a flag staff settled:
+  "this row is right" = right for the reading shown and wrong for the other; removing the row =
+  wrong for the reading shown, nothing for the other), removed by staff, typical and slowest-1-in-10
+  reply time; plus scans, retake rate, the wait staff actually had, and failures per provider. Only
+  path `both` shows staff a flag: a disagreement on `fast`/`window` (the reply went out before the
+  other AI finished) is reported separately and judged only by removals. Rows nobody touched are
+  no evidence either way. Until 20 disagreements are settled (`SETTLED_ENOUGH`) the page says it's
+  too early to name the more accurate AI. Test and App Store review accounts are left out
+  (`TEST_EMAIL_PATTERN`, as on Customers). Removals include duplicates and mis-taps, so "removed by
+  staff" over-counts mistakes a little, equally for both AIs. Only scans from app builds that report
+  outcomes can count as wrong — older builds' removals were never recorded
 - **Matching the answer to a product** (`_match_or_create_product`). Order: (0) `bar_book` — the
   scanning bar's own products (`par_levels` of `location_id`, which must be the caller's own), by
   match key, taken ONLY when exactly one fits: a bar's pars, prices and distributor hang off the
@@ -451,6 +484,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - POST /inventory/{session_id}/scan/bulk
 - POST /scans/analyze — the live AI vision route (OpenAI and Gemini side by side), see AI Vision Rules above
 - POST /scans/warm — best-effort provider warm-up, fire-and-forget, never raises
+- POST /scans/{scan_id}/outcome — the bartender removed a scanned row or confirmed a flagged one;
+  feeds the Scanner page (see AI Vision Rules)
 - POST /inventory/{session_id}/voice — voice notes
 - POST /inventory/{session_id}/complete
 - GET/POST /distributors — distributor management

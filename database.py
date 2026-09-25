@@ -718,6 +718,21 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_scan_events_user_created
             ON scan_events(user_id, created_at)
         """)
+        # What the bartender did with a scanned row (POST /scans/{id}/outcome):
+        # removed it, or confirmed a row the two AIs read differently. Its own
+        # table keyed by the scan id, because a removal can arrive before the
+        # scan's scan_events row exists: that row is written once the second
+        # opinion is in, which can be seconds after the reply. scanstats.py
+        # reads the two together.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scan_outcomes (
+                scan_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
         conn.commit()
 
         # Seed products — always runs but is idempotent (checks name+brand before insert)

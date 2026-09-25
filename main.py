@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 import uuid
 import json
+import re
 import traceback
 
 from database import init_db, get_db
@@ -4861,6 +4862,48 @@ async def warm_scan(user_id: str = Depends(get_current_user)):
     """Pre-warm the AI vision path — the app calls this when the scan screen
     opens so the first bottle scan is as fast as the rest."""
     return {"warmed": await _warm_providers()}
+
+
+class ScanOutcomeRequest(BaseModel):
+    # "removed": the bartender deleted the scanned row, which is the only way the
+    # app offers to fix a wrong bottle. "confirmed": they tapped "this row is
+    # right" on a row the two AIs read differently.
+    outcome: str = Field(pattern="^(removed|confirmed)$")
+
+
+_SCAN_ID_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
+
+
+@v1_router.post("/scans/{scan_id}/outcome", status_code=202)
+def record_scan_outcome(scan_id: str, request: ScanOutcomeRequest,
+                        user_id: str = Depends(get_current_user)):
+    """What the bartender did with a scanned row: the only ground truth the scan
+    log gets. A row's product can't be changed in the app, so a wrong bottle is
+    fixed by removing the row, and before this a removed row still counted as
+    right (the draft sync writes final_product_id seconds after the scan, before
+    anyone has looked at it). The scanner report (scanstats.py) reads these.
+
+    Fire-and-forget: the app never waits on it, and a lost outcome only costs a
+    data point, so it never raises. The latest outcome wins, and only for the
+    user who first reported one — scan ids are not secrets."""
+    if not _SCAN_ID_RE.fullmatch(scan_id):
+        return {"accepted": False}
+    now = now_iso()
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO scan_outcomes (scan_id, user_id, outcome, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (scan_id) DO UPDATE
+                SET outcome = EXCLUDED.outcome, updated_at = EXCLUDED.updated_at
+                WHERE scan_outcomes.user_id = EXCLUDED.user_id
+            """, (scan_id, user_id, request.outcome, now, now))
+            conn.commit()
+    except Exception as e:
+        print(f"[scan] SCAN_OUTCOME_FAILED id={scan_id} {e}", flush=True)
+        return {"accepted": False}
+    return {"accepted": True}
 
 
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)

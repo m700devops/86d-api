@@ -5758,3 +5758,43 @@ def coach_school_refresh(_: bool = Depends(require_crm_key)):
     import school
     threading.Thread(target=school.refresh_if_due, kwargs={"force": True}, daemon=True).start()
     return {"started": True}
+
+
+# ─── The scanner's report card ──────────────────────────────────────────────
+# How each AI reads bottles, from the product's own scan log. Read-only, and in
+# this direction only: nothing on the scan path reads the CRM. See scanstats.py
+# for what counts as right, wrong and slow.
+import scanstats as _scanstats
+
+SCANNER_ROW_CAP = 20000
+
+
+@crm_router.get("/scanner", response_model=dict)
+def scanner_report(days: int = 30, _: bool = Depends(require_crm_key)):
+    """The Scanner tab: per AI model, how often it couldn't read a label, how it
+    fared when the two read different bottles, how often staff removed its
+    answer, and how fast it replied. App Store review and our own test accounts
+    are left out (TEST_EMAIL_PATTERN), the same as on the Customers list."""
+    days = max(1, min(int(days), 365))
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT s.provider, s.model, s.status, s.path, s.second_opinion, s.second_answer,
+                       s.provider_ms, s.total_ms, s.output_tokens, s.fallback_from, o.outcome
+                FROM scan_events s
+                LEFT JOIN scan_outcomes o ON o.scan_id = s.id AND o.user_id = s.user_id
+                LEFT JOIN users u ON u.id = s.user_id
+                WHERE s.created_at >= %s AND (u.email IS NULL OR u.email !~* %s)
+                ORDER BY s.created_at DESC
+                LIMIT %s
+            """, (since, TEST_EMAIL_PATTERN, SCANNER_ROW_CAP))
+            rows = [dict(r) for r in cursor.fetchall()]
+    except Exception as e:
+        print(f"[crm] SCANNER_REPORT_FAILED {e}", flush=True)
+        raise HTTPException(status_code=503, detail={
+            "error": "scanner_report_failed", "message": "Couldn't read the scan log just now."})
+    report = _scanstats.summarize(rows, days)
+    report["capped"] = len(rows) >= SCANNER_ROW_CAP
+    return report
