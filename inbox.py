@@ -19,12 +19,8 @@ from typing import Optional
 from contacts import strip_non_content
 
 # Shared by thousands of unrelated people, so a matching domain proves nothing.
-FREE_MAIL = {
-    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
-    "outlook.com", "live.com", "msn.com", "icloud.com", "me.com", "mac.com",
-    "aol.com", "comcast.net", "att.net", "sbcglobal.net", "verizon.net",
-    "protonmail.com", "proton.me", "gmx.com", "mail.com", "zoho.com",
-}
+# The full list lives with the other address rules; see contacts.free_mail.
+from contacts import FREE_MAIL_DOMAINS as FREE_MAIL, free_mail  # noqa: E402
 _BOUNCE_RE = re.compile(r"^(mailer-daemon|postmaster|no-?reply|do-?not-?reply)@", re.I)
 # Where the new text ends and the quoted conversation begins.
 _QUOTE_START_RE = re.compile(
@@ -113,7 +109,7 @@ def match_leads(mail: dict, leads: list, sent: dict) -> list:
         email = (lead.get("email") or "").lower()
         if not email or lead["id"] in found:
             continue
-        if email == sender or (dom and dom not in FREE_MAIL and _domain(email) == dom):
+        if email == sender or (dom and not free_mail(dom) and _domain(email) == dom):
             found.append(lead["id"])
     return found
 

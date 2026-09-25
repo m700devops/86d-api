@@ -48,7 +48,7 @@ _SITE_FLAGS = [
 ]
 
 # Linear on any page: see contacts.strip_non_content and test_hostile_pages.py.
-_ANY_TAG = re.compile(r"<[^<>]{0,2000}>")
+_ANY_TAG = re.compile(r"<[^<>]{0,300000}>")   # see contacts._ANY_TAG
 
 
 def _visible(html: str) -> str:
