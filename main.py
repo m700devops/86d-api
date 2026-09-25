@@ -1879,7 +1879,41 @@ def save_inventory_draft(request: InventoryDraftRequest, user_id: str = Depends(
             SET bottles_data = EXCLUDED.bottles_data, updated_at = EXCLUDED.updated_at
         """, (user_id, request.location_id, json.dumps(request.bottles), now))
         conn.commit()
+
+        # Each scanned row carries the scan_id its identification was logged
+        # under; record the product the row holds NOW. Where that differs from
+        # what the AI matched, a person corrected it — the accuracy number, per
+        # model and prompt, with no extra call from the app. After the draft's
+        # own commit and in its own try: this must never cost anyone their draft.
+        finals = _scan_finals(request.bottles)
+        if finals:
+            try:
+                cursor.execute("""
+                    UPDATE scan_events AS s
+                    SET final_product_id = v.product_id, final_at = %s
+                    FROM unnest(%s::text[], %s::text[]) AS v(id, product_id)
+                    WHERE s.id = v.id AND s.user_id = %s
+                      AND s.final_product_id IS DISTINCT FROM v.product_id
+                """, (now, list(finals), list(finals.values()), user_id))
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"[scan] SCAN_FINALS_FAILED user={user_id} {e}", flush=True)
         return {"success": True}
+
+
+def _scan_finals(bottles: list) -> dict:
+    """{scan_id: product_id} for draft rows that came from a logged scan and now
+    hold a product. Draft rows are the app's own JSON, so every field is checked."""
+    finals = {}
+    for bottle in bottles or []:
+        if not isinstance(bottle, dict):
+            continue
+        scan_id, product_id = bottle.get("scanId"), bottle.get("productId")
+        if (isinstance(scan_id, str) and 0 < len(scan_id) <= 64
+                and isinstance(product_id, str) and product_id):
+            finals[scan_id] = product_id
+    return finals
 
 @v1_router.get("/inventory/draft", response_model=InventoryDraftResponse)
 def get_inventory_draft(location_id: str, user_id: str = Depends(get_current_user)):
@@ -3578,6 +3612,9 @@ def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_c
 class ScanAnalyzeRequest(BaseModel):
     image: str                          # base64 encoded JPEG
     previous_readings: list[float] = [] # last N raw liquidLevel floats for smoothing (optional)
+    # The bar being counted. Recorded with the scan (scan_events) so accuracy can
+    # be read per bar; optional because app builds before it existed don't send it.
+    location_id: Optional[str] = Field(default=None, max_length=64)
 
 class ScanAnalyzeResponse(BaseModel):
     name: str
@@ -3590,7 +3627,11 @@ class ScanAnalyzeResponse(BaseModel):
     needs_rescan: bool = False  # True when confidence is too low for reliable classification
     matched_product_id: Optional[str] = None
     is_new_product: bool = False
-    match_method: str = "none"  # "exact", "auto_created", "none"
+    match_method: str = "none"  # "exact", "normalized", "alias", "swapped", "combined", "auto_created", "unreadable", "none"
+    # The scan_events row this answer was logged under. The app keeps it on the
+    # bottle row, and the draft sync reports which product the row ended up as —
+    # that pair is how "the AI said X, the count kept Y" gets measured.
+    scan_id: Optional[str] = None
 
 PRODUCT_CATALOG = """KNOWN PRODUCTS — spelling normalization ONLY. If the product you READ OFF THE LABEL appears below, use this exact spelling. NEVER use this list to substitute a different variant than the one printed on the label; products not listed are fine as transcribed.
 
@@ -3627,6 +3668,10 @@ Mixers/Juice (common): Schweppes Tonic Water, Fever-Tree Tonic Water, Schweppes 
 BOTTLE_PROMPT = """You are identifying a beverage container (liquor, beer, wine, soda, mixers, water — glass, plastic, or can) from a photo for bar inventory.
 
 Your ONLY job is to identify the exact product. Nothing else matters.
+
+WHICH CONTAINER — photos are taken at a bar, so there are often several bottles or cans in frame (a back-bar shelf, a speed rail, a cooler):
+- Identify ONLY the container nearest the centre of the photo — the one the camera is aimed at.
+- Ignore every other container, even one whose label is larger or easier to read. Never mix text from two different containers.
 
 CRITICAL — identification is a READING task, not a recall task:
 - The name and brand MUST come from text printed on the label. TRANSCRIBE the label exactly as printed.
@@ -3665,6 +3710,32 @@ Rules:
 
 """ + PRODUCT_CATALOG
 
+# Sent with the image, after it. The instructions above go FIRST (as the system
+# message) so they are an identical prefix on every scan — OpenAI caches a
+# repeated prefix automatically, but only a prefix: with the image first, as it
+# used to be, ~2,600 identical tokens were re-read in full on every scan.
+SCAN_USER_TEXT = ("Identify the container nearest the centre of this photo. "
+                  "Return only the JSON object.")
+
+SCAN_CATEGORIES = ["spirits", "beer", "wine", "soda", "mixer", "water", "juice", "other"]
+
+# The answer's shape, enforced by the provider rather than hoped for: OpenAI's
+# strict structured output can't return anything else, so there is no prose to
+# fail to parse and no category outside the list. Strict mode needs every field
+# required and no extras; the numeric range is checked in _parse_ai_result.
+SCAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "brand": {"type": "string"},
+        "category": {"type": "string", "enum": SCAN_CATEGORIES},
+        "product_type": {"type": "string"},
+        "confidence": {"type": "number"},
+    },
+    "required": ["name", "brand", "category", "product_type", "confidence"],
+    "additionalProperties": False,
+}
+
 
 # ─── AI provider helpers ───────────────────────────────────────────────────
 
@@ -3697,6 +3768,19 @@ TOTAL_SCAN_TIMEOUT_SEC: float = float(os.getenv("TOTAL_SCAN_TIMEOUT_SEC", "20.0"
 # Blue Bolt"). This only gates creating NEW products — matching an existing one
 # runs before the check, so a legible scan of a known bottle is unaffected.
 AUTO_CREATE_CONFIDENCE: float = float(os.getenv("AUTO_CREATE_CONFIDENCE", "0.6"))
+# BOTTLE_PROMPT tells the model to answer an illegible label with the generic
+# descriptor ("Sports Drink") and a confidence of AT MOST 0.5, so a read at or
+# under that line is, by the prompt's own definition, not a reading. It used to be
+# matched anyway: CONFIDENCE_THRESHOLD (0.35) sits below the ceiling, the app
+# never looked at needs_rescan, and a blurry Gatorade matched the generic
+# "Gatorade / Sports Drink" product and was counted with a green check. Now such
+# a read is never matched — the app sees no product and asks for a retake.
+# Keep this in lockstep with the "cap confidence at 0.5" line in BOTTLE_PROMPT.
+UNREADABLE_CONFIDENCE: float = float(os.getenv("UNREADABLE_CONFIDENCE", "0.5"))
+# How long an idle connection to a provider is kept open. The HTTP library's
+# default is 5 seconds, shorter than the gap between two bottles, so without this
+# a shared client still reconnected (TCP + TLS) on most scans.
+AI_KEEPALIVE_SECONDS: float = float(os.getenv("AI_KEEPALIVE_SECONDS", "120"))
 
 
 def _strip_code_fences(text: str) -> str:
@@ -3709,16 +3793,30 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _parse_ai_result(text: str) -> dict:
+    """Model text -> result dict with every field present and well-typed.
+
+    Raises json.JSONDecodeError (or ValueError) when the text isn't a JSON
+    object; _run_providers treats that as this provider failing and moves on.
+    Types are forced here because a null name or a "high" confidence used to
+    get as far as ScanAnalyzeResponse — AFTER product matching had run.
+    """
     text = _strip_code_fences(text)
     result = json.loads(text)
-    if "category" in result:
-        result["category"] = result["category"].lower()
+    if not isinstance(result, dict):
+        raise ValueError(f"AI returned {type(result).__name__}, not a JSON object")
+    for key in ("name", "brand", "product_type"):
+        value = result.get(key)
+        result[key] = value.strip() if isinstance(value, str) else ""
+    category = str(result.get("category") or "").strip().lower()
+    result["category"] = category if category in SCAN_CATEGORIES else "other"
+    try:
+        confidence = float(result.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence != confidence:  # NaN
+        confidence = 0.0
+    result["confidence"] = min(max(confidence, 0.0), 1.0)
     result.setdefault("levelReadable", True)
-    result.setdefault("confidence", 0.5)
-    result.setdefault("name", "")
-    result.setdefault("brand", "")
-    result.setdefault("category", "other")
-    result.setdefault("product_type", "")
     result.setdefault("liquidLevel", 0.0)
     return result
 
@@ -3753,76 +3851,230 @@ def _apply_stabilization(result: dict, previous_readings: list[float]) -> dict:
     return result
 
 
-async def _call_openai(api_key: str, prompt: str, image_data: str) -> str:
-    client = openai.AsyncOpenAI(api_key=api_key)
-    response = await asyncio.wait_for(
-        client.chat.completions.create(
-            model=OPENAI_MODEL,
-            max_tokens=300,
+# The OpenAI SDK's HTTP library. openai 3.x ships on httpx2 (not the httpx this
+# app pins for everything else); older majors used httpx. The connection limits
+# below must be built from whichever one the SDK actually uses.
+try:
+    import httpx2 as _openai_http
+except ImportError:  # openai < 3
+    _openai_http = httpx
+
+# One client per provider for the life of the process. Every scan used to build
+# a new client — a new connection pool, so a fresh TCP + TLS handshake to the
+# provider on every scan — and /scans/warm warmed a client that was then thrown
+# away, so the warm-up the app fires when the scan screen opens warmed nothing a
+# scan used. Keyed by API key so a changed key gets a new client.
+_openai_clients: dict = {}
+_gemini_models: dict = {}
+
+# Models that turned down the full request (structured output, temperature 0,
+# system message) and were then served by the plain one. Remembered so each
+# later scan doesn't pay a rejected round trip first. Only recorded when the
+# plain request SUCCEEDS — a 400 caused by a bad photo must not switch the
+# structured output off for everyone.
+_openai_plain_models: set = set()
+_gemini_plain_models: set = set()
+
+
+def _openai_client(api_key: str) -> "openai.AsyncOpenAI":
+    client = _openai_clients.get(api_key)
+    if client is None:
+        client = openai.AsyncOpenAI(
+            api_key=api_key,
+            # The SDK retries 429s and 5xx errors itself — twice, waiting as long
+            # as retry-after says — and all of it inside PROVIDER_TIMEOUT, so a
+            # rate-limited OpenAI could use up the whole 9s before Gemini started.
+            # Falling through to the other provider is this path's retry.
+            max_retries=0,
+            http_client=openai.DefaultAsyncHttpxClient(
+                limits=_openai_http.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=20,
+                    keepalive_expiry=AI_KEEPALIVE_SECONDS,
+                ),
+            ),
+        )
+        _openai_clients[api_key] = client
+    return client
+
+
+def _gemini_model(api_key: str):
+    """The cached GenerativeModel. genai.configure() empties the SDK's client
+    cache every time it runs, so calling it per scan (as this used to) built a new
+    gRPC channel for every scan. The model object keeps the client it creates on
+    first use, so configuring once and reusing the model keeps the channel."""
+    cache_key = (api_key, GEMINI_MODEL)
+    model = _gemini_models.get(cache_key)
+    if model is None:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        _gemini_models[cache_key] = model
+    return model
+
+
+def _openai_is_reasoning(model: str) -> bool:
+    """o-series and GPT-5-family models reject `max_tokens` and any non-default
+    temperature. Swapping OPENAI_MODEL to one of them used to make every scan's
+    OpenAI call fail with a 400 and fall silently through to Gemini."""
+    return model.lower().startswith(("o1", "o3", "o4", "gpt-5"))
+
+
+def _openai_request(model: str, prompt: str, image_data: str, plain: bool = False) -> dict:
+    """Keyword arguments for chat.completions.create.
+
+    The full request puts the fixed instructions first as the system message (so
+    they're cacheable), the image last, and asks for strict schema-shaped JSON at
+    temperature 0 — the prompt demands that every scan of the same bottle gives
+    the same name, and sampling at the default temperature of 1.0 worked against
+    it. `plain` is the request as it was before any of that, used only when a
+    model turns the full one down.
+    """
+    image_part = {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/jpeg;base64,{image_data}", "detail": "high"},
+    }
+    reasoning = _openai_is_reasoning(model)
+    # Reasoning models spend completion tokens thinking, so 300 would cut them off.
+    token_param = "max_completion_tokens" if reasoning else "max_tokens"
+    token_budget = 4000 if reasoning else 300
+    if plain:
+        return {
+            "model": model,
+            token_param: token_budget,
+            "messages": [{"role": "user", "content": [image_part, {"type": "text", "text": prompt}]}],
+        }
+    kwargs = {
+        "model": model,
+        "max_completion_tokens": token_budget,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": [image_part, {"type": "text", "text": SCAN_USER_TEXT}]},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "bottle_scan", "strict": True, "schema": SCAN_SCHEMA},
+        },
+    }
+    if reasoning:
+        kwargs["reasoning_effort"] = "low"  # reading a label needs little deliberation
+    else:
+        kwargs["temperature"] = 0
+    return kwargs
+
+
+def _openai_usage(response) -> dict:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+    details = getattr(usage, "prompt_tokens_details", None)
+    return {
+        "input_tokens": getattr(usage, "prompt_tokens", None),
+        "cached_tokens": getattr(details, "cached_tokens", None) if details else None,
+        "output_tokens": getattr(usage, "completion_tokens", None),
+    }
+
+
+async def _call_openai(api_key: str, prompt: str, image_data: str, stats: Optional[dict] = None) -> str:
+    """One OpenAI scan call; returns the model's text. `stats` (if given) gets
+    the token counts for the scan log. Raises on failure, like every provider."""
+    client = _openai_client(api_key)
+
+    async def _create(plain: bool):
+        return await client.chat.completions.create(
             timeout=60.0,  # SDK fallback; asyncio.wait_for is the real gate
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_data}",
-                                "detail": "high",
-                            },
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-        ),
-        timeout=PROVIDER_TIMEOUT,
-    )
-    return response.choices[0].message.content.strip()
+            **_openai_request(OPENAI_MODEL, prompt, image_data, plain=plain),
+        )
+
+    async def _attempt():
+        if OPENAI_MODEL in _openai_plain_models:
+            return await _create(plain=True)
+        try:
+            return await _create(plain=False)
+        except openai.BadRequestError as e:
+            print(f"[analyze_bottle] OpenAI rejected the structured request "
+                  f"(model={OPENAI_MODEL}): {e} — retrying as a plain request", flush=True)
+            response = await _create(plain=True)
+            _openai_plain_models.add(OPENAI_MODEL)
+            print(f"[analyze_bottle] SCAN_OPENAI_PLAIN model={OPENAI_MODEL} — plain request "
+                  f"worked; structured output stays off for this model until restart", flush=True)
+            return response
+
+    response = await asyncio.wait_for(_attempt(), timeout=PROVIDER_TIMEOUT)
+    if stats is not None:
+        stats.update(_openai_usage(response))
+    message = response.choices[0].message
+    if not message.content:
+        # A refusal comes back as `refusal` with no content. Raising makes the
+        # scan fall through to Gemini instead of dying on None.strip().
+        raise ValueError(f"OpenAI returned no content (refusal: {getattr(message, 'refusal', None)!r})")
+    return message.content.strip()
 
 
-async def _call_gemini(api_key: str, prompt: str, image_data: str) -> str:
+async def _call_gemini(api_key: str, prompt: str, image_data: str, stats: Optional[dict] = None) -> str:
     import base64
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(GEMINI_MODEL)
+    model = _gemini_model(api_key)
     image_bytes = base64.b64decode(image_data)
-    response = await asyncio.wait_for(
-        asyncio.to_thread(
-            model.generate_content,
-            [prompt, {"mime_type": "image/jpeg", "data": image_bytes}]
-        ),
-        timeout=PROVIDER_TIMEOUT,
-    )
+    contents = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}]
+
+    def _generate():
+        # JSON mode: the reply is a JSON object, never prose around one.
+        if GEMINI_MODEL not in _gemini_plain_models:
+            try:
+                return model.generate_content(
+                    contents, generation_config={"response_mime_type": "application/json"})
+            except Exception as e:
+                if "invalid" not in type(e).__name__.lower() and "400" not in str(e):
+                    raise
+                print(f"[analyze_bottle] Gemini rejected JSON mode (model={GEMINI_MODEL}): {e} "
+                      f"— retrying as a plain request", flush=True)
+                response = model.generate_content(contents)
+                _gemini_plain_models.add(GEMINI_MODEL)
+                return response
+        return model.generate_content(contents)
+
+    response = await asyncio.wait_for(asyncio.to_thread(_generate), timeout=PROVIDER_TIMEOUT)
+    if stats is not None:
+        usage = getattr(response, "usage_metadata", None)
+        if usage is not None:
+            stats.update({
+                "input_tokens": getattr(usage, "prompt_token_count", None),
+                "cached_tokens": getattr(usage, "cached_content_token_count", None),
+                "output_tokens": getattr(usage, "candidates_token_count", None),
+            })
     return response.text.strip()
 
 
 async def _warm_providers() -> dict:
-    """Open TLS connections / init the AI clients so the first real scan doesn't
-    pay the cold-path setup (observed ~8s extra on the first scan). Best-effort,
-    never raises. Costs ~1 token per provider per call."""
+    """Open the shared clients' connections so the first real scan doesn't pay
+    the cold-path setup (observed ~8s extra on the first scan). Best-effort,
+    never raises.
+
+    OpenAI is warmed with a model lookup, not a completion: it opens a
+    connection in the same pool the scans use, costs no tokens, and fails
+    loudly (404) when OPENAI_MODEL has been retired. A 1-token completion
+    also broke on reasoning models, which reject `max_tokens`."""
     openai_key = os.getenv("OPENAI_API_KEY")
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     warmed = {"openai": False, "gemini": False}
 
     if openai_key:
         try:
-            client = openai.AsyncOpenAI(api_key=openai_key)
             await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=OPENAI_MODEL,
-                    max_tokens=1,
-                    messages=[{"role": "user", "content": "ping"}],
-                ),
+                _openai_client(openai_key).models.retrieve(OPENAI_MODEL),
                 timeout=8,
             )
             warmed["openai"] = True
+        except openai.PermissionDeniedError as e:
+            # A project key restricted from reading models: the connection is
+            # open (the point of warming) — it just can't confirm the model.
+            warmed["openai"] = True
+            print(f"[warm] OpenAI key can't look up models ({e}); connection warmed anyway", flush=True)
         except Exception as e:
             print(f"[warm] OpenAI warm-up failed (non-fatal): {e}", flush=True)
 
     if gemini_key:
         try:
-            genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel(GEMINI_MODEL)
+            model = _gemini_model(gemini_key)
             await asyncio.wait_for(
                 asyncio.to_thread(
                     model.generate_content,
@@ -3992,72 +4244,94 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
         return (None, False, "none")
 
 
-def _process_ai_result(text: str, request: ScanAnalyzeRequest, user_id: str):
+def _process_ai_result(text: str, request: ScanAnalyzeRequest, user_id: str,
+                       event: Optional[dict] = None):
     """Parse AI text, apply stabilization, do product matching.
 
-    Returns ScanAnalyzeResponse, or JSONResponse(200, None) when no bottle detected.
-    Raises json.JSONDecodeError on unparseable text.
+    Runs in a worker thread — product matching queries the database, and the
+    route is async. Returns ScanAnalyzeResponse, or JSONResponse(200, None) when
+    no bottle was detected. Raises json.JSONDecodeError / ValueError on text that
+    isn't a JSON object. `event` (the scan_events row being built) gets the answer.
     """
+    event = event if event is not None else {}
     result = _parse_ai_result(text)
+    event.update({k: result[k] for k in ("name", "brand", "category", "product_type", "confidence")})
     if not result.get("name") and result.get("confidence", 1) == 0:
+        event["status"] = "no_bottle"
         return JSONResponse(status_code=200, content=None)
     result = _apply_stabilization(result, request.previous_readings)
+    unreadable = result["confidence"] <= UNREADABLE_CONFIDENCE
     result["needs_rescan"] = (
         not result.get("levelReadable", True)
-        or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
+        or result["confidence"] < CONFIDENCE_THRESHOLD
+        or unreadable
     )
-    matched_id, is_new, method = _match_or_create_product(result, user_id)
+    if unreadable:
+        # Not matched, on purpose: see UNREADABLE_CONFIDENCE. No product in the
+        # response is what makes the app ask for a retake.
+        matched_id, is_new, method = None, False, "unreadable"
+    else:
+        matched_id, is_new, method = _match_or_create_product(result, user_id)
     result["matched_product_id"] = matched_id
     result["is_new_product"] = is_new
     result["match_method"] = method
+    result["scan_id"] = event.get("id")
+    event.update({
+        "status": "unreadable" if unreadable else "ok",
+        "match_method": method,
+        "matched_product_id": matched_id,
+        "needs_rescan": result["needs_rescan"],
+    })
     return ScanAnalyzeResponse(**result)
 
 
-async def _run_providers(openai_key, gemini_key, prompt, request, user_id):
-    """Try OpenAI then Gemini. Falls through on per-provider timeout.
-    Returns ScanAnalyzeResponse or JSONResponse. Raises HTTPException on fatal errors."""
-    last_error = None
-
+async def _run_providers(openai_key, gemini_key, prompt, request, user_id,
+                         event: Optional[dict] = None):
+    """Try OpenAI then Gemini; any failure of one — timeout, error, or an answer
+    that can't be parsed — falls through to the next. (A parse failure used to
+    return a 500 without trying Gemini at all.)
+    Returns ScanAnalyzeResponse or JSONResponse. Raises HTTPException when every
+    provider failed."""
+    event = event if event is not None else {}
+    providers = []
     if openai_key:
+        providers.append(("openai", OPENAI_MODEL, _call_openai, openai_key))
+    if gemini_key:
+        providers.append(("gemini", GEMINI_MODEL, _call_gemini, gemini_key))
+
+    last_error = None
+    failed = []
+    for name, model, call, key in providers:
+        stats: dict = {}
+        started = time.monotonic()
         try:
-            print(f"[analyze_bottle] trying OpenAI model={OPENAI_MODEL} timeout={PROVIDER_TIMEOUT}s", flush=True)
-            text = await _call_openai(openai_key, prompt, request.image)
-            return _process_ai_result(text, request, user_id)
+            print(f"[analyze_bottle] trying {name} model={model} timeout={PROVIDER_TIMEOUT}s", flush=True)
+            text = await call(key, prompt, request.image, stats)
+            event.update(provider=name, model=model,
+                         provider_ms=int((time.monotonic() - started) * 1000), **stats)
+            return await asyncio.to_thread(_process_ai_result, text, request, user_id, event)
         except openai.AuthenticationError:
             raise HTTPException(status_code=503, detail={
                 "error": "service_unavailable",
                 "message": "AI service authentication failed — check OPENAI_API_KEY"
             })
         except (asyncio.TimeoutError, openai.APITimeoutError) as e:
-            print(f"[analyze_bottle] OpenAI timed out after {PROVIDER_TIMEOUT}s, trying fallback", flush=True)
+            print(f"[analyze_bottle] {name} timed out after {PROVIDER_TIMEOUT}s", flush=True)
+            failed.append(f"{name}:timeout")
             last_error = e
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=500, detail={
-                "error": "parse_failed",
-                "message": f"Could not parse AI response: {e}"
-            })
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[analyze_bottle] {name} answer unusable ({e}) — trying the next provider", flush=True)
+            failed.append(f"{name}:unparseable")
+            last_error = e
         except Exception as e:
-            print(f"[analyze_bottle] OpenAI unexpected error: {traceback.format_exc()}", flush=True)
+            print(f"[analyze_bottle] {name} error: {traceback.format_exc()}", flush=True)
+            failed.append(f"{name}:{type(e).__name__}")
             last_error = e
-
-    if gemini_key:
-        try:
-            print(f"[analyze_bottle] trying Gemini model={GEMINI_MODEL} timeout={PROVIDER_TIMEOUT}s", flush=True)
-            text = await _call_gemini(gemini_key, prompt, request.image)
-            return _process_ai_result(text, request, user_id)
-        except asyncio.TimeoutError as e:
-            print(f"[analyze_bottle] Gemini timed out after {PROVIDER_TIMEOUT}s", flush=True)
-            last_error = e
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=500, detail={
-                "error": "parse_failed",
-                "message": f"Could not parse Gemini response: {e}"
-            })
-        except Exception as e:
-            print(f"[analyze_bottle] Gemini error: {traceback.format_exc()}", flush=True)
-            last_error = e
+        finally:
+            event["fallback_from"] = ",".join(failed) or None
 
     if isinstance(last_error, (asyncio.TimeoutError, openai.APITimeoutError)):
+        event["status"] = "timeout"
         raise HTTPException(status_code=504, detail={
             "error": "ai_timeout",
             "message": "AI service timed out — image may be too large or service is slow"
@@ -4066,6 +4340,73 @@ async def _run_providers(openai_key, gemini_key, prompt, request, user_id):
         "error": "ai_api_error",
         "message": f"All AI providers failed: {last_error}"
     })
+
+
+_background_tasks: set = set()
+
+
+def _spawn(coro) -> None:
+    """Run a coroutine without awaiting it, holding a reference so it isn't
+    garbage-collected mid-flight (asyncio only keeps weak references to tasks)."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _record_scan_event(event: dict) -> None:
+    """Write one scan_events row. Never raises: the scan has already been
+    answered, and a lost log row must not become a failed scan."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO scan_events
+                    (id, user_id, location_id, status, provider, model, fallback_from,
+                     name, brand, category, product_type, confidence,
+                     match_method, matched_product_id, needs_rescan,
+                     provider_ms, total_ms, input_tokens, cached_tokens, output_tokens,
+                     image_kb, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+            """, (
+                event["id"], event["user_id"], event.get("location_id"), event.get("status"),
+                event.get("provider"), event.get("model"), event.get("fallback_from"),
+                event.get("name"), event.get("brand"), event.get("category"),
+                event.get("product_type"), event.get("confidence"),
+                event.get("match_method"), event.get("matched_product_id"), event.get("needs_rescan"),
+                event.get("provider_ms"), event.get("total_ms"), event.get("input_tokens"),
+                event.get("cached_tokens"), event.get("output_tokens"),
+                event.get("image_kb"), now_iso(),
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scan] SCAN_EVENT_FAILED id={event.get('id')} {e}", flush=True)
+
+
+def _log_scan(event: dict) -> None:
+    """One greppable line per scan (grep Render logs for `SCAN `), then the
+    scan_events row in the background. Speed and accuracy were invisible before
+    this: the phone kept its timings to itself and the server logged none."""
+    fields = ("status", "provider", "model", "provider_ms", "total_ms", "input_tokens",
+              "cached_tokens", "output_tokens", "confidence", "match_method",
+              "image_kb", "fallback_from", "id")
+    print("[scan] SCAN " + " ".join(f"{k}={event.get(k) if event.get(k) is not None else '-'}"
+                                    for k in fields), flush=True)
+    try:
+        _spawn(asyncio.to_thread(_record_scan_event, dict(event)))
+    except RuntimeError:  # no running loop (only outside the server)
+        _record_scan_event(dict(event))
+
+
+def _scan_subscription_row(user_id: str):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT subscription_status, trial_ends_at FROM users WHERE id = %s AND deleted_at IS NULL",
+            (user_id,)
+        )
+        return cursor.fetchone()
 
 
 @v1_router.post("/scans/warm")
@@ -4077,20 +4418,20 @@ async def warm_scan(user_id: str = Depends(get_current_user)):
 
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
 async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
-    """Analyze bottle image using OpenAI GPT-4o with Gemini 2.0 Flash fallback.
+    """Analyze a bottle image: OpenAI (OPENAI_MODEL) first, Gemini (GEMINI_MODEL) as fallback.
 
     Per-provider cap: PROVIDER_TIMEOUT (default 9s) — on timeout falls through to next provider.
-    Total wall-clock cap: TOTAL_SCAN_TIMEOUT_SEC (default 20s) — returns empty 200 on expiry.
+    Total wall-clock cap: TOTAL_SCAN_TIMEOUT_SEC (default 20s) — a 504 on expiry. It
+    used to be an empty 200, the same answer as an empty frame, so the app said "No
+    bottle detected" and parked the saved row for a manual retry; a 5xx is what the
+    app's automatic retry sweep picks up.
     """
     print("[analyze_bottle] function started", flush=True)
+    started = time.monotonic()
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT subscription_status, trial_ends_at FROM users WHERE id = %s AND deleted_at IS NULL",
-            (user_id,)
-        )
-        sub_row = cursor.fetchone()
+    # In a worker thread: psycopg2 blocks, and this route shares one event loop
+    # with every other request the process serves.
+    sub_row = await asyncio.to_thread(_scan_subscription_row, user_id)
     if not sub_row or not is_entitled(sub_row["subscription_status"], sub_row["trial_ends_at"]):
         raise HTTPException(status_code=402, detail={
             "error": "trial_expired",
@@ -4108,14 +4449,28 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             "message": "No AI provider API keys configured on the server"
         })
 
+    event = {
+        "id": generate_id(),
+        "user_id": user_id,
+        "location_id": request.location_id,
+        "image_kb": round(len(request.image) * 3 / 4 / 1024),
+        "status": "error",
+    }
     try:
         return await asyncio.wait_for(
-            _run_providers(openai_key, gemini_key, BOTTLE_PROMPT, request, user_id),
+            _run_providers(openai_key, gemini_key, BOTTLE_PROMPT, request, user_id, event),
             timeout=TOTAL_SCAN_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
         print(f"[analyze_bottle] total timeout exceeded ({TOTAL_SCAN_TIMEOUT_SEC}s)", flush=True)
-        return JSONResponse(status_code=200, content=None)
+        event["status"] = "timeout"
+        raise HTTPException(status_code=504, detail={
+            "error": "ai_timeout",
+            "message": "AI service took too long — the scan will retry"
+        })
+    finally:
+        event["total_ms"] = int((time.monotonic() - started) * 1000)
+        _log_scan(event)
 
 # ============== APP FUNNEL EVENTS ==============
 

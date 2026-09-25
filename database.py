@@ -650,6 +650,49 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_app_events_anon
             ON app_events(anon_id)
         """)
+
+        # One row per /scans/analyze call: which provider answered, how fast,
+        # what it said, what it matched. final_product_id is filled in later by
+        # the draft sync with the product the bartender's row actually ended up
+        # as — matched_product_id vs final_product_id is scan accuracy. No image
+        # is stored. Written in the background (main._record_scan_event), so a
+        # failure here never fails a scan.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scan_events (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                location_id TEXT,
+                status TEXT,
+                provider TEXT,
+                model TEXT,
+                fallback_from TEXT,
+                name TEXT,
+                brand TEXT,
+                category TEXT,
+                product_type TEXT,
+                confidence REAL,
+                match_method TEXT,
+                matched_product_id TEXT,
+                needs_rescan BOOLEAN,
+                provider_ms INTEGER,
+                total_ms INTEGER,
+                input_tokens INTEGER,
+                cached_tokens INTEGER,
+                output_tokens INTEGER,
+                image_kb INTEGER,
+                final_product_id TEXT,
+                final_at TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scan_events_created
+            ON scan_events(created_at)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scan_events_user_created
+            ON scan_events(user_id, created_at)
+        """)
         conn.commit()
 
         # Seed products — always runs but is idempotent (checks name+brand before insert)

@@ -237,7 +237,12 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py -q` (475 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_lead_finding.py test_scan_path.py -q` (551 tests; test_timezones.py needs a dummy
+  `DATABASE_URL`)
+- test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
+  against a local fake server, so it checks the request actually sent: instructions first and
+  image last, temperature 0, strict schema, no SDK retries, one shared client, the plain-request
+  fallback. Product matching and the scan log are stubbed; no network, no database
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -259,8 +264,56 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   dict so assertions can check what actually got saved, not just that nothing raised
 
 ## AI Vision Rules
-- `POST /v1/scans/analyze` (main.py:3590) tries OpenAI first, falls through to Gemini on timeout/error —
-  see `_run_providers()` at main.py:3528
+- `POST /v1/scans/analyze` (`analyze_bottle`, main.py ~4420) tries OpenAI first and falls through
+  to Gemini on ANY failure of the first — timeout, error, or an answer that isn't a JSON object
+  (that last one used to return a 500 without trying Gemini) — see `_run_providers()`
+- **One client per provider for the life of the process** (`_openai_client()`, `_gemini_model()`).
+  Every scan used to build a new client, so every scan paid a fresh TCP + TLS handshake, and
+  `/scans/warm` warmed a client that was immediately thrown away; `genai.configure()` per call also
+  emptied the Gemini SDK's client cache. Idle connections are kept `AI_KEEPALIVE_SECONDS` (120) —
+  the HTTP library's default of 5s is shorter than the gap between two bottles. The OpenAI client
+  has `max_retries=0`: the SDK's own retries (twice, honouring retry-after) ran inside the 9-second
+  provider window, so a rate-limited OpenAI used it all up before Gemini started. OpenAI is warmed
+  with `models.retrieve` (no tokens, and a 404 when `OPENAI_MODEL` has been retired)
+- **The request** (`_openai_request()`): BOTTLE_PROMPT as the system message FIRST, then the image,
+  then `SCAN_USER_TEXT`. OpenAI caches a repeated prompt PREFIX automatically; with the image first
+  (as it was) the ~2,600 identical instruction tokens were re-read in full on every scan. Strict
+  structured output (`SCAN_SCHEMA`, category is an enum) and **temperature 0** — the prompt demands
+  the same name for every scan of the same bottle, and the default temperature of 1.0 worked
+  against it ("Red" vs "Red Label" is how one bottle becomes two products). Reasoning models
+  (o-series, GPT-5 family) get `max_completion_tokens` and `reasoning_effort="low"` and no
+  temperature — they reject `max_tokens` and non-default temperature, which used to make every
+  OpenAI call 400 and fall silently through to Gemini. If a model rejects the full request, the
+  old plain request is tried; the model is remembered as plain (`_openai_plain_models`,
+  `SCAN_OPENAI_PLAIN` in the log) ONLY if the plain one succeeds, so a 400 caused by one bad photo
+  can't switch structured output off for everyone. Gemini gets JSON mode the same way
+  (`_gemini_plain_models`). Gemini's temperature is left alone: Google's guidance for Gemini 3
+  models is to keep the default
+- **"WHICH CONTAINER" in BOTTLE_PROMPT**: identify only the container nearest the centre of the
+  photo. A back-bar photo has neighbours in it, and nothing used to say which one to read
+- **An unreadable label is never matched** (`UNREADABLE_CONFIDENCE`, default 0.5 — keep it in
+  lockstep with the prompt's "cap confidence at 0.5" line). The prompt answers an illegible label
+  with the generic descriptor at ≤0.5, but only <0.35 was flagged and the app never read
+  `needs_rescan`, so a blurry Gatorade matched the generic "Gatorade / Sports Drink" product and
+  was counted with a green check. Such a read now comes back with no product
+  (`match_method="unreadable"`, `needs_rescan=true`), which is what makes the app ask for a retake
+- **The 20s total cap is a 504, not an empty 200.** The empty 200 is "no bottle in frame"; the app
+  said exactly that and parked the saved row for a manual retry. A 5xx is what the app's automatic
+  retry sweep picks up. `null` still means no bottle
+- **Every scan is measured.** One `[scan] SCAN status= provider= model= provider_ms= total_ms=
+  input_tokens= cached_tokens= output_tokens= confidence= match_method= image_kb= fallback_from= id=`
+  line (grep Render logs for `SCAN `), and a `scan_events` row written in the background
+  (`_record_scan_event`, never fails a scan; `SCAN_EVENT_FAILED` if it does). The response carries
+  `scan_id`; the app keeps it on the bottle row and `PUT /inventory/draft` records the product that
+  row holds now in `final_product_id` (`_scan_finals`, after the draft's own commit, in its own
+  try — `SCAN_FINALS_FAILED`). **matched_product_id vs final_product_id is scan accuracy**, per
+  model and prompt: `SELECT model, count(*) FILTER (WHERE final_product_id = matched_product_id)
+  * 1.0 / count(*) FROM scan_events WHERE final_product_id IS NOT NULL GROUP BY model`. The request
+  takes an optional `location_id` (older app builds don't send it). No image is stored
+- The route's database work (entitlement check, product matching) runs in worker threads: psycopg2
+  blocks, and the route shares one event loop with every other request
+- `openai` is PINNED (`openai==3.19.2`, which runs on `httpx2`, not the app's `httpx`). It used to
+  be `>=1.0.0`, so each fresh build could pick up a new major version
 - Model constants are ENV-OVERRIDABLE: `OPENAI_MODEL` (default `gpt-4o`), `GEMINI_MODEL`
   (default `gemini-3.6-flash`). They are env vars because a provider can retire a model out from
   under the app and it fails SILENTLY — `gemini-2.0-flash` was retired and every scan ran with no
@@ -1186,7 +1239,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   Apple Analytics tab's App Store Connect team key. Unset is fine: the tab's Connect form
   saves the key instead (encrypted). `\n` in APPLE_PRIVATE_KEY is accepted
 - SENTRY_DSN — optional, error visibility only
-- CONFIDENCE_THRESHOLD, LEVEL_DEADBAND — optional tuning, see AI Vision Rules above
+- CONFIDENCE_THRESHOLD, LEVEL_DEADBAND, UNREADABLE_CONFIDENCE (0.5), AI_KEEPALIVE_SECONDS (120) —
+  optional tuning, see AI Vision Rules above
 
 ## Deploy Rules
 - Deployed via Render (see Procfile) — do NOT change without approval
