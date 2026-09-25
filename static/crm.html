@@ -532,7 +532,6 @@
             <button class="startbtn" id="pNowGo">Start</button>
           </div>
           <div class="ptiles">
-            <button id="pTileReh"><b>🎭 Rehearse a real call</b><span id="pTileRehS">The bar you're about to ring, from what's on file.</span></button>
             <button id="pTileFilm"><b>🎬 Review my real calls</b><span>Coaching from your own logged calls.</span></button>
             <button id="pTileCall"><b>📞 Take a call</b><span id="pTileCallS">A tough owner. Get them to try it.</span></button>
             <button id="pTileGaunt"><b>🎯 Gauntlet</b><span>10 fast objections. Works offline.</span></button>
@@ -707,15 +706,6 @@
               <div style="display:flex;gap:8px"><button class="go" id="cGot">I had it</button><button id="cMiss">Not yet</button></div></div>
           </div>
           <div id="cDone" class="hide card"><b>All caught up.</b><p class="muted" style="margin:6px 0 10px">Lines you miss in drills, calls and the Gauntlet come back here: tomorrow, then in 3 days, then a week, then two weeks.</p><button class="go" id="cNext">Next</button></div>
-        </div>
-
-        <div id="pReh" class="hide">
-          <div class="ghead"><button id="rLeave">← Leave</button><div class="t">Rehearse a real call</div></div>
-          <p style="font-size:15px;color:var(--text2);margin:0 0 12px">Pick the call you're about to make. The practice owner
-            knows only what's on file about that bar (its facts, who we ask for, what happened last time) and invents
-            the rest. Whoever picks up first isn't the one who decides: get through to them, then get a next step.
-            You finish with two lines to say on the real call.</p>
-          <div id="rList"></div>
         </div>
 
         <div id="pFilm" class="hide">
@@ -1408,9 +1398,7 @@ function renderWhereInfo(box, d, l){
     +(d.facts.length?`<div class="fx">${d.facts.map(f=>
       `<span>${esc(f.text)} <i>${esc(f.source)}</i></span>`).join('')}</div>`:'')
     +(thin?'<div class="none">Not much on file for this one — go in fresh. It doesn\u2019t '
-      +'change where it sits on the list.</div>':'')
-    +(l.id?`<div style="margin-top:10px"><button data-rehearse="${esc(l.id)}"
-        title="Practise this exact call first, against a practice owner who knows what's on file">🎭 Rehearse this call</button></div>`:'');
+      +'change where it sits on the list.</div>':'');
 }
 
 const MAIL_SUBJECT = "Following up — 86'd bar inventory";
@@ -1849,7 +1837,6 @@ function leadDetailsCell(l, cols){
     <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
     <div class="row" style="margin-top:10px"><button data-edit>Edit</button>
       <button data-prep="${esc(l.id)}">Prep me for the call</button>
-      <button data-rehearse="${esc(l.id)}">Rehearse this call</button>
       <button data-cancel>Close</button></div>
     <div class="wherebox hide" data-prepbox style="margin-top:10px"></div></td>`;
 }
@@ -2953,7 +2940,6 @@ function prScore(rec){ PR.scores.push({...rec, at:new Date().toISOString(), day:
 const dayNum=()=>{ const d=new Date(); return Math.floor(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())/864e5); };
 let BLOCK=Math.floor(dayNum()/ROT_DAYS);
 let SCHOOL=null, DAILY=[];   // the server's school pack, once applied (see applyPack)
-let NEXT_LEADS=null;         // real calls coming up (loadNextLeads), for the daily set and the rehearsal picker
 const daysLeft=()=>ROT_DAYS-(dayNum()%ROT_DAYS);
 function rng(seed){ return ()=>{ seed|=0; seed=seed+0x6D2B79F5|0; let t=Math.imul(seed^seed>>>15,1|seed); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
 function pick(arr,n,salt){ const r=rng(BLOCK*97+salt), a=arr.slice();
@@ -2965,10 +2951,10 @@ function pick(arr,n,salt){ const r=rng(BLOCK*97+salt), a=arr.slice();
 // the way out, both driven from switchTab's loader map and its tab-leave
 // check below.
 function loadSchoolPanel(){
-  prView('pHome'); prRender(); window.scrollTo(0,0); loadSchool(); loadNextLeads();
+  prView('pHome'); prRender(); window.scrollTo(0,0); loadSchool();
   return Promise.resolve();
 }
-function prView(id){ ['pHome','pSch','pGame','pGaunt','pTape','pCards','pReh','pFilm'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
+function prView(id){ ['pHome','pSch','pGame','pGaunt','pTape','pCards','pFilm'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
 $('pTileBack').onclick=()=>switchTab($('tabs').querySelector('button[data-tab="calls"]'));
 
 /* ── content banks ── */
@@ -3201,6 +3187,7 @@ function skillLevels(){
   return out;
 }
 const RANKS=[[0,'Barback'],[60,'Bartender'],[200,'Head Bartender'],[450,'Bar Manager'],[900,'Beverage Director'],[2000,'Closer']];
+// 'rehearse' scores come from the retired Rehearse-a-real-call mode; they keep their XP.
 function xp(){ return PR.scores.reduce((a,s)=>a+(s.kind==='game'||s.kind==='rehearse'?(s.pts||0):s.kind==='film'?15:s.kind==='quiz'?s.score*5:s.kind==='gaunt'?Math.round((s.pts||0)/5):s.kind==='cards'?10:s.kind==='tape'?Math.round((s.pts||0)/3):(s.score||0)*3),0)
   + Object.values(PR.mods).filter(Boolean).length*20 + Object.keys(PR.lines).length*15 + Object.keys(PR.watched).length*5; }
 function streak(){
@@ -3223,9 +3210,9 @@ const unlocked=b=>b.level===1||wins(LADDER[b.level-2].id).length>0;
 const nextLadder=()=>LADDER.find(b=>unlocked(b)&&!wins(b.id).length);
 
 /* Today's set is the loop a working day actually runs: warm up on the
-   pushback you're really getting, rehearse the call you're about to make,
-   then (after calling) review how the real calls went. Each step falls back
-   to the old fictional practice when there's nothing real to use yet. */
+   pushback you're really getting, take one practice call, then (after
+   calling) review how the real calls went. The warm-up falls back to a
+   Quick-Think when nothing is due in Replay. */
 function dailySet(){
   const lv=skillLevels(); let weakest=null;
   SKILLS.forEach(s=>{ if(lv[s[0]]!=null&&(!weakest||lv[s[0]]<lv[weakest[0]])) weakest=s; });
@@ -3234,17 +3221,12 @@ function dailySet(){
     :{kind:'drill',t:'One real objection, 25 seconds.',
       w:(weakest?`Weakest skill right now: ${weakest[1]} (${lv[weakest[0]].toFixed(1)}/10). `:'')+'Built from what prospects actually said on your calls.',
       go:()=>{ openSchool('pDrill'); $('dNew').click(); }};
-  const nl=NEXT_LEADS&&NEXT_LEADS[0];
-  let reh;
-  if(nl) reh={kind:'rehearse',t:`Rehearse your call to ${nl.name}.`,
-    w:`${nl.why}. The practice owner knows what's on file about them; you finish with two lines for the real call.`,
-    go:()=>gStartLead(nl.id)};
-  else{ const nb=nextLadder(), gid=nb?nb.id:ROT.guests[0], gname=nb?nb.name:GUEST_META[gid][0];
-    reh={kind:'game',t:`Win a call against ${gname}.`,w:nb?`Level ${nb.level}. ${nb.tag}`:`Guest this rotation. ${GUEST_META[gid][1]}`,go:()=>gStart(gid)}; }
+  const nb=nextLadder(), gid=nb?nb.id:ROT.guests[0], gname=nb?nb.name:GUEST_META[gid][0];
+  const game={kind:'game',t:`Win a call against ${gname}.`,w:nb?`Level ${nb.level}. ${nb.tag}`:`Guest this rotation. ${GUEST_META[gid][1]}`,go:()=>gStart(gid)};
   const film={kind:'film',t:'After your calls: watch the film.',
     w:'Make your calls first. Then the coach reads your real conversations back to you, and anything you fumbled comes back in Replay.',
     go:fOpen};
-  return [warm,reh,film];
+  return [warm,game,film];
 }
 let PNOW=null;
 function prRender(){
@@ -3271,8 +3253,7 @@ function prRender(){
           go:()=>switchTab($('tabs').querySelector('button[data-tab="calls"]'))};
   } else { $('pNowK').textContent=`TODAY'S SET · ${i+1} OF 3`; PNOW=set[i]; }
   $('pNowT').textContent=PNOW.t; $('pNowW').textContent=PNOW.w;
-  $('pNowGo').textContent=i<0?'Go to the call list':PNOW.kind==='film'?'Review my calls':PNOW.kind==='rehearse'?'Rehearse it':'Start';
-  $('pTileRehS').textContent=NEXT_LEADS&&NEXT_LEADS.length?`Next up: ${NEXT_LEADS[0].name}.`:'The bar you\'re about to ring, from what\'s on file.';
+  $('pNowGo').textContent=i<0?'Go to the call list':PNOW.kind==='film'?'Review my calls':'Start';
   if(!$('gPick').classList.contains('hide')) gBossList();
 }
 function openSchool(id){ sOpen({pDrill:'drill',pLines:'drill',pTest:'test',pMods:'learn'}[id]||'learn'); }
@@ -3483,65 +3464,6 @@ function gBegin(tok, opening, ringLine){
     if(G.patience<=0) gEnd('lost','You went quiet too long. Click.'); },2500);
 }
 
-/* ── Rehearse a real call ──
-   The same game, against a real bar on the list: the server builds the
-   practice owner from what's on file (coach.lead_boss). What's real is shown
-   before the phone rings, so the rep knows which details they can use for
-   real and which the practice owner will make up. */
-async function gStartLead(leadId){
-  gQuit(); const tok=gToken;
-  prView('pGame'); gView('gPlay'); $('gChat').innerHTML=''; $('gNote').textContent=''; $('gIn').value='';
-  $('gTitle').textContent='Rehearsal'; $('gSend').disabled=true;
-  let r;
-  try{ r=await api('/coach/rehearse/'+encodeURIComponent(leadId)); }
-  catch(e){ if(tok===gToken) gMsg('ev','— '+e.message+' —'); return; }
-  if(tok!==gToken) return;
-  if(!r.ai){ gMsg('ev','— the practice owner can\'t talk: no AI key on the server —'); return; }
-  $('gTitle').textContent='Rehearsal · '+r.bar;
-  G={id:'lead',lead:leadId,bar:r.bar,name:r.name,level:2,guest:true,rule:'none',patience:r.patience,trust:10,found:[],log:[],
-     busy:false,speaking:true,over:false,interrupts:0,maxLines:MAX_LINES,ints:1,intP:0.2,real:r.real||[]};
-  const real=document.createElement('div'); real.className='gmsg ev'; real.style.maxWidth='100%';
-  real.innerHTML='<b>Real, on file:</b> '+(G.real.length?G.real.map(esc).join(' · '):'just the name')
-    +'<br>Everything else they say is made up for practice.';
-  $('gChat').appendChild(real);
-  gBegin(tok, r.opening, '— ringing '+r.bar+' —');
-}
-async function rOpen(){
-  prView('pReh');
-  if(!NEXT_LEADS) await loadNextLeads(true);
-  const ls=NEXT_LEADS||[];
-  $('rList').innerHTML=ls.length?ls.map(l=>`<button class="boss" data-lead="${esc(l.id)}"><div class="lv">🎭</div>
-      <div><b>${esc(l.name)}</b><span>${esc(l.why)}</span></div><div class="st">Rehearse</div></button>`).join('')
-    :'<div class="card muted" style="font-size:13px">Nothing coming up on the call list or in Follow-ups right now. '
-      +'You can rehearse any bar from its row: open it and press “Rehearse this call”.</div>';
-}
-$('rList').onclick=e=>{ const b=e.target.closest('[data-lead]'); if(b) gStartLead(b.dataset.lead); };
-$('rLeave').onclick=()=>{ prView('pHome'); prRender(); };
-$('pTileReh').onclick=()=>rOpen();
-
-/* The real calls coming up, for the daily set and the picker: overdue
-   callbacks first, then today's, then whoever is in a calling window now. */
-async function loadNextLeads(quiet){
-  const [q,n]=await Promise.all([api('/queue').catch(()=>null), api('/now').catch(()=>null)]);
-  const out=[], seen=new Set();
-  const add=(l,why)=>{ if(l&&l.id&&!seen.has(l.id)){ seen.add(l.id); out.push({id:l.id,name:l.name,why}); } };
-  ((q&&q.overdue)||[]).forEach(l=>add(l,'Callback overdue'));
-  ((q&&q.due_today)||[]).forEach(l=>add(l,'Callback due today'));
-  ((n&&n.ready)||[]).forEach(l=>add(l,'In their calling window now'));
-  ((n&&n.soon)||[]).slice(0,4).forEach(l=>add(l,'Their window opens soon'));
-  NEXT_LEADS=out.slice(0,12);
-  if(!quiet&&TAB==='school') prRender();
-}
-/* A Rehearse button anywhere on the page (the prep sheet, a lead's details)
-   opens the School straight into that call. */
-document.addEventListener('click',e=>{
-  const b=e.target.closest('[data-rehearse]'); if(!b) return;
-  e.preventDefault();
-  const tab=document.querySelector('#menu button[data-tab="school"]');
-  if(tab&&TAB!=='school') switchTab(tab);
-  gStartLead(b.dataset.rehearse);
-});
-
 /* ── Game film: the coach reads your real calls back to you ── */
 let FILM=null;
 async function fOpen(){
@@ -3580,7 +3502,7 @@ async function gSend(){
   const bubble=gMsg('them','…');
   let r;
   try{
-    r=await api('/coach/turn',{method:'POST',body:JSON.stringify({boss:G.id,lead_id:G.lead||null,challenge:G.rule,transcript:G.log.slice(-40),said:t,patience:G.patience,trust:G.trust,found:G.found,interrupt})});
+    r=await api('/coach/turn',{method:'POST',body:JSON.stringify({boss:G.id,challenge:G.rule,transcript:G.log.slice(-40),said:t,patience:G.patience,trust:G.trust,found:G.found,interrupt})});
   }catch(e){
     if(tok!==gToken||!G) return;
     bubble.remove(); $('gIn').value=t; $('gNote').textContent=e.message+' Your line is back in the box. Send it again.';
@@ -3593,7 +3515,7 @@ async function gSend(){
   $('gNote').textContent=(r.coach_tag?'Coach: '+r.coach_tag:'')+(r.new_pain?' · 💡 found a problem':'');
   G.busy=false; $('gSend').disabled=false;
   const lines=G.log.filter(l=>l.role==='rep').length;
-  if(r.result){ say(r.reply,G.id); return gEnd(r.result, r.result==='won'?(G.lead?`${G.name} agreed to a next step.`:`${G.name} said yes to a trial.`):`${G.name} hung up.`); }
+  if(r.result){ say(r.reply,G.id); return gEnd(r.result, r.result==='won'?`${G.name} said yes to a trial.`:`${G.name} hung up.`); }
   if(lines>=G.maxLines){ say(r.reply,G.id); return gEnd('lost',`Out of time: ${G.maxLines} lines and no yes.`); }
   G.speaking=true; say(r.reply,G.id,()=>gYourTurn(tok));
 }
@@ -3603,28 +3525,23 @@ async function gEnd(result, why){
   const lines=g.log.filter(l=>l.role==='rep').length, won=result==='won';
   const pts=won?Math.max(0,100+g.level*50+g.trust+g.patience*2+g.found.length*25-lines*3):g.found.length*15+Math.floor(g.trust/2);
   const stars=won?(lines<=8&&g.found.length===3?3:lines<=12?2:1):0;
-  const rec3={kind:g.lead?'rehearse':'game',boss:g.id,won,stars,pts,score:Math.min(10,Math.round(pts/40))};
+  const rec3={kind:'game',boss:g.id,won,stars,pts,score:Math.min(10,Math.round(pts/40))};
   setTimeout(()=>{ if(tok!==gToken) return; gView('gEnd');
-    $('eVerdict').textContent=(won?(g.lead?'Next step agreed. ':'Trial booked. '):'Lost them. ')+why;
-    $('ePick').textContent=g.lead?'Another real call':'Different owner';
+    $('eVerdict').textContent=(won?'Trial booked. ':'Lost them. ')+why;
     $('eStars').textContent=won?'★'.repeat(stars)+'☆'.repeat(3-stars):'';
     $('ePts').textContent=`${pts} pts · ${lines} lines · ${g.found.length}/3 problems found · trust ${g.trust} · patience ${g.patience}`; },1200);
   $('eTape').innerHTML='<div class="muted">Reviewing the tape…</div>';
   if(lines>0){
-    try{ const r=await api('/coach/review',{method:'POST',body:JSON.stringify({boss:g.id,lead_id:g.lead||null,transcript:g.log.slice(-60),result})});
+    try{ const r=await api('/coach/review',{method:'POST',body:JSON.stringify({boss:g.id,transcript:g.log.slice(-60),result})});
       Object.assign(rec3,{opener:r.opener,discovery:r.discovery,objections:r.objections,ask:r.ask});
       if(!won||Math.min(r.opener,r.discovery,r.objections,r.ask)<6) addCard('Call with '+g.name+' · '+(r.turning_point||'').slice(0,140),'What would you say differently next time?',r.redo);
-      const sheet=(r.cheat_sheet||[]).length?`<div class="card" style="margin-top:6px"><strong>For the real call to ${esc(g.bar)}</strong>
-          ${r.cheat_sheet.map(x=>`<div class="say" style="margin-top:6px">${esc(x)}</div>`).join('')}
-          ${r.avoid?`<div style="margin-top:8px"><strong>Don't:</strong> ${esc(r.avoid)}</div>`:''}
-          <div class="muted" style="font-size:12px;margin-top:8px">Built only from what's on file. The rest of the practice call was made up.</div></div>`:'';
-      if(tok===gToken) $('eTape').innerHTML=`<div>Opener ${r.opener} · Discovery ${r.discovery} · Objections ${r.objections} · Ask ${r.ask}</div><div><strong>Turning point:</strong> ${esc(r.turning_point)}</div><div class="say">${esc(r.redo)}</div>${sheet}`;
+      if(tok===gToken) $('eTape').innerHTML=`<div>Opener ${r.opener} · Discovery ${r.discovery} · Objections ${r.objections} · Ask ${r.ask}</div><div><strong>Turning point:</strong> ${esc(r.turning_point)}</div><div class="say">${esc(r.redo)}</div>`;
     }catch{ if(tok===gToken) $('eTape').innerHTML='<div class="muted">No tape review this time. Your score still counts.</div>'; }
   } else $('eTape').innerHTML='';
   prScore(rec3);
 }
-$('eAgain').onclick=()=>{ const g=G; if(g&&g.lead) gStartLead(g.lead); else if(g&&g.id) gStart(g.id); else gOpen(); };
-$('ePick').onclick=()=>{ const g=G; if(g&&g.lead) rOpen(); else gOpen(); };
+$('eAgain').onclick=()=>{ const g=G; if(g&&g.id) gStart(g.id); else gOpen(); };
+$('ePick').onclick=()=>gOpen();
 $('eNext').onclick=()=>{ gQuit(); prView('pHome'); prRender(); };
 $('gLeave').onclick=()=>{ gQuit(); prView('pHome'); prRender(); };
 

@@ -14,19 +14,16 @@ agreeable is the thing it's best at — and a game you can't lose teaches nothin
 Two things tie practice to the real job, because a fictional owner only goes
 so far:
 
-- REHEARSAL (`lead_boss()`): the same game against a REAL bar on the call
-  list, built from what's actually on file — its facts, who we ask for, what
-  happened on earlier calls, the objections it gave — plus the patterns the
-  playbook learned from real calls. Anything not on file is invented, and the
-  review keeps the two apart: the cheat sheet for the real call may only use
-  what's real (`REAL FACTS`), never a detail the practice owner made up.
+- REAL PUSHBACK (`curveball_prompt(real=)`): about half the drill lines are
+  built from objections prospects really gave on this rep's calls.
 - GAME FILM (`film_prompt()`, `validate_film()`): the rep's own logged calls,
   read back as coaching — one thing working, one pattern costing calls, and
   drills built from what prospects actually said, which the page files into
   Replay. A drill must come from a call in the log, or it's dropped.
-"""
-import re
 
+(A "rehearse a real call" mode — the game played against a real lead built
+from what was on file — was tried and removed at the owner's request.)
+"""
 from typing import Optional
 
 WIN_TRUST = 70
@@ -268,8 +265,8 @@ def grade_prompt(who: str, line: str, answer: str, seconds: int, timed_out: bool
 
 def turn_prompt(boss_id: str, transcript: list[dict], said: str, patience: int,
                 trust: int, found: list[str], interrupt: Optional[str],
-                challenge: str = "none", boss: Optional[dict] = None) -> tuple[str, str]:
-    b = boss or get_boss(boss_id)
+                challenge: str = "none") -> tuple[str, str]:
+    b = get_boss(boss_id)
     rule = CHALLENGES.get(challenge, CHALLENGES["none"])["prompt"]
     pains = "\n".join(f"- {k}: {v}" + (" (ALREADY FOUND)" if k in found else "")
                       for k, v in b["pains"].items())
@@ -284,9 +281,8 @@ def turn_prompt(boss_id: str, transcript: list[dict], said: str, patience: int,
         "Pushy, vague, feature-dumping, 'is this a bad time', fake flattery or a lie (like "
         "claiming Android support) costs patience and trust. Empathy, a clear reason for "
         "calling, sharp specific questions, honesty and handling your objection well earn "
-        "trust. Raise at least one real objection before you can be won. "
-        + (b.get("win") or "You may agree to try 86'd")
-        + f" only if trust would be at least {WIN_TRUST} and at least {WIN_PAINS} pains "
+        "trust. Raise at least one real objection before you can be won. You may agree to "
+        f"try 86'd only if trust would be at least {WIN_TRUST} and at least {WIN_PAINS} pains "
         "have been found; otherwise you are not convinced yet. Reply with JSON only.")
     lines = "\n".join(("REP: " if t.get("role") == "rep" else "OWNER: ") + str(t.get("text", ""))[:600]
                       for t in transcript[-30:])
@@ -300,10 +296,9 @@ def turn_prompt(boss_id: str, transcript: list[dict], said: str, patience: int,
     return system, user
 
 
-def apply_turn(boss_id: str, patience: int, trust: int, found: list[str], out: dict,
-               boss: Optional[dict] = None) -> dict:
+def apply_turn(boss_id: str, patience: int, trust: int, found: list[str], out: dict) -> dict:
     """The referee. Turns the model's proposal into the game's actual state."""
-    b = boss or get_boss(boss_id)
+    b = get_boss(boss_id)
     found = [f for f in found if f in b["pains"]]
     patience = clamp(patience, 0, 100) + clamp(out.get("patience_delta"), -30, 10)
     trust = clamp(clamp(trust, 0, 100) + clamp(out.get("trust_delta"), -20, 25), 0, 100)
@@ -324,9 +319,8 @@ def apply_turn(boss_id: str, patience: int, trust: int, found: list[str], out: d
     }
 
 
-def review_prompt(boss_id: str, transcript: list[dict], result: str,
-                  boss: Optional[dict] = None) -> tuple[str, str]:
-    b = boss or get_boss(boss_id)
+def review_prompt(boss_id: str, transcript: list[dict], result: str) -> tuple[str, str]:
+    b = get_boss(boss_id)
     system = "You are a tough cold-call coach. The rep sells " + PRODUCT + " Reply with JSON only."
     lines = "\n".join(("REP: " if t.get("role") == "rep" else "OWNER: ") + str(t.get("text", ""))[:600]
                       for t in transcript[-40:])
@@ -334,16 +328,7 @@ def review_prompt(boss_id: str, transcript: list[dict], result: str,
             f"Judge the ask against the company's own asks: {ASKS_TEXT}.\n"
             "Score 0-10 each. Return {\"opener\": n, \"discovery\": n, \"objections\": n, "
             "\"ask\": n, \"turning_point\": \"the moment the call turned, quoted, one sentence\", "
-            "\"redo\": \"one line to say differently next time, max 30 words\"")
-    if b.get("real") is not None:
-        facts = "\n".join(f"- {f}" for f in b["real"]) or "- (nothing beyond the name)"
-        user += (", \"cheat_sheet\": [two short lines to actually say on the REAL call to this "
-                 "bar], \"avoid\": \"one thing not to do on the real call, max 20 words\"}.\n\n"
-                 "This was a REHEARSAL for a real call. Only these facts about the bar are real:\n"
-                 f"{facts}\nEverything else the practice owner said was invented. The cheat sheet "
-                 "may use the real facts and the rep's own good lines — never an invented detail.")
-    else:
-        user += "}."
+            "\"redo\": \"one line to say differently next time, max 30 words\"}.")
     return system, user
 
 
@@ -449,108 +434,6 @@ def tape_score(mistake_lines: list[int], picks: list[int], seconds_left: int) ->
     if perfect:
         pts += 30 + max(0, seconds_left)
     return {"hits": hits, "false": false, "missed": len(real) - hits, "pts": pts, "perfect": perfect}
-
-
-# ── rehearsal: a real bar, before the real call ──────────────────────────────
-
-_LABEL_RE = re.compile(r"(Objection|How they do it now|Best time|Spoke to|Next step|"
-                       r"Decision makers?|Your notes): ([^·\n]{2,240})")
-_KINDS = {"bar": "bar", "pub": "pub", "nightclub": "nightclub", "restaurant": "restaurant with a bar"}
-
-
-def lead_details(notes: str) -> dict:
-    """The labelled details logged calls carry, newest last: {label: [values]}."""
-    out: dict = {}
-    for label, value in _LABEL_RE.findall(notes or ""):
-        v = value.strip(" .;")
-        if v and v not in out.setdefault(label, []):
-            out[label].append(v)
-    return out
-
-
-def lead_boss(lead: dict, facts: Optional[list] = None, history: str = "",
-              patterns: Optional[list] = None, kind: str = "") -> dict:
-    """A practice character built from a REAL lead, for rehearsing the call.
-
-    The phone is answered by whoever picked up before (a "Spoke to:" name) or
-    a bartender, and the rep has to earn being put through to the decision
-    maker — exactly what the real call will ask of them. The hidden pains are
-    the real ones where the log has them ("How they do it now") and otherwise
-    the pains the master sheet tells every rep to ask about. `real` lists what
-    is actually on file, so the review can keep the real call honest.
-    """
-    import pitch
-
-    name = str(lead.get("name") or "the bar")[:120]
-    loc = str(lead.get("loc") or "")[:80]
-    details = lead_details(lead.get("notes") or "")
-    dm = str(lead.get("contact") or lead.get("manager_name") or "").strip()[:60]
-    picked_up = (details.get("Spoke to") or [""])[-1][:60]
-    if picked_up and dm and picked_up.lower().split()[0] == dm.lower().split()[0]:
-        picked_up = ""                       # the decision maker picked up last time
-    last = lead.get("last_outcome") or ""
-
-    real = [f"The bar: {name}" + (f", {loc}" if loc else "")
-            + (f" (a {_KINDS.get(kind, kind)})" if kind else "")]
-    if dm:
-        real.append(f"Who decides / who we ask for: {dm}")
-    if picked_up:
-        real.append(f"Who picked up last time: {picked_up}")
-    if last:
-        real.append(f"How the last call went: {last.replace('_', ' ')}")
-    for label in ("How they do it now", "Objection", "Best time", "Next step"):
-        for v in (details.get(label) or [])[-2:]:
-            real.append(f"{label}: {v}")
-    real += [str(f)[:200] for f in (facts or [])[:6]]
-    angle = pitch.state_angle(loc)
-    if angle:
-        real.append(angle)
-
-    owner = dm or "the owner"
-    callback = last == "callback" and bool(dm)
-    gatekeeper = picked_up or "a bartender"
-    now = details.get("How they do it now") or []
-    pains = {
-        "count": (f"their current way ({now[-1][:120]}) eats real time every week" if now
-                  else "the weekly count takes a couple of hours of someone's night"),
-        "orders": "orders go out as texts or emails to each rep, typed up after the count, "
-                  "and wrong or short deliveries slip through",
-        "prices": "nobody keeps track when a rep's price changes, so costs creep up unnoticed",
-    }
-    lines = [f"You are playing the people who answer the phone at {name}"
-             + (f" in {loc}" if loc else "") + ", a REAL independent bar the rep is about to "
-             "call for real. This is a rehearsal of that exact call.",
-             "REAL FACTS (use them and never contradict them):"]
-    lines += [f"- {r}" for r in real]
-    if history.strip():
-        lines += ["EARLIER CALLS (you remember only what's here, and only vaguely):",
-                  history.strip()[:1500]]
-    if patterns:
-        lines += ["HOW BARS LIKE THIS HAVE REALLY RESPONDED TO THIS REP (behave consistently "
-                  "with it):"] + [f"- {str(p)[:240]}" for p in patterns[:8]]
-    if callback:
-        lines.append(f"{owner} asked the rep to call back, and answers the phone.")
-    else:
-        lines.append(f"The phone is answered by {gatekeeper}. Play them until the rep earns being "
-                     f"put through to {owner}: asking for {owner} by name or by the job (who does "
-                     "the ordering), giving the reason in one line, and being easy to help. Then "
-                     f"play {owner}.")
-    lines.append("Anything not listed above (personality, small details) invent plausibly for a "
-                 "bar like this, and keep it modest.")
-    return {
-        "name": owner if owner != "the owner" else f"The owner of {name}",
-        "bar": name, "level": 2,
-        "patience": 50 if last == "not_interested" else (65 if callback else 60),
-        "opening": (f"{name}, this is {dm.split()[0]}." if callback
-                    else f"{name}, {(picked_up.split()[0] + ' speaking') if picked_up else 'hello'}"
-                         " — what can I do for you?"),
-        "brief": "\n".join(lines),
-        "pains": pains,
-        "real": real,
-        "win": ("You may agree to a concrete next step — downloading 86'd to try on your next "
-                "count (first month free, no card), or a set time for a short call with the "
-                "founder —"),
-    }
 
 
 # ── game film: the rep's own real calls, read back as coaching ───────────────
