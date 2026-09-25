@@ -428,6 +428,9 @@ def init_school_tables():
     print("[school] SCHOOL_TABLES_READY", flush=True)
 
 
+RETRY_AFTER_FAIL_HOURS = 6
+
+
 def _last_ok(cursor) -> Optional[datetime]:
     cursor.execute("SELECT started_at FROM crm_school_packs WHERE ok = TRUE ORDER BY started_at DESC LIMIT 1")
     row = cursor.fetchone()
@@ -447,6 +450,16 @@ def refresh_if_due(force: bool = False) -> Optional[dict]:
                        "AND started_at > NOW() - INTERVAL '20 minutes'")
         if cursor.fetchone()["n"]:
             return None
+        # "Due" is measured from the last GOOD pack, so a refresh that failed
+        # (search blocked, the AI down) stayed due — and ran again, with its
+        # paid AI calls, every 15 minutes until midnight. Any attempt, good or
+        # not, now rests it RETRY_AFTER_FAIL_HOURS.
+        if not force:
+            cursor.execute("SELECT COUNT(*) AS n FROM crm_school_packs "
+                           "WHERE started_at > NOW() - make_interval(hours => %s)",
+                           (RETRY_AFTER_FAIL_HOURS,))
+            if cursor.fetchone()["n"]:
+                return None
         cursor.execute("SELECT COUNT(*) AS n FROM crm_school_packs")
         run_no = cursor.fetchone()["n"]
         cursor.execute("SELECT pack FROM crm_school_packs WHERE ok = TRUE ORDER BY started_at DESC LIMIT 4")

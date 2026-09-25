@@ -311,7 +311,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_order_numbers.py test_film.py -q` (533 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_lead_finding.py test_order_numbers.py test_film.py test_failure_points.py -q` (566
+  tests; test_timezones.py (37 more) needs a dummy `DATABASE_URL` and runs on its own; run them
+  in a venv with the pinned requirements — system Python lacks cryptography's backend, which
+  test_apple_auth.py and main.py need)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -756,7 +759,8 @@ capture. Don't reintroduce them or describe them as current.)
   touches the row, so it costs nothing to widen or narrow later. It only matches on shape, so
   an oddly-named but real signup (no `test`/`appreview`/`-verify` in the address, not on
   `86d.com`/`example.com`) still shows up and has to be judged by hand
-- `DELETE /v1/crm/users/{id}` — the Customers list's own delete button, for exactly that: a
+- `DELETE /v1/crm/users/{id}` — the Customers list's own delete button (it frees the email,
+  see FAILURE POINTS FIXED), for exactly that: a
   signup the pattern filter above doesn't catch (an ad hoc test account, a mistaken signup)
   that still needs to go. **Soft delete**, setting the same `deleted_at` the product API
   already checks everywhere a user matters — login, registration's email-exists check, the
@@ -1315,13 +1319,74 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - SENTRY_DSN — optional, error visibility only
 - CONFIDENCE_THRESHOLD, LEVEL_DEADBAND — optional tuning, see AI Vision Rules above
 
+## FAILURE POINTS FIXED (audit, 2026-09-25) — don't reintroduce these
+Each is covered by test_failure_points.py unless noted.
+- **The Stripe webhook reads the VERIFIED payload with `json.loads`, never the library's
+  event object.** requirements.txt allowed any `stripe>=7`; a clean build installs 15.x, where
+  `StripeObject` is no longer a dict, so `event["data"]["object"].get(...)` raised on EVERY
+  webhook — a customer paid and stayed locked out, cancellations never landed. The DB work runs
+  in `_apply_billing_event` via `asyncio.to_thread`. A checkout that completes `unpaid` (delayed
+  payment methods) waits for the subscription's own "active" update
+- **`openai`, `stripe` and `sentry-sdk` are PINNED** (3.19.2 / 15.6.1 / 2.70.0 — what a clean
+  build installed on 2026-09-25, and what the code was verified against). They were `>=`, so any
+  deploy could pull a breaking major. Upgrade on purpose, and re-run test_failure_points.py
+- **The DB pool WAITS for a connection** (`database.POOL_WAIT_SECONDS`, env
+  `DB_POOL_WAIT_SECONDS`, default 15s, via a semaphore of `POOL_MAX` = 10). psycopg2's pool
+  raises `PoolError` the instant all ten are out, and the threadpool runs up to forty requests,
+  so a burst turned straight into 500s on scans and logins. `DB_POOL_WAIT_TIMEOUT` is logged when
+  a wait gives up. A connection given back to a pool drained meanwhile is closed, not a 500
+- **Nothing blocking runs on the event loop.** One process, one loop: the scan route's
+  entitlement read (`_scan_subscription`) and parse + product matching (`_process_ai_result`,
+  up to seven queries), the webhook and the admin route all run in `asyncio.to_thread`. Before,
+  every scan stalled every other request while it matched
+- **The scan falls back to Gemini when OpenAI rejects the key or answers in something that
+  isn't JSON** — it used to 503/500 on the spot, the two moments the fallback exists for.
+  `SCAN_PROVIDER_AUTH_FAILED` is logged
+- **Sending an order can't double-send on a retry** (`/orders/email` + table `order_sends`).
+  The app tags each order with `client_ref` (the count's draft, or one reorder); per distributor
+  the server CLAIMS (ref, distributor, exact items) before emailing and records sent/failed
+  after. A retry after a lost response (bar wifi, the app's 20s timeout) skips everyone already
+  emailed that exact order — reported `sent`, `already_sent: true`, with their ORIGINAL
+  `order_number` (each result carries its own). Changed items are a new order and go. A failed
+  claim can be retried; a 'sending' one older than `SEND_STALE_MINUTES` (10) — a request that
+  died — can be taken over. No DB connection is held while Resend answers, and the Past Orders
+  record is written in its own transaction AFTER the sends: it used to share theirs, so a
+  failure after the emails had gone rolled it back and answered 500, and the manager sent the
+  order again. Now `ORDER_HISTORY_FAILED` is logged and the response still says what went. Old
+  app builds send no ref and behave as before
+- **Reset codes: 5 wrong guesses burns the code** (`RESET_MAX_ATTEMPTS`,
+  `users.password_reset_attempts`, reset to 0 by each new code). A 6-digit code with no limit
+  let anyone who knew a customer's email request a code and guess until they owned the account.
+  Codes come from `secrets.randbelow`, compared with `compare_digest`. `RESET_CODE_BURNED` logged
+- **Sign-up races answer, they don't 500**: a duplicate register → 400 `email_exists`, a
+  double-tapped first Apple sign-in → 409 "tap Sign in with Apple again" (savepoint). 500s no
+  longer carry `"debug": str(e)` (it leaked database error text)
+- **The CRM's Customers delete frees the email** (`CONCAT(email, '.deleted.', …)`, same as the
+  app's own delete). It didn't, so anyone deleted there could never sign up again with that
+  address; `init_db()` frees the ones already deleted (idempotent)
+- **`/admin/activate-account` compares with `compare_digest` and is closed when SECRET_KEY is
+  unset** (a missing header vs a missing env var used to be `None == None`: a pass)
+- **Trial reminders**: each stamp is its own transaction, with no connection held across sends.
+  A shared one meant one failed stamp aborted the rest, and those customers were emailed again
+  six hours later
+- **Checkout / billing portal**: Stripe is called with no DB connection held, and a Stripe
+  error is a 502 with words (`STRIPE_ERROR` logged) instead of a bare 500
+- **Background jobs can't retry-loop on paid calls**: an inbox mail that keeps failing is given
+  up after `INBOX_MAX_TRIES` (3) passes (`INBOX_GAVE_UP`; a plain-words opt-out is still
+  recorded — CAN-SPAM), the School refresh rests `RETRY_AFTER_FAIL_HOURS` (6) after ANY attempt
+  (a failed one stayed "due" and re-ran, with its AI calls, every 15 minutes until midnight), and
+  the daily lead run rests `LEADGEN_RETRY_HOURS` (2) after any attempt (it re-hit the map
+  mirrors every 15 minutes). Login-failure tracking prunes itself past 5,000 addresses
+
 ## Deploy Rules
 - Deployed via Render (see Procfile) — do NOT change without approval
 - **The web service is on the Starter plan ($7/mo, 0.5 CPU, 512MB), not Free.** It does not
   spin down, so there is no cold start to design around. Confirmed from the Render dashboard
   on 2026-09-15; earlier notes in both repos assumed Free and were wrong. Postgres is on a
   paid tier separately. 512MB has been enough to crawl 200 venue sites in one run
-- Requirements are pinned — check compatibility before upgrading
+- Requirements are pinned — check compatibility before upgrading. ALL of them now: openai,
+  stripe and sentry-sdk were `>=` until 2026-09-25, and stripe 15 silently broke the webhook
+  (see FAILURE POINTS FIXED)
 - Cannot push directly to main — always work on a feature branch and open a PR (branch name is assigned
   per session, not fixed — the old hardcoded `claude/build-ios-preview-ASNee` reference here no longer exists)
 - NOTE: README.md is outdated (says SQLite) — ignore it, this app uses PostgreSQL

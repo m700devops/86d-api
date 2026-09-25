@@ -1691,10 +1691,15 @@ def delete_user(user_id: str, _: bool = Depends(require_crm_key)):
     """
     with get_db() as conn:
         cursor = conn.cursor()
+        # The address is freed the same way the app's own "delete my account"
+        # does it. Without this the row kept its email under users' UNIQUE
+        # index, so the person could never sign up again with that address:
+        # registration's own check skips deleted rows, and the insert failed.
         cursor.execute(
-            "UPDATE users SET deleted_at=%s, updated_at=%s "
+            "UPDATE users SET deleted_at=%s, updated_at=%s, "
+            "email = CONCAT(email, '.deleted.', %s) "
             "WHERE id=%s AND deleted_at IS NULL",
-            (now_iso(), now_iso(), user_id),
+            (now_iso(), now_iso(), generate_id()[:8], user_id),
         )
         deleted = cursor.rowcount > 0
         conn.commit()
@@ -4986,6 +4991,10 @@ def _apply_proposed(proposed: list, back: dict, text: str, today: str,
 INBOX_BATCH = int(os.getenv("CRM_INBOX_BATCH", "20"))   # emails handled per pass, max
 
 
+INBOX_MAX_TRIES = 3
+_INBOX_FAILS: dict = {}     # message_id -> failed passes, this process
+
+
 def process_inbox(days: int = 3) -> dict:
     import assist as _assist
     import inbox as _inbox
@@ -5029,7 +5038,24 @@ def process_inbox(days: int = 3) -> dict:
                 draft = _reply_draft_for(mail, lead_ids[0])
         tally[status] += 1
         if status == "failed":
-            continue          # not recorded, so the next pass tries it again
+            # Not recorded, so the next pass tries it again — but only
+            # INBOX_MAX_TRIES times. Each try is a paid model call, and a mail
+            # that always fails used to be retried every 5 minutes for as long
+            # as it stayed in the fetch window (up to 20 of them a pass).
+            fails = _INBOX_FAILS[mail["message_id"]] = _INBOX_FAILS.get(mail["message_id"], 0) + 1
+            if fails < INBOX_MAX_TRIES:
+                continue
+            print(f"[crm] INBOX_GAVE_UP after {fails} tries: {mail.get('subject')!r}", flush=True)
+            _INBOX_FAILS.pop(mail["message_id"], None)
+            # Giving up on reading it must never mean ignoring "stop emailing
+            # me": the plain-words check needs no model, and an opt-out has to
+            # be honoured (CAN-SPAM) however the rest of the mail went.
+            if lead_ids and _inbox.looks_like_opt_out(mail.get("text")):
+                try:
+                    _record_opt_out(mail, lead_ids)
+                    result = {**(result or {}), "opt_out": True}
+                except Exception as exc:
+                    print(f"[crm] INBOX_OPT_OUT_FAILED {mail.get('from_addr')}: {exc}", flush=True)
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute("""
