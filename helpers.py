@@ -72,11 +72,15 @@ def product_match_key(name: Optional[str], brand: Optional[str]) -> str:
     both -> "greygoose|original". A name that is only the brand is the brand's
     base product, which the prompt and the seed catalog both call "Original"."""
     brand_flat = "".join(_match_words(brand))
-    words = _match_words(name)
-    # Drop the brand from the front of the name — repeatedly, since some seeded
-    # beers carry it twice ("Coors Coors Light 12oz" / "Coors") — on word
-    # boundaries but compared as run-together letters, so "J&B" meets "JB" and
-    # "Tito's" meets "Titos".
+    words = _strip_brand(_match_words(name), brand_flat)
+    return f"{brand_flat}|{''.join(words) or 'original'}"
+
+
+def _strip_brand(words: list, brand_flat: str) -> list:
+    """Drop the brand from the front of the name's words — repeatedly, since
+    some seeded beers carry it twice ("Coors Coors Light 12oz" / "Coors") — on
+    word boundaries but compared as run-together letters, so "J&B" meets "JB"
+    and "Tito's" meets "Titos"."""
     while brand_flat and words:
         seen, cut = "", 0
         for i, word in enumerate(words):
@@ -89,7 +93,60 @@ def product_match_key(name: Optional[str], brand: Optional[str]) -> str:
         if not cut:
             break
         words = words[cut:]
-    return f"{brand_flat}|{''.join(words) or 'original'}"
+    return words
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """True when a and b differ by at most one inserted, deleted or changed letter."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    i = j = edits = 0
+    while i < len(a) and j < len(b):
+        if a[i] != b[j]:
+            edits += 1
+            if edits > 1:
+                return False
+            if len(a) == len(b):
+                i += 1
+            j += 1
+            continue
+        i += 1
+        j += 1
+    return edits + (len(b) - j) + (len(a) - i) <= 1
+
+
+def label_supports(name: Optional[str], brand: Optional[str], label_text: Optional[str]) -> Optional[bool]:
+    """Does the label text the model wrote down contain the product name it
+    returned? None when there is no label text to judge by (an older reply, or a
+    provider that skipped the field) — no evidence is not counter-evidence.
+
+    The prompt asks the model to transcribe the label BEFORE naming the product
+    and to take the name only from those words. A name word missing from its own
+    transcription is a name from memory — the Gatorade that was read as "Glacier
+    Freeze" when the label said "Blue Bolt". Tolerant of what isn't recall:
+    accents, case, punctuation, sizes, the brand repeated in the name, a word
+    split differently ("Old No.7"), one wrong letter in a longer word
+    ("Citroen"/"Citron"), and "Original", which is the convention for a base
+    product and never printed as a variant."""
+    label = _match_words(label_text)
+    if not label:
+        return None
+    tokens = set(label)
+    flat = "".join(label)
+    words = _strip_brand(_match_words(name), "".join(_match_words(brand)))
+    for word in words:
+        if word == "original" or word in tokens:
+            continue
+        if len(word) >= 3 and word in flat:
+            continue
+        if len(word) >= 5 and any(_one_edit_apart(word, t) for t in tokens):
+            continue
+        return False
+    return True
 
 
 _SIZE_VALUE_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*(ml|cl|l|lt|ltr|liters?|litres?|fl\.?\s*oz|oz)\b")

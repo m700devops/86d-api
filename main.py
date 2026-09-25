@@ -20,7 +20,7 @@ from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
     classify_level, smooth_level, calculate_variance, generate_order_items,
     normalize_match_text, NORM_SQL, product_match_key, seed_display_name,
-    size_ml, sizes_compatible,
+    size_ml, sizes_compatible, label_supports,
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -3698,7 +3698,7 @@ CRITICAL — identification is a READING task, not a recall task:
 - The name and brand MUST come from text printed on the label. TRANSCRIBE the label exactly as printed.
 - Do NOT infer the flavor or variant from the liquid color, cap color, bottle shape, or from which variants are most popular for that brand. Example: if a Gatorade label prints "BLUE BOLT", the name is "Blue Bolt" — NOT "Glacier Freeze", "Cool Blue", or any other blue variant you associate with the brand.
 - If the variant name is not clearly legible in the photo, use the generic descriptor printed on the label (e.g. "Sports Drink") as the name and cap confidence at 0.5. A generic name is always better than a guessed variant.
-- Before returning, self-check: "Can I point to the exact pixels where the name I'm returning is printed?" If not, you are guessing — fall back to the generic descriptor.
+- Write label_text FIRST: the words you can actually read on this one container. Then take brand and name ONLY from those words. Every word of the name you return must appear in label_text (the one exception is "Original" for a base product). If a word you want to use isn't there, you are recalling, not reading — fall back to the generic descriptor.
 
 BASE PRODUCTS — descriptors are not variant names:
 - Many flagship products print NO variant name — only the brand plus a flavor/class descriptor. Example: a standard Sprite bottle prints "Sprite" and "Carbonated Lemon-Lime Flavored Drink". "Lemon-Lime" there is a DESCRIPTOR of the base product, not a variant.
@@ -3706,6 +3706,7 @@ BASE PRODUCTS — descriptors are not variant names:
 - Return a distinct variant name ONLY when the label prints an explicit variant (e.g. "Zero Sugar", "Cherry", "Blue Bolt", "Tropical Mix"). Descriptor phrases like "flavored drink", "original taste", "classic", "carbonated beverage" mean base product → "Original".
 
 How to read the label:
+0. Transcribe the readable words into label_text, in reading order, exactly as printed.
 1. Find the largest brand wordmark (e.g. GATORADE, JACK DANIEL'S) — that is the brand.
 2. Find the variant/expression/flavor text, usually smaller and near the brand (e.g. BLUE BOLT, OLD NO. 7, RED LABEL) — that is the name. If there is no variant text — only a flavor/class descriptor — the name is "Original".
 3. Use any printed class designation for product_type (e.g. SPORTS DRINK, TENNESSEE WHISKEY, LONDON DRY GIN).
@@ -3713,6 +3714,7 @@ How to read the label:
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
+  "label_text": "The words printed on this container that you can actually read, in reading order, exactly as printed (e.g. JOHNNIE WALKER RED LABEL BLENDED SCOTCH WHISKY 750 ML)",
   "name": "Variant/expression name only (e.g. Old No. 7, Red Label, Blue Bolt, Original)",
   "brand": "Brand/distillery name only (e.g. Jack Daniel's, Johnnie Walker, Gatorade)",
   "category": "one of: spirits | beer | wine | soda | mixer | water | juice | other",
@@ -3721,12 +3723,13 @@ Return ONLY a JSON object — no markdown, no explanation:
 }
 
 Rules:
+- label_text: written FIRST. Only words you can actually see on the ONE container you are identifying — never words you expect a label like this to carry. Up to about 30 words; include every word you used for brand and name.
 - name: variant/expression only — do NOT include the brand name in this field. Use "Original" for a brand's base product with no printed variant name.
 - brand: brand/distillery name only — do NOT include the variant or product type
 - product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka, Lemon-Lime Soda, Cola, Tonic Water, Sports Drink, Energy Drink). Use the label's own designation when visible.
 - category must be one of: spirits, beer, wine, soda, mixer, water, juice, other
 - confidence is 0.0-1.0 and reflects how certain you are of the EXACT product (brand + variant)
-- If no bottle or can is present at all, return: {"name":"","brand":"","category":"other","product_type":"","confidence":0}
+- If no bottle or can is present at all, return: {"label_text":"","name":"","brand":"","category":"other","product_type":"","confidence":0}
 - Return ONLY valid JSON.
 
 """ + PRODUCT_CATALOG
@@ -3747,13 +3750,17 @@ SCAN_CATEGORIES = ["spirits", "beer", "wine", "soda", "mixer", "water", "juice",
 SCAN_SCHEMA = {
     "type": "object",
     "properties": {
+        # FIRST on purpose: strict structured output writes keys in schema
+        # order, so the model commits to what it can read before it names the
+        # product — and the server can check the name against it (label_supports).
+        "label_text": {"type": "string"},
         "name": {"type": "string"},
         "brand": {"type": "string"},
         "category": {"type": "string", "enum": SCAN_CATEGORIES},
         "product_type": {"type": "string"},
         "confidence": {"type": "number"},
     },
-    "required": ["name", "brand", "category", "product_type", "confidence"],
+    "required": ["label_text", "name", "brand", "category", "product_type", "confidence"],
     "additionalProperties": False,
 }
 
@@ -3802,6 +3809,16 @@ UNREADABLE_CONFIDENCE: float = float(os.getenv("UNREADABLE_CONFIDENCE", "0.5"))
 # default is 5 seconds, shorter than the gap between two bottles, so without this
 # a shared client still reconnected (TCP + TLS) on most scans.
 AI_KEEPALIVE_SECONDS: float = float(os.getenv("AI_KEEPALIVE_SECONDS", "120"))
+# What to do when the product name the model returned isn't in the label text
+# it transcribed first (helpers.label_supports): "enforce" treats the read as
+# unreadable — no product, the app asks for a retake; "log" only records it in
+# scan_events.label_supported; "off" skips the check. A name missing from the
+# model's own reading of the label is a name from memory, the failure the prompt
+# spends a whole section forbidding — but the check can also refuse a good read
+# the model under-transcribed, so watch the retake rate after deploying:
+# SELECT count(*) FILTER (WHERE status = 'label_unsupported') * 1.0 / count(*)
+# FROM scan_events WHERE created_at > <deploy time>.
+LABEL_CHECK: str = os.getenv("LABEL_CHECK", "enforce").strip().lower()
 
 
 def _strip_code_fences(text: str) -> str:
@@ -3825,9 +3842,10 @@ def _parse_ai_result(text: str) -> dict:
     result = json.loads(text)
     if not isinstance(result, dict):
         raise ValueError(f"AI returned {type(result).__name__}, not a JSON object")
-    for key in ("name", "brand", "product_type"):
+    for key in ("name", "brand", "product_type", "label_text"):
         value = result.get(key)
         result[key] = value.strip() if isinstance(value, str) else ""
+    result["label_text"] = result["label_text"][:600]
     category = str(result.get("category") or "").strip().lower()
     result["category"] = category if category in SCAN_CATEGORIES else "other"
     try:
@@ -4360,15 +4378,21 @@ def _process_ai_result(text: str, request: ScanAnalyzeRequest, user_id: str,
         event["status"] = "no_bottle"
         return JSONResponse(status_code=200, content=None)
     result = _apply_stabilization(result, request.previous_readings)
-    unreadable = result["confidence"] <= UNREADABLE_CONFIDENCE
+    supported = label_supports(result["name"], result["brand"], result["label_text"])
+    event.update(label_text=result["label_text"] or None, label_supported=supported)
+    low_confidence = result["confidence"] <= UNREADABLE_CONFIDENCE
+    # A confident answer whose name isn't in the model's own reading of the label.
+    unsupported = not low_confidence and supported is False and LABEL_CHECK == "enforce"
+    unreadable = low_confidence or unsupported
     result["needs_rescan"] = (
         not result.get("levelReadable", True)
         or result["confidence"] < CONFIDENCE_THRESHOLD
         or unreadable
     )
     if unreadable:
-        # Not matched, on purpose: see UNREADABLE_CONFIDENCE. No product in the
-        # response is what makes the app ask for a retake.
+        # Not matched, on purpose: see UNREADABLE_CONFIDENCE and LABEL_CHECK. No
+        # product in the response is what makes the app ask for a retake. Both
+        # reasons show the app "unreadable"; scan_events keeps them apart.
         matched_id, is_new, method = None, False, "unreadable"
     else:
         matched_id, is_new, method = _match_or_create_product(result, user_id, request.location_id)
@@ -4377,7 +4401,7 @@ def _process_ai_result(text: str, request: ScanAnalyzeRequest, user_id: str,
     result["match_method"] = method
     result["scan_id"] = event.get("id")
     event.update({
-        "status": "unreadable" if unreadable else "ok",
+        "status": "label_unsupported" if unsupported else "unreadable" if unreadable else "ok",
         "match_method": method,
         "matched_product_id": matched_id,
         "needs_rescan": result["needs_rescan"],
@@ -4465,9 +4489,9 @@ def _record_scan_event(event: dict) -> None:
                      name, brand, category, product_type, confidence,
                      match_method, matched_product_id, needs_rescan,
                      provider_ms, total_ms, input_tokens, cached_tokens, output_tokens,
-                     image_kb, created_at)
+                     image_kb, label_text, label_supported, created_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO NOTHING
             """, (
                 event["id"], event["user_id"], event.get("location_id"), event.get("status"),
@@ -4477,7 +4501,8 @@ def _record_scan_event(event: dict) -> None:
                 event.get("match_method"), event.get("matched_product_id"), event.get("needs_rescan"),
                 event.get("provider_ms"), event.get("total_ms"), event.get("input_tokens"),
                 event.get("cached_tokens"), event.get("output_tokens"),
-                event.get("image_kb"), now_iso(),
+                event.get("image_kb"), event.get("label_text"), event.get("label_supported"),
+                now_iso(),
             ))
             conn.commit()
     except Exception as e:
@@ -4490,7 +4515,7 @@ def _log_scan(event: dict) -> None:
     this: the phone kept its timings to itself and the server logged none."""
     fields = ("status", "provider", "model", "provider_ms", "total_ms", "input_tokens",
               "cached_tokens", "output_tokens", "confidence", "match_method",
-              "image_kb", "fallback_from", "id")
+              "label_supported", "image_kb", "fallback_from", "id")
     print("[scan] SCAN " + " ".join(f"{k}={event.get(k) if event.get(k) is not None else '-'}"
                                     for k in fields), flush=True)
     try:

@@ -237,8 +237,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_scan_path.py test_match_key.py -q` (592 tests; test_timezones.py
-  needs a dummy `DATABASE_URL`)
+  test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py -q` (622 tests;
+  test_timezones.py needs a dummy `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
   image last, temperature 0, strict schema, no SDK retries, one shared client, the plain-request
@@ -291,6 +291,20 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   can't switch structured output off for everyone. Gemini gets JSON mode the same way
   (`_gemini_plain_models`). Gemini's temperature is left alone: Google's guidance for Gemini 3
   models is to keep the default
+- **The model writes down what it read before it answers, and the server checks the answer
+  against it.** `label_text` is the FIRST field of `SCAN_SCHEMA` (strict output writes keys in
+  schema order, so the reading is committed before the name), and `helpers.label_supports()`
+  checks every word of the returned name is in it — tolerant of accents, case, punctuation,
+  sizes, a repeated brand, a word split differently ("Old No.7"), one wrong letter in a longer word,
+  and "Original". A confident name missing from the model's own reading is a name from memory
+  (the Gatorade read as "Glacier Freeze" when the label said "Blue Bolt"): with `LABEL_CHECK=enforce`
+  (default) it's treated as unreadable — no product, `match_method="unreadable"`, the app asks for a
+  retake — and logged `status=label_unsupported`; `log` records `label_supported=false` and matches as
+  before; `off` skips it. No label text = no verdict (`None`). It can also refuse a good read the
+  model under-transcribed, so read the retake rate after a deploy: `SELECT status, count(*) FROM
+  scan_events WHERE created_at > '<deploy>' GROUP BY status`. The reading itself is stored in
+  `scan_events.label_text` — the evidence for any disputed scan. Costs ~20-40 more output tokens
+  (a few tenths of a second). Covered by test_label_check.py
 - **"WHICH CONTAINER" in BOTTLE_PROMPT**: identify only the container nearest the centre of the
   photo. A back-bar photo has neighbours in it, and nothing used to say which one to read
 - **An unreadable label is never matched** (`UNREADABLE_CONFIDENCE`, default 0.5 — keep it in
@@ -1272,8 +1286,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   Apple Analytics tab's App Store Connect team key. Unset is fine: the tab's Connect form
   saves the key instead (encrypted). `\n` in APPLE_PRIVATE_KEY is accepted
 - SENTRY_DSN — optional, error visibility only
-- CONFIDENCE_THRESHOLD, LEVEL_DEADBAND, UNREADABLE_CONFIDENCE (0.5), AI_KEEPALIVE_SECONDS (120) —
-  optional tuning, see AI Vision Rules above
+- CONFIDENCE_THRESHOLD, LEVEL_DEADBAND, UNREADABLE_CONFIDENCE (0.5), AI_KEEPALIVE_SECONDS (120),
+  LABEL_CHECK (enforce | log | off) — optional tuning, see AI Vision Rules above
 
 ## Deploy Rules
 - Deployed via Render (see Procfile) — do NOT change without approval

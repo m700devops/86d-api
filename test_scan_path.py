@@ -391,3 +391,64 @@ def test_scan_finals_reads_only_well_formed_scanned_rows():
     ]
     assert main._scan_finals(bottles) == {"scan-1": "prod-1", "scan-6": "prod-6"}
     assert main._scan_finals(None) == {}
+
+
+# ─── the label-text check ─────────────────────────────────────────────────────
+
+def test_the_model_writes_what_it_read_before_the_answer():
+    schema = main.SCAN_SCHEMA
+    assert list(schema["properties"])[0] == "label_text"   # strict output writes keys in this order
+    assert "label_text" in schema["required"]
+    assert main.BOTTLE_PROMPT.index('"label_text"') < main.BOTTLE_PROMPT.index('"name": "Variant')
+
+
+def test_parse_keeps_label_text_as_a_bounded_string():
+    assert main._parse_ai_result('{"name": "x"}')["label_text"] == ""
+    assert main._parse_ai_result('{"name": "x", "label_text": null}')["label_text"] == ""
+    assert len(main._parse_ai_result(json.dumps({"name": "x", "label_text": "A " * 1000}))["label_text"]) == 600
+
+
+def test_a_name_from_memory_is_not_matched(monkeypatch):
+    monkeypatch.setattr(main, "_match_or_create_product",
+                        lambda *a: pytest.fail("a name missing from the model's own reading must not be matched"))
+    event = {"id": "scan-4"}
+    answer = dict(GOOD, name="Glacier Freeze", brand="Gatorade", confidence=0.93,
+                  label_text="GATORADE THIRST QUENCHER BLUE BOLT")
+    response = main._process_ai_result(json.dumps(answer), _request(), "user-1", event)
+    assert (response.matched_product_id, response.match_method, response.needs_rescan) == (None, "unreadable", True)
+    assert (event["status"], event["label_supported"]) == ("label_unsupported", False)
+    assert event["label_text"] == "GATORADE THIRST QUENCHER BLUE BOLT"
+
+
+def test_a_name_on_the_label_is_matched(monkeypatch):
+    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user, location=None: ("prod-bb", False, "exact"))
+    event = {"id": "scan-5"}
+    answer = dict(GOOD, name="Blue Bolt", brand="Gatorade", label_text="GATORADE BLUE BOLT")
+    response = main._process_ai_result(json.dumps(answer), _request(), "user-1", event)
+    assert response.matched_product_id == "prod-bb"
+    assert (event["status"], event["label_supported"]) == ("ok", True)
+
+
+def test_label_check_can_be_set_to_log_only(monkeypatch):
+    monkeypatch.setattr(main, "LABEL_CHECK", "log")
+    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user, location=None: ("prod-gf", False, "exact"))
+    event = {"id": "scan-6"}
+    answer = dict(GOOD, name="Glacier Freeze", brand="Gatorade", label_text="GATORADE BLUE BOLT")
+    response = main._process_ai_result(json.dumps(answer), _request(), "user-1", event)
+    assert response.matched_product_id == "prod-gf"                  # matched as before...
+    assert (event["status"], event["label_supported"]) == ("ok", False)  # ...but recorded
+
+
+def test_low_confidence_stays_unreadable_not_unsupported(monkeypatch):
+    monkeypatch.setattr(main, "_match_or_create_product", lambda *a: pytest.fail("unreadable"))
+    event = {"id": "scan-7"}
+    answer = dict(GOOD, name="Sports Drink", brand="Gatorade", confidence=0.5, label_text="GATORADE")
+    main._process_ai_result(json.dumps(answer), _request(), "user-1", event)
+    assert event["status"] == "unreadable"
+
+
+def test_sdk_request_asks_for_label_text_first(fake_openai):
+    server = fake_openai()
+    asyncio.run(main._call_openai("sk-test", main.BOTTLE_PROMPT, IMAGE))
+    [body] = server.posts()
+    assert list(body["response_format"]["json_schema"]["schema"]["properties"])[0] == "label_text"

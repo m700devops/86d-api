@@ -689,11 +689,18 @@ def init_db():
                 cached_tokens INTEGER,
                 output_tokens INTEGER,
                 image_kb INTEGER,
+                label_text TEXT,
+                label_supported BOOLEAN,
                 final_product_id TEXT,
                 final_at TEXT,
                 created_at TEXT NOT NULL
             )
         """)
+        # Added after the table first shipped: what the model read off the label
+        # before naming the product, and whether that name was in it
+        # (helpers.label_supports). ADD COLUMN IF NOT EXISTS is idempotent.
+        cursor.execute("ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS label_text TEXT")
+        cursor.execute("ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS label_supported BOOLEAN")
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_scan_events_created
             ON scan_events(created_at)
