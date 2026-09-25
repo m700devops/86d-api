@@ -691,6 +691,10 @@ def init_db():
                 image_kb INTEGER,
                 label_text TEXT,
                 label_supported BOOLEAN,
+                path TEXT,
+                second_opinion TEXT,
+                second_provider TEXT,
+                second_answer TEXT,
                 final_product_id TEXT,
                 final_at TEXT,
                 created_at TEXT NOT NULL
@@ -701,6 +705,11 @@ def init_db():
         # (helpers.label_supports). ADD COLUMN IF NOT EXISTS is idempotent.
         cursor.execute("ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS label_text TEXT")
         cursor.execute("ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS label_supported BOOLEAN")
+        # The second opinion (main._run_providers): how the answer was reached
+        # (fast / both / window / single), whether the other provider agreed, and
+        # what it said (JSON).
+        for col in ("path", "second_opinion", "second_provider", "second_answer"):
+            cursor.execute(f"ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS {col} TEXT")
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_scan_events_created
             ON scan_events(created_at)

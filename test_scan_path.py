@@ -271,10 +271,35 @@ def _request():
     return main.ScanAnalyzeRequest(image=IMAGE, location_id="loc-1")
 
 
+def _catalog(monkeypatch, found=("prod-7", "exact"), forbid=None):
+    """Stub the catalog: _find_product (the read-only lookup) returns `found`,
+    _record_match (the one write) echoes it. With `forbid`, reaching either
+    fails the test with that message. Returns the calls made."""
+    calls = []
+
+    def find(result, user, location=None):
+        if forbid:
+            pytest.fail(forbid)
+        calls.append(("find", user, location))
+        return found
+
+    def record(result, user, product_id, method, allow_create=True):
+        if forbid:
+            pytest.fail(forbid)
+        calls.append(("record", product_id, method, allow_create))
+        return (product_id, False, method) if product_id else (None, False, "none")
+
+    monkeypatch.setattr(main, "_find_product", find)
+    monkeypatch.setattr(main, "_record_match", record)
+    return calls
+
+
+def _active(user):
+    return {"subscription_status": "active", "trial_ends_at": None}, None
+
+
 def test_unreadable_label_is_never_matched(monkeypatch):
-    def matcher(*args):
-        raise AssertionError("an unreadable read must not be matched to a product")
-    monkeypatch.setattr(main, "_match_or_create_product", matcher)
+    _catalog(monkeypatch, forbid="an unreadable read must not be matched to a product")
     event = {"id": "scan-1"}
     answer = dict(GOOD, name="Sports Drink", brand="Gatorade", confidence=0.5)
     response = main._process_ai_result(json.dumps(answer), _request(), "user-1", event)
@@ -286,22 +311,16 @@ def test_unreadable_label_is_never_matched(monkeypatch):
 
 
 def test_confident_read_is_matched_against_the_scanning_bar(monkeypatch):
-    seen = []
-
-    def matcher(result, user, location=None):
-        seen.append((user, location))
-        return ("prod-7", False, "bar_book")
-
-    monkeypatch.setattr(main, "_match_or_create_product", matcher)
+    calls = _catalog(monkeypatch, found=("prod-7", "bar_book"))
     event = {"id": "scan-2"}
     response = main._process_ai_result(json.dumps(GOOD), _request(), "user-1", event)
     assert (response.matched_product_id, response.match_method, response.needs_rescan) == ("prod-7", "bar_book", False)
-    assert seen == [("user-1", "loc-1")]
+    assert calls == [("find", "user-1", "loc-1"), ("record", "prod-7", "bar_book", True)]
     assert event["matched_product_id"] == "prod-7" and event["status"] == "ok"
 
 
 def test_no_bottle_is_still_an_empty_200(monkeypatch):
-    monkeypatch.setattr(main, "_match_or_create_product", lambda *a: pytest.fail("nothing to match"))
+    _catalog(monkeypatch, forbid="nothing to match")
     event = {}
     response = main._process_ai_result('{"name": "", "brand": "", "category": "other", '
                                        '"product_type": "", "confidence": 0}', _request(), "u", event)
@@ -319,7 +338,7 @@ def test_unusable_openai_answer_falls_through_to_gemini(monkeypatch):
 
     monkeypatch.setattr(main, "_call_openai", openai_says_sorry)
     monkeypatch.setattr(main, "_call_gemini", gemini_answers)
-    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user, location=None: ("prod-7", False, "exact"))
+    _catalog(monkeypatch)
     event = {"id": "scan-3"}
     response = asyncio.run(main._run_providers("sk", "g", main.BOTTLE_PROMPT, _request(), "user-1", event))
     assert response.matched_product_id == "prod-7"
@@ -333,8 +352,7 @@ def test_total_timeout_is_a_504_not_no_bottle(monkeypatch):
     async def never_answers(*args):
         await asyncio.sleep(5)
 
-    monkeypatch.setattr(main, "_scan_subscription_row",
-                        lambda user: {"subscription_status": "active", "trial_ends_at": None})
+    monkeypatch.setattr(main, "_scan_context", _active)
     monkeypatch.setattr(main, "_run_providers", never_answers)
     monkeypatch.setattr(main, "_record_scan_event", logged.append)
     monkeypatch.setattr(main, "TOTAL_SCAN_TIMEOUT_SEC", 0.05)
@@ -359,10 +377,9 @@ def test_every_scan_is_logged_with_its_scan_id(monkeypatch):
         event.update(provider="openai", model="gpt-4o", provider_ms=1500)
         return await asyncio.to_thread(main._process_ai_result, json.dumps(GOOD), request, user_id, event)
 
-    monkeypatch.setattr(main, "_scan_subscription_row",
-                        lambda user: {"subscription_status": "active", "trial_ends_at": None})
+    monkeypatch.setattr(main, "_scan_context", _active)
     monkeypatch.setattr(main, "_run_providers", answers)
-    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user, location=None: ("prod-7", False, "exact"))
+    _catalog(monkeypatch)
     monkeypatch.setattr(main, "_record_scan_event", logged.append)
     monkeypatch.setenv("OPENAI_API_KEY", "sk")
 
@@ -409,8 +426,7 @@ def test_parse_keeps_label_text_as_a_bounded_string():
 
 
 def test_a_name_from_memory_is_not_matched(monkeypatch):
-    monkeypatch.setattr(main, "_match_or_create_product",
-                        lambda *a: pytest.fail("a name missing from the model's own reading must not be matched"))
+    _catalog(monkeypatch, forbid="a name missing from the model's own reading must not be matched")
     event = {"id": "scan-4"}
     answer = dict(GOOD, name="Glacier Freeze", brand="Gatorade", confidence=0.93,
                   label_text="GATORADE THIRST QUENCHER BLUE BOLT")
@@ -421,7 +437,7 @@ def test_a_name_from_memory_is_not_matched(monkeypatch):
 
 
 def test_a_name_on_the_label_is_matched(monkeypatch):
-    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user, location=None: ("prod-bb", False, "exact"))
+    _catalog(monkeypatch, found=("prod-bb", "exact"))
     event = {"id": "scan-5"}
     answer = dict(GOOD, name="Blue Bolt", brand="Gatorade", label_text="GATORADE BLUE BOLT")
     response = main._process_ai_result(json.dumps(answer), _request(), "user-1", event)
@@ -431,7 +447,7 @@ def test_a_name_on_the_label_is_matched(monkeypatch):
 
 def test_label_check_can_be_set_to_log_only(monkeypatch):
     monkeypatch.setattr(main, "LABEL_CHECK", "log")
-    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user, location=None: ("prod-gf", False, "exact"))
+    _catalog(monkeypatch, found=("prod-gf", "exact"))
     event = {"id": "scan-6"}
     answer = dict(GOOD, name="Glacier Freeze", brand="Gatorade", label_text="GATORADE BLUE BOLT")
     response = main._process_ai_result(json.dumps(answer), _request(), "user-1", event)
@@ -440,7 +456,7 @@ def test_label_check_can_be_set_to_log_only(monkeypatch):
 
 
 def test_low_confidence_stays_unreadable_not_unsupported(monkeypatch):
-    monkeypatch.setattr(main, "_match_or_create_product", lambda *a: pytest.fail("unreadable"))
+    _catalog(monkeypatch, forbid="unreadable")
     event = {"id": "scan-7"}
     answer = dict(GOOD, name="Sports Drink", brand="Gatorade", confidence=0.5, label_text="GATORADE")
     main._process_ai_result(json.dumps(answer), _request(), "user-1", event)

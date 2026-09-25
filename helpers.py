@@ -177,6 +177,60 @@ def sizes_compatible(a: Optional[float], b: Optional[float]) -> bool:
     return abs(a - b) <= 0.05 * max(a, b)
 
 
+# Words that can differ between two readings of the SAME bottle without making it
+# a different product: label furniture, age wording, and the class / region words
+# a model may or may not fold into the name ("Old No. 7" vs "Old No. 7 Tennessee
+# Whiskey", "Red" vs "Red Label", "12" vs "12 Year Old"). Deliberately small:
+# nothing that ever names a variant — "rye", "light", "dry", "reserve", "ale" and
+# above all "original" are NOT here, because "Bulleit" vs "Bulleit Rye" and
+# "Bud Light" vs "Bud Light Lime" are different bottles.
+_DESCRIPTOR_WORDS = frozenset({
+    "label", "year", "years", "yr", "yrs", "old", "aged", "brand", "the", "and", "of",
+    "vodka", "gin", "rum", "tequila", "mezcal", "whiskey", "whisky", "bourbon", "scotch",
+    "cognac", "brandy", "liqueur", "beer", "lager", "wine",
+    "tennessee", "kentucky", "straight", "sour", "mash", "blended", "single", "malt",
+    "canadian", "irish", "american", "japanese", "mexican", "french",
+})
+
+
+def _reading_words(name: Optional[str], brand: Optional[str]) -> list:
+    """Brand + name as comparable words. A name that is only the brand (or empty)
+    is the base product, "original" — so a bare "Grey Goose" never agrees with
+    "Grey Goose Le Citron"."""
+    brand_words = _match_words(brand)
+    name_words = _strip_brand(_match_words(name), "".join(brand_words)) or ["original"]
+    return brand_words + name_words
+
+
+def _covered(word: str, pool) -> bool:
+    return word in pool or (len(word) >= 5 and any(_one_edit_apart(word, p) for p in pool))
+
+
+def answers_agree(name_a: Optional[str], brand_a: Optional[str],
+                  name_b: Optional[str], brand_b: Optional[str]) -> bool:
+    """Do two providers' answers describe the same bottle?
+
+    Agree when one reading's words are all in the other (one wrong letter allowed
+    in a longer word) and whatever the longer one adds is only descriptor words
+    (_DESCRIPTOR_WORDS) — "Jack Daniel's / Old No. 7" and "Jack Daniel's /
+    Old No. 7 Tennessee Whiskey". Anything else is a disagreement: "Red Label" vs
+    "Black Label", "Bud Light" vs "Bud Light Lime", 12 vs 15, a 750ml vs a 1L.
+
+    Strict on purpose. A false disagreement costs a bartender one glance at a
+    flagged row; a false agreement is exactly today's behaviour, an unflagged
+    guess. Two answers that land on the same catalog product agree regardless —
+    the caller checks that first."""
+    if not sizes_compatible(size_ml(name_a) or size_ml(brand_a), size_ml(name_b) or size_ml(brand_b)):
+        return False
+    a, b = _reading_words(name_a, brand_a), _reading_words(name_b, brand_b)
+    for small, big in ((a, b), (b, a)):
+        if all(_covered(w, big) for w in small):
+            extra = [w for w in big if not _covered(w, small)]
+            if all(w in _DESCRIPTOR_WORDS for w in extra):
+                return True
+    return False
+
+
 def seed_display_name(name: str, brand: Optional[str]) -> str:
     """A seeded product's name the way the model is asked to write it — no
     brand in front, no size at the end: "Johnnie Walker Red Label 750ml" /

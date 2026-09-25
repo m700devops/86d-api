@@ -11,8 +11,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - Python / FastAPI (single-file monolith: main.py)
 - PostgreSQL via psycopg2 (requires DATABASE_URL — app crashes without it)
 - Deployed on Render at https://eight6d-api.onrender.com
-- OpenAI GPT-4o for AI bottle vision (primary)
-- Google Gemini 2.0 Flash as fallback if OpenAI is down/rate-limited/times out
+- AI bottle vision: OpenAI (`OPENAI_MODEL`, default gpt-4o, primary) and Google Gemini (`GEMINI_MODEL`)
+  asked SIDE BY SIDE, each a second opinion on the other — see AI Vision Rules
 
 ## Key Files
 - main.py — all routes and app logic (~3690 lines, single-file monolith)
@@ -237,12 +237,15 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py -q` (622 tests;
-  test_timezones.py needs a dummy `DATABASE_URL`)
+  test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
+  test_second_opinion.py -q` (666 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
   image last, temperature 0, strict schema, no SDK retries, one shared client, the plain-request
   fallback. Product matching and the scan log are stubbed; no network, no database
+- test_second_opinion.py — the second opinion: `helpers.answers_agree`, the pure `_decide`, and
+  `_run_providers` with fake providers on REAL delays (fast path, wait window, failures, a rejected
+  key, the total cap cancelling both calls, the one-bar inference). Every rule was mutation-checked
 - test_match_key.py — `helpers.product_match_key`, sizes, and the generated prompt product list;
   pure (no database). The matcher's SQL was checked against a real Postgres, not in this suite
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
@@ -266,9 +269,37 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   dict so assertions can check what actually got saved, not just that nothing raised
 
 ## AI Vision Rules
-- `POST /v1/scans/analyze` (`analyze_bottle`, main.py ~4420) tries OpenAI first and falls through
-  to Gemini on ANY failure of the first — timeout, error, or an answer that isn't a JSON object
-  (that last one used to return a 500 without trying Gemini) — see `_run_providers()`
+- **`POST /v1/scans/analyze` asks OpenAI and Gemini AT THE SAME TIME — the second opinion**
+  (`_run_providers`; `SECOND_OPINION=off` restores the old order, Gemini only when OpenAI fails).
+  Each reply becomes an `_Answer`: parsed, label-checked and looked up by `_find_product`, which is
+  READ-ONLY — only the chosen answer counts a scan or creates a product (`_record_match`, called
+  once from `_respond`). Then:
+  - **fast path**: the first answer that is `strong` — a bottle in THIS bar's own book (`bar_book`)
+    named from words the model itself read off the label — is returned at once. The other
+    provider's answer is still logged when it lands (after the reply, `_finish_second_opinion`), so
+    `scan_events.second_opinion` measures how often the fast path is contradicted
+  - otherwise both are compared by the pure `_decide()`: agree (same product, or
+    `helpers.answers_agree` — the same words give or take descriptor words like "Label",
+    "Tennessee Whiskey", "12 Year Old", one wrong letter) → the better-supported answer, and a new
+    product may be created; DISAGREE → the better-supported answer (label evidence, then the bar's
+    own bottle, then any catalog product, then confidence, then OpenAI) is counted but flagged:
+    `needs_confirmation=true` and `alternative` = what the other read, and the app marks the row
+    for a check. **A disagreement never creates a product**, and neither does a single reading the
+    other model looked at and couldn't make out (`other_unreadable`)
+  - once one READABLE answer is in, the other gets `SECOND_OPINION_WAIT_SEC` (2.0) more, then the
+    first is used alone (`path=window`); an unreadable first answer waits for the other in full
+  - a provider that fails (timeout, error, unparseable reply, a REJECTED KEY) just isn't there —
+    the other answers alone (`path=single`) with the old single-provider rules. A rejected OpenAI
+    key used to fail every scan with a 503 even with Gemini configured
+  - the 20s total cap cancels both provider calls (test_second_opinion.py checks nothing is left
+    running). Costs a Gemini call on every scan; `SECOND_OPINION=off` if that ever matters
+  - verified against a real Postgres through the ASGI stack on one persistent loop (as uvicorn
+    serves): the fast path replied in ~0.2s via Gemini and OpenAI's answer, landing ~1s later, was
+    logged `agree`/`disagree`. NOTE a `TestClient` used without `with` runs each request on its
+    own loop and cancels leftovers, which makes background work look broken when it isn't
+- **An app build that sends no `location_id` gets the account's location when there is exactly
+  one** (`_scan_context`, in the same thread hop as the entitlement check) — most accounts are one
+  bar, and without it older builds could never use the bar's own book or the fast path
 - **One client per provider for the life of the process** (`_openai_client()`, `_gemini_model()`).
   Every scan used to build a new client, so every scan paid a fresh TCP + TLS handshake, and
   `/scans/warm` warmed a client that was immediately thrown away; `genai.configure()` per call also
@@ -318,7 +349,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   retry sweep picks up. `null` still means no bottle
 - **Every scan is measured.** One `[scan] SCAN status= provider= model= provider_ms= total_ms=
   input_tokens= cached_tokens= output_tokens= confidence= match_method= image_kb= fallback_from= id=`
-  line (grep Render logs for `SCAN `), and a `scan_events` row written in the background
+  line (grep Render logs for `SCAN `; it also carries `path` = fast | both | window | single and
+  `second_opinion`), and a `scan_events` row written in the background (plus `second_provider` and
+  `second_answer`, the other provider's reading as JSON)
   (`_record_scan_event`, never fails a scan; `SCAN_EVENT_FAILED` if it does). The response carries
   `scan_id`; the app keeps it on the bottle row and `PUT /inventory/draft` records the product that
   row holds now in `final_product_id` (`_scan_finals`, after the draft's own commit, in its own
@@ -357,8 +390,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   exact spelling, plus junk ("Putaendo" twice). Add a product to `seed_data.py` and it's in the
   prompt. test_match_key.py checks no two seeded products share a key and every seeded product is
   reachable from its listed name
-- The route's database work (entitlement check, product matching) runs in worker threads: psycopg2
-  blocks, and the route shares one event loop with every other request
+- The route's database work (entitlement check, lookups, the one write) and the synchronous Gemini
+  call run on the scan path's OWN thread pool (`_SCAN_POOL`, `SCAN_THREADS`, default 16) —
+  psycopg2 blocks, the route shares one event loop with every other request, and the default
+  pool `asyncio.to_thread` uses is shared with the CRM's background jobs (the daily lead run, the
+  inbox reader, phone checks, School), some of which hold a thread for minutes
 - `openai` is PINNED (`openai==3.19.2`, which runs on `httpx2`, not the app's `httpx`). It used to
   be `>=1.0.0`, so each fresh build could pick up a new major version
 - Model constants are ENV-OVERRIDABLE: `OPENAI_MODEL` (default `gpt-4o`), `GEMINI_MODEL`
@@ -413,7 +449,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   distributor a bottle is ordered from at this bar, set once and applied to every future scan
 - POST /inventory/start, GET /inventory/{session_id}, POST /inventory/{session_id}/scan
 - POST /inventory/{session_id}/scan/bulk
-- POST /scans/analyze — the live AI vision route (OpenAI → Gemini fallback), see AI Vision Rules above
+- POST /scans/analyze — the live AI vision route (OpenAI and Gemini side by side), see AI Vision Rules above
 - POST /scans/warm — best-effort provider warm-up, fire-and-forget, never raises
 - POST /inventory/{session_id}/voice — voice notes
 - POST /inventory/{session_id}/complete
@@ -1287,7 +1323,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   saves the key instead (encrypted). `\n` in APPLE_PRIVATE_KEY is accepted
 - SENTRY_DSN — optional, error visibility only
 - CONFIDENCE_THRESHOLD, LEVEL_DEADBAND, UNREADABLE_CONFIDENCE (0.5), AI_KEEPALIVE_SECONDS (120),
-  LABEL_CHECK (enforce | log | off) — optional tuning, see AI Vision Rules above
+  LABEL_CHECK (enforce | log | off), SECOND_OPINION (on | off), SECOND_OPINION_WAIT_SEC (2.0),
+  SCAN_THREADS (16) — optional tuning, see AI Vision Rules above
 
 ## Deploy Rules
 - Deployed via Render (see Procfile) — do NOT change without approval
