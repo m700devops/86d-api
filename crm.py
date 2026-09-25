@@ -4925,7 +4925,8 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
         f"{_ask_when(t['at'], tz)} | {alias_of.get(t['lead_id'], '?')} | {t['kind']} | "
         f"{t['outcome'] or ''}" for t in touches])
     history = [t.model_dump() for t in data.history][-4:]
-    out = _claude_json(_assist.SYSTEM, _assist.message_block(text, history), _assist.SCHEMA,
+    out = _claude_json(_assist.BAR_SYSTEM, _assist.message_block(text, history),
+                       _assist.BAR_SCHEMA,
                        context=_assist.context_block(book, _assist.dates_table(today_d), log),
                        purpose="ai-bar")
 
@@ -4934,7 +4935,51 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
     question = str(question).strip()[:1000] if question else None
     proposed = out.get("changes") if isinstance(out.get("changes"), list) else []
 
+    # A bar that isn't in the book can't be CHANGED — it has to be added. The
+    # bar used to have no way to do that: "Added NE Moose Bar & Grill as a new
+    # lead" came back over "couldn't match 'NE Moose Bar & Grill' to a lead",
+    # and nothing was saved. New bars go through the same path as "Add a lead"
+    # (_quick_add): the lead, the call, the follow-up, and a bar that IS in the
+    # book after all gets the call logged on its existing row.
+    new_texts = _assist.new_lead_texts(out, text, back)
+    stray = [c for c in proposed if isinstance(c, dict)
+             and re.fullmatch(r"L\d+", str(c.get("lead") or "").strip())
+             and str(c.get("lead")).strip() not in back]
+    proposed = [c for c in proposed if isinstance(c, dict)
+                and str(c.get("lead") or "").strip() in back]
     applied, skipped = _apply_proposed(proposed, back, text, today)
+    skipped += [{"lead": None, "why": f"couldn't match {c['lead']!r} to a lead"} for c in stray]
+    added: list = []
+    for part in new_texts:
+        try:
+            made = _quick_add(part)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            skipped.append({"lead": None, "why": "couldn't add the new bar — "
+                            + str(detail.get("message") or exc.detail)})
+            continue
+        except Exception as exc:
+            print(f"[crm] AI_BAR_ADD_FAILED {exc}", flush=True)
+            skipped.append({"lead": None, "why": "couldn't add the new bar — try Add a lead"})
+            continue
+        lead = made["lead"]
+        existing = (made.get("applied") or {}).get("matched_existing")
+        changed = [("already in your book — logged the call on it" if existing
+                    else "added as a new lead")]
+        if lead.get("last_outcome"):
+            changed.append(f"logged call ({lead['last_outcome'].replace('_', ' ')})")
+        if lead.get("contact"):
+            changed.append(f"ask for {lead['contact']}")
+        if lead.get("followup_date"):
+            changed.append(f"follow-up → {lead['followup_date']}")
+        applied.append({"lead_id": lead["id"], "name": lead["name"],
+                        "changed": changed, "undo_id": made.get("undo_id")})
+        added.append(lead["name"])
+    if added:
+        said = ", ".join(added)
+        reply = (reply + " " if reply else "") + f"Saved: {said}."
+    elif not applied and new_texts:
+        reply = "Nothing was saved — see below."
     return {"reply": reply, "question": question, "applied": applied, "skipped": skipped}
 
 
@@ -5784,6 +5829,11 @@ def _find_existing_lead(cursor, name: str, loc: Optional[str], phones,
 # test_routes.py now checks every CRM route lands on the function it names.
 @crm_router.post("/leads/quick-add", response_model=dict, status_code=201)
 def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
+    """Add a lead from pasted notes — see _quick_add()."""
+    return _quick_add(data.text, data.name)
+
+
+def _quick_add(text: str, name_override: Optional[str] = None) -> dict:
     """Describe a call to a bar that isn't in the CRM yet — paste whatever you
     have — and get back a new lead with the call logged and every detail kept.
 
@@ -5797,10 +5847,10 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
     address off it, the same way the lead generator does.
     """
     today = _today()
-    extracted = _quick_add_extract(data.text, today)
+    extracted = _quick_add_extract(text, today)
 
-    name = _clean(data.name, 200) or _clean(extracted.get("name"), 200) \
-        or _name_from_text(data.text)
+    name = _clean(name_override, 200) or _clean(extracted.get("name"), 200) \
+        or _name_from_text(text)
     if not name:
         raise HTTPException(status_code=422, detail={
             "error": "no_name",
@@ -5844,7 +5894,7 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
         from leadgen import phones_in
         phones = sorted(phones_in(" ".join(filter(None, [
             str(extracted.get("phone") or ""), str(extracted.get("other_phones") or ""),
-            data.text]))))
+            text]))))
         lead = _find_existing_lead(cursor, name, loc, phones,
                                    _clean(extracted.get("email"), 320))
         matched = lead is not None
@@ -5858,7 +5908,7 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
             lead = cursor.fetchone()
 
         updated, applied, undo_id, counters = _apply_call_notes(
-            cursor, lead, extracted, data.text, "call", today, now)
+            cursor, lead, extracted, text, "call", today, now)
         if matched:
             # After the call's own note, and still under its undo: the
             # snapshot was taken before either.
