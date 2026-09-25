@@ -15,8 +15,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   asked SIDE BY SIDE, each a second opinion on the other — see AI Vision Rules
 
 ## Key Files
-- main.py — all routes and app logic (~3690 lines, single-file monolith). Runs as the product
-  API, the CRM, or both, per `APP_ROLE` — see TWO SERVICES under Deploy Rules
+- main.py — all routes and app logic (~3690 lines, single-file monolith)
 - database.py — PostgreSQL connection (DATABASE_URL required)
 - auth.py — JWT access + refresh tokens
 - helpers.py — level classification, ID generation, variance calc, order generation
@@ -245,7 +244,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py test_scanstats.py test_roles.py -q` (700 tests; test_timezones.py needs a dummy
+  test_second_opinion.py test_scanstats.py -q` (685 tests; test_timezones.py needs a dummy
   `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
@@ -254,10 +253,6 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_second_opinion.py — the second opinion: `helpers.answers_agree`, the pure `_decide`, and
   `_run_providers` with fake providers on REAL delays (fast path, wait window, failures, a rejected
   key, the total cap cancelling both calls, the one-bar inference). Every rule was mutation-checked
-- test_roles.py — `APP_ROLE`: each role's real app built in its own interpreter (which routes exist,
-  where /crm goes), startup run per role with the database stubbed (who sets up which tables, which
-  jobs start), and every background job on exactly one side. Every rule was mutation-checked; two
-  real uvicorn processes (api + crm) were also run side by side on one real Postgres
 - test_scanstats.py — the scanner report (`scanstats.summarize`, row by row: which evidence counts
   as right, wrong or nothing), the outcome route and the CRM report route with a faked database.
   Every rule was mutation-checked; the whole path was also run against a real Postgres upgraded
@@ -1362,38 +1357,11 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   Apple Analytics tab's App Store Connect team key. Unset is fine: the tab's Connect form
   saves the key instead (encrypted). `\n` in APPLE_PRIVATE_KEY is accepted
 - SENTRY_DSN — optional, error visibility only
-- APP_ROLE — `all` (default: everything, as always), `api` or `crm`; CRM_URL — on an `api`
-  service, where /crm sends people. See TWO SERVICES under Deploy Rules
 - CONFIDENCE_THRESHOLD, LEVEL_DEADBAND, UNREADABLE_CONFIDENCE (0.5), AI_KEEPALIVE_SECONDS (120),
   LABEL_CHECK (enforce | log | off), SECOND_OPINION (on | off), SECOND_OPINION_WAIT_SEC (2.0),
   SCAN_THREADS (16) — optional tuning, see AI Vision Rules above
 
 ## Deploy Rules
-- **TWO SERVICES (`APP_ROLE`), so the sales tool can't slow the scanner.** One codebase, one
-  database, optionally two Render services. The CRM's background work crawls venue sites (regex
-  over pages strangers wrote, holding the GIL) and has taken this whole server down before (PR #35,
-  the boot-time phone crawl). `APP_ROLE=api`: the app's routes and scanner, product schema
-  (`init_db`), jobs `warm_providers` + `trial_reminders`; no `/v1/crm`, and `/crm` 307s to
-  `CRM_URL/crm` (404 without it) so old bookmarks work. `APP_ROLE=crm`: `/crm` + `/v1/crm` only,
-  CRM/leadgen/school schema, and the six CRM jobs (lead run, scheduled email, inbox, phone checks,
-  playbook, School); no product routes. Unset/`all` = both, exactly as before, and an unknown value
-  runs everything with a loud warning rather than taking the product down. Each background job
-  belongs to exactly ONE side (`BACKGROUND_JOBS` in main.py; test_roles.py fails a loop started
-  any other way), so two services never double an email or an inbox read. Only the api side runs
-  `init_db`: two services racing the same migrations is how `CREATE TABLE IF NOT EXISTS` collides.
-  The boot log says which: grep `APP_ROLE=` and `BACKGROUND_JOBS`. The CRM page is served by the
-  CRM service itself, so its calls stay same-origin (the CORS note in the CRM section still holds).
-  Each process has its own pool (`maxconn` 10), so two services can hold up to 20 connections.
-  **Setting it up on Render** (the owner's to do; NOT live until then): New → Web Service, same
-  repo and branch, Starter, same build and start command (`./render-start.sh` — no Procfile
-  change), health check `/health`; env = the CRM's vars copied from 86d-api (DATABASE_URL,
-  SECRET_KEY — the SAME one, the saved Apple key is encrypted with it — CRM_API_KEY,
-  ANTHROPIC_API_KEY, CRM_AI_*, SPACEMAIL_*, CRM_OPERATOR_TZ, CRM_TIMEZONE, CRM_INBOX_*,
-  LEADGEN_*, COMPANY_*, APPLE_*, YOUTUBE_API_KEY, SENTRY_DSN; a Render environment group saves
-  the copying) plus `APP_ROLE=crm`. Once its log shows `APP_ROLE=crm`, set `APP_ROLE=api` and
-  `CRM_URL=https://<crm service>.onrender.com` on 86d-api — right away, outside calling hours:
-  until then both run the CRM's jobs. Undo: remove `APP_ROLE` from 86d-api and suspend the CRM
-  service
 - Deployed via Render (see Procfile) — do NOT change without approval
 - **The web service is on the Starter plan ($7/mo, 0.5 CPU, 512MB), not Free.** It does not
   spin down, so there is no cold start to design around. Confirmed from the Render dashboard

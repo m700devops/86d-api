@@ -1,9 +1,8 @@
 from fastapi import FastAPI, Depends, HTTPException, Header, Request, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, FileResponse, RedirectResponse
+from fastapi.responses import JSONResponse, FileResponse
 from contextlib import asynccontextmanager
-from typing import Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 import asyncio
@@ -45,61 +44,6 @@ from pydantic import BaseModel, Field
 # Startup time for uptime calculation
 START_TIME = time.time()
 
-# Which half of the app this process runs. One codebase, and optionally two
-# Render services on the same database, so the sales tool can never slow the
-# scanner down: the CRM's background work crawls venue sites (regex over pages
-# strangers wrote, holding the GIL) and has taken this whole server down before.
-#   api — the product: the app's routes, the scanner, trial reminders. No CRM.
-#   crm — the sales tool: /crm, /v1/crm and all of its background work.
-#   all — both in one process, as it has always been. The default, so setting
-#         nothing changes nothing.
-# An unknown value runs everything (with a loud warning) rather than failing
-# to boot: a typo must not take the product down.
-APP_ROLES = ("all", "api", "crm")
-
-
-def _read_role(value: Optional[str]) -> str:
-    role = (value or "all").strip().lower()
-    if role not in APP_ROLES:
-        print(f"[startup] WARNING: APP_ROLE={value!r} not understood (use api, crm or all) "
-              f"— running everything", flush=True)
-        return "all"
-    return role
-
-
-APP_ROLE = _read_role(os.getenv("APP_ROLE"))
-SERVES_API = APP_ROLE in ("all", "api")
-SERVES_CRM = APP_ROLE in ("all", "crm")
-# Where the CRM lives when it's its own service: /crm here redirects there, so
-# the operator's old bookmark keeps working.
-CRM_URL = (os.getenv("CRM_URL") or "").strip().rstrip("/")
-
-ROLE_SUMMARY = {
-    "all": "the product API and the CRM in one process",
-    "api": "the product API only; the CRM runs on its own service",
-    "crm": "the CRM only (/crm, /v1/crm and its background work); the app talks to the API service",
-}
-
-# Every background job and the ONE side that runs it. Each job belongs to
-# exactly one side so two services never both send the same email, read the
-# same inbox or crawl the same site (test_roles.py checks it). The loops are
-# defined further down; the lambdas look them up when the app starts.
-BACKGROUND_JOBS = [
-    ("warm_providers", "api", lambda: _warm_providers()),        # first scan as fast as the rest
-    ("trial_reminders", "api", lambda: _trial_reminder_loop()),  # the app's trial-ending emails
-    ("leadgen_daily", "crm", lambda: _leadgen_daily_loop()),
-    ("scheduled_email", "crm", lambda: _scheduled_email_loop()),
-    ("inbox", "crm", lambda: _inbox_loop()),
-    ("phone_check", "crm", lambda: _phone_check_loop()),
-    ("playbook", "crm", lambda: _playbook_loop()),
-    ("school_refresh", "crm", lambda: _school_refresh_loop()),
-]
-
-
-def jobs_for(role: str) -> list:
-    """[(name, start)] of the background jobs a process in `role` runs."""
-    return [(name, start) for name, side, start in BACKGROUND_JOBS if role in ("all", side)]
-
 # Error reporting — a no-op if SENTRY_DSN isn't set, so this is safe to ship
 # before you've created a Sentry account. Once set, unhandled exceptions in
 # any request (including the AI scan path, billing, everything) show up in
@@ -116,59 +60,59 @@ async def lifespan(app: FastAPI):
     # One consolidated report of every env var this app depends on, instead
     # of discovering a missing one via a confused customer weeks from now.
     from auth import SECRET_KEY as _sk
-    # (name, is set, what breaks without it, which side needs it)
     _config_checks = [
-        ("SECRET_KEY", _sk != "your-secret-key-change-in-production", "CRITICAL — anyone can forge login tokens for any account (the CRM also encrypts the saved Apple key with it: both services need the SAME one)", "both"),
-        ("OPENAI_API_KEY", bool(os.getenv("OPENAI_API_KEY")), "primary bottle-scan provider will fail over to Gemini", "api"),
-        ("GEMINI_API_KEY / GOOGLE_API_KEY", bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")), "no fallback if OpenAI is down/rate-limited", "api"),
-        ("RESEND_API_KEY", bool(os.getenv("RESEND_API_KEY")), "order emails and password resets cannot send", "api"),
-        ("STRIPE_SECRET_KEY", bool(os.getenv("STRIPE_SECRET_KEY")), "checkout/billing endpoints will 503", "api"),
-        ("STRIPE_PRICE_ID", bool(os.getenv("STRIPE_PRICE_ID")), "checkout endpoint will 503 — nobody can subscribe", "api"),
-        ("STRIPE_WEBHOOK_SECRET", bool(os.getenv("STRIPE_WEBHOOK_SECRET")), "payments won't activate subscriptions — customers pay and stay locked out", "api"),
-        ("CRM_API_KEY", bool(os.getenv("CRM_API_KEY")), "every CRM call answers 503 — the page loads and can do nothing (sales tool only)", "crm"),
-        ("ANTHROPIC_API_KEY", bool(os.getenv("ANTHROPIC_API_KEY")), "the CRM can't read call notes into fields — they get typed by hand (sales tool only, no effect on the app)", "crm"),
-        ("SPACEMAIL_USER / SPACEMAIL_PASSWORD", bool(os.getenv("SPACEMAIL_USER") and os.getenv("SPACEMAIL_PASSWORD")), "the CRM's Email button falls back to a mailto: link and sends nothing itself (sales tool only)", "crm"),
-        ("SENTRY_DSN", bool(_sentry_dsn), "no error visibility (optional but recommended)", "both"),
+        ("SECRET_KEY", _sk != "your-secret-key-change-in-production", "CRITICAL — anyone can forge login tokens for any account"),
+        ("OPENAI_API_KEY", bool(os.getenv("OPENAI_API_KEY")), "primary bottle-scan provider will fail over to Gemini"),
+        ("GEMINI_API_KEY / GOOGLE_API_KEY", bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")), "no fallback if OpenAI is down/rate-limited"),
+        ("RESEND_API_KEY", bool(os.getenv("RESEND_API_KEY")), "order emails and password resets cannot send"),
+        ("STRIPE_SECRET_KEY", bool(os.getenv("STRIPE_SECRET_KEY")), "checkout/billing endpoints will 503"),
+        ("STRIPE_PRICE_ID", bool(os.getenv("STRIPE_PRICE_ID")), "checkout endpoint will 503 — nobody can subscribe"),
+        ("STRIPE_WEBHOOK_SECRET", bool(os.getenv("STRIPE_WEBHOOK_SECRET")), "payments won't activate subscriptions — customers pay and stay locked out"),
+        ("ANTHROPIC_API_KEY", bool(os.getenv("ANTHROPIC_API_KEY")), "the CRM can't read call notes into fields — they get typed by hand (sales tool only, no effect on the app)"),
+        ("SPACEMAIL_USER / SPACEMAIL_PASSWORD", bool(os.getenv("SPACEMAIL_USER") and os.getenv("SPACEMAIL_PASSWORD")), "the CRM's Email button falls back to a mailto: link and sends nothing itself (sales tool only)"),
+        ("SENTRY_DSN", bool(_sentry_dsn), "no error visibility (optional but recommended)"),
     ]
-    if APP_ROLE == "api":
-        _config_checks.append(("CRM_URL", bool(CRM_URL), "/crm on this service answers 404 instead of sending the operator to the CRM service", "api"))
-    _config_checks = [c for c in _config_checks if c[3] == "both" or APP_ROLE in ("all", c[3])]
-    missing = [(name, note) for name, ok, note, _side in _config_checks if not ok]
+    missing = [(name, note) for name, ok, note in _config_checks if not ok]
     print("=" * 70, flush=True)
-    print(f"[startup] APP_ROLE={APP_ROLE} — {ROLE_SUMMARY[APP_ROLE]}", flush=True)
     print(f"[startup] config check: {len(_config_checks) - len(missing)}/{len(_config_checks)} set", flush=True)
     for name, note in missing:
         print(f"[startup]   MISSING {name} — {note}", flush=True)
     print("=" * 70, flush=True)
-    if SERVES_API:
-        try:
-            # Run init_db in thread pool to avoid blocking startup
-            await asyncio.to_thread(init_db)
-            print("[lifespan] Database initialized successfully", flush=True)
-        except Exception as e:
-            print(f"[lifespan] Database init warning (may already exist): {e}", flush=True)
-    if SERVES_CRM:
-        # CRM schema, each in its own try so a failure here can never stop the
-        # product API booting when the two share a process.
-        try:
-            await asyncio.to_thread(init_crm_tables)
-        except Exception as e:
-            print(f"[crm] CRM_TABLES_FAILED {e}", flush=True)
-        try:
-            await asyncio.to_thread(init_leadgen_tables)
-        except Exception as e:
-            print(f"[leadgen] LEADGEN_TABLES_FAILED {e}", flush=True)
-        try:
-            from school import init_school_tables
-            await asyncio.to_thread(init_school_tables)
-        except Exception as e:
-            print(f"[school] SCHOOL_TABLES_FAILED {e}", flush=True)
-    # Background work, each job on exactly one side (BACKGROUND_JOBS). All
-    # best-effort: a failure inside one never touches requests.
-    jobs = jobs_for(APP_ROLE)
-    for _name, start in jobs:
-        asyncio.create_task(start())
-    print(f"[startup] BACKGROUND_JOBS {' '.join(name for name, _ in jobs) or 'none'}", flush=True)
+    try:
+        # Run init_db in thread pool to avoid blocking startup
+        await asyncio.to_thread(init_db)
+        print("[lifespan] Database initialized successfully", flush=True)
+    except Exception as e:
+        print(f"[lifespan] Database init warning (may already exist): {e}", flush=True)
+    # CRM schema, in its own try so a failure here can never stop the product
+    # API from booting — the CRM is an internal sales tool sharing the process.
+    try:
+        await asyncio.to_thread(init_crm_tables)
+    except Exception as e:
+        print(f"[crm] CRM_TABLES_FAILED {e}", flush=True)
+    try:
+        await asyncio.to_thread(init_leadgen_tables)
+    except Exception as e:
+        print(f"[leadgen] LEADGEN_TABLES_FAILED {e}", flush=True)
+    # Pre-warm AI provider connections so the first scan is fast (best-effort)
+    asyncio.create_task(_warm_providers())
+    # Periodic trial-ending reminder emails (best-effort, runs for the life of the process)
+    asyncio.create_task(_trial_reminder_loop())
+    # Daily lead sourcing. Best-effort like the reminder loop — a failure here
+    # must never touch the product API.
+    asyncio.create_task(_leadgen_daily_loop())
+    asyncio.create_task(_scheduled_email_loop())
+    asyncio.create_task(_inbox_loop())
+    asyncio.create_task(_phone_check_loop())
+    asyncio.create_task(_playbook_loop())
+    # Cold-call school refresh: every few days at 10am Asia/Manila. Own try,
+    # own loop — nothing here may affect the product API or the CRM.
+    try:
+        from school import init_school_tables
+        await asyncio.to_thread(init_school_tables)
+    except Exception as e:
+        print(f"[school] SCHOOL_TABLES_FAILED {e}", flush=True)
+    asyncio.create_task(_school_refresh_loop())
     yield
 
 app = FastAPI(
@@ -5078,19 +5022,13 @@ def record_app_events(batch: AppEventBatch, authorization: str = Header(None)):
 
 
 # ============== INCLUDE V1 ROUTER ==============
-# Only where the product is served (APP_ROLE api or all). A CRM-only service
-# answers nothing under /v1 but /v1/crm — the app never calls it.
 
-if SERVES_API:
-    app.include_router(v1_router)
+app.include_router(v1_router)
 
 # ============== CRM (internal sales tool) ==============
 # Separate router with its own /v1/crm prefix and its own shared-key auth —
-# none of the JWT-authenticated product routes above apply to it. Not mounted
-# on an API-only service (APP_ROLE=api): the sales tool's requests — crawls,
-# long AI calls — then never share a process with a scan.
-if SERVES_CRM:
-    app.include_router(crm_router)
+# none of the JWT-authenticated product routes above apply to it.
+app.include_router(crm_router)
 
 CRM_PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "crm.html")
 
@@ -5104,17 +5042,7 @@ async def crm_page():
     credentials — every /v1/crm/* call it makes carries a key the operator
     typed, held in their browser's localStorage. noindex because a public URL
     that lists prospects has no business in a search index.
-
-    On an API-only service it sends the operator to the CRM's own service
-    (CRM_URL), so a bookmark of this address keeps working after the split.
     """
-    if not SERVES_CRM:
-        if CRM_URL:
-            return RedirectResponse(CRM_URL + "/crm", status_code=307)
-        raise HTTPException(status_code=404, detail={
-            "error": "not_found",
-            "message": "The CRM runs on its own service — set CRM_URL here to send people to it",
-        })
     if not os.path.exists(CRM_PAGE):
         raise HTTPException(status_code=404, detail={
             "error": "not_found", "message": "CRM page is not installed on this server",
@@ -5134,7 +5062,7 @@ async def crm_asset(asset: str):
     traversal away from handing out anything in the repo.
     """
     allowed = {"icon.png": "image/png", "favicon.png": "image/png"}
-    if not SERVES_CRM or asset not in allowed:
+    if asset not in allowed:
         raise HTTPException(status_code=404, detail={
             "error": "not_found", "message": "No such asset"})
     path = os.path.join(os.path.dirname(CRM_PAGE), asset)
