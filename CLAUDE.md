@@ -311,7 +311,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_order_numbers.py test_film.py test_failure_points.py -q` (566
+  test_lead_finding.py test_order_numbers.py test_film.py test_failure_points.py
+  test_owner_rules.py -q` (596
   tests; test_timezones.py (37 more) needs a dummy `DATABASE_URL` and runs on its own; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
@@ -540,20 +541,56 @@ capture. Don't reintroduce them or describe them as current.)
 - **The harvest takes `restaurant` as well as `bar`/`pub`/`nightclub`.** It used to take the
   three drink-led types only, which is a small slice of the places that pour: an independent
   restaurant with a licence has a back bar to count exactly like a tavern does, and in OSM it
-  is `amenity=restaurant`. The cost is that most restaurants have no bar worth calling, so a
-  restaurant must SHOW a drinks programme on its own site (`LIQUOR_HINTS`, or a `bar=yes`
-  tag) before it can qualify — `_restaurant_pours()`, covered by test_leadgen.py. Harvesting
-  is cheap; promoting is what matters
-- **`LIQUOR_HINTS` is anchored, not bare words, after a real harvested pizzeria with zero
-  alcohol reached the call list through it.** Bare `cocktail` matched "shrimp cocktail" and
-  "fruit cocktail" on a kitchen menu, `bar menu` matched "salad bar menu", `spirits` (no word
-  boundary) matched "spirited", `shots?\b` (no LEADING boundary) matched "screenshot", and
-  bare `draft`/`happy hour` matched an NFL-watch-party page or a lunch special — none of which
-  mean the venue pours. Every phrase now requires something a kitchen-only site has no reason
-  to say (`full bar`, `craft cocktail menu`, `wine list`, a named liquor, `draft beer` rather
-  than bare `draft`, …). `NO_LIQUOR_HINTS` (byob, "we do not serve alcohol", "no liquor
-  license") is checked FIRST and overrides everything else, including an OSM `bar=yes` tag —
-  a mapper's edit can be stale, a venue is not wrong about its own liquor license
+  is `amenity=restaurant`. The cost is that most restaurants have no bar worth calling, so
+  every venue must SHOW liquor on its own site before it can qualify — see THE OWNER'S RULES
+  below. Harvesting is cheap; promoting is what matters
+- **THE OWNER'S RULES (Stephan, 2026-09-25) — in this order, and 1-3 are EXCLUSIONS, never
+  score:** 1. no chains or corporate venues, 2. very confident it pours LIQUOR, 3. no main-strip
+  tourist bars, 4. an email if they have one (the call list's first sort key — see CALLING
+  MODE). They were all a few points of score before, and a personal-looking email outranked
+  every one: Honky Tonk Central (329 Broadway, one of four Broadway bars under one owner) and
+  Sweedeedee (a beer-and-wine brunch café) sat at the top of the list. Covered by
+  test_owner_rules.py, test_leadgen.py and test_callnow.py.
+  - **Liquor = spirits, read from VISIBLE text** (`liquor_verdict()`, fed `contacts.visible_text()`).
+    The old `LIQUOR_HINTS` read raw HTML — Squarespace ships a country picker in every page's
+    script, and "Martinique" matched `martini`, so every Squarespace restaurant "poured" — and
+    counted "wine list", "draft beer" and "tap list", which a beer-and-wine room says too. Now:
+    `NO_LIQUOR_HINTS` or `BEER_WINE_ONLY` (beer and wine only, soju / wine-based cocktails,
+    agave wine) decide against; `DEFINITE_LIQUOR` (full bar, cocktail menu, craft cocktails, a
+    whiskey list, "beer, wine & spirits") or named spirits and spirit cocktails
+    (`NAMED_SPIRITS`, with food after them excluded: bourbon pecan pie, vodka sauce, rum cake,
+    whiskey pop tart) decide for. A bar/pub/nightclub needs one; a restaurant, and any
+    brewery / taproom / wine bar / bottle shop (`_BEER_WINE_NAME`, `craft=brewery`), needs a
+    definite phrase or two different spirits. OSM `bar=yes`, `drink:beer/wine` are NOT liquor;
+    a spirits/cocktails tag is one piece of evidence. The venue's drinks/menu pages are read
+    before deciding, for every venue type. A site that is Instagram, or blank without
+    JavaScript, can't show anything — excluded: "very confident" was the owner's word.
+    Measured on 80 real Portland venues: most bars/pubs that fail are breweries, wine bars and
+    bottle shops; most restaurants the old gate passed had no liquor at all.
+  - **Tourist strips** (`TOURIST_STRIPS`: street + house-number range per city, and
+    `TOURIST_ZONES`: map paths/boxes for venues with no address, like casino-floor bars) —
+    Las Vegas Strip + Fremont, Lower Broadway / 2nd Ave / Printers Alley, Bourbon + Decatur,
+    Dirty Sixth + Rainey, Beale, River Walk, I-Drive + CityWalk, Rush / Division / Navy Pier,
+    Gaslamp, River St (Savannah), Power Plant Live, P&L District, Fourth Street Live,
+    Stockyards, Faneuil Hall, Reno's casino core, Ybor 7th Ave, City Market (Charleston),
+    Greektown, Bricktown, Santa Cruz Boardwalk. House ranges keep East Austin's 6th St,
+    Hillcrest's 5th Ave and North Las Vegas Blvd on the list. Add a metro's strip as it comes up.
+  - **Chains** beyond CHAIN_NAMES (`corporate_index()` / `corporate_reason()`): a
+    `brand`/`operator` value on 2+ harvested venues (McMenamins), a CHAIN_NAMES word in the
+    operator (Hilton), or one website domain across 2+ harvest cities. A bare `operator` is NOT
+    corporate (Portland data: owners' own names), nor is a domain a few bars in ONE town share
+    — a local owner with two or three rooms is who 86'd is for. `SHARED_HOSTS` never count.
+  - **Where it's applied:** `enrich_candidate` rejects a strip/brand venue before any request
+    and a non-liquor venue after reading its pages, stamping `fit_status='ok'` + `fit_note`
+    (the evidence, shown in the lead's notes) on a pass. `_promote_one` re-checks strip and
+    chain, and `promote_leads` only takes `fit_status='ok'`. `_reconcile_owner_rules()` runs
+    every boot (map data only, no crawling) and takes strip/chain leads off the list. Leads
+    and candidates qualified before the rules have `fit_status` NULL: the call list hides a
+    generated lead until it's 'ok' (`crm._fit_ok`), and `verify_fit()` — in main.py's
+    phone-check loop, one small batch after the phone batch, in-window leads first — crawls
+    them: pass → 'ok'; fail → deleted from the list, candidate rejected with the reason; site
+    down → back to the bank as 'retry' to be re-crawled. Never touches a called lead; one with
+    an email queued is kept but hidden. Logs `LEADGEN_OWNER_RULES`, `LEADGEN_FIT_CHECKED`
 - **`recheck_restaurant_leads()` is the one-time correction for rows the OLD gate let
   through.** Tightening `LIQUOR_HINTS` only changes what NEW candidates do from here on —
   restaurants already banked (`status='qualified'`) or already promoted-but-never-called sit
@@ -639,14 +676,10 @@ capture. Don't reintroduce them or describe them as current.)
   inventory. `UPSCALE_HINTS` (tasting menu, sommelier) is a gentler one, same as
   `ASIAN_CUISINE_HINTS` (read straight off the OSM `cuisine` tag, no crawl needed) — per
   Stephan's own sales experience, an Asian restaurant runs a materially higher rate of
-  already having some system in place. `_on_tourist_strip()` is the same idea again, from a
-  fourth signal: an address on a curated list of tourist strips (Las Vegas Blvd, Lower
-  Broadway, Bourbon St, ...) keyed by `(city, street)` so "Broadway" only counts against
-  Nashville, not the dozen other seeded metros with an ordinary street by that name.
-  `NEIGHBOURHOOD_HINTS` (pool table, happy hour, dive, tavern) is the positive. None of them
-  EXCLUDE anything — a fine-dining room, a sushi bar, or a Broadway honky-tonk can still be
-  on a clipboard and stays on the list; they only decide order, which is what matters when
-  fifty names are in front of you
+  already having some system in place. `NEIGHBOURHOOD_HINTS` (pool table, happy hour, dive,
+  tavern) is the positive. These decide ORDER within a cell at promote time and never
+  exclude — a fine-dining room or a sushi bar stays on the list. Tourist strips, chains and
+  no-liquor venues DO exclude (THE OWNER'S RULES above); the old -4 strip penalty is moot
 - **The Asian-cuisine and tourist-strip penalties were back-applied ONCE**
   (`_rescore_map_penalties_once()`, `_map_fit_penalty()`). A score is computed at enrichment
   and stored, so rows banked or promoted before those two existed kept their old order.
@@ -780,9 +813,13 @@ capture. Don't reintroduce them or describe them as current.)
   be contacted is the one mistake this list must never cause
 
 ## CALLING MODE — the "Ready to start calling" button
-- `GET /v1/crm/now` — ONE flat queue, ordered by who is in a calling window this minute,
-  then by how far the call can get (a name to ask for, then a direct mailbox, then fit
-  score). The response still has three buckets — `ready` (in a window now), `soon` (opens
+- `GET /v1/crm/now` — ONE flat queue of leads that passed the owner's rules (`_fit_ok`),
+  ordered by who is in a calling window this minute, then `_reach()`: **a lead with an email
+  first** (the owner's priority 4), then a name to ask for, then the kind of mailbox, fewest
+  tries, fit score. It used to put a manager name and a "personal" email before everything,
+  which is how a tourist-strip bar with lsumpter@ at the top outranked every fit signal. A
+  row with no timezone (`state='unknown'`) is never "ready" — it has no window; it used to
+  count as ready around the clock. The response still has three buckets — `ready` (in a window now), `soon` (opens
   shortly), `rest` (past the window, shut today, permanently closed) — plus counts and a
   `headline`, but **the page only ever renders `ready` as a table.** It used to also render
   `soon`/`rest` as tables (and, before that, an eight-tab service×timezone browser via a

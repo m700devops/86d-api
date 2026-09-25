@@ -3234,6 +3234,10 @@ async def _phone_check_loop():
         try:
             import leadgen
             checked = await asyncio.to_thread(leadgen.phone_check_step)
+            # Then the owner's rules (pours liquor, not a strip, not a chain)
+            # for leads listed before them — one after the other, never side
+            # by side, so the crawl stays at two sites at a time.
+            checked += await asyncio.to_thread(leadgen.fit_check_step)
         except Exception as e:
             print(f"[leadgen] PHONE_CHECK_LOOP_ERROR {e}", flush=True)
         await asyncio.sleep(45 if checked else 1800)

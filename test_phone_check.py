@@ -107,7 +107,7 @@ def _cand(**kw):
 def test_enrichment_takes_the_number_from_their_contact_page(monkeypatch):
     _site(monkeypatch, {
         "https://devonspub.example": '<a href="mailto:owner@devonspub.example">Email</a>'
-                                     '<a href="/contact">Contact</a>',
+                                     '<a href="/contact">Contact</a><p>Whiskey and cold beer</p>',
         "https://devonspub.example/contact": "<p>Call us: 303-893-0552</p>",
     })
     out = leadgen.enrich_candidate(_cand())
@@ -117,7 +117,7 @@ def test_enrichment_takes_the_number_from_their_contact_page(monkeypatch):
 
 def test_a_site_with_no_number_still_banks_the_lead_but_marks_it(monkeypatch):
     _site(monkeypatch, {"https://devonspub.example":
-                        '<a href="mailto:owner@devonspub.example">Email</a>'})
+                        '<a href="mailto:owner@devonspub.example">Email</a> Full bar'})
     out = leadgen.enrich_candidate(_cand())
     assert out["status"] == "qualified" and out["phone_status"] == "unconfirmed"
 

@@ -147,6 +147,10 @@ def init_crm_tables():
             ("call_brief", "TEXT"),                 # the talking points written from them
             ("phone_status", "TEXT"),               # does their own site vouch for it
             ("phone_note", "TEXT"),                 # what the check found, in words
+            # The owner's rules (pours liquor, not a tourist strip, not a
+            # chain): 'ok' or 'blocked', and the evidence or the reason.
+            ("fit_status", "TEXT"),
+            ("fit_note", "TEXT"),
         ]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -473,7 +477,7 @@ LEAD_COLUMNS = (
     "opening_hours", "opener",
     "lead_score", "email_kind", "tz_name", "queued_email_at", "venue_facts",
     "manager_name", "manager_role", "manager_source", "manager_seen_at",
-    "phone_status", "phone_note",
+    "phone_status", "phone_note", "fit_status", "fit_note",
 )
 
 # How long to wait before the next dial, by attempt number. Spread across days
@@ -508,6 +512,29 @@ BAD_PHONE = ("conflict", "unconfirmed", "wrong")
 def _dial_ok(row) -> bool:
     """Whether a lead's number may be offered for dialling at all."""
     return row.get("source") != "leadgen" or row.get("phone_status") in TRUSTED_PHONE
+
+
+def _fit_ok(row) -> bool:
+    """Whether a generated lead passed the owner's rules: pours liquor (shown
+    on its own site), not on a main tourist strip, not a chain. Until the
+    background check has looked (leadgen.verify_fit), it isn't offered. The
+    operator's own entries are trusted as typed."""
+    return row.get("source") != "leadgen" or row.get("fit_status") == "ok"
+
+
+# The call list's order, the owner's priority 4 (2026-09-25): a lead with an
+# email first. Then a name to ask for, the kind of mailbox, fewest tries, fit.
+# (1-3 — chains, liquor, tourist strips — are filters, never an order.)
+_KIND_RANK = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
+
+
+def _reach(lead: dict) -> tuple:
+    return (0 if lead.get("email") else 1,
+            0 if lead.get("manager_name") else 1,
+            _KIND_RANK.get(lead.get("email_kind"), 2),
+            lead.get("attempts") or 0,
+            -(lead.get("lead_score") or 0),
+            lead["name"])
 
 # "Nobody picked up" in the operator's own words. There was no outcome for
 # this at all, so a call that rang out with no way to leave a message had
@@ -3965,6 +3992,9 @@ def export_csv(scope: str = "today", _: bool = Depends(require_crm_key)):
     for row in rows:
         if row.get("phone_status") in BAD_PHONE:
             continue      # a number the website check found wrong never reaches a dialer
+        if row.get("fit_status") == "blocked" or (
+                scope != "all" and not row.get("last_touch_at") and not _fit_ok(row)):
+            continue      # the owner's rules: chains, beer-and-wine rooms, tourist strips
         window = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"))
         writer.writerow([
             row["name"], row["phone"] or "", row["email"] or "", row["loc"] or "",
@@ -4028,7 +4058,7 @@ def call_list(_: bool = Depends(require_crm_key)):
         lead = _lead_row(row)
         # A number that didn't validate, or that the venue's own site doesn't
         # vouch for, is never offered for dialling.
-        if not lead["phone_ok"] or not _dial_ok(row):
+        if not lead["phone_ok"] or not _dial_ok(row) or not _fit_ok(row):
             continue
         usable += 1
         lead["call_window"] = _call_window(row.get("tz_offset_hours"),
@@ -4055,15 +4085,7 @@ def call_list(_: bool = Depends(require_crm_key)):
         # couldn't classify — an unclassified one is usually the venue's own
         # mailbox (oshaughnessyspub@gmail.com), which somebody there actually
         # reads.
-        kind_rank = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
-        return (
-            WINDOW_RANK.get(lead["call_window"].get("state"), 2),
-            0 if lead.get("manager_name") else 1,
-            kind_rank.get(lead.get("email_kind"), 2),
-            lead.get("attempts") or 0,
-            -(lead.get("lead_score") or 0),
-            lead["name"],
-        )
+        return (WINDOW_RANK.get(lead["call_window"].get("state"), 2), *_reach(lead))
 
     def build_zones(by_zone: dict) -> list:
         # Every zone appears, empty or not. The sub-tabs have to be in the same
@@ -4197,13 +4219,16 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
         lead = _lead_row(row)
         # About one map number in five isn't the bar's any more: only numbers
         # the venue's own website vouches for are dialled. See leadgen.
-        if not lead["phone_ok"] or not _dial_ok(row):
+        if not lead["phone_ok"] or not _dial_ok(row) or not _fit_ok(row):
             continue
         window = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"),
                               row.get("tz_name"))
         lead["call_window"] = window
         lead["zone"] = ZONE_LABELS.get(row.get("tz_offset_hours"), "—")
-        if window["good_now"]:
+        # Only a venue in its own calling window is "ready". A row with no
+        # timezone has no window at all — it used to count as ready around
+        # the clock.
+        if window["good_now"] and window.get("state") != "unknown":
             ready.append(lead)
         elif window.get("state") == "early":
             soon.append(lead)
@@ -4214,13 +4239,7 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
             # noisier, and at 3am in Iloilo a noisier call beats no call.
             rest.append(lead)
 
-    def reach(lead):
-        kind_rank = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
-        return (0 if lead.get("manager_name") else 1,
-                kind_rank.get(lead.get("email_kind"), 2),
-                lead.get("attempts") or 0,
-                -(lead.get("lead_score") or 0),
-                lead["name"])
+    reach = _reach
 
     ready.sort(key=reach)
     # The nearly-ready ones are ordered by the clock instead: the point of

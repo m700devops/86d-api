@@ -173,6 +173,7 @@ def test_only_numbers_their_website_vouches_for_are_offered():
                          ("conflict", "good"), ("mine", "good"))
     for r in rows:
         r["source"] = "leadgen"
+        r["fit_status"] = "ok"
     rows[0]["phone_status"] = "confirmed"
     rows[1]["phone_status"] = "from_site"
     rows[3]["phone_status"] = "conflict"
@@ -193,3 +194,42 @@ def test_the_prep_sheet_profile_is_only_whats_on_file():
     assert crm._venue_profile(quick)["website"] == "https://oldetown.example"
     bare = {"cand_website": None, "cand_amenity": None, "opening_hours": None, "notes": None}
     assert crm._venue_profile(bare) == {"kind": None, "website": None, "hours": None}
+
+
+# ── The owner's priorities (2026-09-25) ──────────────────────────────────────
+# 1. no chains, 2. pours liquor, 3. no tourist strips — filters, applied by the
+# generator and the background check, which stamp fit_status. 4. an email if
+# they have one — the first thing the ready list sorts by. And only venues in
+# their own calling window are "ready".
+
+def test_a_generated_lead_is_offered_only_once_it_passed_the_owners_rules():
+    rows, states = _rows(("passed", "good"), ("unchecked", "good"), ("strip", "good"),
+                         ("mine", "good"))
+    for r in rows:
+        r.update(source="leadgen", phone_status="confirmed")
+    rows[0]["fit_status"] = "ok"
+    rows[2]["fit_status"] = "blocked"
+    rows[3]["source"] = "manual"           # the operator's own entry: trusted as typed
+    assert {l["name"] for l in _run(rows, states)["ready"]} == {"passed", "mine"}
+
+
+def test_a_lead_with_an_email_comes_first_whatever_else_it_has():
+    rows, states = _rows(("named, no email", "good"), ("role email", "good"),
+                         ("direct email", "good"), ("nothing", "good"))
+    rows[0].update(manager_name="Larry", lead_score=20)
+    rows[1].update(email="info@bar.example", email_kind="role")
+    rows[2].update(email="dave@bar.example", email_kind="personal")
+    assert [l["name"] for l in _run(rows, states)["ready"]] == [
+        "direct email", "role email", "named, no email", "nothing"]
+
+
+def test_no_timezone_is_no_window_so_never_ready():
+    rows, states = _rows(("zoneless", "unknown"), ("open", "good"))
+    WINDOWS["unknown"] = {"good_now": True, "state": "unknown", "known": False,
+                          "hint": "", "local_time": None, "window": None}
+    try:
+        d = _run(rows, states)
+    finally:
+        WINDOWS.pop("unknown")
+    assert [l["name"] for l in d["ready"]] == ["open"]
+    assert [l["name"] for l in d["rest"]] == ["zoneless"]

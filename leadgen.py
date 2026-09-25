@@ -27,6 +27,7 @@ silently stopping the pipeline.
 
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -42,7 +43,7 @@ from database import get_db
 from helpers import generate_id, now_iso
 from callwindow import ZONE_OFFSETS, SERVICES, bucket_of, all_buckets
 import venue as venue_facts
-from contacts import email_kind, find_manager, strip_non_content
+from contacts import email_kind, find_manager, strip_non_content, visible_text
 from phones import normalize_us_phone, is_toll_free, format_us_phone_dashed
 
 # ── Tunables ────────────────────────────────────────────────────────────────
@@ -172,25 +173,7 @@ CHAIN_SITE_HINTS = re.compile(
     re.I,
 )
 
-# Words that confirm a full liquor program rather than a beer-and-wine cafe.
-#
-# Every term here is anchored to something a kitchen-only menu can't also say.
-# The previous list wasn't: bare "cocktail" matched "shrimp cocktail" and
-# "fruit cocktail" on family-restaurant menus, "bar menu" matched "salad bar
-# menu" and "raw bar menu", "spirits" (no word boundary) matched "spirited",
-# "shots" matched "screenshot", and bare "draft"/"happy hour" match a pizza
-# place's NFL-watch-party page or lunch specials with zero alcohol involved.
-# A real harvested pizzeria (no booze at all) qualified through exactly this
-# door. Every phrase below is one a kitchen-only site has no reason to use.
-LIQUOR_HINTS = re.compile(
-    r"(craft cocktail|cocktail menu|cocktail list|cocktail bar|signature cocktail|"
-    r"full bar|craft beer|beer on tap|\bon draft\b|draft beer|draught beer|"
-    r"whisk(e)?y|bourbon|tequila|mezcal|\bvodka\b|\brum\b|\bgin\b|"
-    r"martini|margarita|\bliquor\b|distiller|mixolog|wine list|tap list|beer list)",
-    re.I,
-)
-
-# Explicit signals a venue does NOT pour, checked before LIQUOR_HINTS: a site
+# Explicit signals a venue does NOT pour, checked before anything else: a site
 # saying this outright beats any inference from a keyword match, and BYOB
 # specifically means there is no liquor license to sell against at all.
 NO_LIQUOR_HINTS = re.compile(
@@ -203,28 +186,11 @@ NO_LIQUOR_HINTS = re.compile(
 
 
 def _restaurant_pours(html_seen: str, tags: dict) -> tuple[bool, Optional[str]]:
-    """Whether a restaurant-tagged venue shows enough evidence it sells
-    alcohol to be worth a call. Pure function of the crawled text and the OSM
-    tags, so it's testable without a DB, network or clock — see
-    test_leadgen.py. Returns (qualifies, reject_reason).
-
-    An explicit "we don't serve alcohol"/BYOB statement on the venue's own
-    site wins over everything else, including an OSM `bar=yes` tag: OSM tags
-    are third-party edits and can be stale or wrong, but a venue is not wrong
-    about whether it holds a liquor license.
-    """
-    if html_seen and NO_LIQUOR_HINTS.search(html_seen):
-        return False, "site says no alcohol served"
-    drinks = bool(html_seen and LIQUOR_HINTS.search(html_seen))
-    # What mappers record about a place's drinks. Any of these says it pours.
-    tagged_bar = (tags.get("bar") == "yes" or tags.get("cocktails") == "yes"
-                  or any(tags.get(k) in ("yes", "served", "only")
-                         for k in ("drink:cocktail", "drink:cocktails", "drink:spirits",
-                                   "drink:liquor", "drink:beer", "drink:wine",
-                                   "drink:craft_beer", "alcohol")))
-    if drinks or tagged_bar:
-        return True, None
-    return False, "restaurant with no sign of a bar programme"
+    """(pours liquor?, why not) for a restaurant, from its raw pages — the
+    liquor_verdict() rule. Kept for recheck_restaurant_leads()."""
+    v = liquor_verdict(visible_text(html_seen or ""), tags, (tags or {}).get("name") or "",
+                       "restaurant")
+    return (True, None) if v["status"] == "spirits" else (False, v["reason"])
 
 
 # ── Small HTTP helper ───────────────────────────────────────────────────────
@@ -376,7 +342,10 @@ def init_leadgen_tables():
                               ("phone_status", "TEXT"), ("phone_note", "TEXT"),
                               # A site that didn't load is tried again on later
                               # runs (up to ENRICH_TRIES) instead of rejected.
-                              ("enrich_attempts", "INTEGER"), ("retry_after", "TEXT")]:
+                              ("enrich_attempts", "INTEGER"), ("retry_after", "TEXT"),
+                              # The owner's rules (liquor, strip, chain): 'ok'
+                              # or 'blocked', and the evidence / reason.
+                              ("fit_status", "TEXT"), ("fit_note", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'crm_lead_candidates' AND column_name = %s
@@ -505,6 +474,18 @@ def init_leadgen_tables():
             # Rolls the marker back with the updates, so the next boot retries.
             conn.rollback()
             print(f"[leadgen] LEADGEN_RESCORE_FAILED {exc}", flush=True)
+
+        # The owner's rules (tourist strips, chains) against what's already on
+        # the list and in the bank — map data only, no crawling.
+        try:
+            removed, rejected = _reconcile_owner_rules(cursor)
+            conn.commit()
+            if removed or rejected:
+                print(f"[leadgen] LEADGEN_OWNER_RULES removed_leads={removed} "
+                      f"rejected_candidates={rejected}", flush=True)
+        except Exception as exc:
+            conn.rollback()
+            print(f"[leadgen] LEADGEN_OWNER_RULES_FAILED {exc}", flush=True)
 
         try:
             reopened = _requalify_once(cursor)
@@ -1293,47 +1274,322 @@ NEIGHBOURHOOD_NAME = re.compile(
     re.I,
 )
 
-# The tourist strip in each metro, keyed by the same city name `_seed_cities`
-# stores on every harvested candidate. A bar on Las Vegas Blvd or Lower
-# Broadway isn't independent in the way a neighbourhood dive is — it's a
-# resort concierge program or a bar built for a bachelorette crawl, with
-# volume and turnover that already justified buying SOME system, whatever
-# it is. Keyed by CITY rather than a bare street-name regex on purpose:
-# "Broadway" alone is also a perfectly ordinary street in a dozen other
-# seeded metros, and matching it there would penalize an actual
-# neighbourhood bar for sharing a street name with Nashville's. Like
-# POS_STACK_HINTS, this is a SCORING PENALTY, not a reject — an
-# independently-run dive that happens to sit on one of these blocks stays
-# on the list, just further down it. Not exhaustive; add a metro's strip
-# here as it comes up rather than guessing every one in advance.
-TOURIST_STRIP_STREETS = {
-    "las vegas": (r"\blas vegas blvd\b", r"\bfremont st(?:reet)?\b"),
-    "nashville": (r"\bbroadway\b", r"\b(?:lower\s+)?2nd\s+ave\b"),
-    "new orleans": (r"\bbourbon st(?:reet)?\b", r"\bdecatur st(?:reet)?\b"),
-    "austin": (r"\b(?:e\.?\s*|east\s+)?6th\s+st(?:reet)?\b", r"\brainey st(?:reet)?\b"),
-    "memphis": (r"\bbeale st(?:reet)?\b",),
-    "san antonio": (r"\briver\s*walk\b",),
-    "orlando": (r"\bicon\s*park\b", r"\binternational\s+dr(?:ive)?\b"),
-    "chicago": (r"\brush st(?:reet)?\b",),
+# ── The owner's rules for who belongs on the call list (2026-09-25) ────────
+#
+# In order: 1. no chains or corporate venues, 2. very confident it pours
+# LIQUOR, 3. no main-strip tourist bars, 4. an email if they have one. The
+# first three are exclusions, not score adjustments: Honky Tonk Central (329
+# Broadway, one of four Broadway bars under one owner) and Sweedeedee (a
+# beer-and-wine brunch café that "matched" liquor on the word Martinique in a
+# hidden country list) both sat at the top of the call list because every one
+# of these used to be a few points either way, and a personal-looking email
+# outranked all of them.
+
+# The main tourist strip in each metro, keyed by the city name `_seed_cities`
+# stores on every candidate. Keyed by city because "Broadway" and "6th St" are
+# ordinary streets elsewhere, and bounded by house number where the strip is
+# only part of a street: East Austin's 6th St and San Diego's Hillcrest end of
+# 5th Ave are exactly the independents the list is for. A missing house
+# number on a strip street counts as on it. Not exhaustive: add a metro's
+# strip here as it comes up.
+#   (label, addr:street pattern, (lowest, highest house number) or None)
+TOURIST_STRIPS = {
+    "las vegas": [
+        ("the Las Vegas Strip", r"\blas vegas (?:blvd|boulevard)\b", (1900, 4299)),
+        ("Fremont Street", r"\bfremont (?:st|street)\b", (1, 799)),
+    ],
+    "nashville": [
+        ("Lower Broadway", r"^(?:lower )?broadway$", (1, 699)),
+        ("2nd Avenue", r"^(?:2nd|second) (?:ave|avenue)(?: (?:n|s|north|south))?$", (1, 499)),
+        ("Printers Alley", r"\bprinters? alley\b", None),
+    ],
+    "new orleans": [
+        ("Bourbon Street", r"\bbourbon (?:st|street)\b", None),
+        ("Decatur Street", r"\bdecatur (?:st|street)\b", (1, 1299)),
+    ],
+    "austin": [
+        ("Dirty Sixth", r"^(?:e|east)\.? 6th (?:st|street)$", (1, 799)),
+        ("Rainey Street", r"\brainey (?:st|street)\b", None),
+    ],
+    "memphis": [("Beale Street", r"\bbeale (?:st|street)\b", (1, 399))],
+    "san antonio": [("the River Walk", r"\briver ?walk\b|\bpaseo del rio\b", None)],
+    "orlando": [
+        ("International Drive", r"\binternational (?:dr|drive)\b", None),
+        ("Universal CityWalk", r"\buniversal (?:blvd|boulevard)\b|\bcitywalk\b", None),
+    ],
+    "chicago": [
+        ("Rush Street", r"^(?:n\.? |north )?rush (?:st|street)$", None),
+        ("Division Street", r"^(?:w|west)\.? division (?:st|street)$", (1, 99)),
+        ("Navy Pier", r"^(?:e|east)\.? grand (?:ave|avenue)$", (500, 999)),
+    ],
+    "san diego": [("the Gaslamp Quarter",
+                   r"^(?:4th|5th|6th|fourth|fifth|sixth) (?:ave|avenue)$", (300, 999))],
+    "savannah": [("River Street", r"^(?:(?:e|w|east|west)\.? )?river (?:st|street)$", None)],
+    "baltimore": [("Power Plant Live", r"^market (?:pl|place)$", None)],
+    "louisville": [("Fourth Street Live", r"^(?:s\.? |south )?(?:4th|fourth) (?:st|street)$",
+                    (400, 499))],
+    "fort worth": [("the Stockyards",
+                    r"\bexchange (?:ave|avenue)\b|\brodeo plaza\b|\bstockyards (?:blvd|boulevard)\b",
+                    None)],
+    "boston": [("Faneuil Hall", r"\bfaneuil\b|\bquincy market\b|^(?:north|south) market (?:st|street)$"
+                r"|^union (?:st|street)$", None)],
+    "reno": [("the casino core", r"^(?:n\.? |north )?virginia (?:st|street)$", (1, 499))],
+    "tampa": [("Ybor City's 7th Avenue", r"^(?:e|east)\.? (?:7th|seventh) (?:ave|avenue)$",
+               (1300, 2099))],
+    "charleston": [("City Market", r"^(?:n|s|north|south)\.? market (?:st|street)$", None)],
+    "detroit": [("Greektown", r"^(?:e\.? |east )?monroe (?:st|street)$", (300, 699))],
+    "santa cruz": [("the Beach Boardwalk", r"^beach (?:st|street)$", None)],
 }
 
+# Where a venue has no street address — casino-interior bars on the Strip
+# often don't — or the district isn't one street, its map position decides.
+# Paths are (lat, lon) centrelines with a width in metres either side; boxes
+# are (south, north, west, east). Drawn from OpenStreetMap, 2026-09-25.
+TOURIST_ZONES = {
+    "las vegas": [
+        # The resort corridor: casinos sit up to ~400 m back from the Blvd.
+        ("the Las Vegas Strip", "path", ((36.0866, -115.1727), (36.1162, -115.1722),
+                                         (36.1265, -115.1680), (36.1440, -115.1575),
+                                         (36.1478, -115.1552)), 450),
+        ("Fremont Street", "path", ((36.17173, -115.14632), (36.16830, -115.13880)), 90),
+    ],
+    "nashville": [("Lower Broadway", "path",
+                   ((36.1621, -86.7745), (36.1603, -86.7797)), 110)],
+    "san antonio": [("the River Walk", "box", (29.4200, 29.4290, -98.4935, -98.4845), 0)],
+    "san diego": [("the Gaslamp Quarter", "box", (32.7062, 32.7160, -117.1625, -117.1580), 0)],
+    "baltimore": [("Power Plant Live", "box", (39.2882, 39.2901, -76.6084, -76.6063), 0)],
+    "kansas city": [("the Power & Light District", "box",
+                     (39.0955, 39.0995, -94.5850, -94.5790), 0)],
+    "louisville": [("Fourth Street Live", "box", (38.2508, 38.2533, -85.7585, -85.7561), 0)],
+    "boston": [("Faneuil Hall", "box", (42.3590, 42.3615, -71.0575, -71.0522), 0)],
+    "oklahoma city": [("Bricktown", "box", (35.4624, 35.4697, -97.5123, -97.5000), 0)],
+    "santa cruz": [("the Beach Boardwalk", "box", (36.9633, 36.9658, -122.0212, -122.0129), 0)],
+    "orlando": [("Universal CityWalk", "box", (28.4715, 28.4752, -81.4692, -81.4639), 0)],
+}
 
-def _on_tourist_strip(tags: dict, city: Optional[str]) -> bool:
-    """Whether the venue's OWN street address falls on a known tourist strip.
+_STRIP_RES = {city: [(label, re.compile(pat), rng) for label, pat, rng in strips]
+              for city, strips in TOURIST_STRIPS.items()}
 
-    Reads `addr:street` off the map tags, never inferred from the city or
-    venue name alone — a bar two blocks off Broadway is a different bar
-    from one on it.
-    """
-    if not city:
-        return False
-    streets = TOURIST_STRIP_STREETS.get(city.strip().lower())
-    if not streets:
-        return False
-    addr = (tags.get("addr:street") or "").lower()
-    if not addr:
-        return False
-    return any(re.search(p, addr) for p in streets)
+
+def _house_number(raw) -> Optional[int]:
+    m = re.match(r"\s*(\d{1,6})", str(raw or ""))
+    return int(m.group(1)) if m else None
+
+
+def _metres_to_segment(p, a, b) -> float:
+    k = math.cos(math.radians(p[0])) * 111320
+    ax, ay, bx, by = a[1] * k, a[0] * 111320, b[1] * k, b[0] * 111320
+    px, py = p[1] * k, p[0] * 111320
+    dx, dy = bx - ax, by - ay
+    t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy)
+                                             / (dx * dx + dy * dy)))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def tourist_strip(tags: dict, city: Optional[str], lat=None, lon=None) -> Optional[str]:
+    """Which main tourist strip the venue is on, or None.
+
+    By its own street address first (and house number, where only part of
+    the street is the strip), then by where it sits on the map."""
+    key = (city or "").strip().lower()
+    street = re.sub(r"\s+", " ", str((tags or {}).get("addr:street") or "")).strip().lower()
+    if street:
+        for label, pattern, rng in _STRIP_RES.get(key, ()):
+            # North Las Vegas Blvd is dives and strip clubs, not the Strip.
+            if not pattern.search(street) or (label == "the Las Vegas Strip"
+                                              and re.search(r"\bn(?:orth)?\b", street)):
+                continue
+            number = _house_number((tags or {}).get("addr:housenumber"))
+            if rng is None or number is None or rng[0] <= number <= rng[1]:
+                return label
+    try:
+        point = (float(lat), float(lon))
+    except (TypeError, ValueError):
+        return None
+    for label, kind, shape, width in TOURIST_ZONES.get(key, ()):
+        if kind == "box":
+            south, north, west, east = shape
+            if south <= point[0] <= north and west <= point[1] <= east:
+                return label
+        elif any(_metres_to_segment(point, a, b) <= width for a, b in zip(shape, shape[1:])):
+            return label
+    return None
+
+
+def _on_tourist_strip(tags: dict, city: Optional[str], lat=None, lon=None) -> bool:
+    return tourist_strip(tags, city, lat, lon) is not None
+
+
+# ── 2. Does it pour LIQUOR? ─────────────────────────────────────────────────
+#
+# Spirits, not beer and wine: a beer-and-wine room has no back bar to count.
+# Read from what a visitor SEES on the venue's own pages (visible_text: no
+# scripts, styles or markup) — the old check read raw HTML, and Squarespace
+# ships a country picker in every page's script whose "Martinique" matched
+# "martini", so every Squarespace restaurant "poured liquor". "Wine list",
+# "draft beer" and "tap list" counted too, which is how a beer-and-wine brunch
+# café reached the top of the list.
+#
+# Three kinds of evidence, all matched on lower-cased text:
+#   - a site saying it doesn't pour at all (NO_LIQUOR_HINTS) or pours beer and
+#     wine only (BEER_WINE_ONLY) — decides against, whatever else it says;
+#   - DEFINITE: a phrase only a liquor programme uses (full bar, cocktail
+#     menu, craft cocktails, a whiskey list, beer, wine & spirits);
+#   - named spirits and spirit cocktails, each counted once. Food words after
+#     one ("bourbon pecan pie", "vodka sauce", "rum cake") don't count.
+# A bar or pub needs one definite phrase or one named spirit on its own site;
+# a restaurant, a brewery, a wine bar or a taproom needs a definite phrase or
+# two different named spirits. Nothing found is "not confident" — excluded.
+BEER_WINE_ONLY = re.compile(
+    r"\b(?:beers?|wines?) {0,3}(?:and|&|\+|/) {0,3}(?:beers?|wines?) {0,3}only\b"
+    r"|\b(?:only|just) {1,3}(?:serve {1,3}|offer {1,3}|pour {1,3})?(?:beers?|wines?)"
+    r" {0,3}(?:and|&|/) {0,3}(?:beers?|wines?)\b"
+    r"|\b(?:beer|wine) {0,3}(?:and|&|/) {0,3}(?:beer|wine) {1,3}(?:license|licence|permit)\b"
+    r"|\b(?:soju|sake|wine)[- ](?:based|infused)\b|\b(?:soju|wine|sake) cocktails?\b"
+    r"|\bagave wine\b|\bwine margaritas?\b"
+    r"|\b(?:no|don'?t serve|do not serve|doesn'?t serve) {1,3}(?:hard {1,3})?(?:liquor|spirits)\b")
+
+_NOT_DRINK_AFTER = (r"(?![- ]{1,3}(?:sauce|shrimp|party|parties|attire|dress|hour|napkins?"
+                    r"|tables?|glass(?:es)?\b))")
+DEFINITE_LIQUOR = re.compile(
+    r"\bfull[- ](?:service )?bar\b|\bfull liquor\b|\bwell (?:drinks?|liquor)\b"
+    r"|\b(?:craft|signature|house|classic|handcrafted|hand[- ]crafted|specialty|seasonal"
+    r"|premium) cocktails?\b" + _NOT_DRINK_AFTER +
+    r"|\bcocktail (?:menu|list|program|programme|bar|lounge)\b"
+    r"|\b(?:whiske?y|bourbon|scotch|tequila|mezcal|spirits?|liquor) "
+    r"(?:list|selection|menu|collection|library|flights?|bar)\b"
+    r"|\b(?:selection|list|flights?|collection) of (?:[a-z]{1,20} ){0,2}"
+    r"(?:whiske?ys?|whiskies|bourbons?|scotch|tequilas?|mezcals?|rums?|gins?|vodkas?"
+    r"|spirits|liquors?)\b"
+    r"|\b(?:beers?|wines?) {0,2}(?:,|&|and|\+) {0,2}(?:(?:beers?|wines?) {0,2}(?:,|&|and|\+)"
+    r" {0,2})?(?:spirits|liquor|cocktails)\b")
+
+_FOOD_AFTER = (r"(?![- ]{1,3}(?:glaze[ds]?|sauce|cream sauce|cakes?|raisins?|pecan|pie|caramel"
+               r"|vanilla|butter|bbq|barbe?cue|chicken|shrimp|salmon|cured|braised|brined"
+               r"|marinated|bread|beans|maple|mustard|onion|jam|ribs|wings|steak|burger"
+               r"|brownies?|cheesecake|fudge|syrup|soaked|reduction|aioli|vinaigrette"
+               r"|sausage|pork|beef|pasta|penne|rigatoni|street|st\b|row\b|balls?|eggs?"
+               r"|bonnet|tape|pizza|flatbread|mix|pop ?tarts?|cream cheese|frosting|icing"
+               r"|donuts?|doughnuts?|cupcakes?|cookies?|ice cream|truffles?|french toast"
+               r"|pancakes?|shake|milkshake)\b)")
+NAMED_SPIRITS = re.compile(
+    r"(?<!alla )\b(whiske?ys?|whiskies|bourbons?|scotch|tequilas?|mezcals?|mescal|vodkas?|gin"
+    r"|rums?|cognac|pisco|cacha[cç]a|aquavit|akvavit|grappa|amaro|amari|absinthe|fernet"
+    r"|campari|aperol|negronis?|martinis?|margaritas?|mojitos?|daiquiris?|moscow mules?"
+    r"|mai tais?|sazeracs?|gimlets?|mint juleps?|long island iced teas?|liquors?)\b"
+    + _FOOD_AFTER)
+_SPIRIT_KEY = {"whisky": "whiskey", "whiskies": "whiskey", "mescal": "mezcal",
+               "cachaça": "cachaca", "akvavit": "aquavit", "amari": "amaro"}
+
+_BEER_WINE_NAME = re.compile(
+    r"\b(?:wine bar|winery|wine room|wine house|wine shop|wine cellar|vino|enoteca|vinoteca"
+    r"|taproom|tap room|brewing|brewery|brewpub|brew pub|beer garden|biergarten|beer hall"
+    r"|bottle ?shop|cidery|cider house|meadery|tasting room)\b", re.I)
+_DRINK_TAGS = ("drink:spirits", "drink:liquor", "drink:cocktail", "drink:cocktails")
+
+
+def _spirit_key(word: str) -> str:
+    word = _SPIRIT_KEY.get(word, word)
+    return word[:-1] if word.endswith("s") and word not in ("scotch",) else word
+
+
+def liquor_verdict(text: str, tags: Optional[dict] = None, name: str = "",
+                   amenity: str = "") -> dict:
+    """{"status": spirits | beer_wine | no_alcohol | unknown, "evidence": [...],
+    "reason": why not, when it isn't spirits}. `text` is VISIBLE text."""
+    tags = tags or {}
+    low = (text or "").lower()
+    if NO_LIQUOR_HINTS.search(low):
+        return {"status": "no_alcohol", "evidence": [], "reason": "site says no alcohol served"}
+    beer_wine = BEER_WINE_ONLY.search(low)
+    if beer_wine:
+        return {"status": "beer_wine", "evidence": [beer_wine.group(0)],
+                "reason": f"beer and wine only (their site: “{beer_wine.group(0)}”)"}
+    evidence: list = []
+    definite = DEFINITE_LIQUOR.search(low)
+    if definite:
+        evidence.append(definite.group(0))
+    named: dict = {}
+    for m in NAMED_SPIRITS.finditer(low):
+        named.setdefault(_spirit_key(m.group(1)), m.group(0))
+        if len(named) >= 3:
+            break
+    if any(tags.get(k) in ("yes", "served", "only") for k in _DRINK_TAGS) \
+            or tags.get("cocktails") == "yes":
+        named.setdefault("map", "the map lists cocktails or spirits")
+    evidence += [v for k, v in named.items() if v not in evidence]
+    pours_first = ((amenity or tags.get("amenity")) in ("bar", "pub", "nightclub")
+                   and not _BEER_WINE_NAME.search(name or tags.get("name") or "")
+                   and tags.get("craft") not in ("brewery", "winery", "cider")
+                   and tags.get("microbrewery") != "yes")
+    if definite or len(named) >= 2 or (pours_first and named):
+        return {"status": "spirits", "evidence": evidence[:3], "reason": None}
+    return {"status": "unknown", "evidence": evidence[:3],
+            "reason": "no sign on their own site that they pour liquor"}
+
+
+# ── 1. Chains and corporate venues ──────────────────────────────────────────
+#
+# CHAIN_NAMES and franchise language (looks_like_chain) catch the brands we
+# know. Two signals catch the ones we don't, from the harvest itself:
+#   - a `brand` tag (or an `operator` that is one) on two or more venues:
+#     McMenamins' pubs carry it; a single independent that a mapper tagged
+#     with its own name (Aalto Lounge) does not repeat;
+#   - one website domain used by venues in two or more harvest cities.
+# A domain shared by a few bars in ONE town is a local owner with two or
+# three rooms — still who 86'd is for — so that alone is not corporate.
+# Shared hosts are no one's own domain and never count.
+SHARED_HOSTS = re.compile(
+    r"(?:^|\.)(?:" + PLATFORM_DOMAINS + r"|linktr\.ee|square\.site|business\.site"
+    r"|google\.com|goo\.gl|bit\.ly|toasttab\.com|order\.online|menufy\.com|chownow\.com"
+    r"|tripadvisor\.com|untappd\.com|beermenus\.com|singleplatform\.com|popmenu\.com"
+    r"|clover\.com|spoton\.com|bentobox\.com|wixsite\.com|carrd\.co|tumblr\.com"
+    r"|blogspot\.com|github\.io|myshopify\.com|mapquest\.com|yellowpages\.com)$", re.I)
+
+
+def corporate_index(cursor) -> dict:
+    """The brands and domains the harvest shows running more than one venue."""
+    # Counted per VENUE: an independent whose map entry names itself as both
+    # brand and operator is one venue, not two.
+    cursor.execute("""
+        SELECT lower(b) AS v FROM (
+            SELECT id, substring(raw_tags from '"brand": "([^"]{1,100})"') AS b
+              FROM crm_lead_candidates
+            UNION ALL
+            SELECT id, substring(raw_tags from '"operator": "([^"]{1,100})"')
+              FROM crm_lead_candidates) x
+         WHERE b IS NOT NULL GROUP BY lower(b) HAVING COUNT(DISTINCT id) >= 2
+    """)
+    brands = {r["v"] for r in cursor.fetchall()}
+    cursor.execute("""
+        SELECT d FROM (
+            SELECT lower(substring(website from '^[A-Za-z]+://(?:www\\.)?([^/:?#]+)')) AS d,
+                   lower(city) AS c
+              FROM crm_lead_candidates) x
+         WHERE d IS NOT NULL GROUP BY d HAVING COUNT(DISTINCT c) >= 2
+    """)
+    domains = {r["d"] for r in cursor.fetchall() if not SHARED_HOSTS.search(r["d"] or "")}
+    return {"brands": brands, "domains": domains}
+
+
+def corporate_reason(tags: dict, website: Optional[str], index: Optional[dict]) -> Optional[str]:
+    """Why the venue is a chain or corporate-run, or None."""
+    tags = tags or {}
+    for key in ("name", "brand", "operator"):
+        value = tags.get(key)
+        if value and key != "name":
+            m = _CHAIN_NAME_RE.search(normalize_name(value))
+            if m:
+                return f"chain ({key} {value})"
+    index = index or {}
+    for key in ("brand", "operator"):
+        value = (tags.get(key) or "").strip()
+        if value and value.lower() in index.get("brands", ()):
+            return f"chain ({value}, on several venues)"
+    domain = domain_of(website or "")
+    if domain and domain in index.get("domains", ()):
+        return f"chain (its website {domain} serves venues in several cities)"
+    return None
 
 
 def _stack_signals(site_html: str) -> dict:
@@ -1395,7 +1651,8 @@ def score_candidate(tags: dict, email: Optional[str], site_html: str,
     if manager:
         score += 5
 
-    if site_html and LIQUOR_HINTS.search(site_html):
+    if site_html and liquor_verdict(visible_text(site_html[:400000]), tags, name,
+                                    amenity)["status"] == "spirits":
         score += 2
     if tags.get("brand") or tags.get("operator"):
         score -= 2          # branded/operated usually means a group
@@ -1590,6 +1847,7 @@ def first_website(raw: Optional[str]) -> Optional[str]:
 # operator or the book decided (deleted by hand, suppressed, already a lead or
 # a customer, a chain by name) stays closed.
 REOPENABLE = ("site unreachable", "no email found", "restaurant with no sign",
+              "no sign on their own site",
               "phone not a dialable", "franchise language", "no phone on their site")
 
 
@@ -2030,6 +2288,231 @@ def _verify_phones_safe(**kw) -> Optional[dict]:
         print(f"[leadgen] LEADGEN_PHONES_VERIFY_FAILED {exc}", flush=True)
 
 
+# ── The owner's rules, applied to what's already banked or listed ─────────
+
+def _reconcile_owner_rules(cursor) -> tuple[int, int]:
+    """Every boot: never-called leads and banked candidates on a tourist strip
+    or run by a chain come off the list / out of the bank. Map data and the
+    harvest only — no crawling, so it's cheap and safe at boot. Called and
+    emailed leads are never touched; a lead with an email queued stays but is
+    hidden from the call list. Returns (leads removed, candidates rejected)."""
+    corporate = corporate_index(cursor)
+    cursor.execute("""
+        SELECT c.id, c.city, c.lat, c.lon, c.website, c.raw_tags, c.status,
+               l.id AS lead_id, l.queued_email_at
+          FROM crm_lead_candidates c
+          LEFT JOIN crm_leads l ON l.id = c.promoted_lead_id
+         WHERE c.status = 'qualified'
+            OR (c.status = 'promoted' AND l.source = 'leadgen' AND l.status = 'new'
+                AND l.last_touch_at IS NULL)
+    """)
+    removed = rejected = 0
+    for row in cursor.fetchall():
+        tags = _cand_tags(row)
+        strip = tourist_strip(tags, row["city"], row["lat"], row["lon"])
+        why = f"tourist strip ({strip})" if strip else corporate_reason(
+            tags, row["website"], corporate)
+        if not why:
+            continue
+        if row["status"] == "promoted":
+            cursor.execute("""
+                DELETE FROM crm_leads WHERE id = %s AND status = 'new'
+                   AND last_touch_at IS NULL AND queued_email_at IS NULL
+            """, (row["lead_id"],))
+            if not cursor.rowcount:
+                cursor.execute("UPDATE crm_leads SET fit_status = 'blocked', fit_note = %s "
+                               "WHERE id = %s", (why, row["lead_id"]))
+                continue
+            removed += 1
+        else:
+            rejected += 1
+        cursor.execute("""
+            UPDATE crm_lead_candidates
+               SET status = 'rejected', reject_reason = %s, fit_status = 'blocked',
+                   fit_note = %s, promoted_lead_id = NULL, promoted_at = NULL
+             WHERE id = %s
+        """, (why, why, row["id"]))
+    return removed, rejected
+
+
+_fit_lock = threading.Lock()
+
+
+def check_fit(row: dict, corporate: Optional[dict] = None) -> dict:
+    """The owner's rules for one venue, crawling its homepage and drinks pages:
+    {"status": ok | blocked | unreachable, "note": evidence or reason}."""
+    tags = _cand_tags(row)
+    strip = tourist_strip(tags, row.get("city"), row.get("lat"), row.get("lon"))
+    if strip:
+        return {"status": "blocked", "note": f"tourist strip ({strip})"}
+    why = corporate_reason(tags, row.get("website"), corporate)
+    if why:
+        return {"status": "blocked", "note": why}
+    home, website, status = _fetch_site(row.get("website") or "")
+    if not home:
+        return {"status": "unreachable", "note": f"site unreachable (HTTP {status})"}
+    text = visible_text(home[:200000])
+    chain = looks_like_chain(row.get("name") or "", website, text)
+    if chain:
+        return {"status": "blocked", "note": chain}
+    name, amenity = row.get("name") or "", (row.get("amenity") or "").lower()
+    verdict = liquor_verdict(text, tags, name, amenity)
+    if verdict["status"] == "unknown":
+        for url in _drink_links(website, home, limit=3):
+            body, code = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
+            if _ok(code, body):
+                text += " \n" + visible_text(body[:200000])
+                verdict = liquor_verdict(text, tags, name, amenity)
+                if verdict["status"] != "unknown":
+                    break
+    if verdict["status"] == "spirits":
+        return {"status": "ok", "note": _evidence_note(verdict)}
+    return {"status": "blocked", "note": verdict["reason"]}
+
+
+def _in_window_now(row: dict) -> bool:
+    """Whether the call list would show this lead this minute — those are the
+    ones someone is waiting on, so they're checked first."""
+    from zoneinfo import ZoneInfo
+    from callwindow import call_window
+    try:
+        local = (datetime.now(ZoneInfo(row["tz_name"])) if row.get("tz_name") else
+                 datetime.now(timezone.utc) + timedelta(hours=row.get("tz_offset_hours") or 0))
+        return bool(call_window(row.get("opening_hours"), local)["good_now"])
+    except Exception:
+        return False
+
+
+def verify_fit(lead_limit: int = VERIFY_BATCH, bank_limit: int = VERIFY_BATCH,
+               budget_s: int = VERIFY_BUDGET_S) -> dict:
+    """Apply the owner's rules to leads and candidates qualified before them.
+
+    Never-called call-list leads first — the ones in a calling window this
+    minute before the rest — then the bank's best. Until checked, a generated
+    lead isn't offered for dialling (crm._fit_ok), so nothing unchecked is
+    ever called. Passes are stamped 'ok' with the evidence; a fail comes off
+    the call list (its candidate rejected, with the reason); a site that
+    doesn't load goes back to the bank to be re-crawled from scratch. One
+    small batch per call, same pace as verify_phones: it shares a 0.5-CPU box
+    with the product API."""
+    if not _fit_lock.acquire(blocking=False):
+        return {"skipped": "a check is already running"}
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with get_db() as conn:
+            cursor = conn.cursor()
+            leads: list = []
+            if lead_limit:
+                cursor.execute("""
+                    SELECT l.id AS lead_id, l.tz_name, l.tz_offset_hours, l.opening_hours,
+                           c.id, c.name, c.city, c.lat, c.lon, c.website, c.raw_tags,
+                           c.amenity
+                      FROM crm_leads l
+                      JOIN crm_lead_candidates c ON c.promoted_lead_id = l.id
+                     WHERE l.source = 'leadgen' AND l.fit_status IS NULL
+                       AND l.status = 'new' AND l.last_touch_at IS NULL
+                """)
+                leads = [dict(r) for r in cursor.fetchall()]
+                leads.sort(key=lambda r: not _in_window_now(r))
+                leads = leads[:lead_limit]
+            bank: list = []
+            if bank_limit:
+                cursor.execute("""
+                    SELECT id, name, city, lat, lon, website, raw_tags, amenity
+                      FROM crm_lead_candidates
+                     WHERE status = 'qualified' AND fit_status IS NULL
+                     ORDER BY score DESC LIMIT %s
+                """, (bank_limit,))
+                bank = [dict(r) for r in cursor.fetchall()]
+            corporate = corporate_index(cursor) if (leads or bank) else {}
+
+        deadline = time.monotonic() + budget_s
+
+        def check(row):
+            if time.monotonic() > deadline:
+                return row, None
+            try:
+                return row, check_fit(row, corporate)
+            except Exception as exc:
+                return row, {"status": "unreachable", "note": f"check failed: {exc}"[:200]}
+
+        with ThreadPoolExecutor(max_workers=VERIFY_WORKERS) as pool:
+            lead_results = [r for r in pool.map(check, leads) if r[1]]
+            bank_results = [r for r in pool.map(check, bank) if r[1]]
+
+        tally: Counter = Counter()
+        retry_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        with get_db() as conn:
+            cursor = conn.cursor()
+            for row, v in lead_results:
+                tally["lead_" + v["status"]] += 1
+                _apply_fit_to_lead(cursor, row, v, retry_at)
+            for row, v in bank_results:
+                tally["bank_" + v["status"]] += 1
+                _apply_fit_to_candidate(cursor, row["id"], v, retry_at)
+            conn.commit()
+        out = {"leads_checked": len(lead_results), "bank_checked": len(bank_results),
+               **dict(tally)}
+        print(f"[leadgen] LEADGEN_FIT_CHECKED {out}", flush=True)
+        return out
+    finally:
+        _fit_lock.release()
+
+
+def _apply_fit_to_candidate(cursor, cand_id: str, v: dict, retry_at: str) -> None:
+    if v["status"] == "ok":
+        cursor.execute("UPDATE crm_lead_candidates SET fit_status = 'ok', fit_note = %s "
+                       "WHERE id = %s", (v["note"], cand_id))
+    elif v["status"] == "blocked":
+        cursor.execute("""
+            UPDATE crm_lead_candidates
+               SET status = 'rejected', reject_reason = %s, fit_status = 'blocked',
+                   fit_note = %s, promoted_lead_id = NULL, promoted_at = NULL
+             WHERE id = %s
+        """, (v["note"], v["note"], cand_id))
+    else:
+        # Back to the crawl queue: the next daily run re-enriches it under
+        # today's rules, or rejects it after ENRICH_TRIES.
+        cursor.execute("""
+            UPDATE crm_lead_candidates
+               SET status = 'retry', reject_reason = %s, retry_after = %s,
+                   promoted_lead_id = NULL, promoted_at = NULL
+             WHERE id = %s
+        """, (v["note"], retry_at, cand_id))
+
+
+def _apply_fit_to_lead(cursor, row: dict, v: dict, retry_at: str) -> None:
+    """Every write re-checks the lead is still unworked and unchecked — the
+    operator may ring it in the minute the crawl takes."""
+    unworked = "status = 'new' AND last_touch_at IS NULL AND fit_status IS NULL"
+    if v["status"] == "ok":
+        cursor.execute(f"UPDATE crm_leads SET fit_status = 'ok', fit_note = %s "
+                       f"WHERE id = %s AND {unworked}", (v["note"], row["lead_id"]))
+        _apply_fit_to_candidate(cursor, row["id"], v, retry_at)
+        return
+    cursor.execute(f"DELETE FROM crm_leads WHERE id = %s AND {unworked} "
+                   "AND queued_email_at IS NULL", (row["lead_id"],))
+    if cursor.rowcount:
+        _apply_fit_to_candidate(cursor, row["id"], v, retry_at)
+    else:
+        # Worked meanwhile, or an email is queued to them: kept, but never
+        # offered for dialling.
+        cursor.execute(f"UPDATE crm_leads SET fit_status = 'blocked', fit_note = %s "
+                       f"WHERE id = %s AND {unworked}", (v["note"], row["lead_id"]))
+
+
+def fit_check_step() -> int:
+    """One background batch of verify_fit; how many rows it checked."""
+    try:
+        out = verify_fit(bank_limit=0)
+        if not out.get("leads_checked") and not out.get("skipped"):
+            out = verify_fit(lead_limit=0)
+    except Exception as exc:
+        print(f"[leadgen] LEADGEN_FIT_CHECK_FAILED {exc}", flush=True)
+        return 0
+    return out.get("leads_checked", 0) + out.get("bank_checked", 0)
+
+
 # A homepage that didn't answer for one of these reasons is tried again on a
 # later run rather than rejected: a site down for an afternoon, a rate limit,
 # a bot wall having a bad day, a network blip. Measured on 90 Austin venues,
@@ -2112,7 +2595,8 @@ def _rejected(reason: str, status: str = "rejected") -> dict:
             "email": None, "email_source": None, "email_kind": None,
             "manager_name": None, "manager_role": None,
             "manager_source": None, "manager_seen_at": None,
-            "venue_facts": None, "opener": None, "score": 0}
+            "venue_facts": None, "opener": None, "score": 0,
+            "fit_status": None, "fit_note": None}
 
 
 def enrich_candidate(cand: dict) -> dict:
@@ -2139,6 +2623,15 @@ def enrich_candidate(cand: dict) -> dict:
         osm_tags = json.loads(cand.get("raw_tags") or "{}")
     except json.JSONDecodeError:
         osm_tags = {}
+
+    # The owner's exclusions that need no crawl: a main tourist strip, or a
+    # brand / operator that is a known chain. Decided before a single request.
+    strip = tourist_strip(osm_tags, cand.get("city"), cand.get("lat"), cand.get("lon"))
+    if strip:
+        return _rejected(f"tourist strip ({strip})")
+    corporate = corporate_reason(osm_tags, website, None)
+    if corporate:
+        return _rejected(corporate)
     tagged = (osm_tags.get("email") or osm_tags.get("contact:email") or "").strip()
     if tagged and not EMAIL_BLOCKLIST.search(tagged) and "@" in tagged:
         email, email_source = tagged.lower(), "OpenStreetMap tag"
@@ -2216,35 +2709,33 @@ def enrich_candidate(cand: dict) -> dict:
                 numbers += [p for p in site_phones(body) if p not in numbers]
     verdict = judge_phone(cand.get("phone"), numbers, cand.get("local_codes") or ())
 
-    chain_reason = looks_like_chain(cand["name"], website, html_seen)
-    tags = {}
-    try:
-        tags = json.loads(cand.get("raw_tags") or "{}")
-    except json.JSONDecodeError:
-        pass
-
+    tags = osm_tags
+    # Franchise language is read from what a visitor sees, not from scripts:
+    # an ordering widget's "find a location" is not the venue talking.
+    seen_text = " \n".join(visible_text(body[:200000]) for _url, body in pages)
+    chain_reason = looks_like_chain(cand["name"], website, seen_text)
     if chain_reason:
         return _rejected(chain_reason)
-    # A bar is a bar. A restaurant has to show a drinks programme — a cocktail
-    # list, a full bar, taps, something — before it is worth a call. Without
-    # this the wider harvest would fill the list with sandwich shops.
+
+    # Must pour LIQUOR, shown on its own site — bars included: a wine bar or a
+    # taproom is tagged a bar too. The drinks are usually on a menu page, so
+    # those are read before deciding (see liquor_verdict).
     amenity = (cand.get("amenity") or "").lower()
-    if amenity == "restaurant":
-        qualifies, reason = _restaurant_pours(html_seen, tags)
-        if not qualifies and reason and reason.startswith("restaurant with no sign"):
-            # Their drinks are usually on a menu page nobody opened yet.
-            for url in _drink_links(website, home):
-                if fetched >= MAX_PAGES_PER_SITE + 2:
+    liquor = liquor_verdict(seen_text, tags, cand.get("name") or "", amenity)
+    if liquor["status"] == "unknown":
+        for url in _drink_links(website, home, limit=3):
+            if fetched >= MAX_PAGES_PER_SITE + 3:
+                break
+            body, status = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
+            fetched += 1
+            if _ok(status, body):
+                html_seen += body[:200000]
+                seen_text += " \n" + visible_text(body[:200000])
+                liquor = liquor_verdict(seen_text, tags, cand.get("name") or "", amenity)
+                if liquor["status"] != "unknown":
                     break
-                body, status = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
-                fetched += 1
-                if _ok(status, body):
-                    html_seen += body[:200000]
-                    qualifies, reason = _restaurant_pours(html_seen, tags)
-                    if qualifies or not reason.startswith("restaurant with no sign"):
-                        break
-        if not qualifies:
-            return _rejected(reason)
+    if liquor["status"] != "spirits":
+        return _rejected(liquor["reason"])
 
     # No email is no longer a rejection. It's a CALL list: a bar whose own
     # website vouches for its number is worth ringing whether or not it
@@ -2280,7 +2771,16 @@ def enrich_candidate(cand: dict) -> dict:
             # Toast is how you get told something you could have read.
             **_stack_signals(html_seen))),
         "score": score_candidate(tags, email, html_seen, manager, cand.get("city")),
+        # Passed the owner's rules; the note is the liquor evidence, shown on
+        # the prep sheet so the operator can see why it's on the list.
+        "fit_status": "ok",
+        "fit_note": _evidence_note(liquor),
     }
+
+
+def _evidence_note(liquor: dict) -> str:
+    return "Pours liquor — their site: " + ", ".join(
+        f"\u201c{e}\u201d" for e in liquor.get("evidence") or [])
 
 
 def _record_retry(cand: dict, reason: str) -> None:
@@ -2342,13 +2842,24 @@ def _cand_tags(cand: dict) -> dict:
         return {}
 
 
-def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
+def _promote_one(cursor, cand: dict, now: str, corporate: Optional[dict] = None) -> Optional[str]:
     """Promote a single candidate, or reject it and return None.
 
     Split out of the loop so the bucket filler can walk past a candidate that
     turns out to be suppressed or a duplicate and try the next one in the same
     cell, instead of leaving that cell short.
     """
+    # The owner's rules, checked again at the last gate: the strip list and
+    # the chain index both grow after a candidate was crawled.
+    tags = _cand_tags(cand)
+    blocked = tourist_strip(tags, cand.get("city"), cand.get("lat"), cand.get("lon"))
+    blocked = f"tourist strip ({blocked})" if blocked else corporate_reason(
+        tags, cand.get("website"), corporate)
+    if blocked:
+        cursor.execute("UPDATE crm_lead_candidates SET status='rejected', reject_reason=%s, "
+                       "fit_status='blocked', fit_note=%s WHERE id=%s",
+                       (blocked, blocked, cand["id"]))
+        return None
     # Re-checked even though harvest validates: rows banked by an older build
     # predate the validator, and this is the last gate before a number reaches
     # a dialer.
@@ -2446,6 +2957,8 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
     )
     if cand.get("phone_status") == "from_site" and cand.get("phone_note"):
         notes += f"\nPhone taken from their website — {cand['phone_note']}"
+    if cand.get("fit_note"):
+        notes += f"\n{cand['fit_note']}"
     if cand.get("manager_name"):
         # Dated on purpose. A name read off a website is only ever "this is
         # what their site said on this day".
@@ -2457,9 +2970,10 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
                                source, tz_offset_hours, opening_hours, opener,
                                lead_score, email_kind, manager_name, manager_role,
                                manager_source, manager_seen_at, tz_name, venue_facts,
-                               phone_status, phone_note, created_at, updated_at)
+                               phone_status, phone_note, fit_status, fit_note,
+                               created_at, updated_at)
         VALUES (%s, %s, %s, 'new', %s, %s, %s, 'leadgen', %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (lead_id, cand["name"], loc, cand["phone"], cand["email"], notes,
           cand.get("tz_offset_hours"), cand.get("opening_hours"),
           cand.get("opener"), cand.get("score"),
@@ -2473,6 +2987,7 @@ def _promote_one(cursor, cand: dict, now: str) -> Optional[str]:
               venue_facts.extract_facts(_cand_tags(cand), "",
                                         cand.get("opening_hours"))),
           cand.get("phone_status"), cand.get("phone_note"),
+          cand.get("fit_status"), cand.get("fit_note"),
           now, now))
     cursor.execute("""
         UPDATE crm_lead_candidates
@@ -2616,12 +3131,15 @@ def promote_leads(limit: int = DAILY_TARGET) -> int:
         if not any(deficits.values()):
             return 0
 
-        # Only numbers the venue's own site vouches for. The rest stay banked.
+        # Only numbers the venue's own site vouches for, and only venues that
+        # passed the owner's rules (liquor shown on their site). The rest stay
+        # banked until the background check gets to them.
         cursor.execute("""
             SELECT * FROM crm_lead_candidates
-             WHERE status = 'qualified' AND phone_status IN %s
+             WHERE status = 'qualified' AND phone_status IN %s AND fit_status = 'ok'
              ORDER BY score DESC, discovered_at ASC
         """, (PHONE_OK,))
+        corporate = corporate_index(cursor)
         # Bank the candidates by the cell they would land in. Best-first within
         # each cell, preserved from the query order.
         by_bucket: dict = {b: [] for b in all_buckets()}
@@ -2643,14 +3161,14 @@ def promote_leads(limit: int = DAILY_TARGET) -> int:
                 break
             bucket = max(candidates_left, key=lambda b: deficits[b])
             cand = by_bucket[bucket].pop(0)
-            if _promote_one(cursor, cand, now):
+            if _promote_one(cursor, cand, now, corporate):
                 promoted += 1
                 deficits[bucket] -= 1
 
         # Only once the real cells are served: leads with no timezone can't be
         # worked zone by zone, so they must never displace one that can.
         while promoted < limit and zoneless:
-            if _promote_one(cursor, zoneless.pop(0), now):
+            if _promote_one(cursor, zoneless.pop(0), now, corporate):
                 promoted += 1
 
         conn.commit()
@@ -2693,6 +3211,7 @@ def pool_depth() -> dict:
             SELECT COUNT(*) AS n FROM crm_lead_candidates
              WHERE status = 'qualified'
                AND (phone_status IS NULL OR phone_status IN %s)
+               AND (fit_status IS NULL OR fit_status = 'ok')
         """, (PHONE_OK,))
         qualified = cursor.fetchone()["n"]
     counts = bucket_counts()
@@ -2843,6 +3362,7 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
         # until their number is checked; check enough of the best to fill the
         # holes. A no-op once the bank is all checked.
         verify_phones(lead_limit=0, bank_limit=max(60, headroom * 2))
+        verify_fit(lead_limit=0, bank_limit=max(60, headroom * 2))
         promoted = promote_leads(headroom)
 
         # 2. Top the bank back up if it's getting shallow, or if what's banked
@@ -2938,7 +3458,8 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                                    manager_source=%s, manager_seen_at=%s,
                                    venue_facts=%s, score=%s, enriched_at=%s,
                                    phone=COALESCE(%s, phone), phone_status=%s,
-                                   phone_note=%s, website=COALESCE(%s, website)
+                                   phone_note=%s, website=COALESCE(%s, website),
+                                   fit_status=%s, fit_note=%s
                              WHERE id=%s
                         """, (result["status"], result["reject_reason"], result["email"],
                               result["email_source"], result.get("email_kind"),
@@ -2948,7 +3469,8 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                               result.get("venue_facts"),
                               result["score"], now_iso(), result.get("phone"),
                               result.get("phone_status"), result.get("phone_note"),
-                              result.get("website"), cand["id"]))
+                              result.get("website"), result.get("fit_status"),
+                              result.get("fit_note"), cand["id"]))
                         conn.commit()
                     except Exception:
                         # Almost always the unique-email index: another venue
@@ -2966,7 +3488,8 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                                    manager_source=%s, manager_seen_at=%s,
                                    venue_facts=%s, score=%s, enriched_at=%s,
                                    phone=COALESCE(%s, phone), phone_status=%s,
-                                   phone_note=%s, website=COALESCE(%s, website)
+                                   phone_note=%s, website=COALESCE(%s, website),
+                                   fit_status=%s, fit_note=%s
                              WHERE id=%s
                         """, (result["status"], result["reject_reason"],
                               result.get("opener"), result.get("manager_name"),
@@ -2974,7 +3497,8 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                               result.get("manager_seen_at"), result.get("venue_facts"),
                               max(0, result["score"] - 3), now_iso(), result.get("phone"),
                               result.get("phone_status"), result.get("phone_note"),
-                              result.get("website"), cand["id"]))
+                              result.get("website"), result.get("fit_status"),
+                              result.get("fit_note"), cand["id"]))
                         conn.commit()
             except Exception as exc:
                 errors += 1

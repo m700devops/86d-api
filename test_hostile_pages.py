@@ -36,6 +36,8 @@ SHAPES = {
     "json phones": '"telephone":"' * (N // 13), "caps": "Ab " * (N // 3),
     "at words": "info at " * (N // 8), "dot words": "x dot " * (N // 6),
     "quotes": "\n> " * (N // 3), "dashes": "-" * N, "on": "On " * (N // 3),
+    "spirits and food": "bourbon pecan whiskey glaze vodka sauce martinique " * (N // 50),
+    "selection of": "selection of the best " * (N // 22), "beer and": "beer and " * (N // 9),
 }
 
 
@@ -50,6 +52,8 @@ READERS = {
     "contact links": lambda h: leadgen._contact_urls("https://x.com", h),
     "find_manager": lambda h: contacts.find_manager(h, "https://x.com/about"),
     "restaurant gate": lambda h: leadgen._restaurant_pours(h, {}),
+    "liquor verdict": lambda h: leadgen.liquor_verdict(contacts.visible_text(h), {}, "", "bar"),
+    "liquor verdict, raw text": lambda h: leadgen.liquor_verdict(h, {}, "", "restaurant"),
     "opener": lambda h: leadgen.opener_line(h, "bar"),
     "stack signals": leadgen._stack_signals,
     "venue facts": lambda h: venue.extract_facts({}, h),
