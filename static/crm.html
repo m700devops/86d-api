@@ -21,6 +21,10 @@
   header img{width:46px;height:46px;border-radius:10px}
   header h1{font-size:20px;margin:0;letter-spacing:-0.4px}
   header .sub{color:var(--text3);font-size:12px}
+  /* The title copies the App Store link — it looks like a title, not a button. */
+  .titlebtn{background:none;border:0;padding:0;font:inherit;color:inherit;letter-spacing:inherit;
+            cursor:pointer;border-radius:4px}
+  .titlebtn:hover{color:var(--accent)}
 
   #pipeBody tr[data-id],#yetBody tr[data-id],#fOverdue tr[data-id],#fToday tr[data-id]{cursor:pointer}
   #pipeBody tr[data-id]:hover td,#yetBody tr[data-id]:hover td,
@@ -83,13 +87,34 @@
   .pipebar input{flex:1;min-width:220px}
   .pipebar button{flex:none;white-space:nowrap}
   /* Open / Dead — the CRM tab's only two views. */
-  .stands{font-size:13px;line-height:1.35;min-width:220px}
+  /* WHERE THINGS STAND: the same three-line shape on every row, told apart
+     by an icon and by weight, not by colour. Red is kept for one thing —
+     a follow-up you've missed or never booked. */
+  .stands{font-size:13px;line-height:1.35;min-width:240px}
+  .sl{display:flex;gap:8px;align-items:flex-start}
+  .sl+.sl{margin-top:4px}
+  .ic{width:14px;height:14px;flex:none;margin-top:2px;fill:none;stroke:currentColor;
+      stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  .sl.head{font-size:14px;font-weight:600;color:var(--text)}
+  .sl .when{font-weight:400;color:var(--text3)}
+  .sl.prior{font-size:12.5px;color:var(--text3)}
+  .sl.next{color:var(--text2)}
+  .sl.next.now{color:var(--text);font-weight:600}
+  .sl.next.late{color:var(--stop);font-weight:600}
+  .sl.quiet{color:var(--text3);font-weight:400}
+  /* REACHED OUT: one big number, what it's made of underneath. */
+  th.reach,td.reach{text-align:center}
+  th.reach .hash{display:block;font-size:12px;letter-spacing:0;margin-top:2px}
+  td.reach .n{font-size:20px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+  td.reach .mix{display:flex;gap:8px;justify-content:center;margin-top:3px;font-size:12px;
+                color:var(--text3);white-space:nowrap}
+  td.reach .mix span{display:inline-flex;align-items:center;gap:3px}
+  td.reach .mix .ic{width:12px;height:12px;margin-top:0}
   /* Clickable column header — styled as a header, not a button. */
   .thsort{background:none;border:0;padding:0;font:inherit;color:inherit;letter-spacing:inherit;
           cursor:pointer;white-space:nowrap}
   .thsort span{margin-left:4px;color:var(--text3)}
   .thsort:hover,.thsort.on,.thsort.on span{color:var(--accent)}
-  .stands .err{font-weight:600}
   .glance{display:flex;gap:8px;margin-bottom:14px}
   .glance button{font-size:14px;font-weight:700;padding:9px 18px;border-radius:10px}
   .glance button b{margin-left:6px;color:var(--text3);font-weight:700}
@@ -464,7 +489,7 @@
   <header>
     <img src="/crm/icon.png" alt="86'd">
     <div>
-      <h1>86'd — Sales</h1>
+      <h1><button id="copyApp" class="titlebtn" title="Copy the App Store link">86'd — Sales</button></h1>
       <div class="sub">Who to call, and what to say</div>
     </div>
   </header>
@@ -1431,11 +1456,23 @@ async function loadMailStatus(){
   try{ MAIL=await api('/mail/status'); }catch{ MAIL={configured:false,from:null}; }
 }
 
+async function copyText(text){
+  try{ await navigator.clipboard.writeText(text); }
+  catch{ const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);
+         t.select();document.execCommand('copy');t.remove(); }
+}
+/* Click the page's title ("86'd — Sales") and the App Store link is on the
+   clipboard, ready to paste into a text, a DM or an email. The link is the
+   server's (COMPANY_APP_URL, from /mail/status on unlock); before that, the
+   live listing. */
+const APP_URL_DEFAULT='https://apps.apple.com/us/app/86d-bar-inventory/id6798359825';
+$('copyApp').onclick=async()=>{
+  await copyText((MAIL&&MAIL.app_url)||APP_URL_DEFAULT);
+  toast('App Store link copied — paste it anywhere');
+};
 async function copyDigits(el){
   const num=el.dataset.copy;
-  try{ await navigator.clipboard.writeText(num); }
-  catch{ const t=document.createElement('textarea');t.value=num;document.body.appendChild(t);
-         t.select();document.execCommand('copy');t.remove(); }
+  await copyText(num);
   const cls=el.classList.contains('copybtn')?'done':'copied';
   el.classList.add(cls); setTimeout(()=>el.classList.remove(cls),1200);
   if(el.classList.contains('copybtn')) el.textContent='COPIED';
@@ -1736,9 +1773,10 @@ async function loadPipeline(){
           <th>${yet?'STAGE':`<button class="thsort ${PIPE.first?'on':''}" data-sortstage
                title="Click to put a stage at the top">STAGE ${PIPE.first
                ?`<span>· ${esc(STAGE_NAME[PIPE.first])} first</span>`:'<span>⇅</span>'}</button>`}</th>
-          <th>PHONE</th><th>WHERE THINGS STAND</th><th></th>
+          <th>PHONE</th><th>WHERE THINGS STAND</th>
+          ${yet?'':'<th class="reach" title="Every call, email and Facebook message — undone ones don\'t count">REACHED OUT<span class="hash">#</span></th>'}<th></th>
         </tr></thead>
-        <tbody>${d.leads.map((l,i)=>pipeRow(l,S.offset+i+1)).join('')}</tbody>
+        <tbody>${d.leads.map((l,i)=>pipeRow(l,S.offset+i+1,{yet,today:d.today})).join('')}</tbody>
       </table>
     </div></div>
     <div class="pipefoot">
@@ -1852,14 +1890,38 @@ document.addEventListener('click', e=>{
   loadWhereInfo(b.dataset.prep, box, {});
 });
 
-/* WHERE THINGS STAND, as two plain lines: what happened last, and what's next.
-   It used to be one line like "call back 2026-09-25 — Answered · 1 try": a raw
-   date, "call back" whether a person asked for one or nobody picked up, and
-   nothing to say it was overdue. Hover shows the latest note. */
+/* WHERE THINGS STAND — at most three short lines, in the same order on every
+   row so the eye always knows where to look:
+     1. the latest thing that happened, and when (bold): a call and how it
+        went, an email, a Facebook message, or their reply
+     2. how the last CALL went, when line 1 isn't a call (grey) — emailing
+        after a voicemail must not hide the voicemail
+     3. what's next (grey; bold when it's today; red only when it's overdue,
+        or when someone was reached and nothing is booked)
+   An icon per kind of thing instead of colours. It used to be built from the
+   lead's stored last_outcome alone, which an email overwrites with
+   "emailed" — a value this screen had no words for — so a call and then an
+   email read "Called · yesterday". The lines now come from the touch log
+   (crm.touch_story). Hover shows the latest note. */
 const MAX_ATTEMPTS=6;   // crm.py MAX_ATTEMPTS: 5 retries on the ladder, then retired
-function niceDay(ymd){
+const ICON={
+  call:'<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>',
+  email:'<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+  fb:'<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+  reply:'<polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>',
+  next:'<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+  done:'<path d="M20 6 9 17l-5-5"/>',
+  stop:'<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+  clock:'<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+};
+const icon=k=>`<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICON[k]||''}</svg>`;
+const ymdLocal=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+/* "today", "yesterday", "Friday", "Mon, Sep 22". `ref` is the day counted
+   from (the server's, for follow-up dates); default this device's. */
+function niceDay(ymd, ref){
   if(!ymd) return '';
-  const d=new Date(ymd+'T12:00:00'), t=new Date(); t.setHours(12,0,0,0);
+  const d=new Date(ymd+'T12:00:00'), t=ref?new Date(ref+'T12:00:00'):new Date();
+  t.setHours(12,0,0,0);
   const diff=Math.round((d-t)/86400000);
   if(diff===0) return 'today';
   if(diff===1) return 'tomorrow';
@@ -1867,64 +1929,109 @@ function niceDay(ymd){
   const txt=d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
   return diff>1&&diff<7 ? d.toLocaleDateString('en-US',{weekday:'long'}) : txt;
 }
+// A moment (a call, an email) as the operator's own day — the date part of
+// the UTC stamp is a day behind for the whole Manila morning.
+const dayOf=at=>{ const d=new Date(at); return isNaN(d)?niceDay(String(at||'').slice(0,10)):niceDay(ymdLocal(d)); };
 function latestNote(l){
   const lines=(l.notes||'').split('\n').filter(x=>x.trim());
   const last=lines[lines.length-1]||'';
   // "[date] call · attempt N: summary — Your notes: …" -> the summary part
   return last.replace(/^\[[^\]]*\][^:]*:\s*/,'').split(' — Your notes:')[0].trim();
 }
-function standing(l){
-  const note=latestNote(l);
-  const when=niceDay((l.last_touch_at||'').slice(0,10));
-  const who=l.contact?l.contact.split(/[(,]/)[0].trim():'';
-  const hasSystem=/already (?:has|have|uses?|using|got)|has a system|have a system|using (?:an? )?(?:app|system|software)/i.test(l.notes||'');
-  const last={
+// Who picked up on the latest logged call ("Spoke to: Lesley (bartender)").
+function spokeTo(l){
+  const calls=(l.notes||'').split('\n').filter(x=>/^\[[^\]]*\] call\b/.test(x));
+  const m=/Spoke to: ([^·\n—]+)/.exec(calls[calls.length-1]||'');
+  return m ? m[1].split(/[(,]/)[0].trim() : '';
+}
+const askFor=l=>l.contact?l.contact.split(/[(,]/)[0].trim():'';
+const hasSystem=l=>/already (?:has|have|uses?|using|got)|has a system|have a system|using (?:an? )?(?:app|system|software)/i.test(l.notes||'');
+// How a call went, in a few words.
+function callSaid(outcome, l){
+  const who=spokeTo(l)||askFor(l);
+  return ({
     answered:`Talked to ${who||'someone'}`,
     callback:`${who||'They'} asked for a callback`,
     voicemail:'Left a voicemail',
     no_answer:'Nobody picked up',
     gatekeeper:"Manager wasn't in",
-    not_interested:hasSystem?'Already has a system':'Said no',
-    logged:'Logged a call',
-  }[l.last_outcome];
-  const out={last:'', next:'', lastTone:'', nextTone:'muted', note};
-  if(l.status==='won'){ out.last=last?`${last} · ${when}`:'Signed up'; out.next='Customer — signed up';
-    out.nextTone='win-good'; return out; }
-  if(l.status==='dead'){ out.last=(last||'Said no')+(when?` · ${when}`:''); out.next="Don't call again";
-    out.nextTone='muted'; return out; }
-  if(!l.last_touch_at&&!l.last_outcome){ out.last='Not called yet'; out.lastTone='muted';
-    out.next=l.queued_email_at?'Email queued':'On the call list'; return out; }
-  out.last=(last||'Called')+(when?` · ${when}`:'');
+    not_interested:hasSystem(l)?'Already has a system':'Said no',
+    wrong_number:'Wrong number',
+  })[outcome] || 'Called';
+}
+function standing(l, today){
+  const out={lines:[], note:latestNote(l)};
+  const add=(ic,text,cls,when)=>out.lines.push({ic,text,cls,when});
+  const t=l.last_touch, rep=l.last_reply;
+  const replied=rep && (!t || Date.parse(rep.at)>Date.parse(t.at));
 
-  const tries=l.attempts||0;
-  const reached=['answered','callback','gatekeeper'].includes(l.last_outcome);
-  const due=l.followup_date, today=new Date().toISOString().slice(0,10);
-  if(l.queued_email_at){ out.next='Email queued to send'; }
+  // 1. the latest thing that happened
+  if(replied) add('reply', rep.opt_out?'Asked us to stop emailing':'They replied', 'head', dayOf(rep.at));
+  else if(t) add(t.kind==='email'?'email':t.kind==='fb'?'fb':'call',
+                 t.kind==='email'?'Emailed':t.kind==='fb'?'Messaged on Facebook':callSaid(t.outcome,l),
+                 'head', dayOf(t.at));
+  else if(l.last_touch_at||l.last_outcome)      // worked before the touch log, or set by hand
+    add(l.last_outcome==='emailed'?'email':'call',
+        l.last_outcome==='emailed'?'Emailed':callSaid(l.last_outcome,l), 'head',
+        l.last_touch_at?dayOf(l.last_touch_at):'');
+  else add('call','Not called yet','head quiet');
+
+  // 2. how the last call went, if line 1 isn't it
+  const call=l.last_call;
+  if(call && out.lines[0].ic!=='call') add('call', callSaid(call.outcome,l), 'prior', dayOf(call.at));
+
+  // 3. what's next
+  const callOutcome=call?call.outcome:(l.last_outcome!=='emailed'?l.last_outcome:null);
+  const reached=['answered','callback','gatekeeper'].includes(callOutcome);
+  const who=askFor(l), due=l.followup_date;
+  today=today||ymdLocal(new Date());
+  if(l.status==='won') add('done','Customer — signed up','next');
+  else if(l.status==='dead') add('stop', rep&&rep.opt_out?"Don't email again":"Don't call again",'next');
+  else if(replied && rep.needs_reply && !rep.answered && !rep.opt_out)
+    add('reply','Answer their email — draft in Follow-ups','next now');
+  else if(!t&&!l.last_touch_at&&!l.last_outcome)
+    add('next', l.queued_email_at?'Email scheduled to send':'On the call list','next');
+  else if(l.queued_email_at) add('clock','Email scheduled to send','next');
   else if(due){
-    const overdue=due<today, isToday=due===today;
-    const verb=l.last_outcome==='callback'&&who?`Call ${who} back`
-             : l.last_outcome==='gatekeeper'?'Call back for the manager'
-             : reached?'Follow up'
-             : `Try again (attempt ${Math.min(tries+1,MAX_ATTEMPTS)} of ${MAX_ATTEMPTS})`;
-    out.next=overdue?`${verb} — overdue since ${niceDay(due)}`:`${verb} ${niceDay(due)}`;
-    out.nextTone=overdue?'err':isToday?'win-good':'muted';
+    const tries=l.attempts||0;
+    const verb=callOutcome==='callback'&&who?`Call ${who} back`
+             : callOutcome==='gatekeeper'?'Call back for the manager'
+             : reached||!call?'Follow up'
+             : `Call again (call ${Math.min(tries+1,MAX_ATTEMPTS)} of ${MAX_ATTEMPTS})`;
+    if(due<today) add('next',`${verb} — overdue since ${niceDay(due,today)}`,'next late');
+    else add('next',`${verb} ${niceDay(due,today)}`, due===today?'next now':'next');
   }
-  else if(reached){ out.next='No follow-up set — pick a date'; out.nextTone='err'; }
-  else out.next=`${tries} tr${tries===1?'y':'ies'} so far`;
+  else if(reached) add('next','No follow-up set — pick a date','next late');
+  else add('next','No follow-up set','next');
   return out;
 }
+function standHtml(st){
+  return st.lines.map(x=>`<div class="sl ${x.cls}">${icon(x.ic)}<span>${esc(x.text)}${
+    x.when?`<span class="when"> · ${esc(x.when)}</span>`:''}</span></div>`).join('');
+}
+/* REACHED OUT: every call, email and Facebook message, one each — a call
+   then two follow-up emails is 3. Undone ones don't count. */
+function reachHtml(l){
+  const t=l.tries||{total:0,call:0,email:0,fb:0};
+  // Worked, but not one call or email logged here (the stage was set by hand,
+  // or it predates the log): a 0 beside "Emailed" would contradict itself.
+  if(!t.total&&(l.last_touch_at||l.last_outcome))
+    return '<div class="n muted" title="No call or email logged here — the stage was set by hand">—</div>';
+  const mix=[['call',t.call,'call'],['email',t.email,'email'],['fb',t.fb,'Facebook message']]
+    .filter(([,n])=>n).map(([k,n,w])=>`<span title="${n} ${w}${n===1?'':'s'}">${icon(k)}${n}</span>`).join('');
+  return `<div class="n">${t.total||0}</div>${mix?`<div class="mix">${mix}</div>`:''}`;
+}
 
-function pipeRow(l,n){
+function pipeRow(l,n,opt={}){
   /* Two lines per row instead of eight columns. Everything that was a column
      of its own — email, town, who to ask for — is still here, just stacked
      under the name where it reads as one thing about one bar rather than
      eight separate things to track across. */
-  const touch=(l.last_touch_at||'').slice(0,10);
   const who=l.contact ? `ask for ${l.contact}`
           : (l.manager_name ? `ask if ${l.manager_name} is still ${l.manager_role||'there'}` : '');
   const sub=[who, l.email, l.loc].filter(Boolean).join(' · ');
 
-  const st=standing(l);
+  const st=standing(l, opt.today);
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}"
               data-contact="${esc(l.contact||'')}">
     <td class="rownum">${n}</td>
@@ -1935,9 +2042,8 @@ function pipeRow(l,n){
       ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`
         +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button></div>`
       : '<span class="muted">no number</span>'}</td>
-    <td class="stands" title="${esc(st.note)}">
-      <div class="${st.lastTone}">${esc(st.last)}</div>
-      <div class="${st.nextTone}">${esc(st.next)}</div></td>
+    <td class="stands" title="${esc(st.note)}">${standHtml(st)}</td>
+    ${opt.yet?'':`<td class="reach">${reachHtml(l)}</td>`}
     <td><div class="acts">
       <button class="go" data-act="log">Log</button>
       <button data-act="mail">Email</button>
@@ -2040,19 +2146,20 @@ $('pipeBody').onclick=async e=>{
     tr.nextElementSibling.remove(); return;
   }
   const d=document.createElement('tr'); d.className='drawer';
+  const cols=tr.children.length;   // 7 on the CRM tab, 6 in Yet to Contact
   if(btn.dataset.act==='view'){
     let l;
     try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
     d.dataset.mode='view';
-    d.innerHTML=leadDetailsCell(l, 6);
+    d.innerHTML=leadDetailsCell(l, cols);
   } else if(btn.dataset.act==='edit'){
     let l;
     try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
     d.dataset.mode='edit';
-    d.innerHTML=leadEditCell(l, 6);
+    d.innerHTML=leadEditCell(l, cols);
   } else if(btn.dataset.act==='log'){
     d.dataset.mode='log';
-    d.innerHTML=`<td colspan="6">
+    d.innerHTML=`<td colspan="${cols}">
       <p class="hint">What happened? Type it however it comes out, or hit a button.</p>
       <textarea rows="3" placeholder="spoke to Dave, wants a callback Tuesday"></textarea>
       <div class="row">
@@ -2075,7 +2182,7 @@ $('pipeBody').onclick=async e=>{
       return;
     }
     d.className='drawer mailer'; d.dataset.mode='mail';
-    d.innerHTML=composeDrawer(addr, tr.dataset.contact);
+    d.innerHTML=composeDrawer(addr, tr.dataset.contact, cols);
     setTimeout(()=>{ wireSlots(d); loadSlots(d, id); }, 0);
   }
   tr.after(d);
