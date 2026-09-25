@@ -870,9 +870,11 @@ capture. Don't reintroduce them or describe them as current.)
   asked for a callback · yesterday", "Left a voicemail", "Already has a system"), "Emailed",
   "Messaged on Facebook", or **"They replied"** when an inbox reply came in after our last
   touch. (2) **How the last CALL went, grey**, only when line 1 isn't a call — so emailing after
-  a voicemail doesn't hide the voicemail. (3) **What's next**: grey; bold when due today; red
-  ONLY when overdue or when someone was reached and nothing is booked (the warm lead that
-  quietly dies). "Call again (call 2 of 6) Sunday" counts CALLS (`attempts`, the ladder);
+  a voicemail doesn't hide the voicemail. (3) **What's next, only when something IS next**:
+  grey; bold when due today or already past ("— was due Tue", never "overdue"). **No red
+  anywhere in the cell and no "No follow-up set" line** — the owner found red stressful and
+  assumes no follow-up unless the log sets one, so an unbooked lead simply has no third line.
+  "Call again (call 2 of 6) Sunday" counts CALLS (`attempts`, the ladder);
   "Answer their email — draft in Follow-ups" when a reply needs one. Hover shows the latest
   note. "Who" is the latest call's "Spoke to:", else who we ask for
 - **It is built from the touch log, not `last_outcome`.** Sending an email overwrites
