@@ -54,6 +54,7 @@ READERS = {
     "restaurant gate": lambda h: leadgen._restaurant_pours(h, {}),
     "liquor verdict": lambda h: leadgen.liquor_verdict(contacts.visible_text(h), {}, "", "bar"),
     "liquor verdict, raw text": lambda h: leadgen.liquor_verdict(h, {}, "", "restaurant"),
+    "site names venue": lambda h: leadgen.site_names_venue(h, "NE Moose Bar & Grill"),
     "opener": lambda h: leadgen.opener_line(h, "bar"),
     "stack signals": leadgen._stack_signals,
     "venue facts": lambda h: venue.extract_facts({}, h),
