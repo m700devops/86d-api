@@ -20,6 +20,7 @@ if "database" not in sys.modules:
     sys.modules["database"] = stub
 
 import contacts  # noqa: E402
+import crm  # noqa: E402
 import inbox  # noqa: E402
 import leadgen  # noqa: E402
 import venue  # noqa: E402
@@ -55,6 +56,11 @@ READERS = {
     "liquor verdict": lambda h: leadgen.liquor_verdict(contacts.visible_text(h), {}, "", "bar"),
     "liquor verdict, raw text": lambda h: leadgen.liquor_verdict(h, {}, "", "restaurant"),
     "site names venue": lambda h: leadgen.site_names_venue(h, "NE Moose Bar & Grill"),
+    "site mentions venue": lambda h: leadgen.site_mentions_venue(h, "https://x.com", "Olde Town"),
+    "page text": leadgen._page_text,
+    "pick email": lambda h: leadgen.pick_email(leadgen.extract_emails(h), "https://x.com", "Olde"),
+    "flagged domains": leadgen.flagged_domains,
+    "notes website": crm._notes_website,
     "opener": lambda h: leadgen.opener_line(h, "bar"),
     "stack signals": leadgen._stack_signals,
     "venue facts": lambda h: venue.extract_facts({}, h),

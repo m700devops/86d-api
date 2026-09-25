@@ -80,7 +80,7 @@ def test_quick_add_drops_a_looked_up_site_that_isnt_them(monkeypatch):
     monkeypatch.setattr(leadgen, "find_venue_website", lambda name, loc=None:
                         "https://africangrilllakewood.com/")
     monkeypatch.setattr(leadgen, "site_is_venue", lambda site, name: False)
-    monkeypatch.setattr(leadgen, "find_email_on_site", lambda site: (_ for _ in ()).throw(
+    monkeypatch.setattr(leadgen, "find_email_on_site", lambda site, **kw: (_ for _ in ()).throw(
         AssertionError("read a site that isn't the bar")))
     monkeypatch.setattr(crm, "_quick_add_extract", lambda text, *a: {
         "name": MOOSE, "loc": MPLS, "outcome": "gatekeeper", "status": "contacted",
@@ -103,7 +103,12 @@ def test_only_looked_up_sites_are_suspects():
                       " — Your notes: Olde Town, website oldetown.example"}
     looked = {"id": "M", "name": MOOSE, "email": "info@africangrilllakewood.com", "notes": NOTES}
     no_email = {"id": "N", "name": "X", "email": None, "notes": NOTES}
-    assert [r["id"] for r, _, _ in leadgen.lookup_suspects([typed, looked, no_email])] == ["M"]
+    # A looked-up website with no email on it counts too: the wrong-number
+    # button and the prep sheet read it.
+    assert [r["id"] for r, _, _ in leadgen.lookup_suspects([typed, looked, no_email])] == ["M", "N"]
+    flagged = dict(looked, notes=NOTES + "\n[2026-09-26] Website https://africangrilllakewood.com/"
+                                         " is not theirs — the automatic website lookup …")
+    assert leadgen.lookup_suspects([flagged]) == []
 
 
 class _Cursor:
@@ -148,6 +153,7 @@ def test_the_clean_up_takes_the_wrong_email_off_once(monkeypatch):
     assert leadgen.recheck_looked_up_sites() == 1
     lead_update, mail_stop = cur.writes
     assert "SET email = NULL" in lead_update[0] and lead_update[1][-1] == lead["email"]
+    assert "is not theirs" in lead_update[1][1]
     assert "Removed info@africangrilllakewood.com" in lead_update[1][1]
     assert "crm_scheduled_emails" in mail_stop[0]
     assert leadgen.recheck_looked_up_sites() == 0        # marker: never again

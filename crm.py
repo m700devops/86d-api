@@ -179,6 +179,15 @@ def init_crm_tables():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sched_due "
                        "ON crm_scheduled_emails(status, send_at)")
+        # The lead's email when this was queued: if it changes before the
+        # send ("Brent has left, email Jed"), the queued mail is held rather
+        # than sent to the old address. NULL on rows queued before this.
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'crm_scheduled_emails' AND column_name = 'lead_email_at_queue'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE crm_scheduled_emails ADD COLUMN lead_email_at_queue TEXT")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sched_lead "
                        "ON crm_scheduled_emails(lead_id)")
 
@@ -1343,10 +1352,11 @@ def _email_domain(email: Optional[str]) -> str:
     if not email or "@" not in email:
         return ""
     domain = email.split("@")[-1].lower().strip()
-    # A shared mailbox provider says nothing about which business this is.
-    if domain in {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
-                  "aol.com", "icloud.com", "me.com", "live.com", "msn.com",
-                  "comcast.net", "verizon.net", "att.net"}:
+    # A shared mailbox provider says nothing about which business this is —
+    # the one full list (contacts.free_mail), not a second short copy: a
+    # signup on cox.net was credited to whichever lead also used cox.net.
+    from contacts import free_mail
+    if free_mail(domain):
         return ""
     return domain
 
@@ -2690,15 +2700,27 @@ def lead_brief(lead_id: str, refresh: bool = False, quick: bool = False,
     return answer(brief, False)
 
 
+def _notes_website(notes: Optional[str]) -> Optional[str]:
+    """The venue's website as the notes carry it: a "Website:" line first,
+    else the first URL — never one a later line says is not theirs (the
+    wrong-lookup clean-up writes that), and never the page an email was
+    merely found on. Used by the prep sheet and the wrong-number lookup."""
+    from leadgen import domain_of, flagged_domains
+    bad = flagged_domains(notes)
+    text = notes or ""
+    labelled = re.findall(r"Website: (https?://[^\s|,;·]+)", text)
+    for url in labelled + _URL_IN_TEXT.findall(text):
+        if domain_of(url) not in bad:
+            return url
+    return None
+
+
 def _venue_profile(row) -> dict:
     """The plain facts on file for the prep sheet, all already stored: what
     kind of place, their website, the hours the map lists. Nothing here is
     fetched or generated, and nothing here decides where a lead sorts — a
     bare profile is just a bare profile."""
-    website = row.get("cand_website")
-    if not website:
-        found = re.search(r"https?://[^\s|,;]+", row.get("notes") or "")
-        website = found.group(0) if found else None
+    website = row.get("cand_website") or _notes_website(row.get("notes"))
     return {"kind": row.get("cand_amenity"), "website": website,
             "hours": row.get("opening_hours")}
 
@@ -3035,10 +3057,11 @@ def _queue_email(lead, to: str, data) -> dict:
         replaced = cursor.rowcount
         cursor.execute("""
             INSERT INTO crm_scheduled_emails
-                (id, lead_id, to_addr, subject, body, send_at, status, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
+                (id, lead_id, to_addr, subject, body, send_at, status, created_at,
+                 lead_email_at_queue)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s)
         """, (queue_id, lead["id"], to, data.subject.strip(), data.body,
-              when.isoformat(), now_iso()))
+              when.isoformat(), now_iso(), lead.get("email") or ""))
         cursor.execute("UPDATE crm_leads SET queued_email_at = %s WHERE id = %s",
                        (when.isoformat(), lead["id"]))
         conn.commit()
@@ -3129,6 +3152,28 @@ def cancel_scheduled(queue_id: str, _: bool = Depends(require_crm_key)):
     return {"cancelled": True}
 
 
+def _queued_mail_hold(lead: Optional[dict], to_addr: str,
+                      email_at_queue: Optional[str] = None) -> Optional[str]:
+    """Why a queued email must not go now, or None. Pure.
+
+    The address rule is "the lead's email CHANGED since queueing", never
+    "differs from To": the compose box may deliberately send somewhere else
+    (a cell given on a call), and that must still go. Rows queued before the
+    snapshot existed (email_at_queue None) aren't judged on it."""
+    if not lead:
+        return "the lead was deleted"
+    if lead.get("status") == "dead":
+        return "the lead is marked dead (they said no) since this was queued"
+    if lead.get("status") == "won":
+        return "they signed up since this was queued"
+    now_email = (lead.get("email") or "").strip().lower()
+    if (email_at_queue is not None and now_email != email_at_queue.strip().lower()
+            and now_email != (to_addr or "").strip().lower()):
+        return (f"the lead's email changed to {lead.get('email') or 'nothing'} since this "
+                f"was queued to {to_addr} — check it and send again")
+    return None
+
+
 def run_due_emails(limit: int = 20) -> dict:
     """Send whatever is due. Called on a timer; safe to call at any moment.
 
@@ -3172,14 +3217,26 @@ def run_due_emails(limit: int = 20) -> dict:
         except ValueError:
             late_minutes = 0
         # They may have opted out after this was queued: that wins, always.
+        # So does anything else that changed since: the lead said no or
+        # signed up, was deleted, or now carries a different address (a reply
+        # said "Brent has left, email Jed") — mail queued to the old one would
+        # go to the wrong person, or to a bar that already said no.
         with get_db() as conn:
             cursor = conn.cursor()
             opted_out = _email_suppressed(cursor, job["to_addr"])
             if opted_out:
+                opted_out = f"{job['to_addr']} {opted_out}"
+            else:
+                cursor.execute("SELECT status, email FROM crm_leads WHERE id = %s",
+                               (job["lead_id"],))
+                lead_now = cursor.fetchone()
+                opted_out = _queued_mail_hold(lead_now, job["to_addr"],
+                                              job.get("lead_email_at_queue"))
+            if opted_out:
                 cursor.execute("""
                     UPDATE crm_scheduled_emails SET status = 'failed', last_error = %s
                      WHERE id = %s
-                """, (f"Not sent: {job['to_addr']} {opted_out}.", job["id"]))
+                """, (f"Not sent: {opted_out}.", job["id"]))
                 cursor.execute("""
                     UPDATE crm_leads SET queued_email_at = NULL
                      WHERE id = %s AND NOT EXISTS (
@@ -3189,7 +3246,7 @@ def run_due_emails(limit: int = 20) -> dict:
                 conn.commit()
         if opted_out:
             skipped += 1
-            print(f"[crm] held back a queued email to {job['to_addr']} — opted out", flush=True)
+            print(f"[crm] held back a queued email to {job['to_addr']} — {opted_out}", flush=True)
             continue
         if late_minutes > STALE_AFTER_MINUTES:
             skipped += 1
@@ -3806,8 +3863,12 @@ def wrong_number(lead_id: str, _: bool = Depends(require_crm_key)):
     # the website it was found on.
     website = row.get("cand_website")
     if not website:
-        found = _URL_IN_TEXT.search(row.get("notes") or "")
-        website = found.group(0) if found else None
+        # From the notes, the site has to name the bar before its number is
+        # trusted: a wrong website there would swap in another venue's line.
+        from leadgen import site_is_venue
+        website = _notes_website(row.get("notes"))
+        if website and not site_is_venue(website, row.get("name") or ""):
+            website = None
     new = None
     if website:
         try:
@@ -4580,9 +4641,27 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
         return re.sub(r"\s+", " ", v).strip()[:limit] if isinstance(v, str) and v.strip() else None
 
     FIELD_LIMITS = {"contact": 200, "email": 320, "phone": 50}
+    import assist as _assist
     for field, limit in FIELD_LIMITS.items():
         value = _text("ask_for", limit) if field == "contact" else None
         value = value or _text(field, limit)
+        # An email or number goes on the lead only if it is really in what
+        # the operator typed — or, for an email, it's the one quick-add read
+        # off the venue's own site. A model's misreading or guess used to be
+        # saved straight over a good address; the AI bar already had this
+        # rule (assist.clean_change), the notes path didn't.
+        verified = bool(extracted.get("_verified"))
+        if value and field == "email" and not (
+                verified or _assist.grounded(value, raw_text or "")
+                or value == extracted.get("_email_from_site")):
+            applied.setdefault("not_saved", []).append(
+                f"email {value} — it isn't in your notes")
+            value = None
+        if value and field == "phone" and not (
+                verified or _assist.phone_grounded(value, raw_text or "")):
+            applied.setdefault("not_saved", []).append(
+                f"phone {value} — it isn't in your notes")
+            value = None
         if value:
             sets.append(f"{field} = %s"); params.append(value)
             applied[field] = value
@@ -4859,6 +4938,9 @@ def _apply_assist_change(cursor, lead, clean: dict, today: str, now: str) -> str
         if fields.get("followup_date"):
             extracted["followup_in_days"] = (
                 date.fromisoformat(fields["followup_date"]) - date.fromisoformat(today)).days
+        # clean_change already checked every field against the WHOLE message;
+        # their_words is only this lead's part of it.
+        extracted["_verified"] = True
         _, _, undo_id, _ = _apply_call_notes(
             cursor, lead, extracted, lg["their_words"], lg["kind"], today, now)
         # What the call-notes write doesn't cover. Still under the same undo:
@@ -5893,9 +5975,10 @@ def _quick_add(text: str, name_override: Optional[str] = None) -> dict:
                           flush=True)
                     website = None
             if website:
-                email, page = find_email_on_site(website)
+                email, page = find_email_on_site(website, venue_name=name)
                 if email:
                     extracted["email"] = email
+                    extracted["_email_from_site"] = email
                     found_via = page
         except Exception as exc:
             print(f"[crm] quick-add email lookup failed: {exc}", flush=True)

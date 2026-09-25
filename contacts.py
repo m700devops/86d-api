@@ -51,7 +51,12 @@ _ROLE_SPACE_NAME = re.compile(rf"\b({_ROLE_ALT})\s+({_NAME})\b")
 
 # `[^<>]`, not `[^>]`: a tag stops at the next '<' too, so a page of '<'
 # with no '>' is one pass, not a re-scan from every '<' to the end.
-_ANY_TAG = re.compile(r"<[^<>]{0,2000}>")
+# The bound is large on purpose. `[^<>]` can't cross a '<', so each run is
+# scanned once whatever the bound — it is linear either way — and at 2000 a
+# Squarespace <body class="…"> (thousands of characters of class names) or a
+# data attribute full of script URLs was left in the "visible" text: The
+# Pocket Pub got a manager called "gallery" from "gallery-manager.js".
+_ANY_TAG = re.compile(r"<[^<>]{0,300000}>")
 _BREAK_TAG = re.compile(r"<\s{0,5}(br|/p|/div|/li|/h[1-6]|/td|/tr)\b[^<>]{0,500}>", re.I)
 # Script and style bodies and HTML comments — never the venue's own words —
 # stripped by a scan, not a `.*?` regex: that one re-scanned to the end of the
@@ -130,6 +135,10 @@ def _plausible_name(candidate: str) -> bool:
     if not candidate or len(candidate) > 40:
         return False
     words = candidate.split()
+    # A name is capitalised. The patterns run case-insensitive (for the role
+    # words), which let lowercase text through as a "name".
+    if not all(w[0].isupper() for w in words):
+        return False
     if not (1 <= len(words) <= 3):
         return False
     if any(w.lower().strip(".") in _NOT_A_NAME for w in words):
@@ -254,17 +263,21 @@ OWNER_LOCALS = {
 }
 
 
-def email_kind(email: Optional[str]) -> str:
+def email_kind(email: Optional[str], venue_name: Optional[str] = None) -> str:
     """'personal' | 'owner' | 'role' | 'unknown'.
 
     'personal' means the local part looks like one human's mailbox —
     dave@, dave.smith@, d.smith@, daveb@. That's the one worth calling first.
+    The venue's own name is not a person: sweedeedee@gmail.com and
+    tootsies@… read "personal" by shape alone and sorted up the list.
     """
     if not email or "@" not in email:
         return "unknown"
     local = email.split("@", 1)[0].strip().lower()
     bare = re.sub(r"[^a-z]", "", local)
     if not bare:
+        return "unknown"
+    if any(w in bare for w in _venue_words(venue_name, 4)):
         return "unknown"
     if local in ROLE_LOCALS or bare in ROLE_LOCALS:
         return "role"
@@ -290,6 +303,85 @@ def email_kind(email: Optional[str]) -> str:
     if re.fullmatch(r"[a-z]{3,12}\d{0,2}", local):
         return "personal"
     return "unknown"
+
+
+# ── Whose address is it? ────────────────────────────────────────────────────
+
+# Mailboxes anyone can have — webmail and the internet providers small bars
+# use. An address here says nothing about which business it belongs to, so
+# the inbox must never tie a reply to every lead on the same domain (one
+# "unsubscribe" from a cox.net address would kill every cox.net bar), and an
+# email on one is still fine for a small independent.
+FREE_MAIL_DOMAINS = frozenset({
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "rocketmail.com",
+    "hotmail.com", "outlook.com", "live.com", "msn.com", "passport.com", "icloud.com",
+    "me.com", "mac.com", "privaterelay.appleid.com", "aol.com", "aim.com",
+    "protonmail.com", "proton.me", "pm.me", "gmx.com", "gmx.us", "mail.com", "zoho.com",
+    "zohomail.com", "fastmail.com", "tutanota.com", "hushmail.com", "yandex.com",
+    "duck.com", "inbox.com", "juno.com", "netzero.net", "netzero.com", "earthlink.net",
+    "mindspring.com", "comcast.net", "xfinity.com", "att.net", "sbcglobal.net",
+    "bellsouth.net", "pacbell.net", "swbell.net", "ameritech.net", "flash.net",
+    "prodigy.net", "snet.net", "wans.net", "verizon.net", "charter.net", "spectrum.net",
+    "rr.com", "roadrunner.com", "twc.com", "brighthouse.com", "cox.net", "optonline.net",
+    "optimum.net", "frontier.com", "frontiernet.net", "centurylink.net", "centurytel.net",
+    "embarqmail.com", "q.com", "qwest.net", "windstream.net", "suddenlink.net",
+    "mediacombb.net", "mchsi.com", "wowway.com", "wow.net", "rcn.com", "tds.net",
+    "ptd.net", "hughes.net", "consolidated.net", "sonic.net", "cableone.net",
+    "sparklight.net", "ziply.com", "live.ca", "hotmail.ca", "yahoo.ca", "outlook.co",
+})
+
+
+def free_mail(domain: Optional[str]) -> bool:
+    """A webmail or internet-provider domain, subdomains included
+    (nc.rr.com, mail.yahoo.com)."""
+    d = (domain or "").lower().strip().strip(".")
+    return any(d == f or d.endswith("." + f) for f in FREE_MAIL_DOMAINS) \
+        or bool(re.match(r"^(?:yahoo|hotmail|outlook|live|msn)\.[a-z.]{2,6}$", d))
+
+
+_GENERIC_VENUE_WORDS = {
+    "the", "and", "bar", "bars", "pub", "tavern", "grill", "grille", "restaurant", "lounge",
+    "kitchen", "cafe", "saloon", "tap", "taproom", "taphouse", "brewing", "brewery",
+    "brewpub", "cantina", "club", "eatery", "bistro", "diner", "house", "company", "inc",
+    "llc", "room", "hall", "social", "street", "north", "south", "east", "west",
+}
+
+
+def _venue_words(name: Optional[str], min_len: int = 3) -> set:
+    words = re.findall(r"[a-z0-9]+", (name or "").lower().replace("&", " and ")
+                       .replace("'s", "s").replace("’s", "s"))
+    return {w for w in words if len(w) >= min_len and w not in _GENERIC_VENUE_WORDS}
+
+
+def _host(url_or_domain: Optional[str]) -> str:
+    d = (url_or_domain or "").strip().lower()
+    d = re.sub(r"^[a-z]+://", "", d).split("/", 1)[0].split(":", 1)[0]
+    return d[4:] if d.startswith("www.") else d
+
+
+def email_fits_venue(email: Optional[str], website: Optional[str] = None,
+                     venue_name: Optional[str] = None) -> bool:
+    """Whether an address found on a venue's site can be the venue's own.
+
+    Measured on 33 real venues that qualified (Portland and Nashville,
+    2026-09-25): five "contact" addresses were someone else's — a PR agency
+    (hi@dianabartonpr.com on Martin's BBQ), the web designer
+    (templates@wavesdesign.io on Suzy Wong's), an events company, a hotel
+    group. The first address on the page was taken whatever its domain.
+    Fits: the site's own domain (or a sub/parent of it), a free or
+    internet-provider mailbox, or a domain carrying a distinctive word of the
+    venue's name (five-srg.com for Five Spice). Anything else is a business
+    that isn't this one."""
+    if not email or "@" not in email:
+        return False
+    dom = _host(email.rsplit("@", 1)[1])
+    site = _host(website)
+    if site and (dom == site or dom.endswith("." + site) or site.endswith("." + dom)):
+        return True
+    if free_mail(dom):
+        return True
+    flat = dom.replace("-", "")
+    return any(w in flat for w in _venue_words(venue_name, 3))
 
 
 # ── Addresses that are not worth having ─────────────────────────────────────

@@ -43,7 +43,8 @@ from database import get_db
 from helpers import generate_id, now_iso
 from callwindow import ZONE_OFFSETS, SERVICES, bucket_of, all_buckets
 import venue as venue_facts
-from contacts import email_kind, find_manager, strip_non_content, visible_text
+from contacts import (email_kind, email_fits_venue, find_manager, strip_non_content,
+                      visible_text)
 from phones import normalize_us_phone, is_toll_free, format_us_phone_dashed
 
 # ── Tunables ────────────────────────────────────────────────────────────────
@@ -242,6 +243,24 @@ def _is_public_http_url(url: str) -> bool:
 _TLS_EXITS = {35, 51, 53, 54, 58, 59, 60, 64, 66, 77, 80, 82, 83, 90, 91}
 
 
+def _decode(raw: Optional[bytes]) -> str:
+    """A page's bytes as text, whatever its encoding. Decoding as strict
+    UTF-8 threw away every page with one Latin-1 or Windows-1252 byte in it —
+    the fetch "failed", the site counted as unreachable, and after three tries
+    a real bar was rejected for good."""
+    if not raw:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        # A stray byte in a UTF-8 page stays UTF-8 (its accents intact); a
+        # page that's really Latin-1/Windows-1252 reads as that.
+        text = raw.decode("utf-8", errors="replace")
+        if text.count("\ufffd") <= 3:
+            return text
+        return raw.decode("cp1252", errors="replace")
+
+
 def _http(url: str, timeout: int = 20, data: Optional[str] = None,
           verify_public: bool = False, insecure: bool = False,
           tls_status: bool = False) -> tuple[str, int]:
@@ -272,17 +291,17 @@ def _http(url: str, timeout: int = 20, data: Optional[str] = None,
         # +5, not more: curl already enforces --max-time, and this outer guard
         # exists only for the case where curl itself wedges. A generous margin
         # here multiplies across every page of every candidate.
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 5)
     except Exception as exc:
         print(f"[leadgen] fetch failed {url}: {exc}", flush=True)
         return "", 0
-    out = proc.stdout or ""
+    out = _decode(proc.stdout)
     if "__STATUS__" not in out:
         # curl never got an HTTP response at all. Without its stderr the log
         # reads "-> 0", which is indistinguishable between DNS failure, a TLS
         # problem, a timeout and a reset mid-transfer — and those want
         # completely different fixes. Say which.
-        why = (proc.stderr or "").strip().replace("\n", " ")[:160]
+        why = _decode(proc.stderr).strip().replace("\n", " ")[:160]
         print(f"[leadgen] no HTTP response from {url[:90]} "
               f"(curl exit {proc.returncode}{': ' + why if why else ''})", flush=True)
         if tls_status and proc.returncode in _TLS_EXITS:
@@ -446,6 +465,15 @@ def init_leadgen_tables():
         city_count = cursor.fetchone()["n"]
 
         moved = _reconcile_timezones(cursor)
+        try:
+            foreign_leads, foreign_cands = _reconcile_foreign_emails(cursor)
+            conn.commit()
+            if foreign_leads or foreign_cands:
+                print(f"[leadgen] LEADGEN_FOREIGN_EMAILS leads={foreign_leads} "
+                      f"candidates={foreign_cands}", flush=True)
+        except Exception as exc:
+            conn.rollback()
+            print(f"[leadgen] LEADGEN_FOREIGN_EMAILS_FAILED {exc}", flush=True)
         bad_cands, bad_leads = _reconcile_bad_emails(cursor)
         conn.commit()
         # In its own transaction: it deletes rows, and a failure here must cost
@@ -792,6 +820,50 @@ def _backfill_venue_facts(cursor) -> int:
     return filled
 
 
+def _reconcile_foreign_emails(cursor) -> tuple[int, int]:
+    """Every boot: take another business's address off generated leads and
+    the bank. Before addresses had to fit the venue (contacts.email_fits_venue)
+    the first one on the page was taken — a PR agency's on Martin's BBQ, the
+    web designer's on Suzy Wong's. A lead is only touched while its email is
+    still the one the crawl found (the operator may have typed a new one, and
+    theirs is theirs) and nobody has emailed it yet. The map's own email tag
+    is the mapper saying it's the venue's, and is left alone.
+    Returns (leads, candidates) cleaned."""
+    cursor.execute("""
+        SELECT l.id, l.name, l.email, c.website
+          FROM crm_leads l
+          JOIN crm_lead_candidates c ON c.promoted_lead_id = l.id
+         WHERE l.source = 'leadgen' AND l.email IS NOT NULL AND l.email_date IS NULL
+           AND lower(l.email) = lower(c.email)
+           AND c.email_source IS DISTINCT FROM 'OpenStreetMap tag'
+    """)
+    leads = 0
+    for row in cursor.fetchall():
+        if not row["website"] or email_fits_venue(row["email"], row["website"], row["name"]):
+            continue
+        cursor.execute("""
+            UPDATE crm_leads
+               SET email = NULL, email_kind = NULL,
+                   notes = COALESCE(notes || E'\\n', '') || %s
+             WHERE id = %s AND email = %s
+        """, (f"[{now_iso()[:10]}] removed {row['email']} — it belongs to another business "
+              f"({row['email'].rsplit('@', 1)[1]}), not this venue. Phone is unaffected.",
+              row["id"], row["email"]))
+        leads += cursor.rowcount or 0
+    cursor.execute("""
+        SELECT id, name, email, website FROM crm_lead_candidates
+         WHERE email IS NOT NULL AND email_source IS DISTINCT FROM 'OpenStreetMap tag'
+    """)
+    cands = 0
+    for row in cursor.fetchall():
+        if not row["website"] or email_fits_venue(row["email"], row["website"], row["name"]):
+            continue
+        cursor.execute("UPDATE crm_lead_candidates SET email = NULL, email_source = NULL, "
+                       "email_kind = NULL WHERE id = %s", (row["id"],))
+        cands += 1
+    return leads, cands
+
+
 def _reconcile_bad_emails(cursor) -> tuple[int, int]:
     """Strip addresses nothing can vouch for, from candidates and from leads.
 
@@ -831,7 +903,7 @@ def _reconcile_bad_emails(cursor) -> tuple[int, int]:
     """)
     if cursor.fetchone():
         cursor.execute("""
-            SELECT id, email, email_kind FROM crm_leads
+            SELECT id, name, email, email_kind FROM crm_leads
              WHERE source = 'leadgen' AND email IS NOT NULL AND email <> ''
         """)
         for row in cursor.fetchall():
@@ -840,7 +912,7 @@ def _reconcile_bad_emails(cursor) -> tuple[int, int]:
             # sorted by a rule that no longer applies — and the rules have
             # already changed once, when "any run of letters" stopped counting
             # as a person's name.
-            kind = email_kind(row["email"])
+            kind = email_kind(row["email"], row["name"])
             if kind != row["email_kind"] and not EMAIL_BLOCKLIST.search(row["email"]):
                 cursor.execute("UPDATE crm_leads SET email_kind = %s WHERE id = %s",
                                (kind, row["id"]))
@@ -1641,7 +1713,7 @@ def score_candidate(tags: dict, email: Optional[str], site_html: str,
 
     if email:
         score += 3
-        kind = email_kind(email)
+        kind = email_kind(email, tags.get("name"))
         if kind == "personal":
             score += 4      # dave@divebar.com: one human, answers, replies
         elif kind == "owner":
@@ -1810,7 +1882,8 @@ def site_is_venue(website: str, name: str) -> bool:
     return bool(_ok(status, home)) and site_names_venue(home, name)
 
 
-def find_email_on_site(website: str, max_pages: int = 4) -> tuple[Optional[str], Optional[str]]:
+def find_email_on_site(website: str, max_pages: int = 4,
+                       venue_name: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
     """(email, page it was read on) from a venue's own site, or (None, None).
 
     Same order enrich_candidate uses: homepage, then the site's own contact
@@ -1820,9 +1893,9 @@ def find_email_on_site(website: str, max_pages: int = 4) -> tuple[Optional[str],
     home, status = _http(website, timeout=PAGE_TIMEOUT, verify_public=True)
     if status != 200 or not home:
         return None, None
-    found = extract_emails(home)
+    found = pick_email(extract_emails(home), website, venue_name)
     if found:
-        return found[0], website
+        return found, website
     urls: list[str] = []
     for href, _kind in CONTACT_LINK_RE.findall(home):
         if href.startswith(("mailto:", "tel:", "#", "javascript:")):
@@ -1838,9 +1911,9 @@ def find_email_on_site(website: str, max_pages: int = 4) -> tuple[Optional[str],
     for url in urls[:max_pages - 1]:
         body, status = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
         if status == 200 and body:
-            found = extract_emails(body)
+            found = pick_email(extract_emails(body), website, venue_name)
             if found:
-                return found[0], url
+                return found, url
     return None, None
 
 
@@ -1924,7 +1997,7 @@ def first_website(raw: Optional[str]) -> Optional[str]:
 # operator or the book decided (deleted by hand, suppressed, already a lead or
 # a customer, a chain by name) stays closed.
 REOPENABLE = ("site unreachable", "no email found", "restaurant with no sign",
-              "no sign on their own site",
+              "no sign on their own site", "their website doesn't mention",
               "phone not a dialable", "franchise language", "no phone on their site")
 
 
@@ -2428,7 +2501,10 @@ def check_fit(row: dict, corporate: Optional[dict] = None) -> dict:
     home, website, status = _fetch_site(row.get("website") or "")
     if not home:
         return {"status": "unreachable", "note": f"site unreachable (HTTP {status})"}
-    text = visible_text(home[:200000])
+    if not site_mentions_venue(home, website, row.get("name") or ""):
+        return {"status": "blocked", "note": f"their website doesn't mention "
+                                             f"{row.get('name')} — it may not be theirs"}
+    text = _page_text(home)
     chain = looks_like_chain(row.get("name") or "", website, text)
     if chain:
         return {"status": "blocked", "note": chain}
@@ -2438,7 +2514,7 @@ def check_fit(row: dict, corporate: Optional[dict] = None) -> dict:
         for url in _drink_links(website, home, limit=3):
             body, code = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
             if _ok(code, body):
-                text += " \n" + visible_text(body[:200000])
+                text += " \n" + _page_text(body)
                 verdict = liquor_verdict(text, tags, name, amenity)
                 if verdict["status"] != "unknown":
                     break
@@ -2579,49 +2655,70 @@ def _apply_fit_to_lead(cursor, row: dict, v: dict, retry_at: str) -> None:
 
 
 def fit_check_step() -> int:
-    """One background batch of verify_fit; how many rows it checked."""
+    """One background batch of verify_fit; how many rows it checked. When a
+    bank batch passes venues, the cells the removals emptied are refilled
+    from them now rather than at the evening run — the call list used to sit
+    thin all afternoon after a clean-up."""
     try:
         out = verify_fit(bank_limit=0)
         if not out.get("leads_checked") and not out.get("skipped"):
             out = verify_fit(lead_limit=0)
+            room = sum(bucket_deficits().values()) if out.get("bank_ok") else 0
+            if room:
+                print(f"[leadgen] LEADGEN_REFILL promoted={promote_leads(room)}", flush=True)
     except Exception as exc:
         print(f"[leadgen] LEADGEN_FIT_CHECK_FAILED {exc}", flush=True)
         return 0
     return out.get("leads_checked", 0) + out.get("bank_checked", 0)
 
 
-# ── ONE-TIME: emails a bad website lookup put on the operator's own leads ──
+# ── ONE-TIME: websites (and emails) a bad lookup put on the operator's leads ──
 
-_LOOKUP_MARKER = "lookup_site_check_2026_09"
+# The first pass (lookup_site_check_2026_09) looked only at leads that got an
+# EMAIL from a wrong site. A wrong site with no email on it was left in the
+# notes, and the wrong-number button and the prep sheet read the first URL in
+# the notes — NE Moose could have been handed African Grill's phone number.
+_LOOKUP_MARKER = "lookup_site_check_2026_09b"
 _NOTE_WEBSITE = re.compile(r"Website: (https?://[^\s·|]{3,300})")
 _NOTE_FOUND_ON = re.compile(r"Email found on: (https?://[^\s·|]{3,300})")
+NOT_THEIRS = "is not theirs"
+
+
+def flagged_domains(notes: Optional[str]) -> set:
+    """Domains the notes already say are not this venue's."""
+    out = set()
+    for line in (notes or "").splitlines():
+        if NOT_THEIRS in line or "picked a different venue" in line:
+            out |= {domain_of(u) for u in re.findall(r"https?://[^\s·|,;()]{3,300}", line)}
+    return out - {""}
 
 
 def lookup_suspects(rows: list) -> list:
-    """Leads whose email came from a website the quick-add LOOKUP chose, not
-    one the operator typed — the only ones the bad lookup could have touched.
-    Pure: (lead, website, page the email was read on) for each."""
+    """Leads whose notes carry a website the quick-add LOOKUP chose, not one
+    the operator typed, and not already flagged. Pure:
+    (lead, website, page the email was read on or None) for each."""
     out = []
     for row in rows:
         notes = row.get("notes") or ""
-        site, found = _NOTE_WEBSITE.search(notes), _NOTE_FOUND_ON.search(notes)
-        if not (site and found and row.get("email")):
+        site = _NOTE_WEBSITE.search(notes)
+        if not site:
             continue
         domain = domain_of(site.group(1))
         # Typed by the operator (their verbatim words carry it) -> theirs, trusted.
         said = " ".join(re.findall(r"Your notes: ([^\n]{0,4000})", notes)).lower()
-        if domain and domain in said:
+        if not domain or domain in said or domain in flagged_domains(notes):
             continue
-        out.append((row, site.group(1), found.group(1)))
+        found = _NOTE_FOUND_ON.search(notes)
+        out.append((row, site.group(1), found.group(1) if found else None))
     return out
 
 
 def recheck_looked_up_sites() -> int:
-    """Once: re-check every lead whose email came from a looked-up website,
-    and take the email off where the site doesn't name the bar — NE Moose Bar
-    & Grill got African Grill's. The lead, the call and the notes stay; one
-    dated line says what was removed and why, and a pending scheduled email to
-    that address is stopped. Returns how many were cleared."""
+    """Once: every operator lead whose website came from the lookup is
+    re-checked; where the site doesn't name the bar, a dated line says the
+    site is not theirs (so nothing reads it again) and an email that came
+    from it comes off, with any pending scheduled email to it stopped.
+    Returns how many sites were flagged."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM crm_leadgen_oneshots WHERE name = %s", (_LOOKUP_MARKER,))
@@ -2629,8 +2726,7 @@ def recheck_looked_up_sites() -> int:
             return 0
         cursor.execute("""
             SELECT id, name, email, notes FROM crm_leads
-             WHERE source IS DISTINCT FROM 'leadgen' AND email IS NOT NULL
-               AND notes LIKE '%%Email found on:%%'
+             WHERE source IS DISTINCT FROM 'leadgen' AND notes LIKE '%%Website: http%%'
         """)
         suspects = lookup_suspects([dict(r) for r in cursor.fetchall()])
 
@@ -2640,7 +2736,7 @@ def recheck_looked_up_sites() -> int:
         if not _ok(status, home):
             continue                     # can't tell — leave it alone
         if not site_names_venue(home, row["name"]):
-            wrong.append((row, site))
+            wrong.append((row, site, found_on))
 
     now = now_iso()
     with get_db() as conn:
@@ -2648,26 +2744,37 @@ def recheck_looked_up_sites() -> int:
         cursor.execute("INSERT INTO crm_leadgen_oneshots (name, applied_at, detail) "
                        "VALUES (%s, %s, %s) ON CONFLICT (name) DO NOTHING RETURNING name",
                        (_LOOKUP_MARKER, now, json.dumps({"checked": len(suspects),
-                                                          "cleared": len(wrong)})))
+                                                          "flagged": len(wrong)})))
         if not cursor.fetchone():
             return 0
-        for row, site in wrong:
-            cursor.execute("""
-                UPDATE crm_leads
-                   SET email = NULL, email_kind = NULL, updated_at = %s,
-                       notes = COALESCE(notes || E'\\n', '') || %s
-                 WHERE id = %s AND email = %s
-            """, (now, f"[{now[:10]}] Removed {row['email']} — the automatic website lookup "
-                       f"had picked a different venue ({site}); that site never mentions "
-                       f"{row['name']}.", row["id"], row["email"]))
-            cursor.execute("""
-                UPDATE crm_scheduled_emails
-                   SET status = 'failed', last_error = %s
-                 WHERE lead_id = %s AND status = 'pending' AND lower(to_addr) = lower(%s)
-            """, ("Not sent: this address belonged to a different venue", row["id"],
-                  row["email"]))
+        for row, site, found_on in wrong:
+            email = row.get("email")
+            from_site = bool(email) and (bool(found_on) or domain_of(site) ==
+                                         email.rsplit("@", 1)[-1].lower())
+            note = (f"[{now[:10]}] Website {site} {NOT_THEIRS} — the automatic website lookup "
+                    f"had picked a different venue; that site never mentions {row['name']}.")
+            if from_site:
+                note += f" Removed {email}, which came from it."
+                cursor.execute("""
+                    UPDATE crm_leads
+                       SET email = NULL, email_kind = NULL, updated_at = %s,
+                           notes = COALESCE(notes || E'\\n', '') || %s
+                     WHERE id = %s AND email = %s
+                """, (now, note, row["id"], email))
+                cursor.execute("""
+                    UPDATE crm_scheduled_emails
+                       SET status = 'failed', last_error = %s
+                     WHERE lead_id = %s AND status = 'pending' AND lower(to_addr) = lower(%s)
+                """, ("Not sent: this address belonged to a different venue", row["id"],
+                      email))
+            else:
+                cursor.execute("""
+                    UPDATE crm_leads SET updated_at = %s,
+                           notes = COALESCE(notes || E'\\n', '') || %s
+                     WHERE id = %s
+                """, (now, note, row["id"]))
         conn.commit()
-    print(f"[leadgen] LEADGEN_LOOKUP_RECHECK checked={len(suspects)} cleared={len(wrong)}",
+    print(f"[leadgen] LEADGEN_LOOKUP_RECHECK checked={len(suspects)} flagged={len(wrong)}",
           flush=True)
     return len(wrong)
 
@@ -2741,12 +2848,43 @@ def _drink_links(website: str, home: str, limit: int = 2) -> list:
         full = urllib.parse.urljoin(website, href)
         if (not full.lower().startswith(("http://", "https://"))
                 or domain_of(full) != domain_of(website)
-                or re.search(r"\.(pdf|jpe?g|png|gif|webp)(\?|$)", full, re.I)
+                or re.search(r"\.(pdf|jpe?g|png|gif|webp)(?:%20|\s)*(\?|#|$)", full, re.I)
                 or full in found):
             continue
         found.append(full)
     found.sort(key=lambda u: 0 if re.search(r"drink|cocktail|bar|wine|beer", u, re.I) else 1)
     return found[:limit]
+
+
+def _page_text(html: str) -> str:
+    """What a visitor reads on one page — the whole page, then capped."""
+    return visible_text(html or "")[:200000]
+
+
+def site_mentions_venue(html: str, website: str, name: str) -> bool:
+    """Whether a homepage is plausibly this venue's own: a distinctive word
+    of its name appears on the page or in the domain. Looser than
+    site_names_venue (every word) on purpose — a bar's own site may shorten
+    its name — but a lapsed domain or somebody else's site says none of it."""
+    words = {w for w in _name_words(name) if w not in _GENERIC_NAME_WORDS and len(w) > 2}
+    if not words:
+        return True
+    flat = domain_of(website).replace("-", "")
+    if any(w in flat for w in words):
+        return True
+    return bool(words & set(_name_words(_page_text(html))))
+
+
+def pick_email(emails: list, website: Optional[str], name: Optional[str]) -> Optional[str]:
+    """The best address on a page that can be the venue's own: its own
+    domain first, then a free mailbox. Somebody else's business domain — the
+    PR agency, the web designer, an events company — is never taken
+    (contacts.email_fits_venue)."""
+    fitting = [e for e in emails or [] if email_fits_venue(e, website, name)]
+    site = domain_of(website or "")
+    own = [e for e in fitting if site and (e.rsplit("@", 1)[1] == site
+                                           or e.rsplit("@", 1)[1].endswith("." + site))]
+    return (own or fitting or [None])[0]
 
 
 def _rejected(reason: str, status: str = "rejected") -> dict:
@@ -2805,10 +2943,18 @@ def enrich_candidate(cand: dict) -> dict:
 
     html_seen += home[:200000]
     pages.append((website, home))
+    # The site has to be theirs. A domain that lapsed and was bought by
+    # someone else, or a map tag pointing at a parent company, gives a
+    # stranger's email and phone: "The Ranch" in Nashville was tagged with
+    # Jackalope Brewing's site. Measured on 33 real venues that qualified,
+    # every other homepage names its bar (or its domain does).
+    if not site_mentions_venue(home, website, cand.get("name") or ""):
+        return _rejected(f"their website doesn't mention {cand.get('name')} — "
+                         "it may not be theirs")
     if not email:
-        emails = extract_emails(home)
-        if emails:
-            email, email_source = emails[0], website
+        email = pick_email(extract_emails(home), website, cand.get("name"))
+        if email:
+            email_source = website
 
     if not email:
         for url in _contact_urls(website, home):
@@ -2820,9 +2966,9 @@ def enrich_candidate(cand: dict) -> dict:
                 continue
             html_seen += body[:200000]
             pages.append((url, body))
-            found = extract_emails(body)
+            found = pick_email(extract_emails(body), website, cand.get("name"))
             if found:
-                email, email_source = found[0], url
+                email, email_source = found, url
                 break
 
     # A name to ask for, from pages already fetched. Measured across 22
@@ -2871,7 +3017,10 @@ def enrich_candidate(cand: dict) -> dict:
     tags = osm_tags
     # Franchise language is read from what a visitor sees, not from scripts:
     # an ordering widget's "find a location" is not the venue talking.
-    seen_text = " \n".join(visible_text(body[:200000]) for _url, body in pages)
+    # Each page read WHOLE, scripts removed first, then capped: Squarespace
+    # and Wix put hundreds of KB of script before the content, so cutting the
+    # raw HTML at 200KB cut the drinks list off (Sonny's, Box Social).
+    seen_text = " \n".join(_page_text(body) for _url, body in pages)
     chain_reason = looks_like_chain(cand["name"], website, seen_text)
     if chain_reason:
         return _rejected(chain_reason)
@@ -2889,7 +3038,7 @@ def enrich_candidate(cand: dict) -> dict:
             fetched += 1
             if _ok(status, body):
                 html_seen += body[:200000]
-                seen_text += " \n" + visible_text(body[:200000])
+                seen_text += " \n" + _page_text(body)
                 liquor = liquor_verdict(seen_text, tags, cand.get("name") or "", amenity)
                 if liquor["status"] != "unknown":
                     break
@@ -2916,7 +3065,7 @@ def enrich_candidate(cand: dict) -> dict:
         "phone_note": verdict["note"],
         "email": email,
         "email_source": email_source,
-        "email_kind": email_kind(email),
+        "email_kind": email_kind(email, cand.get("name")),
         "manager_name": manager["name"] if manager else None,
         "manager_role": manager["role"] if manager else None,
         "manager_source": manager["source"] if manager else None,
@@ -3046,7 +3195,10 @@ def _promote_one(cursor, cand: dict, now: str, corporate: Optional[dict] = None)
     # a call-only lead, an address nothing vouches for is simply dropped and
     # the venue — whose number its own site confirmed — is still promoted.
     if cand.get("email") and (not (cand.get("email_source") or "").strip()
-                              or EMAIL_BLOCKLIST.search(cand["email"])):
+                              or EMAIL_BLOCKLIST.search(cand["email"])
+                              or (cand.get("email_source") != "OpenStreetMap tag"
+                                  and not email_fits_venue(cand["email"], cand.get("website"),
+                                                           cand.get("name")))):
         cand = {**cand, "email": None, "email_source": None, "email_kind": None}
 
     reason = _is_suppressed(cursor, cand["name"], cand["email"],
