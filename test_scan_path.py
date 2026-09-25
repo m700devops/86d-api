@@ -287,7 +287,8 @@ def _catalog(monkeypatch, found=("prod-7", "exact"), forbid=None):
         if forbid:
             pytest.fail(forbid)
         calls.append(("record", product_id, method, allow_create))
-        return (product_id, False, method) if product_id else (None, False, "none")
+        size = result.get("size", "")
+        return (product_id, False, method, size) if product_id else (None, False, "none", size)
 
     monkeypatch.setattr(main, "_find_product", find)
     monkeypatch.setattr(main, "_record_match", record)

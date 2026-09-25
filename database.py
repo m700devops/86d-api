@@ -695,6 +695,8 @@ def init_db():
                 second_opinion TEXT,
                 second_provider TEXT,
                 second_answer TEXT,
+                size TEXT,
+                size_read TEXT,
                 final_product_id TEXT,
                 final_at TEXT,
                 created_at TEXT NOT NULL
@@ -709,6 +711,11 @@ def init_db():
         # (fast / both / window / single), whether the other provider agreed, and
         # what it said (JSON).
         for col in ("path", "second_opinion", "second_provider", "second_answer"):
+            cursor.execute(f"ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS {col} TEXT")
+        # The bottle size: `size` is what matching used — normalized, and only
+        # when the label text carries it (helpers.label_shows_size) — and
+        # `size_read` is the model's field exactly as it wrote it.
+        for col in ("size", "size_read"):
             cursor.execute(f"ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS {col} TEXT")
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_scan_events_created

@@ -189,11 +189,12 @@ def catalog(monkeypatch):
 
         def record(result, user, product_id, method, allow_create=True):
             writes.append({"name": result["name"], "product_id": product_id, "allow_create": allow_create})
+            size = result.get("size", "")
             if product_id:
-                return (product_id, False, method)
+                return (product_id, False, method, size)
             if allow_create:
-                return (f"new-{result['name']}", True, "auto_created")
-            return (None, False, "none")
+                return (f"new-{result['name']}", True, "auto_created", size)
+            return (None, False, "none", size)
 
         monkeypatch.setattr(main, "_find_product", find)
         monkeypatch.setattr(main, "_record_match", record)

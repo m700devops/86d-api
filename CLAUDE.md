@@ -238,7 +238,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py -q` (666 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_second_opinion.py test_bottle_size.py -q` (739 tests; test_timezones.py needs a dummy
+  `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
   image last, temperature 0, strict schema, no SDK retries, one shared client, the plain-request
@@ -248,6 +249,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   key, the total cap cancelling both calls, the one-bar inference). Every rule was mutation-checked
 - test_match_key.py — `helpers.product_match_key`, sizes, and the generated prompt product list;
   pure (no database). The matcher's SQL was checked against a real Postgres, not in this suite
+- test_bottle_size.py — the bottle size end to end: parsing labels' own forms, the check against
+  the model's transcription, `size_fits`/`single_fit`, the size-aware matcher with its SQL faked
+  per step, `_record_match` storing/returning sizes, two providers reading different sizes, the
+  response and the log. Every rule was mutation-checked; the SQL was also run against a real
+  Postgres upgraded from the previous commit's schema
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -349,9 +355,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   retry sweep picks up. `null` still means no bottle
 - **Every scan is measured.** One `[scan] SCAN status= provider= model= provider_ms= total_ms=
   input_tokens= cached_tokens= output_tokens= confidence= match_method= image_kb= fallback_from= id=`
-  line (grep Render logs for `SCAN `; it also carries `path` = fast | both | window | single and
-  `second_opinion`), and a `scan_events` row written in the background (plus `second_provider` and
-  `second_answer`, the other provider's reading as JSON)
+  line (grep Render logs for `SCAN `; it also carries `path` = fast | both | window | single,
+  `second_opinion` and `size`), and a `scan_events` row written in the background (plus
+  `second_provider` and `second_answer`, the other provider's reading as JSON, and `size` /
+  `size_read` — see Bottle size)
   (`_record_scan_event`, never fails a scan; `SCAN_EVENT_FAILED` if it does). The response carries
   `scan_id`; the app keeps it on the bottle row and `PUT /inventory/draft` records the product that
   row holds now in `final_product_id` (`_scan_finals`, after the draft's own commit, in its own
@@ -382,6 +389,34 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - **Sizes**: the key ignores them, so a size the scan DID read is checked separately
   (`helpers.size_ml`/`sizes_compatible`, against `products.size` or a size in the stored name) — a
   "1L" read never lands on the 750ml product. No size read = the key decides
+- **Bottle size — read off the label, used everywhere a bottle is told apart.** Bars stock the same
+  spirit in 750ml, 1L and 1.75L, and none of that used to reach the scanner: the model was never
+  asked, new products were stored with no size, and a distributor's order said "Tito's Handmade x 6"
+  - `SCAN_SCHEMA`/BOTTLE_PROMPT ask for `size`, the net contents copied as printed, "" when they
+    can't be read; never "the size this product usually comes in"
+  - `_evaluate_answer` keeps it ONLY when the model's own `label_text` carries it
+    (`helpers.label_shows_size` — the same reading-not-recall test as the name). Fail-safe: a
+    dropped size is just today's behaviour, it can never cause a retake. Kept normalized to the
+    catalog's own form (`normalize_size`: "750ml", "1L", "1.75L", "12oz"; "75 cl", "1,75 L", and
+    US beer's "1 PT. 9.4 FL. OZ." = 25.4oz are understood); what the model wrote is `size_read`
+  - every matching step is size-aware (`helpers.size_fits`): a product of a different KNOWN size is
+    skipped at every step, exact name included, and one recorded at the size read beats one with
+    none. `bar_book` uses `single_fit`: a read size picks the bar's row of that size. A product
+    with NO size on record is a wildcard, never a mismatch — most products the scanner created
+    before this have none, and treating them as wrong would split every one of them
+  - `sizes_compatible` slack is 2% (was 5%): every unit conversion of a real size fits
+    (12oz/355ml, 25.4oz/750ml) and 720ml no longer joins 750ml
+  - `_record_match` stores the size on a product it CREATES and returns the size to show
+    (`UPDATE … RETURNING size`: the product's recorded size, else the one read). It never sets the
+    size of an existing product: products are shared by every bar, and one bar's read would decide
+    the size another bar has been counting it at
+  - two providers reading different sizes DISAGREE (`_same_bottle`), even on one product, and
+    `alternative` carries the size ("Tito's Handmade 1.75L"). The response's `size` goes on the
+    app's row and from there onto the emailed order line (`OrderEmailItem.size`, which existed but
+    was never filled)
+  - still open: no size readable + a bar keeping two sizes of one bottle = one of them is picked
+    (as before). A human check for that case, or remembering a size per bar (`par_levels`), is the
+    next step if the logs show it happening
 - **The prompt's product list is GENERATED from `seed_data.py`** (`_build_product_catalog`, lines of
   `Brand: Name | Name`, in exactly the split the matcher looks up — `helpers.seed_display_name`),
   plus `EXTRA_BRAND_SPELLINGS` (brands bars stock that the seed lacks; spelling only). It was a
