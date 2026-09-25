@@ -149,120 +149,32 @@ def label_supports(name: Optional[str], brand: Optional[str], label_text: Option
     return True
 
 
-# ── Bottle sizes ─────────────────────────────────────────────────────────────
-# Net contents the way labels print them: "750 ML", "75 cl", "1 LITER", "1,75 L",
-# "12 FL OZ", "1 PINT", and the US compound forms beer uses, "1 PT. 9.4 FL. OZ."
-# (a 750ml bottle) and "1 QT 8 FL OZ" (a forty). A comma followed by exactly
-# three digits is a thousands separator ("1,750 ml"), any other is a decimal
-# comma ("1,75 L"). No repeat sits inside another, so a match can't backtrack
-# its way into a stall — and label text is capped at 600 characters anyway.
-_ML_PER_OZ = 29.5735
-_SIZE_VALUE_RE = re.compile(
-    r"\b(?P<whole>\d+)\s*(?P<big>pints?|pt|quarts?|qt)\b\.?"
-    r"(?:\s*(?P<extra>\d+(?:\.\d+)?)\s*fl\.?\s*oz\b)?"
-    r"|\b(?P<num>\d{1,3}(?:,\d{3})+(?![\d,])|\d+(?:[.,]\d+)?)\s*"
-    r"(?P<unit>ml|cl|l|lt|ltr|liters?|litres?|fl\.?\s*oz|oz)\b"
-)
-_THOUSANDS_RE = re.compile(r"\d{1,3}(?:,\d{3})+")
-# Anything outside this isn't a container a bar counts — it's a misread ("75 L"
-# for "75 cl") or a number that only looked like a size.
-_MIN_ML, _MAX_ML = 10.0, 20000.0
-
-
-def _sizes(text: Optional[str]):
-    """Every size written in `text`, in order: (millilitres, printed in metric)."""
-    for m in _SIZE_VALUE_RE.finditer(fold_accents(text).lower()):
-        if m.group("whole"):
-            per = 473.176 if m.group("big").startswith("p") else 946.353
-            ml = int(m.group("whole")) * per + float(m.group("extra") or 0) * _ML_PER_OZ
-            metric = False
-        else:
-            num = m.group("num")
-            num = num.replace(",", "") if _THOUSANDS_RE.fullmatch(num) else num.replace(",", ".")
-            value, unit = float(num), m.group("unit")
-            if unit == "ml":
-                ml = value
-            elif unit == "cl":
-                ml = value * 10
-            elif unit.startswith("l"):
-                ml = value * 1000
-            else:  # oz / fl oz
-                ml = value * _ML_PER_OZ
-            metric = not unit.endswith("oz")
-        if _MIN_ML <= ml <= _MAX_ML:
-            yield ml, metric
+_SIZE_VALUE_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*(ml|cl|l|lt|ltr|liters?|litres?|fl\.?\s*oz|oz)\b")
 
 
 def size_ml(text: Optional[str]) -> Optional[float]:
     """The first bottle size written in `text`, in millilitres: "750ml" -> 750,
     "1.75L" -> 1750, "12oz" -> 354.9. None when there isn't one."""
-    return next((ml for ml, _ in _sizes(text)), None)
-
-
-def normalize_size(text: Optional[str]) -> str:
-    """The first size in `text`, written the way the catalog writes sizes
-    ("750ml", "1L", "1.75L", "12oz", "25.4oz"): metric stays metric, US
-    customary stays in ounces. "" when there isn't one."""
-    for ml, metric in _sizes(text):
-        if not metric:
-            return f"{round(ml / _ML_PER_OZ, 1):g}oz"
-        if ml >= 1000:
-            return f"{round(ml / 1000, 3):g}L"
-        return f"{round(ml)}ml"
-    return ""
+    match = _SIZE_VALUE_RE.search(fold_accents(text).lower())
+    if not match:
+        return None
+    value, unit = float(match.group(1)), match.group(2)
+    if unit == "ml":
+        return value
+    if unit == "cl":
+        return value * 10
+    if unit.startswith("l"):
+        return value * 1000
+    return value * 29.5735  # oz / fl oz
 
 
 def sizes_compatible(a: Optional[float], b: Optional[float]) -> bool:
     """False only when BOTH sizes are known and differ — the key ignores sizes,
     so this is what stops a scan that read "1L" landing on the 750ml product.
-    2% slack: enough for every unit conversion of a real size (12oz is 354.9ml,
-    "1 PT. 9.4 FL. OZ." is 751ml), not enough to join 720ml to 750ml."""
+    5% slack, so 12oz meets 355ml."""
     if a is None or b is None:
         return True
-    return abs(a - b) <= 0.02 * max(a, b)
-
-
-def label_shows_size(size: Optional[str], label_text: Optional[str]) -> bool:
-    """Did the model write down the size it returned? The size counts only when
-    its own transcription of the label carries it — the same test label_supports
-    applies to the name. A size missing from the transcription is a size from
-    memory ("Tito's comes in 750ml"), and bars stock the same bottle in 750ml,
-    1L and 1.75L: a remembered size is how the wrong one gets ordered."""
-    wanted = size_ml(size)
-    if wanted is None:
-        return False
-    return any(sizes_compatible(wanted, ml) for ml, _ in _sizes(label_text))
-
-
-def row_size_ml(row) -> Optional[float]:
-    """A product row's size: its size column, else a size in its name (the seed
-    catalog's "Grey Goose Original 750ml"). None when nobody recorded one."""
-    return size_ml(row.get("size")) or size_ml(row.get("name"))
-
-
-def size_fits(rows: list, wanted_ml: Optional[float]) -> list:
-    """The product rows that could be the bottle the scan read, in their order,
-    except that rows of the SAME known size come before rows with no size on
-    record. A row of a different known size is dropped. A row with no size is a
-    wildcard, not a mismatch: most products the scanner created before it read
-    sizes have none, and treating them as wrong would split every one of them.
-    No size read (`wanted_ml` None) = every row fits, order unchanged."""
-    fits = [r for r in rows if sizes_compatible(wanted_ml, row_size_ml(r))]
-    if wanted_ml is None:
-        return fits
-    return ([r for r in fits if row_size_ml(r) is not None]
-            + [r for r in fits if row_size_ml(r) is None])
-
-
-def single_fit(rows: list, wanted_ml: Optional[float]):
-    """The one row the scan can only mean, or None. A read size picks a row of
-    that size over rows with none on record; two rows still in the running is a
-    guess (a bar keeping a 750ml and a 1L as separate products, and a scan that
-    read no size), and the caller must not make it."""
-    fits = size_fits(rows, wanted_ml)
-    if wanted_ml is not None:
-        fits = [r for r in fits if row_size_ml(r) is not None] or fits
-    return fits[0] if len(fits) == 1 else None
+    return abs(a - b) <= 0.05 * max(a, b)
 
 
 # Words that can differ between two readings of the SAME bottle without making it

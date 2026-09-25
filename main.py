@@ -24,7 +24,6 @@ from helpers import (
     classify_level, smooth_level, calculate_variance, generate_order_items,
     normalize_match_text, NORM_SQL, product_match_key, seed_display_name,
     size_ml, sizes_compatible, label_supports, answers_agree,
-    normalize_size, label_shows_size, size_fits, single_fit,
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -3628,11 +3627,6 @@ class ScanAnalyzeResponse(BaseModel):
     brand: str
     category: str
     product_type: str = ""  # Specific class/type (e.g. Tennessee Whiskey, Blended Scotch Whisky, Vodka)
-    # The bottle's size for the count and the order: the matched product's
-    # recorded size, else the size read off this label ("750ml", "1.75L",
-    # "12oz"); "" when neither is known. The app puts it on the row, and the row
-    # puts it on the distributor's order line.
-    size: str = ""
     liquidLevel: float
     confidence: float
     levelReadable: bool = True
@@ -3714,7 +3708,6 @@ CRITICAL — identification is a READING task, not a recall task:
 - Do NOT infer the flavor or variant from the liquid color, cap color, bottle shape, or from which variants are most popular for that brand. Example: if a Gatorade label prints "BLUE BOLT", the name is "Blue Bolt" — NOT "Glacier Freeze", "Cool Blue", or any other blue variant you associate with the brand.
 - If the variant name is not clearly legible in the photo, use the generic descriptor printed on the label (e.g. "Sports Drink") as the name and cap confidence at 0.5. A generic name is always better than a guessed variant.
 - Write label_text FIRST: the words you can actually read on this one container. Then take brand and name ONLY from those words. Every word of the name you return must appear in label_text (the one exception is "Original" for a base product). If a word you want to use isn't there, you are recalling, not reading — fall back to the generic descriptor.
-- The same goes for size: copy the net contents only when you can read them on this container. Bars stock the same bottle in 750 ML, 1 L and 1.75 L, so a size filled in from what the brand usually comes in orders the wrong bottle.
 
 BASE PRODUCTS — descriptors are not variant names:
 - Many flagship products print NO variant name — only the brand plus a flavor/class descriptor. Example: a standard Sprite bottle prints "Sprite" and "Carbonated Lemon-Lime Flavored Drink". "Lemon-Lime" there is a DESCRIPTOR of the base product, not a variant.
@@ -3726,8 +3719,7 @@ How to read the label:
 1. Find the largest brand wordmark (e.g. GATORADE, JACK DANIEL'S) — that is the brand.
 2. Find the variant/expression/flavor text, usually smaller and near the brand (e.g. BLUE BOLT, OLD NO. 7, RED LABEL) — that is the name. If there is no variant text — only a flavor/class descriptor — the name is "Original".
 3. Use any printed class designation for product_type (e.g. SPORTS DRINK, TENNESSEE WHISKEY, LONDON DRY GIN).
-4. Find the net contents (e.g. 750 ML, 1 LITER, 1.75 L, 12 FL OZ) for size — often small, at the bottom of the label or on the neck. If you can't read it, size is "".
-5. If the label is angled, partially hidden, or blurry, transcribe what is clearly legible and lower confidence accordingly — never fill gaps from memory.
+4. If the label is angled, partially hidden, or blurry, transcribe what is clearly legible and lower confidence accordingly — never fill gaps from memory.
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
@@ -3736,19 +3728,17 @@ Return ONLY a JSON object — no markdown, no explanation:
   "brand": "Brand/distillery name only (e.g. Jack Daniel's, Johnnie Walker, Gatorade)",
   "category": "one of: spirits | beer | wine | soda | mixer | water | juice | other",
   "product_type": "Specific class and type (e.g. Tennessee Whiskey, Blended Scotch Whisky, Vodka, Lemon-Lime Soda, Sports Drink)",
-  "size": "Net contents exactly as printed on this container (e.g. 750 ML, 1 LITER, 1.75 L, 12 FL OZ), or an empty string if you can't read them",
   "confidence": 0.9
 }
 
 Rules:
-- label_text: written FIRST. Only words you can actually see on the ONE container you are identifying — never words you expect a label like this to carry. Up to about 30 words; include every word you used for brand and name, and the size if you read one.
+- label_text: written FIRST. Only words you can actually see on the ONE container you are identifying — never words you expect a label like this to carry. Up to about 30 words; include every word you used for brand and name.
 - name: variant/expression only — do NOT include the brand name in this field. Use "Original" for a brand's base product with no printed variant name.
 - brand: brand/distillery name only — do NOT include the variant or product type
 - product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka, Lemon-Lime Soda, Cola, Tonic Water, Sports Drink, Energy Drink). Use the label's own designation when visible.
-- size: the net contents printed on THIS container, copied as printed (750 ML, 1 LITER, 1.75 L, 50 ML, 12 FL OZ, 16.9 FL OZ). Return "" when you can't read them — never the size this product usually comes in.
 - category must be one of: spirits, beer, wine, soda, mixer, water, juice, other
 - confidence is 0.0-1.0 and reflects how certain you are of the EXACT product (brand + variant)
-- If no bottle or can is present at all, return: {"label_text":"","name":"","brand":"","category":"other","product_type":"","size":"","confidence":0}
+- If no bottle or can is present at all, return: {"label_text":"","name":"","brand":"","category":"other","product_type":"","confidence":0}
 - Return ONLY valid JSON.
 
 """ + PRODUCT_CATALOG
@@ -3777,12 +3767,9 @@ SCAN_SCHEMA = {
         "brand": {"type": "string"},
         "category": {"type": "string", "enum": SCAN_CATEGORIES},
         "product_type": {"type": "string"},
-        # Net contents as printed, "" when unreadable. Only counted when
-        # label_text carries it too (helpers.label_shows_size).
-        "size": {"type": "string"},
         "confidence": {"type": "number"},
     },
-    "required": ["label_text", "name", "brand", "category", "product_type", "size", "confidence"],
+    "required": ["label_text", "name", "brand", "category", "product_type", "confidence"],
     "additionalProperties": False,
 }
 
@@ -3872,11 +3859,10 @@ def _parse_ai_result(text: str) -> dict:
     result = json.loads(text)
     if not isinstance(result, dict):
         raise ValueError(f"AI returned {type(result).__name__}, not a JSON object")
-    for key in ("name", "brand", "product_type", "label_text", "size"):
+    for key in ("name", "brand", "product_type", "label_text"):
         value = result.get(key)
         result[key] = value.strip() if isinstance(value, str) else ""
     result["label_text"] = result["label_text"][:600]
-    result["size"] = result["size"][:40]
     category = str(result.get("category") or "").strip().lower()
     result["category"] = category if category in SCAN_CATEGORIES else "other"
     try:
@@ -4224,15 +4210,13 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
     # The fields the other way round, for a model that put the brand in `name`.
     swapped_key = product_match_key(brand, name) if brand else None
     # The key ignores sizes (it's how "Grey Goose Original 750ml" is reachable at
-    # all), so a size the scan DID read is checked at every step: a "1L" read
-    # must not land on the 750ml product and put a litre's count on it, and a
-    # product recorded at the size read beats one with no size on record
-    # (helpers.size_fits). `size` is the verified read (_evaluate_answer) — a
-    # size the model didn't write down from the label never gets here.
-    wanted_ml = size_ml(result.get("size")) or size_ml(name) or size_ml(brand)
+    # all), so a size the scan DID read is checked separately: a "1L" read must
+    # not land on the 750ml product and put a litre's count on it.
+    wanted_ml = size_ml(name) or size_ml(brand)
 
     def _size_ok(rows):
-        return size_fits(rows, wanted_ml)
+        return [r for r in rows
+                if sizes_compatible(wanted_ml, size_ml(r["size"]) or size_ml(r["name"]))]
 
     try:
         with get_db() as conn:
@@ -4242,7 +4226,6 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
             # of them fits: two means the bar keeps the same bottle as two products
             # (a 750ml and a 1L, say), and guessing between them would put one
             # size's count on the other; the global steps below decide as before.
-            # A size read off the label settles it (helpers.single_fit).
             # The location must be the caller's own, so a forged location_id can
             # only ever change the order of this user's own matches.
             if location_id:
@@ -4255,13 +4238,13 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
                       AND p.match_key IN (%s, %s)
                     LIMIT 10
                 """, (location_id, user_id, match_key, swapped_key or match_key))
-                row = single_fit(cursor.fetchall(), wanted_ml)
-                if row:
-                    return (row["id"], "bar_book")
+                rows = _size_ok(cursor.fetchall())
+                if len(rows) == 1:
+                    return (rows[0]["id"], "bar_book")
 
             # Step A — exact match on name + brand (case-insensitive)
             cursor.execute("""
-                SELECT id, size, name FROM products
+                SELECT id FROM products
                 WHERE LOWER(name) = LOWER(%s)
                   AND (
                     (brand IS NULL AND %s IS NULL)
@@ -4269,36 +4252,36 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
                   )
                   AND deleted_at IS NULL
                 ORDER BY verified DESC, scan_count DESC
-                LIMIT 10
+                LIMIT 1
             """, (name, brand, brand))
-            rows = _size_ok(cursor.fetchall())
-            if rows:
-                return (rows[0]["id"], "exact")
+            row = cursor.fetchone()
+            if row:
+                return (row["id"], "exact")
 
             # Step B — same, ignoring punctuation and spacing
             cursor.execute(f"""
-                SELECT id, size, name FROM products
+                SELECT id FROM products
                 WHERE {norm_col_name} = %s AND {norm_col_brand} = %s
                   AND deleted_at IS NULL
                 ORDER BY verified DESC, scan_count DESC
-                LIMIT 10
+                LIMIT 1
             """, (norm_name, norm_brand))
-            rows = _size_ok(cursor.fetchall())
-            if rows:
-                return (rows[0]["id"], "normalized")
+            row = cursor.fetchone()
+            if row:
+                return (row["id"], "normalized")
 
             # Step C — an alias a merge recorded, so a phrasing someone already
             # resolved by hand never splits back off into a new product.
             cursor.execute("""
-                SELECT p.id, p.size, p.name FROM product_aliases pa
+                SELECT pa.product_id FROM product_aliases pa
                 JOIN products p ON p.id = pa.product_id
                 WHERE pa.norm_name = %s AND pa.norm_brand = %s
                   AND p.deleted_at IS NULL
-                LIMIT 10
+                LIMIT 1
             """, (norm_name, norm_brand))
-            rows = _size_ok(cursor.fetchall())
-            if rows:
-                return (rows[0]["id"], "alias")
+            row = cursor.fetchone()
+            if row:
+                return (row["product_id"], "alias")
 
             # Step K — the match key: accents, a repeated brand and sizes ignored.
             # This is what finally reaches the seeded catalog ("Grey Goose
@@ -4317,15 +4300,15 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
             # Step D — the two fields swapped
             if norm_name and norm_brand:
                 cursor.execute(f"""
-                    SELECT id, size, name FROM products
+                    SELECT id FROM products
                     WHERE {norm_col_name} = %s AND {norm_col_brand} = %s
                       AND deleted_at IS NULL
                     ORDER BY verified DESC, scan_count DESC
-                    LIMIT 10
+                    LIMIT 1
                 """, (norm_brand, norm_name))
-                rows = _size_ok(cursor.fetchall())
-                if rows:
-                    return (rows[0]["id"], "swapped")
+                row = cursor.fetchone()
+                if row:
+                    return (row["id"], "swapped")
 
                 # ...and the swapped fields by match key.
                 cursor.execute("""
@@ -4345,18 +4328,18 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
             combined = f"{norm_brand}{norm_name}"
             if len(combined) >= 6:
                 cursor.execute(f"""
-                    SELECT id, size, name FROM products
+                    SELECT id FROM products
                     WHERE (
                             ({norm_col_brand} || {norm_col_name}) = %s
                          OR ({norm_col_name} || {norm_col_brand}) = %s
                           )
                       AND deleted_at IS NULL
                     ORDER BY verified DESC, scan_count DESC
-                    LIMIT 10
+                    LIMIT 1
                 """, (combined, combined))
-                rows = _size_ok(cursor.fetchall())
-                if rows:
-                    return (rows[0]["id"], "combined")
+                row = cursor.fetchone()
+                if row:
+                    return (row["id"], "combined")
 
                 # ...and run together by match key, which also reaches the seeded
                 # rows ("Jack Daniel's Old No. 7" / "" meets the stored
@@ -4392,31 +4375,21 @@ def _record_match(result: dict, user_id: str, product_id: Optional[str], method:
     this answer: a product created from one model's reading becomes every bar's
     match target, so a new catalog entry needs both models to agree.
 
-    A product's size is only ever set when the scanner creates it. An existing
-    product with no size on record keeps none: products are shared by every bar,
-    and one bar's read would decide the size another bar has been counting it at.
-
-    Returns (matched_product_id, is_new_product, match_method, size), where
-    `size` is the one to show and order by: the product's recorded size, else
-    the size read off this label (result["size"]), else "". Never raises — on
-    any DB error returns (None, False, "none", the size read).
+    Returns (matched_product_id, is_new_product, match_method). Never raises —
+    on any DB error returns (None, False, "none").
     """
     name = result.get("name", "").strip()
     brand = result.get("brand", "").strip() or None
     confidence = result.get("confidence", 0.0)
     product_type = result.get("product_type", "").strip() or None
-    size = normalize_size(result.get("size"))
     try:
         with get_db() as conn:
             cursor = conn.cursor()
             if product_id:
                 cursor.execute(
-                    "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s "
-                    "RETURNING size",
+                    "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
                     (now_iso(), product_id)
                 )
-                stored = cursor.fetchone()
-                stored_size = ((stored["size"] if stored else None) or "").strip()
                 if product_type:
                     cursor.execute(
                         "UPDATE products SET product_type = %s, updated_at = %s "
@@ -4424,7 +4397,7 @@ def _record_match(result: dict, user_id: str, product_id: Optional[str], method:
                         (product_type, now_iso(), product_id)
                     )
                 conn.commit()
-                return (product_id, False, method, stored_size or size)
+                return (product_id, False, method)
 
             # Auto-create if confidence is sufficient (and nothing contradicted it)
             if name and allow_create and confidence >= AUTO_CREATE_CONFIDENCE:
@@ -4435,25 +4408,24 @@ def _record_match(result: dict, user_id: str, product_id: Optional[str], method:
                     INSERT INTO products
                         (id, name, brand, category, size, upc, image_url, product_type,
                          scan_count, verified, source, created_by_user_id, match_key, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, NULL, NULL, %s, 1, 0, 'scan_auto', %s, %s, %s, %s)
-                """, (new_id, name, brand, category, size or None, product_type, user_id,
+                    VALUES (%s, %s, %s, %s, NULL, NULL, NULL, %s, 1, 0, 'scan_auto', %s, %s, %s, %s)
+                """, (new_id, name, brand, category, product_type, user_id,
                       product_match_key(name, brand), now, now))
                 conn.commit()
-                print(f"[match_product] auto-created product id={new_id} name={name!r} brand={brand!r} "
-                      f"size={size or '-'}", flush=True)
-                return (new_id, True, "auto_created", size)
+                print(f"[match_product] auto-created product id={new_id} name={name!r} brand={brand!r}", flush=True)
+                return (new_id, True, "auto_created")
 
-            return (None, False, "none", size)
+            return (None, False, "none")
     except Exception as e:
         print(f"[match_product] error (returning none): {e}", flush=True)
-        return (None, False, "none", size)
+        return (None, False, "none")
 
 
 def _match_or_create_product(result: dict, user_id: str, location_id: Optional[str] = None) -> tuple:
     """Look up, then count or create — the single-answer path in one call.
     Returns (matched_product_id, is_new_product, match_method)."""
     product_id, method = _find_product(result, user_id, location_id)
-    return _record_match(result, user_id, product_id, method, allow_create=True)[:3]
+    return _record_match(result, user_id, product_id, method, allow_create=True)
 
 
 @dataclass
@@ -4483,15 +4455,11 @@ class _Answer:
         return self.readable and self.method == "bar_book" and self.label_supported is True
 
     def label(self) -> str:
-        """How the app should show this reading: "Johnnie Walker Black Label",
-        "Tito's Handmade 1.75L" — with the size when one was read, since two
-        readings can differ by nothing else."""
+        """How the app should show this reading: "Johnnie Walker Black Label"."""
         name, brand = self.result.get("name", ""), self.result.get("brand", "")
         if name.lower() == "original":
             name = ""
-        text = " ".join(x for x in (brand, name) if x) or self.result.get("name", "")
-        size = self.result.get("size", "")
-        return f"{text} {size}" if text and size else text
+        return " ".join(x for x in (brand, name) if x) or self.result.get("name", "")
 
     def summary(self) -> dict:
         """What scan_events.second_answer keeps of the answer that wasn't used."""
@@ -4499,8 +4467,6 @@ class _Answer:
             "provider": self.provider, "model": self.model, "status": self.status,
             "name": self.result.get("name"), "brand": self.result.get("brand"),
             "confidence": self.result.get("confidence"),
-            "size": self.result.get("size") or None,
-            "size_read": self.result.get("size_read") or None,
             "label_text": self.result.get("label_text") or None,
             "label_supported": self.label_supported,
             "product_id": self.product_id, "method": self.method,
@@ -4525,12 +4491,6 @@ def _evaluate_answer(text: str, request: ScanAnalyzeRequest, user_id: str,
         return answer
     answer.result = result = _apply_stabilization(result, request.previous_readings)
     answer.label_supported = label_supports(result["name"], result["brand"], result["label_text"])
-    # A size counts only when the model wrote it down from the label as well
-    # (helpers.label_shows_size): a remembered size is how the wrong bottle gets
-    # matched and ordered. Kept as read in size_read, for the scan log.
-    result["size_read"] = result.get("size", "")
-    result["size"] = (normalize_size(result["size_read"])
-                      if label_shows_size(result["size_read"], result["label_text"]) else "")
     if result["confidence"] <= UNREADABLE_CONFIDENCE:
         answer.status = "unreadable"          # see UNREADABLE_CONFIDENCE
     elif answer.label_supported is False and LABEL_CHECK == "enforce":
@@ -4543,11 +4503,6 @@ def _evaluate_answer(text: str, request: ScanAnalyzeRequest, user_id: str,
 
 
 def _same_bottle(a: _Answer, b: _Answer) -> bool:
-    """Two sizes read off the label that differ are never the same bottle — even
-    on the same product, which a product with no size on record allows: the
-    size is what the order line carries."""
-    if not sizes_compatible(size_ml(a.result.get("size")), size_ml(b.result.get("size"))):
-        return False
     if a.product_id and a.product_id == b.product_id:
         return True
     return answers_agree(a.result["name"], a.result["brand"], b.result["name"], b.result["brand"])
@@ -4612,7 +4567,6 @@ def _respond(decision: dict, request: ScanAnalyzeRequest, user_id: str, event: d
         name=result.get("name"), brand=result.get("brand"), category=result.get("category"),
         product_type=result.get("product_type"), confidence=result.get("confidence"),
         label_text=result.get("label_text") or None, label_supported=chosen.label_supported,
-        size=result.get("size") or None, size_read=result.get("size_read") or None,
         second_opinion=decision["opinion"],
     )
     if other is not None:
@@ -4622,14 +4576,13 @@ def _respond(decision: dict, request: ScanAnalyzeRequest, user_id: str, event: d
         event.update(status="no_bottle", match_method="none")
         return JSONResponse(status_code=200, content=None)
     if chosen.readable:
-        matched_id, is_new, method, size = _record_match(
+        matched_id, is_new, method = _record_match(
             result, user_id, chosen.product_id, chosen.method, allow_create=decision["allow_create"])
     else:
         # Not matched, on purpose: see UNREADABLE_CONFIDENCE and LABEL_CHECK. No
         # product in the response is what makes the app ask for a retake. Both
         # reasons show the app "unreadable"; scan_events keeps them apart.
-        matched_id, is_new, method, size = None, False, "unreadable", ""
-    result["size"] = size
+        matched_id, is_new, method = None, False, "unreadable"
     result["needs_rescan"] = (
         not result.get("levelReadable", True)
         or result["confidence"] < CONFIDENCE_THRESHOLD
@@ -4817,10 +4770,9 @@ def _record_scan_event(event: dict) -> None:
                      match_method, matched_product_id, needs_rescan,
                      provider_ms, total_ms, input_tokens, cached_tokens, output_tokens,
                      image_kb, label_text, label_supported,
-                     path, second_opinion, second_provider, second_answer,
-                     size, size_read, created_at)
+                     path, second_opinion, second_provider, second_answer, created_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO NOTHING
             """, (
                 event["id"], event["user_id"], event.get("location_id"), event.get("status"),
@@ -4832,7 +4784,7 @@ def _record_scan_event(event: dict) -> None:
                 event.get("cached_tokens"), event.get("output_tokens"),
                 event.get("image_kb"), event.get("label_text"), event.get("label_supported"),
                 event.get("path"), event.get("second_opinion"), event.get("second_provider"),
-                event.get("second_answer"), event.get("size"), event.get("size_read"), now_iso(),
+                event.get("second_answer"), now_iso(),
             ))
             conn.commit()
     except Exception as e:
@@ -4841,7 +4793,7 @@ def _record_scan_event(event: dict) -> None:
 
 def _write_scan_log(event: dict) -> None:
     fields = ("status", "path", "provider", "model", "provider_ms", "total_ms", "input_tokens",
-              "cached_tokens", "output_tokens", "confidence", "match_method", "size",
+              "cached_tokens", "output_tokens", "confidence", "match_method",
               "label_supported", "second_opinion", "image_kb", "fallback_from", "id")
     print("[scan] SCAN " + " ".join(f"{k}={event.get(k) if event.get(k) is not None else '-'}"
                                     for k in fields), flush=True)
