@@ -285,11 +285,18 @@ def test_unreadable_label_is_never_matched(monkeypatch):
     assert event["status"] == "unreadable"
 
 
-def test_confident_read_is_matched(monkeypatch):
-    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user: ("prod-7", False, "exact"))
+def test_confident_read_is_matched_against_the_scanning_bar(monkeypatch):
+    seen = []
+
+    def matcher(result, user, location=None):
+        seen.append((user, location))
+        return ("prod-7", False, "bar_book")
+
+    monkeypatch.setattr(main, "_match_or_create_product", matcher)
     event = {"id": "scan-2"}
     response = main._process_ai_result(json.dumps(GOOD), _request(), "user-1", event)
-    assert (response.matched_product_id, response.match_method, response.needs_rescan) == ("prod-7", "exact", False)
+    assert (response.matched_product_id, response.match_method, response.needs_rescan) == ("prod-7", "bar_book", False)
+    assert seen == [("user-1", "loc-1")]
     assert event["matched_product_id"] == "prod-7" and event["status"] == "ok"
 
 
@@ -312,7 +319,7 @@ def test_unusable_openai_answer_falls_through_to_gemini(monkeypatch):
 
     monkeypatch.setattr(main, "_call_openai", openai_says_sorry)
     monkeypatch.setattr(main, "_call_gemini", gemini_answers)
-    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user: ("prod-7", False, "exact"))
+    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user, location=None: ("prod-7", False, "exact"))
     event = {"id": "scan-3"}
     response = asyncio.run(main._run_providers("sk", "g", main.BOTTLE_PROMPT, _request(), "user-1", event))
     assert response.matched_product_id == "prod-7"
@@ -355,7 +362,7 @@ def test_every_scan_is_logged_with_its_scan_id(monkeypatch):
     monkeypatch.setattr(main, "_scan_subscription_row",
                         lambda user: {"subscription_status": "active", "trial_ends_at": None})
     monkeypatch.setattr(main, "_run_providers", answers)
-    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user: ("prod-7", False, "exact"))
+    monkeypatch.setattr(main, "_match_or_create_product", lambda result, user, location=None: ("prod-7", False, "exact"))
     monkeypatch.setattr(main, "_record_scan_event", logged.append)
     monkeypatch.setenv("OPENAI_API_KEY", "sk")
 

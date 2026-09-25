@@ -237,12 +237,14 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_scan_path.py -q` (551 tests; test_timezones.py needs a dummy
-  `DATABASE_URL`)
+  test_lead_finding.py test_scan_path.py test_match_key.py -q` (592 tests; test_timezones.py
+  needs a dummy `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
   image last, temperature 0, strict schema, no SDK retries, one shared client, the plain-request
   fallback. Product matching and the scan log are stubbed; no network, no database
+- test_match_key.py — `helpers.product_match_key`, sizes, and the generated prompt product list;
+  pure (no database). The matcher's SQL was checked against a real Postgres, not in this suite
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -310,6 +312,37 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   model and prompt: `SELECT model, count(*) FILTER (WHERE final_product_id = matched_product_id)
   * 1.0 / count(*) FROM scan_events WHERE final_product_id IS NOT NULL GROUP BY model`. The request
   takes an optional `location_id` (older app builds don't send it). No image is stored
+- **Matching the answer to a product** (`_match_or_create_product`). Order: (0) `bar_book` — the
+  scanning bar's own products (`par_levels` of `location_id`, which must be the caller's own), by
+  match key, taken ONLY when exactly one fits: a bar's pars, prices and distributor hang off the
+  product id it has been counting, so landing on another bar's copy of the same bottle loses them;
+  two fits (a 750ml and a 1L kept as separate products) fall through rather than guess. Then
+  exact, normalized, alias, **match key** (`match_key`), swapped (also by key), combined (also by
+  flattened key; a bare brand with no brand field is that brand's "Original"), auto-create
+- **`products.match_key` = `helpers.product_match_key(name, brand)`**: accents folded, the brand
+  dropped from the front of the name (repeatedly — seeded beers carry it twice, "Coors Coors Light
+  12oz"), sizes and pack counts dropped; class words ("Bourbon", "Rye") and variant words kept, so
+  Bulleit Bourbon ≠ Bulleit Rye and Citron ≠ Mandrin. It exists because of three measured misses:
+  `normalize_match_text` DELETES accented letters ("Patrón" → `patrn`, never meeting "Patron");
+  a name repeating the brand never met the prompt-compliant one; and 442 of 457 seeded products are
+  stored "Grey Goose Original 750ml" while the model answers "Original" / "Grey Goose" — the seed
+  catalog was unreachable and every first scan of those bottles minted a duplicate. Stored, computed
+  in Python only (no SQL twin to drift), set at every insert (seed, `POST /products`, auto-create),
+  and re-derived for every row on each boot by `database.reconcile_product_match_keys()`
+  (`PRODUCT_MATCH_KEYS updated N` in the log; a normal boot writes nothing), so a change to the key
+  re-keys the catalog on the next deploy. `normalize_match_text`/`NORM_SQL` are unchanged on
+  purpose: the alias table and the expression index are built on them
+- **Sizes**: the key ignores them, so a size the scan DID read is checked separately
+  (`helpers.size_ml`/`sizes_compatible`, against `products.size` or a size in the stored name) — a
+  "1L" read never lands on the 750ml product. No size read = the key decides
+- **The prompt's product list is GENERATED from `seed_data.py`** (`_build_product_catalog`, lines of
+  `Brand: Name | Name`, in exactly the split the matcher looks up — `helpers.seed_display_name`),
+  plus `EXTRA_BRAND_SPELLINGS` (brands bars stock that the seed lacks; spelling only). It was a
+  hand-typed list that disagreed with the catalog on half its entries ("Johnnie Walker Red" vs the
+  product "Red Label", "Grey Goose" vs "Grey Goose Original") while telling the model to use its
+  exact spelling, plus junk ("Putaendo" twice). Add a product to `seed_data.py` and it's in the
+  prompt. test_match_key.py checks no two seeded products share a key and every seeded product is
+  reachable from its listed name
 - The route's database work (entitlement check, product matching) runs in worker threads: psycopg2
   blocks, and the route shares one event loop with every other request
 - `openai` is PINNED (`openai==3.19.2`, which runs on `httpx2`, not the app's `httpx`). It used to

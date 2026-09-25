@@ -1,4 +1,5 @@
 import re
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,6 +23,113 @@ def normalize_match_text(value: Optional[str]) -> str:
 # Postgres equivalent of normalize_match_text, for matching inside a query.
 # `{col}` is substituted with the column expression to normalize.
 NORM_SQL = "regexp_replace(lower(coalesce({col}, '')), '[^a-z0-9]+', '', 'g')"
+
+
+# ── The product match key (products.match_key) ─────────────────────────────
+# normalize_match_text above has three blind spots, each of which turned a
+# correct read into a second product:
+#
+# 1. It DELETES accented letters instead of folding them: "Patrón" -> "patrn",
+#    "Patron" -> "patron". The prompt's spelling list names 25 accented products
+#    (Patrón, every Añejo, Kahlúa, Jägermeister, Rémy Martin), the model writes
+#    the accent or doesn't, and the seed catalog is plain ASCII.
+# 2. A name that repeats the brand ("Jack Daniel's Old No. 7" / "Jack Daniel's")
+#    never meets the same bottle read the way the prompt asks ("Old No. 7").
+# 3. Sizes: 442 of the 457 seeded products are stored "Grey Goose Original 750ml"
+#    / "Grey Goose", while the model is told to answer "Original" / "Grey Goose" —
+#    so the seed catalog was unreachable from a scan, and the first scan of each
+#    of those bottles created a new unverified product instead.
+#
+# This key folds accents, drops the brand from the front of the name, and drops
+# sizes and pack counts. It deliberately does NOT drop class words ("Bourbon",
+# "Rye", "Gin"): Bulleit Bourbon and Bulleit Rye differ only by one, and so do
+# plenty of real products. The variant words are never loosened — "Citron" can
+# never meet "Mandrin". Computed in Python only and STORED (products.match_key,
+# kept current by database.reconcile_product_match_keys on every boot), so there
+# is no SQL twin to drift from. test_match_key.py checks that no two seeded
+# products share a key.
+
+_SIZE_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:ml|cl|l|lt|ltr|liters?|litres?|oz|fl\.?\s*oz)\b"
+    r"|\b\d+\s*-?\s*(?:pack|pk|ct|count)\b"
+)
+
+
+def fold_accents(value: Optional[str]) -> str:
+    """ "Patrón Añejo" -> "Patron Anejo". Letters that don't decompose (ø, ß)
+    are left as they are."""
+    return "".join(c for c in unicodedata.normalize("NFKD", value or "")
+                   if not unicodedata.combining(c))
+
+
+def _match_words(value: Optional[str]) -> list:
+    text = fold_accents(value).lower().replace("'", "").replace("’", "")
+    return re.findall(r"[a-z0-9]+", _SIZE_RE.sub(" ", text))
+
+
+def product_match_key(name: Optional[str], brand: Optional[str]) -> str:
+    """ "Grey Goose Original 750ml" / "Grey Goose" and "Original" / "Grey Goose"
+    both -> "greygoose|original". A name that is only the brand is the brand's
+    base product, which the prompt and the seed catalog both call "Original"."""
+    brand_flat = "".join(_match_words(brand))
+    words = _match_words(name)
+    # Drop the brand from the front of the name — repeatedly, since some seeded
+    # beers carry it twice ("Coors Coors Light 12oz" / "Coors") — on word
+    # boundaries but compared as run-together letters, so "J&B" meets "JB" and
+    # "Tito's" meets "Titos".
+    while brand_flat and words:
+        seen, cut = "", 0
+        for i, word in enumerate(words):
+            seen += word
+            if seen == brand_flat:
+                cut = i + 1
+                break
+            if not brand_flat.startswith(seen):
+                break
+        if not cut:
+            break
+        words = words[cut:]
+    return f"{brand_flat}|{''.join(words) or 'original'}"
+
+
+_SIZE_VALUE_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*(ml|cl|l|lt|ltr|liters?|litres?|fl\.?\s*oz|oz)\b")
+
+
+def size_ml(text: Optional[str]) -> Optional[float]:
+    """The first bottle size written in `text`, in millilitres: "750ml" -> 750,
+    "1.75L" -> 1750, "12oz" -> 354.9. None when there isn't one."""
+    match = _SIZE_VALUE_RE.search(fold_accents(text).lower())
+    if not match:
+        return None
+    value, unit = float(match.group(1)), match.group(2)
+    if unit == "ml":
+        return value
+    if unit == "cl":
+        return value * 10
+    if unit.startswith("l"):
+        return value * 1000
+    return value * 29.5735  # oz / fl oz
+
+
+def sizes_compatible(a: Optional[float], b: Optional[float]) -> bool:
+    """False only when BOTH sizes are known and differ — the key ignores sizes,
+    so this is what stops a scan that read "1L" landing on the 750ml product.
+    5% slack, so 12oz meets 355ml."""
+    if a is None or b is None:
+        return True
+    return abs(a - b) <= 0.05 * max(a, b)
+
+
+def seed_display_name(name: str, brand: Optional[str]) -> str:
+    """A seeded product's name the way the model is asked to write it — no
+    brand in front, no size at the end: "Johnnie Walker Red Label 750ml" /
+    "Johnnie Walker" -> "Red Label". Used to build the prompt's product list."""
+    text = re.sub(r"\s*\b\d+(?:\.\d+)?\s*(?:ml|cl|l|oz)\s*$", "", name.strip(), flags=re.IGNORECASE)
+    while brand and text.lower().startswith(brand.lower() + " "):
+        text = text[len(brand) + 1:].strip()
+    if brand and text.lower() == brand.lower():
+        text = "Original"
+    return text.strip() or "Original"
 
 # ── Level classification ─────────────────────────────────────────────────────
 # Boundaries (threshold, bucket_above, bucket_below) ordered highest-first.

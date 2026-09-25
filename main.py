@@ -19,7 +19,8 @@ from auth import (
 from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
     classify_level, smooth_level, calculate_variance, generate_order_items,
-    normalize_match_text, NORM_SQL
+    normalize_match_text, NORM_SQL, product_match_key, seed_display_name,
+    size_ml, sizes_compatible,
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -737,8 +738,9 @@ def create_product(product_data: ProductCreate, user_id: str = Depends(get_curre
         now = now_iso()
         
         cursor.execute("""
-            INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified,
+                                  match_key, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             product_id,
             product_data.name,
@@ -749,6 +751,7 @@ def create_product(product_data: ProductCreate, user_id: str = Depends(get_curre
             None,  # image_url
             0,  # scan_count
             0,  # verified
+            product_match_key(product_data.name, product_data.brand),
             now,
             now
         ))
@@ -3633,37 +3636,55 @@ class ScanAnalyzeResponse(BaseModel):
     # that pair is how "the AI said X, the count kept Y" gets measured.
     scan_id: Optional[str] = None
 
-PRODUCT_CATALOG = """KNOWN PRODUCTS — spelling normalization ONLY. If the product you READ OFF THE LABEL appears below, use this exact spelling. NEVER use this list to substitute a different variant than the one printed on the label; products not listed are fine as transcribed.
+# Brands bars commonly stock that the seed catalog doesn't carry. Listed for
+# SPELLING only: no product rows back them, so there are no names to teach.
+EXTRA_BRAND_SPELLINGS = [
+    "Iceberg", "Żubrówka", "UV", "Weller", "W.L. Weller", "Bardstown Bourbon Company",
+    "Henry McKenna", "Writers' Tears", "Kilbeggan", "J&B", "Clan MacGregor", "Grant's",
+    "Auchentoshan", "Springbank", "Bunnahabhain", "Redemption", "Lot 40", "Roku",
+    "Clase Azul", "Lunazul", "Hayman's", "Zaya", "Christian Brothers", "Torres", "Cynar",
+    "Montenegro", "Mancino", "Shock Top",
+]
 
-Vodka: Tito's Handmade, Grey Goose, Absolut, Ketel One, Belvedere, Stolichnaya, Svedka, New Amsterdam, Skyy, Pinnacle, Cîroc, Deep Eddy, Wheatley, Three Olives, Smirnoff, Burnett's, Luksusowa, Reyka, Iceberg, Prairie Organic, Finlandia, Russian Standard, Żubrówka, UV Blue, Seagram's Extra Smooth
-Bourbon: Buffalo Trace, Maker's Mark, Woodford Reserve, Knob Creek, Four Roses Small Batch, Bulleit Bourbon, Wild Turkey 101, Eagle Rare 10, Blanton's Original, Weller Special Reserve, Elijah Craig Small Batch, Heaven Hill, Jim Beam White, Old Forester 86, Larceny Small Batch, Basil Hayden's, Angel's Envy, Russell's Reserve 10, Evan Williams Black, Very Old Barton, 1792 Small Batch, Bardstown Bourbon Discovery, Henry McKenna, W.L. Weller 12, Pappy Van Winkle 15
-Tennessee Whiskey: Jack Daniel's Old No. 7, Jack Daniel's Gentleman Jack, Jack Daniel's Single Barrel Select, Jack Daniel's Tennessee Honey, George Dickel No. 12, George Dickel Rye
-Irish Whiskey: Jameson, Jameson Black Barrel, Bushmills Original, Tullamore D.E.W., Redbreast 12, Powers Gold Label, The Irishman Founder's Reserve, Connemara Peated, Writers' Tears Copper Pot, Slane Irish Whiskey, Proper No. Twelve, Kilbeggan Traditional
-Scotch Blended: Johnnie Walker Red, Johnnie Walker Black, Johnnie Walker Double Black, Johnnie Walker Gold Reserve, Dewar's White Label, Dewar's 12, Chivas Regal 12, Famous Grouse, Monkey Shoulder, Cutty Sark, J&B Rare, Clan MacGregor, Scoresby, Bell's Original, Grant's Family Reserve
-Scotch Single Malt: Glenfiddich 12, Glenfiddich 15, Macallan 12 Sherry Oak, Macallan 12 Double Cask, Glenlivet 12, Glenlivet 15, Oban 14, Laphroaig 10, Balvenie 12 DoubleWood, Highland Park 12, Dalmore 12, Auchentoshan Three Wood, Bruichladdich The Classic Laddie, Talisker 10, Springbank 10, Ardbeg 10, Bunnahabhain 12
-Rye Whiskey: Bulleit Rye, WhistlePig 10, Sazerac Rye, High West Rendezvous Rye, Redemption Rye, Rittenhouse Rye 100, George Dickel Rye, Templeton Rye, Knob Creek Rye, Old Overholt Rye, Pikesville Rye, Lot 40 Rye
-Canadian Whisky: Crown Royal Deluxe, Crown Royal Apple, Crown Royal Peach, Crown Royal Black, Canadian Club, Pendleton Original, Forty Creek Barrel Select, Seagram's VO
-Japanese Whisky: Suntory Toki, Nikka Coffey Grain, Hibiki Japanese Harmony, Yamazaki 12, Hakushu 12, Roku Gin (Japanese gin)
-Tequila Blanco: Patrón Silver, Don Julio Blanco, Casamigos Blanco, Herradura Silver, Espolòn Blanco, Olmeca Altos Plata, El Jimador Silver, Jose Cuervo Silver, 1800 Silver, Milagro Silver, Clase Azul Plata, Hornitos Plata, Lunazul Blanco, Cazadores Blanco, Teremana Blanco
-Tequila Reposado: Patrón Reposado, Don Julio Reposado, Casamigos Reposado, Herradura Reposado, Olmeca Altos Reposado, Espolòn Reposado, 1800 Reposado, Cazadores Reposado
-Tequila Añejo: Don Julio Añejo, Patrón Añejo, Casamigos Añejo, 1800 Añejo, Herradura Añejo, Gran Centenario Añejo
-Mezcal: Del Maguey Vida, Ilegal Joven, Montelobos, Banhez Ensemble,Putaendo, Wahaka Madre Cuishe,Putaendo, Alipús San Andres
-Gin: Tanqueray London Dry, Tanqueray No. Ten, Hendrick's, Bombay Sapphire, Beefeater London Dry, Sipsmith London Dry, Aviation American Gin, The Botanist, Monkey 47, Plymouth Gin, New Amsterdam Gin, Malfy Con Limone, Empress 1908, Fords Gin, Nolet's Silver, Hayman's Old Tom, Drumshanbo Gunpowder Irish Gin
-Rum White/Silver: Bacardi Superior, Bacardi Gold, Plantation 3 Stars, Mount Gay Eclipse, Cruzan Light, Flor de Caña Extra Dry 4, Don Q Cristal, Brugal Extra Dry
-Rum Dark/Spiced: Captain Morgan Original Spiced, Kraken Black Spiced, Sailor Jerry Spiced, Myers's Original Dark, Gosling's Black Seal, Diplomatico Reserva Exclusiva, Appleton Estate Signature, El Dorado 12, Zaya Gran Reserva, Angostura 1919, Pusser's Blue Label, Plantation Original Dark, Ron Zacapa 23
-Brandy/Cognac: Hennessy VS, Hennessy VSOP, Rémy Martin VSOP, Rémy Martin 1738, Courvoisier VS, Martell VS, E&J VSOP, Paul Masson Grande Amber VSOP, Korbel California Brandy, Christian Brothers VS, Torres 10 Imperial Brandy
-Liqueurs/Triple Sec: Cointreau, Grand Marnier Cordon Rouge, DeKuyper Triple Sec, Patron Citrónge, Blue Curaçao, Luxardo Maraschino
-Amaretto/Nut: Disaronno Originale, Amaretto di Saronno, Frangelico Hazelnut, Nocello Walnut, Kahlúa Original, Kahlúa Especial, Tia Maria Coffee
-Cream/Sweet: Baileys Original Irish Cream, RumChata, Carolans Irish Cream, St. Brendan's Irish Cream, Mozart Dark Chocolate
-Herbal/Bitter: Jägermeister, Campari, Aperol, Fernet-Branca, Cynar, Aperol, Amaro Averna, Montenegro Amaro, Bénédictine, Chartreuse Green, Chartreuse Yellow, Lillet Blanc, Lillet Rosé
-Fruit/Berry: Chambord Black Raspberry, Midori Melon, Peach Schnapps DeKuyper, St-Germain Elderflower, Crème de Cassis, Limoncello Pallini, Aperol, Pama Pomegranate
-Peppermint/Cinnamon: Fireball Cinnamon Whisky, Rumple Minze Peppermint, DeKuyper Peppermint Schnapps, Templeton Rye Cinnamon
-Coconut/Tropical: Malibu Coconut Rum, DKNY Coconut, Malibu Mango, Blue Chair Bay Coconut
-Vermouth/Fortified: Martini & Rossi Sweet Vermouth, Martini & Rossi Dry Vermouth, Noilly Prat Dry, Dolin Dry, Carpano Antica Formula, Mancino Secco
-Beer (common): Bud Light, Budweiser, Coors Light, Miller Lite, Miller High Life, Corona Extra, Modelo Especial, Dos Equis Lager, Heineken, Stella Artois, Blue Moon Belgian White, Shock Top, Sam Adams Boston Lager, Guinness Draught, Sierra Nevada Pale Ale, Lagunitas IPA, Bell's Two Hearted
-Wine (common): Kim Crawford Sauvignon Blanc, Kendall-Jackson Vintner's Reserve Chardonnay, Josh Cellars Cabernet Sauvignon, La Marca Prosecco, Meiomi Pinot Noir, Whispering Angel Rosé, Barefoot Pinot Grigio, Bogle Essential Red, Chateau Ste. Michelle Riesling
-Soda (common): Sprite Original, Coca-Cola Classic, Coca-Cola Diet Coke, Pepsi Original, Fanta Orange, Canada Dry Ginger Ale
-Mixers/Juice (common): Schweppes Tonic Water, Fever-Tree Tonic Water, Schweppes Club Soda, Red Bull Energy Drink, Ocean Spray Cranberry Juice, Tropicana Orange Juice, Dole Pineapple Juice, Rose's Lime Juice, Rose's Grenadine"""
+
+def _build_product_catalog() -> str:
+    """The prompt's product list, GENERATED from the seed catalog in the exact
+    brand / name split the matcher looks up (helpers.seed_display_name).
+
+    It used to be a hand-typed list that disagreed with the catalog on half its
+    entries — "Johnnie Walker Red" where the product is "Red Label", "Grey Goose"
+    where it is "Grey Goose Original" — while telling the model to "use this exact
+    spelling", so following the list was exactly how a correct read missed the
+    catalog and minted a new product. It also carried junk ("Putaendo" twice in
+    the mezcal line) and duplicates. Generated, it can't drift: add a product to
+    seed_data.py and it's in the prompt."""
+    grouped: dict = {}
+    for p in SEED_PRODUCTS:
+        names = grouped.setdefault(p["category"], {}).setdefault(p["brand"], [])
+        name = seed_display_name(p["name"], p["brand"])
+        if name not in names:
+            names.append(name)
+    lines = [
+        "KNOWN PRODUCTS — spelling ONLY. Each line is a brand, a colon, then that brand's "
+        "product names separated by \" | \", written exactly as the `brand` and `name` fields "
+        "should read: the brand is never repeated in the name, and there is no bottle size. "
+        "If the product you READ OFF THE LABEL is listed, use that exact brand and name. "
+        "NEVER use this list to pick a different variant than the one printed on the label; "
+        "products not listed are fine as transcribed.",
+    ]
+    for category in ("spirits", "beer", "wine", "soda", "mixer", "water", "juice", "other"):
+        if category in grouped:
+            lines.append("")
+            lines.append(category.upper())
+            lines.extend(f"{brand}: {' | '.join(names)}" for brand, names in grouped[category].items())
+    lines.append("")
+    seeded = {product_match_key(None, p["brand"]) for p in SEED_PRODUCTS}
+    extras = [b for b in EXTRA_BRAND_SPELLINGS if product_match_key(None, b) not in seeded]
+    lines.append("Other brands (spelling only): " + ", ".join(extras))
+    return "\n".join(lines)
+
+
+PRODUCT_CATALOG = _build_product_catalog()
 
 BOTTLE_PROMPT = """You are identifying a beverage container (liquor, beer, wine, soda, mixers, water — glass, plastic, or can) from a photo for bar inventory.
 
@@ -4101,17 +4122,23 @@ async def _warm_providers() -> dict:
     return warmed
 
 
-def _match_or_create_product(result: dict, user_id: str) -> tuple:
+def _match_or_create_product(result: dict, user_id: str, location_id: Optional[str] = None) -> tuple:
     """Match AI result against products table; auto-create if confidence high enough.
 
-    Matching widens in stages, cheapest and most certain first: exact strings, then
-    punctuation-insensitive, then an explicit alias recorded by a merge, then the
-    name/brand fields swapped, then the two fields concatenated. Every stage after
-    the first exists because the AI re-reads the label on each scan and can phrase
-    the same bottle differently — "Gatorade"/"Blue Bolt" one time, "Blue Bolt"/
-    "Gatorade" or a single "Gatorade Blue Bolt" the next. Without them each variant
-    becomes its own product, which splits counts (and so over-orders), splits the
-    price book, and drops the distributor assignment.
+    First, when the scan says which bar it's for, THAT BAR'S OWN BOTTLES
+    ("bar_book"): a bar's pars, prices and distributors hang off the product id it
+    has been counting, so landing on some other bar's copy of the same bottle —
+    even the "right" one — loses them. Then matching widens in stages, cheapest and
+    most certain first: exact strings, then punctuation-insensitive, then an
+    explicit alias recorded by a merge, then the match key (accents folded, brand
+    repeated in the name dropped, sizes dropped — helpers.product_match_key), then
+    the name/brand fields swapped, then the two fields concatenated. Every stage
+    after the first exists because the AI re-reads the label on each scan and can
+    phrase the same bottle differently — "Gatorade"/"Blue Bolt" one time, "Blue
+    Bolt"/"Gatorade" or a single "Gatorade Blue Bolt" the next, "Patrón" or
+    "Patron". Without them each variant becomes its own product, which splits
+    counts (and so over-orders), splits the price book, and drops the distributor
+    assignment.
 
     Returns (matched_product_id, is_new_product, match_method).
     Never raises — on any DB error returns (None, False, "none").
@@ -4128,6 +4155,17 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
     norm_brand = normalize_match_text(brand)
     norm_col_name = NORM_SQL.format(col="name")
     norm_col_brand = NORM_SQL.format(col="brand")
+    match_key = product_match_key(name, brand)
+    # The fields the other way round, for a model that put the brand in `name`.
+    swapped_key = product_match_key(brand, name) if brand else None
+    # The key ignores sizes (it's how "Grey Goose Original 750ml" is reachable at
+    # all), so a size the scan DID read is checked separately: a "1L" read must
+    # not land on the 750ml product and put a litre's count on it.
+    wanted_ml = size_ml(name) or size_ml(brand)
+
+    def _size_ok(rows):
+        return [r for r in rows
+                if sizes_compatible(wanted_ml, size_ml(r["size"]) or size_ml(r["name"]))]
 
     try:
         with get_db() as conn:
@@ -4146,6 +4184,26 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
                     )
                 conn.commit()
                 return (product_id, False, method)
+
+            # Step 0 — this bar's own bottles, by match key. Only when exactly one
+            # of them fits: two means the bar keeps the same bottle as two products
+            # (a 750ml and a 1L, say), and guessing between them would put one
+            # size's count on the other; the global steps below decide as before.
+            # The location must be the caller's own, so a forged location_id can
+            # only ever change the order of this user's own matches.
+            if location_id:
+                cursor.execute("""
+                    SELECT DISTINCT p.id, p.size, p.name FROM products p
+                    JOIN par_levels pl ON pl.product_id = p.id
+                    JOIN locations l ON l.id = pl.location_id
+                    WHERE pl.location_id = %s AND l.user_id = %s
+                      AND p.deleted_at IS NULL
+                      AND p.match_key IN (%s, %s)
+                    LIMIT 10
+                """, (location_id, user_id, match_key, swapped_key or match_key))
+                rows = _size_ok(cursor.fetchall())
+                if len(rows) == 1:
+                    return _claim(rows[0]["id"], "bar_book")
 
             # Step A — exact match on name + brand (case-insensitive)
             cursor.execute("""
@@ -4188,6 +4246,20 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
             if row:
                 return _claim(row["product_id"], "alias")
 
+            # Step K — the match key: accents, a repeated brand and sizes ignored.
+            # This is what finally reaches the seeded catalog ("Grey Goose
+            # Original 750ml" / "Grey Goose" for a scan of "Original" / "Grey
+            # Goose") and joins "Patrón" to "Patron".
+            cursor.execute("""
+                SELECT id, size, name FROM products
+                WHERE match_key = %s AND deleted_at IS NULL
+                ORDER BY verified DESC, scan_count DESC
+                LIMIT 10
+            """, (match_key,))
+            rows = _size_ok(cursor.fetchall())
+            if rows:
+                return _claim(rows[0]["id"], "match_key")
+
             # Step D — the two fields swapped
             if norm_name and norm_brand:
                 cursor.execute(f"""
@@ -4200,6 +4272,17 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
                 row = cursor.fetchone()
                 if row:
                     return _claim(row["id"], "swapped")
+
+                # ...and the swapped fields by match key.
+                cursor.execute("""
+                    SELECT id, size, name FROM products
+                    WHERE match_key = %s AND deleted_at IS NULL
+                    ORDER BY verified DESC, scan_count DESC
+                    LIMIT 10
+                """, (swapped_key,))
+                rows = _size_ok(cursor.fetchall())
+                if rows:
+                    return _claim(rows[0]["id"], "swapped")
 
             # Step E — brand and name run together, catching the case where the AI
             # returns the whole label as one field ("Gatorade Blue Bolt" / "").
@@ -4221,6 +4304,23 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
                 if row:
                     return _claim(row["id"], "combined")
 
+                # ...and run together by match key, which also reaches the seeded
+                # rows ("Jack Daniel's Old No. 7" / "" meets the stored
+                # "Jack Daniel's Old No. 7 750ml" / "Jack Daniel's"). With no
+                # brand given, a bare brand ("Grey Goose" / "") is that brand's
+                # base product, which the catalog calls "Original".
+                flat_key = match_key.replace("|", "")
+                flat_keys = [flat_key] if brand else [flat_key, flat_key + "original"]
+                cursor.execute("""
+                    SELECT id, size, name FROM products
+                    WHERE replace(match_key, '|', '') = ANY(%s) AND deleted_at IS NULL
+                    ORDER BY verified DESC, scan_count DESC
+                    LIMIT 10
+                """, (flat_keys,))
+                rows = _size_ok(cursor.fetchall())
+                if rows:
+                    return _claim(rows[0]["id"], "combined")
+
             # Step F — auto-create if confidence is sufficient
             if confidence >= AUTO_CREATE_CONFIDENCE:
                 category = result.get("category", "other") or "other"
@@ -4229,9 +4329,9 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
                 cursor.execute("""
                     INSERT INTO products
                         (id, name, brand, category, size, upc, image_url, product_type,
-                         scan_count, verified, source, created_by_user_id, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, NULL, NULL, NULL, %s, 1, 0, 'scan_auto', %s, %s, %s)
-                """, (new_id, name, brand, category, product_type, user_id, now, now))
+                         scan_count, verified, source, created_by_user_id, match_key, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, NULL, NULL, NULL, %s, 1, 0, 'scan_auto', %s, %s, %s, %s)
+                """, (new_id, name, brand, category, product_type, user_id, match_key, now, now))
                 conn.commit()
                 print(f"[match_product] auto-created product id={new_id} name={name!r} brand={brand!r}", flush=True)
                 return (new_id, True, "auto_created")
@@ -4271,7 +4371,7 @@ def _process_ai_result(text: str, request: ScanAnalyzeRequest, user_id: str,
         # response is what makes the app ask for a retake.
         matched_id, is_new, method = None, False, "unreadable"
     else:
-        matched_id, is_new, method = _match_or_create_product(result, user_id)
+        matched_id, is_new, method = _match_or_create_product(result, user_id, request.location_id)
     result["matched_product_id"] = matched_id
     result["is_new_product"] = is_new
     result["match_method"] = method

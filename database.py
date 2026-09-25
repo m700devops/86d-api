@@ -7,7 +7,7 @@ import threading
 from contextlib import contextmanager
 from typing import Optional
 from seed_data import SEED_PRODUCTS
-from helpers import generate_id, now_iso
+from helpers import generate_id, now_iso, product_match_key
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -557,6 +557,9 @@ def init_db():
             ("created_by_user_id", "TEXT"),
             ("deleted_at", "TEXT"),
             ("product_type", "TEXT"),
+            # helpers.product_match_key(name, brand) — see there. Filled for
+            # every row by reconcile_product_match_keys() below.
+            ("match_key", "TEXT"),
         ]
         for col, col_def in products_migrations:
             cursor.execute("""
@@ -566,6 +569,12 @@ def init_db():
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE products ADD COLUMN {col} {col_def}")
                 print(f"[db] migrated products: added {col} {col_def}", flush=True)
+        conn.commit()
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_products_match_key
+            ON products(match_key) WHERE deleted_at IS NULL
+        """)
         conn.commit()
 
         # Backfill source: seed rows (verified=1) → 'seed', others keep 'manual'
@@ -697,6 +706,32 @@ def init_db():
 
         # Seed products — always runs but is idempotent (checks name+brand before insert)
         seed_products(conn)
+        reconcile_product_match_keys(conn)
+
+
+def reconcile_product_match_keys(conn) -> int:
+    """Make every product's stored match_key equal what product_match_key()
+    computes today. Runs every boot, like the CRM's _reconcile_* passes, rather
+    than once: the first run backfills the column, and any later change to the
+    key rule re-keys the catalog on the next deploy instead of leaving old rows
+    unmatchable. Only rows whose key differs are written, so a normal boot
+    writes nothing. Returns the number of rows updated."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, brand, match_key FROM products")
+    stale = []
+    for row in cursor.fetchall():
+        key = product_match_key(row["name"], row["brand"])
+        if row["match_key"] != key:
+            stale.append((row["id"], key))
+    if stale:
+        cursor.execute("""
+            UPDATE products AS p SET match_key = v.key
+            FROM unnest(%s::text[], %s::text[]) AS v(id, key)
+            WHERE p.id = v.id
+        """, ([s[0] for s in stale], [s[1] for s in stale]))
+        conn.commit()
+        print(f"[db] PRODUCT_MATCH_KEYS updated {len(stale)} product(s)", flush=True)
+    return len(stale)
 
 
 def seed_products(conn):
@@ -728,11 +763,13 @@ def seed_products(conn):
                 continue
 
         cursor.execute("""
-            INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, source, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, source,
+                                  match_key, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             generate_id(), name, brand, product["category"],
-            product.get("size"), upc, None, 0, 1, 'seed', now, now
+            product.get("size"), upc, None, 0, 1, 'seed',
+            product_match_key(name, brand), now, now
         ))
         inserted += 1
 
