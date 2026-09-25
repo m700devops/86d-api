@@ -1709,15 +1709,73 @@ def geocode_city(name: str, state: Optional[str] = None) -> Optional[tuple[float
         return None
 
 
+_US_STATES = {
+    "alabama": "al", "alaska": "ak", "arizona": "az", "arkansas": "ar", "california": "ca",
+    "colorado": "co", "connecticut": "ct", "delaware": "de", "florida": "fl", "georgia": "ga",
+    "hawaii": "hi", "idaho": "id", "illinois": "il", "indiana": "in", "iowa": "ia",
+    "kansas": "ks", "kentucky": "ky", "louisiana": "la", "maine": "me", "maryland": "md",
+    "massachusetts": "ma", "michigan": "mi", "minnesota": "mn", "mississippi": "ms",
+    "missouri": "mo", "montana": "mt", "nebraska": "ne", "nevada": "nv",
+    "new hampshire": "nh", "new jersey": "nj", "new mexico": "nm", "new york": "ny",
+    "north carolina": "nc", "north dakota": "nd", "ohio": "oh", "oklahoma": "ok",
+    "oregon": "or", "pennsylvania": "pa", "rhode island": "ri", "south carolina": "sc",
+    "south dakota": "sd", "tennessee": "tn", "texas": "tx", "utah": "ut", "vermont": "vt",
+    "virginia": "va", "washington": "wa", "west virginia": "wv", "wisconsin": "wi",
+    "wyoming": "wy", "district of columbia": "dc",
+}
+_PLACE_KEYS = ("city", "town", "village", "hamlet", "municipality", "suburb", "city_district")
+
+
+def _place(s: str) -> str:
+    s = re.sub(r"[^a-z ]", "", (s or "").lower().replace("saint ", "st ").replace("st. ", "st "))
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _loc_parts(loc: Optional[str]) -> tuple:
+    """"Minneapolis, MN" -> ("minneapolis", "mn"); either may be ''."""
+    parts = [p.strip() for p in (loc or "").split(",") if p.strip()]
+    city = _place(parts[0]) if parts else ""
+    state = ""
+    if len(parts) > 1:
+        raw = re.sub(r"[^a-z ]", "", parts[1].lower()).strip()
+        raw = re.sub(r"\s+\d.*$", "", raw)
+        state = raw if len(raw) == 2 else _US_STATES.get(raw, "")
+    return city, state
+
+
+def map_result_is_venue(result: dict, name: str, loc: Optional[str]) -> bool:
+    """Whether a Nominatim hit IS the bar the operator named, in their town.
+
+    Nominatim's free-text search returns its best guesses, not a match: the
+    quick-add lookup took the first hit that had a website, and NE Moose Bar &
+    Grill in Minneapolis was given African Grill's site in Lakewood, and the
+    email off it. Same venue name (same_venue: its distinctive words) AND the
+    same city — and state, when both say — or it isn't them."""
+    if not same_venue(result.get("name") or "", name):
+        return False
+    city, state = _loc_parts(loc)
+    if not city:
+        return False
+    address = result.get("address") or {}
+    iso = str(address.get("ISO3166-2-lvl4") or "").lower()
+    if state and iso.startswith("us-") and iso[3:] != state:
+        return False
+    return any(_place(address.get(k) or "") == city for k in _PLACE_KEYS)
+
+
 def find_venue_website(name: str, loc: Optional[str] = None) -> Optional[str]:
-    """A venue's own website from OpenStreetMap, looked up by name (+ town).
+    """A venue's own website from OpenStreetMap, looked up by name + town.
 
     For a bar the operator found themselves: the notes say "their email is on
-    the website" without the URL, and OSM usually has the `website` tag.
-    """
+    the website" without the URL, and OSM usually has the `website` tag. Only
+    a hit that is the same venue in the same town counts (map_result_is_venue);
+    with no town there is no lookup — a same-named bar anywhere in the country
+    is exactly the wrong answer this used to give."""
+    if not _loc_parts(loc)[0]:
+        return None
     query = ", ".join(x for x in [name, loc] if x)
     url = (f"{NOMINATIM}?q={urllib.parse.quote(query)}"
-           "&format=json&limit=3&countrycodes=us&extratags=1")
+           "&format=json&limit=5&countrycodes=us&extratags=1&addressdetails=1")
     body, status = _http(url, timeout=15)
     if status != 200:
         return None
@@ -1725,12 +1783,31 @@ def find_venue_website(name: str, loc: Optional[str] = None) -> Optional[str]:
         results = json.loads(body)
     except json.JSONDecodeError:
         return None
-    for r in results:
+    for r in results if isinstance(results, list) else []:
+        if not map_result_is_venue(r, name, loc):
+            continue
         tags = r.get("extratags") or {}
         site = (tags.get("website") or tags.get("contact:website") or "").strip()
         if site:
             return site if site.lower().startswith("http") else "http://" + site
     return None
+
+
+def site_names_venue(html: str, name: str) -> bool:
+    """Whether a page is about this venue: every distinctive word of its name
+    (3+ letters, generic ones like bar/grill/tavern dropped) appears on it.
+    African Grill's homepage never says "Moose"."""
+    words = {w for w in _name_words(name) if w not in _GENERIC_NAME_WORDS and len(w) > 2}
+    if not words:
+        return True
+    seen = set(_name_words(visible_text(html or "")[:400000]))
+    return words <= seen
+
+
+def site_is_venue(website: str, name: str) -> bool:
+    """Fetch a website's homepage and check it names the venue."""
+    home, status = _http(website, timeout=PAGE_TIMEOUT, verify_public=True)
+    return bool(_ok(status, home)) and site_names_venue(home, name)
 
 
 def find_email_on_site(website: str, max_pages: int = 4) -> tuple[Optional[str], Optional[str]]:
@@ -2511,6 +2588,88 @@ def fit_check_step() -> int:
         print(f"[leadgen] LEADGEN_FIT_CHECK_FAILED {exc}", flush=True)
         return 0
     return out.get("leads_checked", 0) + out.get("bank_checked", 0)
+
+
+# ── ONE-TIME: emails a bad website lookup put on the operator's own leads ──
+
+_LOOKUP_MARKER = "lookup_site_check_2026_09"
+_NOTE_WEBSITE = re.compile(r"Website: (https?://[^\s·|]{3,300})")
+_NOTE_FOUND_ON = re.compile(r"Email found on: (https?://[^\s·|]{3,300})")
+
+
+def lookup_suspects(rows: list) -> list:
+    """Leads whose email came from a website the quick-add LOOKUP chose, not
+    one the operator typed — the only ones the bad lookup could have touched.
+    Pure: (lead, website, page the email was read on) for each."""
+    out = []
+    for row in rows:
+        notes = row.get("notes") or ""
+        site, found = _NOTE_WEBSITE.search(notes), _NOTE_FOUND_ON.search(notes)
+        if not (site and found and row.get("email")):
+            continue
+        domain = domain_of(site.group(1))
+        # Typed by the operator (their verbatim words carry it) -> theirs, trusted.
+        said = " ".join(re.findall(r"Your notes: ([^\n]{0,4000})", notes)).lower()
+        if domain and domain in said:
+            continue
+        out.append((row, site.group(1), found.group(1)))
+    return out
+
+
+def recheck_looked_up_sites() -> int:
+    """Once: re-check every lead whose email came from a looked-up website,
+    and take the email off where the site doesn't name the bar — NE Moose Bar
+    & Grill got African Grill's. The lead, the call and the notes stay; one
+    dated line says what was removed and why, and a pending scheduled email to
+    that address is stopped. Returns how many were cleared."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM crm_leadgen_oneshots WHERE name = %s", (_LOOKUP_MARKER,))
+        if cursor.fetchone():
+            return 0
+        cursor.execute("""
+            SELECT id, name, email, notes FROM crm_leads
+             WHERE source IS DISTINCT FROM 'leadgen' AND email IS NOT NULL
+               AND notes LIKE '%%Email found on:%%'
+        """)
+        suspects = lookup_suspects([dict(r) for r in cursor.fetchall()])
+
+    wrong = []
+    for row, site, found_on in suspects:
+        home, status = _http(site, timeout=PAGE_TIMEOUT, verify_public=True)
+        if not _ok(status, home):
+            continue                     # can't tell — leave it alone
+        if not site_names_venue(home, row["name"]):
+            wrong.append((row, site))
+
+    now = now_iso()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO crm_leadgen_oneshots (name, applied_at, detail) "
+                       "VALUES (%s, %s, %s) ON CONFLICT (name) DO NOTHING RETURNING name",
+                       (_LOOKUP_MARKER, now, json.dumps({"checked": len(suspects),
+                                                          "cleared": len(wrong)})))
+        if not cursor.fetchone():
+            return 0
+        for row, site in wrong:
+            cursor.execute("""
+                UPDATE crm_leads
+                   SET email = NULL, email_kind = NULL, updated_at = %s,
+                       notes = COALESCE(notes || E'\\n', '') || %s
+                 WHERE id = %s AND email = %s
+            """, (now, f"[{now[:10]}] Removed {row['email']} — the automatic website lookup "
+                       f"had picked a different venue ({site}); that site never mentions "
+                       f"{row['name']}.", row["id"], row["email"]))
+            cursor.execute("""
+                UPDATE crm_scheduled_emails
+                   SET status = 'failed', last_error = %s
+                 WHERE lead_id = %s AND status = 'pending' AND lower(to_addr) = lower(%s)
+            """, ("Not sent: this address belonged to a different venue", row["id"],
+                  row["email"]))
+        conn.commit()
+    print(f"[leadgen] LEADGEN_LOOKUP_RECHECK checked={len(suspects)} cleared={len(wrong)}",
+          flush=True)
+    return len(wrong)
 
 
 # A homepage that didn't answer for one of these reasons is tried again on a

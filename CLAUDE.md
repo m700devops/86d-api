@@ -312,7 +312,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_order_numbers.py test_film.py test_failure_points.py
-  test_owner_rules.py -q` (596
+  test_owner_rules.py test_lookup_check.py -q` (606
   tests; test_timezones.py (37 more) needs a dummy `DATABASE_URL` and runs on its own; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
@@ -1296,7 +1296,17 @@ capture. Don't reintroduce them or describe them as current.)
   (`_find_existing_lead()`: same phone + `same_venue`, else same email, else the same name in
   the same town) and logs the call onto the existing lead, worked one first — the page says
   "was already in your book — logged the call on it". See One bar, one lead above
-- **Quick-add finds the email itself.** When the notes carry no address (or say "it's on
+- **Quick-add finds the email itself — but only from THEIR site.** It used to take the first
+  Nominatim hit with a website: NE Moose Bar & Grill (Minneapolis) got African Grill's site
+  in Lakewood and its email. Now a hit must be the same venue in the same city and state
+  (`map_result_is_venue()`: `same_venue` + address), there is no lookup without a town, and a
+  looked-up site must name the bar on its own page (`site_is_venue()` /
+  `site_names_venue()`: every distinctive word of the name) or it's dropped. A URL the
+  operator gave is trusted as typed. `recheck_looked_up_sites()` (once, marker
+  `lookup_site_check_2026_09`, from the phone-check loop) took the email off leads a looked-up
+  site gave where that site doesn't name the bar, with a dated note, and stopped any pending
+  scheduled email to it; logs `LEADGEN_LOOKUP_RECHECK`. Covered by test_lookup_check.py.
+  When the notes carry no address (or say "it's on
   their website"), `leadgen.find_venue_website()` looks the venue up on Nominatim by name +
   town for its OSM `website` tag (unless the notes gave a URL), and
   `leadgen.find_email_on_site()` reads it the same way `enrich_candidate` does — homepage,

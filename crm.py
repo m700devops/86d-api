@@ -5881,9 +5881,17 @@ def _quick_add(text: str, name_override: Optional[str] = None) -> dict:
     found_via = None
     if not _clean(extracted.get("email"), 320):
         try:
+            import leadgen
             from leadgen import find_venue_website, find_email_on_site
             if not website:
+                # Looked up, not given: it only counts if the map hit is this
+                # bar in this town AND the site itself names the bar. A guess
+                # gave NE Moose Bar & Grill another restaurant's email.
                 website = find_venue_website(name, loc)
+                if website and not leadgen.site_is_venue(website, name):
+                    print(f"[crm] quick-add: {website} doesn't name {name!r}; not used",
+                          flush=True)
+                    website = None
             if website:
                 email, page = find_email_on_site(website)
                 if email:
