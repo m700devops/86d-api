@@ -217,10 +217,12 @@ def init_crm_tables():
                        "ON crm_inbox(processed_at DESC)")
         # What the reply said (so a reply to it can be written from their own
         # words), whether it was an opt-out or needs answering, the reply the
-        # AI drafted overnight, and when it was answered.
+        # AI drafted overnight, when it was answered, and when the operator
+        # took its note off "While you were away" (dismissed_at — the row
+        # itself is never deleted; see inbox_dismiss).
         for col, col_type in [("body_text", "TEXT"), ("opt_out", "BOOLEAN"),
                               ("needs_reply", "BOOLEAN"), ("draft", "TEXT"),
-                              ("replied_at", "TEXT")]:
+                              ("replied_at", "TEXT"), ("dismissed_at", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'crm_inbox' AND column_name = %s
@@ -5090,42 +5092,99 @@ def _email_suppressed(cursor, addr: Optional[str]) -> Optional[str]:
     return (row["reason"] or "on the do-not-email list") if row else None
 
 
+INBOX_SHOWN = 50        # notes on "While you were away"
+INBOX_DELETED_SHOWN = 30  # deleted notes that can still be put back
+
+
+def _inbox_item(r):
+    """One crm_inbox row as the page shows it."""
+    try:
+        result = json.loads(r["result"] or "{}")
+    except ValueError:
+        result = {}
+    try:
+        draft = json.loads(r["draft"]) if r["draft"] else None
+    except ValueError:
+        draft = None
+    return {"from": r["from_name"] or r["from_addr"], "from_addr": r["from_addr"],
+            "subject": r["subject"], "received_at": r["received_at"],
+            "processed_at": r["processed_at"], "status": r["status"],
+            "reply": result.get("reply"), "applied": result.get("applied") or [],
+            "skipped": result.get("skipped") or [],
+            "message_id": r["message_id"],
+            "lead_id": (r["lead_ids"] or "").split(",")[0] or None,
+            "opt_out": bool(r["opt_out"]), "needs_reply": bool(r["needs_reply"]),
+            "draft": draft, "replied_at": r["replied_at"],
+            "dismissed_at": r.get("dismissed_at")}
+
+
 @crm_router.get("/inbox", response_model=dict)
 def inbox_feed(hours: int = 72, _: bool = Depends(require_crm_key)):
-    """What the inbox reader did lately — Follow-ups' "While you were away"."""
+    """What the inbox reader did lately — Follow-ups' "While you were away".
+    Notes the operator deleted are left out of `items` and listed, most
+    recently deleted first, under `deleted`, so one deleted by mistake can
+    still be put back after the toast's Undo is gone."""
     since = (datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 720)))).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT message_id, from_addr, from_name, subject, received_at, status,
-                   result, processed_at, lead_ids, opt_out, needs_reply, draft, replied_at
+                   result, processed_at, lead_ids, opt_out, needs_reply, draft, replied_at,
+                   dismissed_at
               FROM crm_inbox
              WHERE status IN ('updated', 'no_change') AND processed_at >= %s
-             ORDER BY processed_at DESC LIMIT 50
+             ORDER BY processed_at DESC LIMIT 200
         """, (since,))
         rows = cursor.fetchall()
         cursor.execute("SELECT MAX(processed_at) AS last FROM crm_inbox")
         last = cursor.fetchone()["last"]
-    items = []
-    for r in rows:
-        try:
-            result = json.loads(r["result"] or "{}")
-        except ValueError:
-            result = {}
-        try:
-            draft = json.loads(r["draft"]) if r["draft"] else None
-        except ValueError:
-            draft = None
-        items.append({"from": r["from_name"] or r["from_addr"], "from_addr": r["from_addr"],
-                      "subject": r["subject"], "received_at": r["received_at"],
-                      "processed_at": r["processed_at"], "status": r["status"],
-                      "reply": result.get("reply"), "applied": result.get("applied") or [],
-                      "skipped": result.get("skipped") or [],
-                      "message_id": r["message_id"],
-                      "lead_id": (r["lead_ids"] or "").split(",")[0] or None,
-                      "opt_out": bool(r["opt_out"]), "needs_reply": bool(r["needs_reply"]),
-                      "draft": draft, "replied_at": r["replied_at"]})
-    return {"items": items, "last_processed": last}
+    items = [_inbox_item(r) for r in rows if not r.get("dismissed_at")]
+    deleted = sorted((_inbox_item(r) for r in rows if r.get("dismissed_at")),
+                     key=lambda it: it["dismissed_at"], reverse=True)
+    return {"items": items[:INBOX_SHOWN], "deleted": deleted[:INBOX_DELETED_SHOWN],
+            "last_processed": last}
+
+
+class InboxNote(BaseModel):
+    message_id: str = Field(..., min_length=1, max_length=1000)
+
+
+def _set_dismissed(message_id, dismiss):
+    """Stamp (or clear) dismissed_at on one note. A second delete keeps the
+    first time, so "deleted 2h ago" stays true."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE crm_inbox
+               SET dismissed_at = CASE WHEN %s THEN COALESCE(dismissed_at, %s) END
+             WHERE message_id = %s
+         RETURNING message_id, dismissed_at
+        """, (bool(dismiss), now_iso(), message_id))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "That note isn't in the inbox log any more."})
+        conn.commit()
+    return {"message_id": row["message_id"], "dismissed_at": row["dismissed_at"]}
+
+
+@crm_router.post("/inbox/dismiss", response_model=dict)
+def inbox_dismiss(data: InboxNote, _: bool = Depends(require_crm_key)):
+    """Take a note off "While you were away" — the operator already knows.
+
+    Only the NOTE goes. What the reply changed on the lead stays (each change
+    has its own Undo), an opt-out stays on the do-not-email list, and the row
+    is kept, only stamped: the reader treats a message it has no row for as
+    new mail, so deleting the row would bring the email back on the next pass
+    and apply its changes a second time."""
+    return _set_dismissed(data.message_id, True)
+
+
+@crm_router.post("/inbox/restore", response_model=dict)
+def inbox_restore(data: InboxNote, _: bool = Depends(require_crm_key)):
+    """Put a deleted note back on the list — the Undo, and the Restore button
+    under "Deleted"."""
+    return _set_dismissed(data.message_id, False)
 
 
 @crm_router.post("/inbox/check", response_model=dict)
