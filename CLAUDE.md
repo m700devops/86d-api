@@ -1017,6 +1017,17 @@ capture. Don't reintroduce them or describe them as current.)
   `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) on Opus 5 / Fable 5.1, and
   retries a 400 once as a plain request with the schema in the prompt. Roughly 10¢ a message
   on Opus 5 (the whole book is ~15-25k tokens)
+- **The AI bar ADDS a bar that isn't in the book** (`assist.BAR_SCHEMA`'s `new_leads`,
+  `BAR_RULES`, `new_lead_texts()`). It used to have no way to: a pasted call to NE Moose Bar &
+  Grill came back "Added … as a new lead" over "couldn't match 'NE Moose Bar & Grill' to a
+  lead", and nothing was saved. Each new bar's part of the message (verbatim, else the whole
+  message) goes through `_quick_add()` — the body of `/leads/quick-add`, so the lead, the
+  call, who to ask for and the follow-up land exactly as "Add a lead" does them, and a bar
+  that IS in the book gets the call on its existing row. A change the model files under a
+  NAME instead of an alias is treated the same way rather than thrown away. The reply ends
+  "Saved: <bars>." from what was actually written, never the model's claim. The inbox reader
+  keeps plain `SCHEMA`/`SYSTEM`: strangers' email must never create leads. Covered by
+  test_assist.py
 - **Follow-ups rows have an Edit button** (between Email and Delete), and the details panel
   has one beside Close. Both open `leadEditCell()` — one form shared with the CRM tab, now
   with Bar and Where as well — saving through `PATCH /leads/{id}`

@@ -218,6 +218,94 @@ def test_a_question_comes_back_and_nothing_changes(monkeypatch):
     assert not any(s.startswith("UPDATE") for s, _ in cur.seen)
 
 
+# ── a bar that isn't in the book yet ────────────────────────────────────────
+# The real message, 2026-09-25. The model answered "Added NE Moose Bar & Grill
+# in Minneapolis as a new lead…" but put the bar in "changes" under its NAME,
+# which can only be thrown away — "couldn't match 'NE Moose Bar & Grill' to a
+# lead", and nothing was saved.
+
+MOOSE = ("NE Moose Bar & Grill (Minneapolis)Phone Number: (612) 623-4999Address: 356 Monroe "
+         "St NE, Minneapolis, MN 55413Standout Lunch Item: Thick, homemade tavern pizzas and "
+         "their highly rated Patty Melt. Just called this, spoke to a worker named Brenda, she "
+         "said she was very busy, Larry is the manager, he'll be abck at 3pm. She did confirm "
+         "they do manual bar inventroy counting.")
+
+
+def _fake_quick_add(monkeypatch, matched=False):
+    made = []
+
+    def quick(text, name_override=None):
+        made.append(text)
+        lead = _lead(id="L-moose", name="NE Moose Bar & Grill", loc="Minneapolis, MN",
+                     status="contacted", contact="Larry", last_outcome="gatekeeper",
+                     followup_date="2026-09-24")
+        return {"lead": lead, "undo_id": "U-moose",
+                "applied": {"matched_existing": lead["name"]} if matched else {}}
+
+    monkeypatch.setattr(crm, "_quick_add", quick)
+    return made
+
+
+def test_a_new_bar_misfiled_under_its_name_is_added_not_dropped(monkeypatch):
+    _wire(monkeypatch, {
+        "reply": "Added NE Moose Bar & Grill in Minneapolis as a new lead.",
+        "question": None,
+        "changes": [_change(lead="NE Moose Bar & Grill", contact="Larry", logged={
+            "kind": "call", "outcome": "gatekeeper", "summary": "Spoke to Brenda.",
+            "their_words": MOOSE})]})
+    made = _fake_quick_add(monkeypatch)
+    out = crm.assist_update(crm.AssistRequest(text=MOOSE), True)
+    assert made == [MOOSE]                        # the operator's own words, whole
+    assert out["skipped"] == []                   # no more "couldn't match"
+    [row] = out["applied"]
+    assert row["name"] == "NE Moose Bar & Grill" and row["undo_id"] == "U-moose"
+    assert row["changed"][0] == "added as a new lead"
+    assert "ask for Larry" in row["changed"] and "follow-up → 2026-09-24" in row["changed"]
+    assert out["reply"].endswith("Saved: NE Moose Bar & Grill.")
+
+
+def test_new_leads_field_adds_each_new_bar_once(monkeypatch):
+    _wire(monkeypatch, {"reply": "Adding it.", "question": None, "changes": [],
+                        "new_leads": [{"text": MOOSE}, {"text": MOOSE}]})
+    made = _fake_quick_add(monkeypatch)
+    out = crm.assist_update(crm.AssistRequest(text=MOOSE), True)
+    assert made == [MOOSE] and len(out["applied"]) == 1
+
+
+def test_a_new_bar_already_in_the_book_says_so(monkeypatch):
+    _wire(monkeypatch, {"reply": "", "question": None, "changes": [],
+                        "new_leads": [{"text": MOOSE}]})
+    _fake_quick_add(monkeypatch, matched=True)
+    out = crm.assist_update(crm.AssistRequest(text=MOOSE), True)
+    assert out["applied"][0]["changed"][0] == "already in your book — logged the call on it"
+
+
+def test_a_new_bar_that_cant_be_added_is_reported_not_claimed(monkeypatch):
+    _wire(monkeypatch, {"reply": "Added it.", "question": None, "changes": [],
+                        "new_leads": [{"text": "called somebody"}]})
+
+    def refuse(text, name_override=None):
+        raise HTTPException(status_code=422, detail={
+            "error": "no_name", "message": "Couldn't tell which bar this was"})
+
+    monkeypatch.setattr(crm, "_quick_add", refuse)
+    out = crm.assist_update(crm.AssistRequest(text="called somebody"), True)
+    assert out["applied"] == [] and out["reply"] == "Nothing was saved — see below."
+    assert "Couldn't tell which bar" in out["skipped"][0]["why"]
+
+
+def test_an_excerpt_that_isnt_in_the_message_becomes_the_whole_message():
+    out = {"new_leads": [{"text": "a paraphrase of the call"}], "changes": []}
+    assert assist.new_lead_texts(out, MOOSE, {}) == [MOOSE]
+
+
+def test_the_inbox_can_never_create_a_lead():
+    import inbox
+    assert "new_leads" not in inbox.INBOX_SCHEMA["properties"]
+    assert "new_leads" not in assist.SYSTEM and "new_leads" in assist.BAR_SYSTEM
+    assert assist.BAR_SCHEMA["required"][-1] == "new_leads"
+
+
 # ── the model call ──────────────────────────────────────────────────────────
 
 class _Resp:

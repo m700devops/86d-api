@@ -97,6 +97,59 @@ Rules:
 10. Questions about what was done ("who did I email Thursday", "how many calls today") are answered from TOUCHES, whose times are the salesperson's own clock."""
 
 
+# Only the AI bar can add a bar to the book. The inbox reader shares SCHEMA
+# and SYSTEM and must never create leads from strangers' mail, so the
+# new-lead field and its rule live apart and are added for the bar alone.
+BAR_SCHEMA = {
+    **SCHEMA,
+    "properties": {
+        **SCHEMA["properties"],
+        "new_leads": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+            "additionalProperties": False,
+        }},
+    },
+    "required": SCHEMA["required"] + ["new_leads"],
+}
+
+BAR_RULES = """
+11. A bar or restaurant the message is about that is NOT in LEADS never goes in "changes" — there is no lead to change, and a change with a name instead of an alias is thrown away. Put it in "new_leads" instead, one entry per new bar, with "text" = every part of the message about that bar copied word for word (name, phone, address, who you spoke to, what was said, when to call back). The system creates the lead, logs the call and sets the follow-up from that text itself. In reply, say you are adding it; never say it was added, logged or scheduled — the system reports that."""
+
+BAR_SYSTEM = SYSTEM + BAR_RULES
+
+
+def new_lead_texts(out: dict, text: str, known_aliases) -> list:
+    """The part of the message about each bar that isn't in the book yet.
+
+    From "new_leads", and — because the model has been seen putting a new bar
+    in "changes" under its NAME, where it can only be thrown away (NE Moose
+    Bar & Grill, 2026-09-25: "Added … as a new lead", nothing saved) — from
+    any change whose lead isn't a known alias. Each excerpt must really be a
+    piece of what was typed, else the whole message is used: this is the
+    operator's own words going onto a new lead, never a paraphrase.
+    """
+    found: list = []
+    for item in out.get("new_leads") or []:
+        if isinstance(item, dict):
+            found.append(words_from(text, str(item.get("text") or "")))
+    if not found:
+        for change in out.get("changes") or []:
+            if not isinstance(change, dict):
+                continue
+            alias = str(change.get("lead") or "").strip()
+            if not alias or alias in known_aliases or re.fullmatch(r"L\d+", alias):
+                continue
+            logged = change.get("logged") if isinstance(change.get("logged"), dict) else {}
+            found.append(words_from(text, str(logged.get("their_words") or "")))
+    unique: list = []
+    for t in found:
+        if t and t not in unique:
+            unique.append(t)
+    return unique
+
+
 def dates_table(today: date, days: int = 14) -> str:
     """Today and the next two weeks, spelled out.
 
