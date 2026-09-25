@@ -118,6 +118,12 @@ def _visible_text(html: str) -> str:
     return re.sub(r"\n\s*\n+", "\n", text)
 
 
+def visible_text(html: str) -> str:
+    """What a visitor reads on the page: no scripts, styles, comments or tags,
+    entities decoded. Public name for the lead generator's liquor check."""
+    return _visible_text(html)
+
+
 def _plausible_name(candidate: str) -> bool:
     """Reject the things a name-shaped regex picks up that aren't people."""
     candidate = candidate.strip(" .,-–—")

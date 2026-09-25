@@ -46,7 +46,7 @@ def _qualified(html="", tags=None):
 
 def test_shrimp_cocktail_does_not_qualify():
     html = "Appetizers: Shrimp Cocktail, Garlic Bread, Mozzarella Sticks"
-    assert _rejected(html) == "restaurant with no sign of a bar programme"
+    assert _rejected(html) == "no sign on their own site that they pour liquor"
 
 
 def test_fruit_cocktail_does_not_qualify():
@@ -85,7 +85,7 @@ def test_bare_drink_menu_alone_does_not_qualify():
 
 
 def test_no_html_and_no_tag_does_not_qualify():
-    assert _rejected("") == "restaurant with no sign of a bar programme"
+    assert _rejected("") == "no sign on their own site that they pour liquor"
 
 
 # ── Real bar programs still qualify ─────────────────────────────────────────
@@ -98,29 +98,75 @@ def test_craft_cocktail_menu_qualifies():
     _qualified("Our craft cocktail menu changes seasonally.")
 
 
-def test_wine_list_qualifies():
-    _qualified("Ask your server about our extensive wine list.")
-
-
 def test_named_liquor_qualifies():
     for word in ("tequila", "bourbon", "mezcal", "whiskey", "whisky", "vodka", "rum", "gin"):
         _qualified(f"We pour a wide selection of {word}.")
 
 
-def test_draft_beer_qualifies():
-    _qualified("12 rotating craft beers, draft beer and bottles.")
+# ── Beer and wine are not liquor (the owner's rule, 2026-09-25) ─────────────
+# A beer-and-wine room has no back bar to count. These all used to qualify.
+
+def test_wine_list_draft_beer_and_tap_list_do_not_qualify():
+    for html in ("Ask your server about our extensive wine list.",
+                 "12 rotating craft beers, draft beer and bottles.",
+                 "Check our tap list for this week's rotation.",
+                 "Mimosas, sangria and a Bloody Mary bar at brunch."):
+        _rejected(html)
 
 
-def test_tap_list_qualifies():
-    _qualified("Check our tap list for this week's rotation.")
+def test_beer_and_wine_only_says_so():
+    for html in ("We serve beer and wine only.", "Soju cocktails and Korean BBQ",
+                 "Our wine-based cocktails", "Agave wine margaritas every day",
+                 "Craft cocktails made with our beer & wine license"):
+        assert _rejected(html).startswith("beer and wine only"), html
 
 
-def test_osm_bar_tag_qualifies_with_no_site_text():
-    _qualified("", {"bar": "yes"})
+def test_osm_bar_or_beer_tags_are_not_liquor():
+    _rejected("", {"bar": "yes"})
+    _rejected("", {"drink:beer": "yes", "drink:wine": "yes"})
 
 
-def test_osm_cocktail_tag_qualifies_with_no_site_text():
-    _qualified("", {"drink:cocktail": "yes"})
+def test_one_spirits_tag_is_not_enough_for_a_restaurant():
+    _rejected("", {"drink:cocktail": "yes"})
+    _qualified("A classic Negroni", {"drink:cocktail": "yes"})
+
+
+# ── The Sweedeedee bug: raw HTML ────────────────────────────────────────────
+
+SQUARESPACE_SCRIPT = ('<script>window.countries=[{"name":"Martinique","code":"MQ"},'
+                      '{"name":"Gin Islands"},"bourbon","full bar"]</script>')
+
+
+def test_words_in_scripts_styles_and_markup_never_count():
+    # Every Squarespace page carries a country picker in a script; its
+    # "Martinique" matched "martini", so every Squarespace restaurant poured.
+    _rejected(SQUARESPACE_SCRIPT + "<p>Pie, coffee and brunch. Open 8-3.</p>")
+    _rejected('<style>.full-bar{}</style><!-- cocktail menu --><img alt="x">'
+              '<p>Breakfast all day</p>')
+
+
+def test_food_named_after_a_spirit_is_not_a_spirit():
+    for html in ("Bourbon pecan pie and whiskey glaze", "Penne alla vodka, vodka sauce",
+                 "Rum cake, rum raisin ice cream", "Margarita pizza", "Scotch eggs",
+                 "Straight from Bourbon Street",
+                 "Red Velvet Whiskey Pop Tart with whiskey cream cheese filling"):
+        _rejected(html)
+
+
+def test_real_bar_programmes_qualify():
+    for html in ("Tequila, lime, triple sec: our house margarita",
+                 "Beer, wine & spirits", "Espresso martini and a Negroni",
+                 "Happy hour well drinks $5", "Our whiskey list runs to 200 bottles"):
+        _qualified(html)
+
+
+def test_a_bar_needs_one_spirit_a_restaurant_two():
+    from leadgen import liquor_verdict
+    assert liquor_verdict("whiskey and cold beer", {}, "Joe's", "bar")["status"] == "spirits"
+    assert liquor_verdict("whiskey and cold beer", {}, "Joe's", "restaurant")["status"] == "unknown"
+    # A taproom or wine bar is tagged a bar too, and is held to the restaurant bar.
+    assert liquor_verdict("whiskey and cold beer", {}, "Hopworks Taproom", "bar")["status"] == "unknown"
+    assert liquor_verdict("whiskey", {"microbrewery": "yes"}, "Kells", "pub")["status"] == "unknown"
 
 
 # ── The explicit "we don't serve alcohol" override ──────────────────────────
