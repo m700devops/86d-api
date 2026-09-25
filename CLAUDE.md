@@ -211,6 +211,15 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   you were away"**: who wrote, what the AI made of it, what changed, Undo per lead
   (`GET /v1/crm/inbox`; `POST /v1/crm/inbox/check` runs a pass now). Log lines: `INBOX`,
   `INBOX_FAILED`, `INBOX_LOOP_ERROR`, `INBOX_DRAFT_FAILED`
+- **Every note there has a Delete** (the operator already knows what it says).
+  `POST /v1/crm/inbox/dismiss {message_id}` only stamps `crm_inbox.dismissed_at` — **the row
+  is never deleted**, because the reader treats a message with no row as new mail: a real
+  DELETE would bring the email back on the next pass and apply its changes twice. Only the
+  NOTE goes: the lead changes stay (each keeps its own Undo), an opt-out stays suppressed, and
+  the playbook still counts the reply. A toast offers Undo for 10 seconds, and `/inbox` lists
+  deleted notes under `deleted` (newest deletion first) so "Deleted (n) — put one back" can
+  restore one later (`POST /v1/crm/inbox/restore`). A reply being typed in one note survives
+  the redraw after a delete in another. Covered by test_inbox_replies.py
 - **An opt-out is final.** When a reply says stop (the model's `opt_out` OR
   `looks_like_opt_out()`), `_record_opt_out()` puts the sender's address in `crm_suppressions`
   (kind `email`), marks each lead dead with its follow-up cleared and a note, and the model's
@@ -312,7 +321,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_order_numbers.py test_rehearsal.py -q` (536 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_lead_finding.py test_order_numbers.py test_rehearsal.py -q` (540 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an

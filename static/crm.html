@@ -30,6 +30,13 @@
   .assist-list{margin:8px 0 0;padding-left:18px;font-size:13px;line-height:1.8}
   .assist-list li.undone{opacity:.45;text-decoration:line-through}
   .assist-list button{margin-left:8px;padding:2px 9px;font-size:12px}
+  .awayhead{display:flex;gap:8px;align-items:flex-start;font-size:13px}
+  .awayhead>div{flex:1;min-width:0}
+  .awayhead button,.awaygone button{padding:2px 9px;font-size:12px;flex:none}
+  #fAwayGone summary{cursor:pointer;font-size:13px;margin-top:10px}
+  .awaygone{display:flex;gap:8px;align-items:center;font-size:13px;padding:6px 0;
+            border-top:1px solid var(--line2)}
+  .awaygone>span{flex:1;min-width:0}
   .phok{font-size:11px;color:var(--text3);margin-top:3px;white-space:nowrap}
   .attempts{border-collapse:collapse;font-size:13px;margin:0 0 4px}
   .attempts td{padding:3px 14px 3px 0;border:0;background:none !important;vertical-align:top}
@@ -762,6 +769,7 @@
         <strong>While you were away</strong>
         <span class="muted" id="fAwayNote" style="font-size:13px"></span>
         <div id="fAwayList" style="margin-top:8px"></div>
+        <div id="fAwayGone"></div>
       </div>
       <div class="card hide" id="fEmpty">
         <strong>No follow-ups due</strong>
@@ -879,9 +887,12 @@ function toast(m,undoId){
   if(undoId){
     // Ten seconds, not two: noticing you clicked the wrong row takes longer
     // than reading the message. The bar above the list is the real safety
-    // net; this is just the fastest path back.
+    // net; this is just the fastest path back. An undo id puts back a logged
+    // touch; a function undoes anything else (a deleted inbox note).
     const b=document.createElement('button');
-    b.textContent='Undo'; b.onclick=()=>{t.classList.remove('show');undoTouch(undoId);};
+    b.textContent='Undo';
+    b.onclick=()=>{t.classList.remove('show');
+      typeof undoId==='function' ? undoId() : undoTouch(undoId);};
     t.appendChild(b);
   }
   t.classList.add('show');
@@ -2227,24 +2238,69 @@ function miniTable(list){
     </tr>`).join('')}</tbody></table></div>`;
 }
 /* Replies the inbox reader handled on its own (crm.process_inbox): who wrote,
-   what the AI made of it, what it changed — each lead with Undo. */
+   what the AI made of it, what it changed — each lead with Undo. A note the
+   operator already knows about can be deleted: only the note goes (the lead
+   changes stay, each with its own Undo), a toast offers Undo for ten seconds,
+   and "Deleted (n)" underneath keeps it one click from coming back after. */
 async function loadAway(){
   let d;
   try{ d=await api('/inbox'); }catch{ return; }
-  const card=$('fAway');
-  card.classList.toggle('hide', !d.items.length && !d.last_processed);
+  const card=$('fAway'), deleted=d.deleted||[];
+  card.classList.toggle('hide', !d.items.length && !deleted.length && !d.last_processed);
   $('fAwayNote').textContent = d.last_processed
     ? ` — replies from bars, read and filed automatically. Last checked ${touchWhen(d.last_processed)}.` : '';
-  $('fAwayList').innerHTML = d.items.length ? d.items.map(it=>`
-    <div class="awayitem" data-msg="${esc(it.message_id||'')}" data-lead="${esc(it.lead_id||'')}"
-         data-to="${esc(it.from_addr||'')}" style="padding:8px 0;border-top:1px solid var(--line2)">
-      <div style="font-size:13px"><strong>${esc(it.from)}</strong>
-        <span class="muted">· ${esc(it.subject||'')} · ${esc(touchWhen(it.processed_at))}</span></div>
-      ${assistResult({reply:it.reply, question:null, applied:it.applied, skipped:it.skipped})}
-      ${awayReply(it)}
-    </div>`).join('')
-    : '<p class="muted" style="margin:0;font-size:13px">No replies from bars yet.</p>';
+  // A reply being edited survives the redraw: this list is redrawn after
+  // every send, delete and put-back, and a draft typed into one note must not
+  // be lost to a click on another.
+  const typed={};
+  $('fAwayList').querySelectorAll('.awayitem').forEach(el=>{
+    const box=el.querySelector('.replybox');
+    if(box) typed[el.dataset.msg]={s:box.querySelector('[data-rsubject]').value,
+                                   b:box.querySelector('[data-rbody]').value};
+  });
+  $('fAwayList').innerHTML = d.items.length ? d.items.map(awayItem).join('') : awayEmpty(deleted.length);
+  $('fAwayList').querySelectorAll('.awayitem').forEach(el=>{
+    const t=typed[el.dataset.msg], box=el.querySelector('.replybox');
+    if(t && box){ box.querySelector('[data-rsubject]').value=t.s; box.querySelector('[data-rbody]').value=t.b; }
+  });
+  awayGone(deleted);
 }
+function awayEmpty(deletedN){
+  return `<p class="muted" style="margin:0;font-size:13px">${deletedN
+    ? 'All caught up — nothing new from bars.' : 'No replies from bars yet.'}</p>`;
+}
+function awayItem(it){
+  return `<div class="awayitem" data-msg="${esc(it.message_id||'')}" data-lead="${esc(it.lead_id||'')}"
+       data-to="${esc(it.from_addr||'')}" style="padding:8px 0;border-top:1px solid var(--line2)">
+    <div class="awayhead"><div><strong>${esc(it.from)}</strong>
+      <span class="muted">· ${esc(it.subject||'')} · ${esc(touchWhen(it.processed_at))}</span></div>
+      <button class="del" data-away-del title="Take this note off the list. What it changed on the lead stays — use Undo beside a change to reverse that.">Delete</button></div>
+    ${assistResult({reply:it.reply, question:null, applied:it.applied, skipped:it.skipped})}
+    ${awayReply(it)}
+  </div>`;
+}
+/* Deleted notes, newest deletion first — the safety net for a mistake
+   noticed after the toast has gone. Stays open across redraws once opened. */
+function awayGone(list){
+  const box=$('fAwayGone'), open=box.querySelector('details')?.open;
+  box.innerHTML = list.length ? `<details${open?' open':''}>
+    <summary class="muted">Deleted (${list.length}) — put one back</summary>
+    ${list.map(g=>`<div class="awaygone" data-msg="${esc(g.message_id||'')}">
+      <span><strong>${esc(g.from)}</strong> <span class="muted">· ${esc(g.subject||'')}
+        · deleted ${esc(touchWhen(g.dismissed_at))}</span></span>
+      <button data-away-restore>Put back</button></div>`).join('')}
+  </details>` : '';
+}
+async function awayRestore(msg){
+  try{ await api('/inbox/restore',{method:'POST',body:JSON.stringify({message_id:msg})});
+       toast('Put back'); await loadAway(); }
+  catch(err){ toast(err.message); }
+}
+$('fAwayGone').onclick=async e=>{
+  const b=e.target.closest('[data-away-restore]'); if(!b) return;
+  b.disabled=true; b.textContent='Putting back…';
+  await awayRestore(b.closest('.awaygone').dataset.msg);
+};
 /* What a reply needs from you. An opt-out is final; a question or real
    interest gets a reply drafted overnight (never sent by itself), ready to
    edit and send — threaded under their email. */
@@ -2268,6 +2324,17 @@ function replyBox(dr){
 }
 $('fAwayList').onclick=async e=>{
   const item=e.target.closest('.awayitem');
+  const delBtn=e.target.closest('[data-away-del]');
+  if(item && delBtn){
+    const msg=item.dataset.msg;
+    delBtn.disabled=true; delBtn.textContent='Deleting…';
+    try{
+      await api('/inbox/dismiss',{method:'POST',body:JSON.stringify({message_id:msg})});
+      toast('Deleted', ()=>awayRestore(msg));
+      await loadAway();
+    }catch(err){ toast(err.message); delBtn.disabled=false; delBtn.textContent='Delete'; }
+    return;
+  }
   const draftBtn=e.target.closest('[data-away-draft]'), sendBtn=e.target.closest('[data-away-send]');
   if(!item || !(draftBtn||sendBtn)) return $('fAssistOut').onclick(e);  // same Undo handling
   const lead=item.dataset.lead, msg=item.dataset.msg;
