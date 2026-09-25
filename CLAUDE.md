@@ -45,7 +45,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   hour, attribution re-match) and Lead engine (run now, bank health, restaurant recheck) were
   removed from the PAGE at the operator's request; every endpoint behind them is still live
   (`/funnel`, `/dialstats`, `/attribution/rematch`, `/leadgen/health`, `/leadgen/run`,
-  `/leadgen/recheck-restaurants`), and the daily 6pm run and the Call list's empty-list
+  `/leadgen/recheck-restaurants`), and the early-morning daily run and the Call list's empty-list
   auto-fill still keep leads coming without anyone opening a panel
 - apple.py — **Apple Analytics**: App Store Connect's App Analytics (impressions, product
   page views, conversion, downloads, proceeds, sessions, installs, deletions, crashes) via
@@ -228,6 +228,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   (or the page's built-in library) stays. Grep Render logs for `SCHOOL_REFRESH`.
   On a free-tier service that's spun down at 10am, the refresh runs when it next wakes.
   See test_school.py
+- activity.py — scans and background crawls TAKE TURNS. Every AI scan and every `/scans/warm`
+  (the app opening its scan screen) calls `scan_seen()`; background crawls call
+  `wait_for_quiet()` before each site and wait until nothing has been scanned for
+  `CRAWL_QUIET_SECONDS` (180). See "The crawl stays out of the scanner's way" under LEAD
+  GENERATOR. Covered by test_crawl_quiet.py
 - seed_data.py — default product catalog
 - scanstats.py — the scanner's report card, pure: `summarize(rows, days)` over scan_events +
   scan_outcomes, per AI model — replies, couldn't-read, flagged disagreements settled right or
@@ -244,7 +249,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py test_scanstats.py -q` (685 tests; test_timezones.py needs a dummy
+  test_second_opinion.py test_scanstats.py test_crawl_quiet.py -q` (705 tests; test_timezones.py needs a dummy
   `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
@@ -253,6 +258,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_second_opinion.py — the second opinion: `helpers.answers_agree`, the pure `_decide`, and
   `_run_providers` with fake providers on REAL delays (fast path, wait window, failures, a rejected
   key, the total cap cancelling both calls, the one-bar inference). Every rule was mutation-checked
+- test_crawl_quiet.py — the crawl's dead hour (`main._in_crawl_window`, checked in winter and
+  summer), `activity.py` on a fake clock, and that every background crawl waits (and nothing
+  someone clicked does). Every rule was mutation-checked
 - test_scanstats.py — the scanner report (`scanstats.summarize`, row by row: which evidence counts
   as right, wrong or nothing), the outcome route and the CRM report route with a faked database.
   Every rule was mutation-checked; the whole path was also run against a real Postgres upgraded
@@ -525,6 +533,24 @@ capture. Don't reintroduce them or describe them as current.)
   calling this API cross-origin would fail on both counts
 
 ## LEAD GENERATOR (leadgen.py)
+- **The crawl stays out of the scanner's way — without a second server.** Crawling bar websites
+  runs in the same process as the bottle scanner, on half a CPU, and reading pages strangers wrote
+  holds the GIL; it has taken the whole server down before. Two things keep them apart, at no
+  cost (a separate CRM service was built and reverted: the owner chose not to pay for one):
+  - **A dead hour.** The daily run fires once, inside `LEADGEN_CRAWL_HOUR` (5) +
+    `LEADGEN_CRAWL_WINDOW_HOURS` (3) in `LEADGEN_CRAWL_TZ` (America/Los_Angeles): 5-8am in LA is
+    8-11am in New York — western bars long closed, eastern ones not yet open — and 8-9pm in
+    Manila, so the list is fresh before the caller's shift. Its own clock, NOT `CRM_TIMEZONE`,
+    which defaults to UTC and put the old 6pm run at 2pm New York, when bars count before
+    opening. Outside the window it never starts, so a restart at 11pm can't crawl mid-service; a
+    missed day is skipped (the list holds weeks of leads, and an empty one refills on demand).
+    `LEADGEN_RUN_HOUR` is no longer read
+  - **Taking turns** (activity.py): every background crawl — each site the daily run enriches,
+    each city it harvests, each phone check, each restaurant recheck — waits while anyone has
+    scanned in the last `CRAWL_QUIET_SECONDS` (180), or opened the app's scan screen. A phone
+    check batch keeps its 90s budget: rows it can't reach wait for the next batch. What the
+    operator clicked and is waiting on (quick-add's email lookup, wrong number) never waits.
+    Log: `CRAWL_PAUSED` / `CRAWL_RESUMED`, once per pause however many threads wait
 - **The cap is PER TAB, not global: `LEADGEN_BUCKET_TARGET` (50) unworked leads in each of
   the 8 (service × timezone) cells.** It used to be a single `LEADGEN_MAX_ACTIVE` of 100, and
   that number cannot survive the tabs: 100 spread over 8 cells averages 12, so opening
@@ -1344,12 +1370,14 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - CRM_OPERATOR_TZ — where the person making the calls is (default `Asia/Manila`). Decides the
   "your time" clock and every upcoming-window time on the call screen
 - CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).
-  Also decides when the daily lead run fires
+  It no longer decides when the daily lead run fires (LEADGEN_CRAWL_*)
 - LEADGEN_BUCKET_TARGET (default 50 — leads per service×timezone tab; total capacity is
   8× this), LEADGEN_DAILY_TARGET (25, a pace not a ceiling), LEADGEN_POOL_FLOOR (50),
   LEADGEN_ENRICH_WORKERS (8),
-  LEADGEN_RUN_HOUR (18 = 6pm, local) — optional lead generator tuning. No API key needed: the
-  generator uses OpenStreetMap, which has neither keys nor billing
+  LEADGEN_CRAWL_HOUR (5), LEADGEN_CRAWL_WINDOW_HOURS (3), LEADGEN_CRAWL_TZ
+  (America/Los_Angeles), CRAWL_QUIET_SECONDS (180) — optional lead generator tuning, see "The
+  crawl stays out of the scanner's way". LEADGEN_RUN_HOUR is no longer read. No API key needed:
+  the generator uses OpenStreetMap, which has neither keys nor billing
 - APPLE_BUNDLE_ID — optional, the audience Apple identity tokens must carry (default
   `com.my86d.app`). There is no Apple secret to set: leaving this unset uses the real bundle
   id, never a weaker check

@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from contextlib import asynccontextmanager
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 import asyncio
@@ -33,6 +34,7 @@ from apple_auth import (
     DEFAULT_BUNDLE_ID as APPLE_DEFAULT_BUNDLE_ID,
 )
 from crm import crm_router, init_crm_tables
+import activity
 from leadgen import init_leadgen_tables
 import google.generativeai as genai
 import openai
@@ -2965,22 +2967,47 @@ async def _trial_reminder_loop():
 
 # ============== LEAD GENERATOR SCHEDULER ==============
 
-LEADGEN_RUN_HOUR = int(os.getenv("LEADGEN_RUN_HOUR", "18"))  # 6pm local, CRM_TIMEZONE
+# The daily lead run crawls bar websites in this process, next to the scanner,
+# so it runs at a dead hour for bars: 5am in Los Angeles is 8am in New York —
+# western bars long closed, eastern ones not open — and 8-9pm in Manila, so the
+# list is fresh before the caller's shift. Its own clock, not CRM_TIMEZONE
+# (which also rolls the daily counters over), and only inside the window: a
+# restart at 11pm must not start a crawl in the middle of service. A day the
+# window is missed is skipped; the list holds weeks of leads, and an empty one
+# refills on demand. It used to be LEADGEN_RUN_HOUR (6pm in CRM_TIMEZONE, which
+# defaults to UTC — 2pm New York, when bars count before opening); that name is
+# no longer read. activity.py makes the crawl wait out any count regardless.
+LEADGEN_CRAWL_HOUR = int(os.getenv("LEADGEN_CRAWL_HOUR", "5"))
+LEADGEN_CRAWL_WINDOW_HOURS = max(1, int(os.getenv("LEADGEN_CRAWL_WINDOW_HOURS", "3")))
+LEADGEN_CRAWL_TZ = os.getenv("LEADGEN_CRAWL_TZ", "America/Los_Angeles")
+
+
+def _crawl_tz():
+    try:
+        return ZoneInfo(LEADGEN_CRAWL_TZ)
+    except (ZoneInfoNotFoundError, ValueError):
+        print(f"[leadgen] LEADGEN_CRAWL_TZ={LEADGEN_CRAWL_TZ!r} is not a known zone — "
+              f"using America/Los_Angeles", flush=True)
+        return ZoneInfo("America/Los_Angeles")
+
+
+def _in_crawl_window(local_now: datetime) -> bool:
+    """Is `local_now` (in the crawl's clock) inside the daily crawl window?"""
+    return LEADGEN_CRAWL_HOUR <= local_now.hour < LEADGEN_CRAWL_HOUR + LEADGEN_CRAWL_WINDOW_HOURS
 LEADGEN_CHECK_INTERVAL_SECONDS = 900                          # 15 min
 
 
 def _leadgen_should_run_now() -> bool:
-    """True once per day, at or after the configured local hour.
+    """True once per day, inside the crawl window (_in_crawl_window).
 
     Checks the run log rather than keeping state in memory, so a restart — which
     on Render's free tier happens whenever the service spins down — can't cause
     a second run or skip the day entirely.
     """
-    from crm import _reset_tz
     from database import get_db as _get_db
 
-    local_now = datetime.now(_reset_tz())
-    if local_now.hour < LEADGEN_RUN_HOUR:
+    local_now = datetime.now(_crawl_tz())
+    if not _in_crawl_window(local_now):
         return False
 
     # Compared as an instant, not as a date string. started_at is written by
@@ -4860,7 +4887,9 @@ def _scan_context(user_id: str) -> tuple:
 @v1_router.post("/scans/warm")
 async def warm_scan(user_id: str = Depends(get_current_user)):
     """Pre-warm the AI vision path — the app calls this when the scan screen
-    opens so the first bottle scan is as fast as the rest."""
+    opens so the first bottle scan is as fast as the rest. A count is starting,
+    so background crawling steps aside from now (activity.py)."""
+    activity.scan_seen()
     return {"warmed": await _warm_providers()}
 
 
@@ -4919,6 +4948,7 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
     """
     print("[analyze_bottle] function started", flush=True)
     started = time.monotonic()
+    activity.scan_seen()   # background crawling waits while a count is in progress
 
     # In a worker thread: psycopg2 blocks, and this route shares one event loop
     # with every other request the process serves.

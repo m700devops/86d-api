@@ -1411,7 +1411,7 @@ async function copyDigits(el){
   toast('Copied '+num);
 }
 
-// Filling the list on demand. The 6pm schedule is the wrong master for
+// Filling the list on demand. The early-morning schedule is the wrong master for
 // someone who has just sat down with a phone: an empty screen at the moment
 // you decide to start calling is the one state this tool must never be in.
 // The run crawls venue sites, so it happens in the background and the page
@@ -2284,7 +2284,7 @@ async function loadFollowups(){
          <br><br><strong>${d.counts.never_called}</strong> leads have never been
          called: those are on the Call list.`
       : `Nothing is due, and there's nothing left to call. The engine refills the
-         list at 6pm.`;
+         list every day before the US wakes up (about 8–9pm your time).`;
   }
 }
 ['fOverdue','fToday'].forEach(id=>{
