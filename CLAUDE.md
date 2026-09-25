@@ -28,7 +28,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   Follow-ups — with School, Yet to Contact, Apple Analytics and Customers behind a burger top right:
   those are looked at occasionally and thought about once, and in the tab row they competed
   with the three things a working day actually needs. The burger turns orange when the open
-  page lives inside it. Single self-contained file, no build step;
+  page lives inside it. **Clicking the title ("86'd — Sales", on every page) copies the App
+  Store link** to paste anywhere — `app_url` from `/mail/status` (COMPANY_APP_URL), loaded on
+  unlock, else the live listing (`APP_URL_DEFAULT`). Single self-contained file, no build step;
   replacing this file replaces the UI. Holds no credentials — the operator types the key and
   it lives in their browser's localStorage. **The Call list tab is one button and one table,
   nothing else.** It used to carry a focus card, a clock, a queued-email banner, an undo
@@ -309,7 +311,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_order_numbers.py test_film.py -q` (528 tests; test_timezones.py needs a dummy `DATABASE_URL`)
+  test_lead_finding.py test_order_numbers.py test_film.py -q` (533 tests; test_timezones.py needs a dummy `DATABASE_URL`)
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -861,20 +863,37 @@ capture. Don't reintroduce them or describe them as current.)
 - Eight columns, not ten: the contact's name sits under the bar's, and last-touch/next-due are
   one column. At ten the action buttons fell off the right-hand edge, and the buttons are the
   point of the screen
-- **WHERE THINGS STAND is two plain lines: what happened last, then what's next** (`standing()`
-  in crm.html). Last: "Nobody picked up · yesterday", "Laura asked for a callback · today",
-  "Already has a system" (a not_interested whose notes say so). Next: "Try again (attempt 2
-  of 6) today", "Call Laura back Sunday", "Call back for the manager tomorrow", in red when
-  overdue, and "No follow-up set — pick a date" in red when someone was reached and nothing
-  is scheduled — the warm lead that quietly dies. Hover shows the latest note. It replaced a
-  single line like "call back 2026-09-25 — Answered · 1 try"
-- **WHERE THINGS STAND shows `last_outcome`, not just a bare date.** A STAGE badge of
+- **WHERE THINGS STAND is up to three short lines, the same shape on every row** (`standing()`
+  in crm.html), told apart by a monochrome icon (phone, envelope, reply arrow, chat bubble,
+  arrow for next) and by weight — not by colour, at the owner's request (easy on the eyes,
+  ADHD-friendly). (1) **The latest thing that happened, bold**: a call and how it went ("Laura
+  asked for a callback · yesterday", "Left a voicemail", "Already has a system"), "Emailed",
+  "Messaged on Facebook", or **"They replied"** when an inbox reply came in after our last
+  touch. (2) **How the last CALL went, grey**, only when line 1 isn't a call — so emailing after
+  a voicemail doesn't hide the voicemail. (3) **What's next**: grey; bold when due today; red
+  ONLY when overdue or when someone was reached and nothing is booked (the warm lead that
+  quietly dies). "Call again (call 2 of 6) Sunday" counts CALLS (`attempts`, the ladder);
+  "Answer their email — draft in Follow-ups" when a reply needs one. Hover shows the latest
+  note. "Who" is the latest call's "Spoke to:", else who we ask for
+- **It is built from the touch log, not `last_outcome`.** Sending an email overwrites
+  `last_outcome` with "emailed", which the old two-line version had no words for, so a call
+  and then an email read "Called · yesterday" and the call's result was gone. `/leads` rows now
+  carry `touch_story()` (crm.py, pure; `_touch_stories()` does two queries per page): `tries`,
+  `last_touch` (any kind), `last_call`, `last_reply` (crm_inbox, matched through the
+  comma-joined `lead_ids` with an array overlap), undone touches excluded. `last_outcome` is
+  only the fallback for a row with no touch logged. Overdue is judged against `today` in the
+  `/leads` response (`_today()`, the same day Follow-ups uses), never the browser's UTC date;
+  touch times are shown in the operator's own day. Covered by test_tries.py
+- **REACHED OUT # (the column after it)**: every call, email and Facebook message, one each —
+  a call then two follow-up emails is 3 — big number, with the per-kind icons and counts under
+  it. Undone touches don't count. A worked lead with nothing logged (stage set by hand) shows
+  "—", not a 0 that contradicts line 1. Not shown in Yet to Contact (it would be all zeros);
+  drawers there span 6 columns, on the CRM tab 7 (`tr.children.length`)
+- **WHERE THINGS STAND shows the outcome, not just a bare date.** A STAGE badge of
   CONTACTED covers a voicemail, a gatekeeper, and an actual conversation alike (`log_touch`
   in crm.py lands all three on "contacted") — the badge alone can't answer "did I actually
-  reach anyone?", and "last touched 2026-09-22" didn't either. `last_outcome` has always
-  recorded the real answer (`OUTCOME_LABEL` in crm.html: Answered / Voicemail / Manager out /
-  Not interested / Asked for a callback / Logged); it just wasn't shown anywhere on this
-  screen. Follow-ups' mini table shows it too, under the bar's name, for the same reason
+  reach anyone?", and "last touched 2026-09-22" didn't either. Follow-ups' mini table shows
+  `last_outcome` too, under the bar's name, for the same reason (`OUTCOME_LABEL`)
 - Edit, Log, Email and Delete all work inline here, sharing the same endpoints (and the same
   undo) as the call list
 

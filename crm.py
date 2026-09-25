@@ -607,6 +607,70 @@ def _tries(kind_counts) -> dict:
     return out
 
 
+def touch_story(touches, replies=()) -> dict:
+    """What the CRM tab's WHERE THINGS STAND and REACHED OUT are drawn from,
+    for one lead. Pure.
+
+    `touches`: its crm_touches rows ({kind, outcome, at}) with undone ones
+    already left out. `replies`: its crm_inbox rows ({processed_at, opt_out,
+    needs_reply, replied_at}).
+
+    Read from the touch log, not the lead's `last_outcome`: sending an email
+    overwrites that with "emailed", so a call and then an email used to lose
+    the call's result and read as "Called yesterday". Here the latest touch
+    of ANY kind and the latest CALL are kept apart, and a reply that came in
+    after them counts too.
+    """
+    def at(row):
+        return str(row.get("at") or "")
+
+    touches = [t for t in touches if t.get("outcome") != "undone"]
+    last = max(touches, key=at, default=None)
+    last_call = max((t for t in touches if t.get("kind") == "call"), key=at, default=None)
+    reply = max(replies, key=lambda r: str(r.get("processed_at") or ""), default=None)
+    counts: dict = {}
+    for t in touches:
+        counts[t.get("kind")] = counts.get(t.get("kind"), 0) + 1
+    return {
+        "tries": _tries(counts.items()),
+        "last_touch": ({"kind": last.get("kind"), "outcome": last.get("outcome"), "at": at(last)}
+                       if last else None),
+        "last_call": ({"outcome": last_call.get("outcome"), "at": at(last_call)}
+                      if last_call else None),
+        "last_reply": ({"at": str(reply.get("processed_at") or ""),
+                        "opt_out": bool(reply.get("opt_out")),
+                        "needs_reply": bool(reply.get("needs_reply")),
+                        "answered": bool(reply.get("replied_at"))} if reply else None),
+    }
+
+
+def _touch_stories(cursor, lead_ids) -> dict:
+    """`touch_story()` for a page of leads: two queries, whatever the page size."""
+    ids = [i for i in lead_ids if i]
+    if not ids:
+        return {}
+    cursor.execute("""
+        SELECT lead_id, kind, outcome, at FROM crm_touches
+         WHERE lead_id = ANY(%s) AND outcome IS DISTINCT FROM 'undone'
+    """, (ids,))
+    touches: dict = {}
+    for r in cursor.fetchall():
+        touches.setdefault(r["lead_id"], []).append(r)
+    # crm_inbox.lead_ids is a comma-joined list: one reply can be about
+    # several venues (one management company's).
+    cursor.execute("""
+        SELECT lead_ids, processed_at, opt_out, needs_reply, replied_at FROM crm_inbox
+         WHERE status IN ('updated', 'no_change')
+           AND string_to_array(COALESCE(lead_ids, ''), ',') && %s::text[]
+    """, (ids,))
+    wanted, replies = set(ids), {}
+    for r in cursor.fetchall():
+        for i in (r["lead_ids"] or "").split(","):
+            if i in wanted:
+                replies.setdefault(i, []).append(r)
+    return {i: touch_story(touches.get(i, []), replies.get(i, [])) for i in ids}
+
+
 def _touch_counts(cursor, lead_ids) -> dict:
     """`_tries()` for many leads in one query. Undone touches don't count —
     the undo button exists to make a misclick not have happened."""
@@ -828,6 +892,8 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                  LIMIT %s OFFSET %s""",
             params + order_params + [limit, offset])
         leads = [_lead_row(row) for row in cursor.fetchall()]
+        # Every call, email and reply behind WHERE THINGS STAND and REACHED OUT.
+        stories = _touch_stories(cursor, [lead["id"] for lead in leads])
 
         # Always the totals for the whole pipeline, not for the current filter:
         # the counts are the tab labels, and a tab that renumbers itself when
@@ -844,8 +910,11 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     for lead in leads:
         lead["window"] = _call_window(lead.get("tz_offset_hours"),
                                       lead.get("opening_hours"), lead.get("tz_name"))
+        lead.update(stories.get(lead["id"]) or touch_story([]))
+    # The page decides "overdue" against this, the same day Follow-ups uses —
+    # not the browser's UTC date, which is a day behind in Manila's morning.
     return {"leads": leads, "count": len(leads), "matching": matching,
-            "offset": offset, "limit": limit,
+            "offset": offset, "limit": limit, "today": _today(),
             "counts": {**{k: by_status.get(k, 0) for k in VALID_STATUSES},
                        **view_counts, "all": everything}}
 
@@ -2814,6 +2883,8 @@ def mail_status(_: bool = Depends(require_crm_key)):
     import pitch
     return {"configured": mailer.is_configured(), "from": mailer.sender(),
             "host": mailer.HOST, "port": mailer.PORT, "signature": pitch.SIGNATURE,
+            # What clicking the page's title copies (COMPANY_APP_URL).
+            "app_url": pitch.APP_URL,
             # The page hides the "draft it for me" box rather than offering a
             # button that can only fail.
             "ai": bool(os.getenv("ANTHROPIC_API_KEY"))}
