@@ -1349,7 +1349,9 @@ Each is covered by test_failure_points.py unless noted.
   emailed that exact order — reported `sent`, `already_sent: true`, with their ORIGINAL
   `order_number` (each result carries its own). Changed items are a new order and go. A failed
   claim can be retried; a 'sending' one older than `SEND_STALE_MINUTES` (10) — a request that
-  died — can be taken over. No DB connection is held while Resend answers, and the Past Orders
+  died — can be taken over; a 'sent' one answers retries for `SEND_DEDUPE_HOURS` (12) only, so
+  a stale ref can never swallow next week's identical order (a missed delivery is worse than a
+  duplicate). The app clears its ref with the draft (86d-mobile InventoryContext). No DB connection is held while Resend answers, and the Past Orders
   record is written in its own transaction AFTER the sends: it used to share theirs, so a
   failure after the emails had gone rolled it back and answered 500, and the manager sent the
   order again. Now `ORDER_HISTORY_FAILED` is logged and the response still says what went. Old

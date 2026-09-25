@@ -2729,6 +2729,12 @@ def _next_order_number(conn, cursor, user_id: str) -> int:
 # A claim still 'sending' after this long belonged to a request that died
 # (a restart mid-send); it can be taken over rather than blocking the order.
 SEND_STALE_MINUTES = 10
+# A 'sent' claim only answers retries this long. A retry after a lost
+# response comes within minutes; the same ref turning up much later with the
+# same items (say, a bar that orders the same two bottles every week, if the
+# app ever failed to start a new ref) is a NEW order, and swallowing it as
+# "already sent" would be a missed delivery — worse than the duplicate.
+SEND_DEDUPE_HOURS = 12
 
 
 def _items_hash(items: list[dict]) -> str:
@@ -2741,8 +2747,10 @@ def _claim_send(user_id: str, ref: str, dist_id: str, ihash: str):
     """Take the right to email this distributor this order under `ref`.
     None means it's ours to send; otherwise the claim someone already holds
     ({status, order_number, email}) — 'sent', or 'sending' right now."""
-    now = now_iso()
-    stale = (datetime.now(timezone.utc) - timedelta(minutes=SEND_STALE_MINUTES)).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    stale = (now_dt - timedelta(minutes=SEND_STALE_MINUTES)).isoformat()
+    expired = (now_dt - timedelta(hours=SEND_DEDUPE_HOURS)).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -2753,8 +2761,9 @@ def _claim_send(user_id: str, ref: str, dist_id: str, ihash: str):
                SET status = 'sending', error = NULL, updated_at = EXCLUDED.updated_at
              WHERE order_sends.status = 'failed'
                 OR (order_sends.status = 'sending' AND order_sends.updated_at < %s)
+                OR (order_sends.status = 'sent' AND order_sends.updated_at < %s)
             RETURNING status
-        """, (user_id, ref, dist_id, ihash, now, now, stale))
+        """, (user_id, ref, dist_id, ihash, now, now, stale, expired))
         if cursor.fetchone():
             conn.commit()
             return None
