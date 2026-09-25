@@ -88,8 +88,8 @@
   .pipebar button{flex:none;white-space:nowrap}
   /* Open / Dead — the CRM tab's only two views. */
   /* WHERE THINGS STAND: the same three-line shape on every row, told apart
-     by an icon and by weight, not by colour. Red is kept for one thing —
-     a follow-up you've missed or never booked. */
+     by an icon and by weight, never by colour — no red anywhere in it (the
+     owner's call: red read as alarm, not information). */
   .stands{font-size:13px;line-height:1.35;min-width:240px}
   .sl{display:flex;gap:8px;align-items:flex-start}
   .sl+.sl{margin-top:4px}
@@ -100,7 +100,6 @@
   .sl.prior{font-size:12.5px;color:var(--text3)}
   .sl.next{color:var(--text2)}
   .sl.next.now{color:var(--text);font-weight:600}
-  .sl.next.late{color:var(--stop);font-weight:600}
   .sl.quiet{color:var(--text3);font-weight:400}
   /* REACHED OUT: one big number, what it's made of underneath. */
   th.reach,td.reach{text-align:center}
@@ -1896,8 +1895,9 @@ document.addEventListener('click', e=>{
         went, an email, a Facebook message, or their reply
      2. how the last CALL went, when line 1 isn't a call (grey) — emailing
         after a voicemail must not hide the voicemail
-     3. what's next (grey; bold when it's today; red only when it's overdue,
-        or when someone was reached and nothing is booked)
+     3. what's next, only when something IS next (grey; bold when it's due
+        today or was due already — never red). No follow-up booked means no
+        third line: none is assumed unless the log sets one
    An icon per kind of thing instead of colours. It used to be built from the
    lead's stored last_outcome alone, which an email overwrites with
    "emailed" — a value this screen had no words for — so a call and then an
@@ -1998,11 +1998,9 @@ function standing(l, today){
              : callOutcome==='gatekeeper'?'Call back for the manager'
              : reached||!call?'Follow up'
              : `Call again (call ${Math.min(tries+1,MAX_ATTEMPTS)} of ${MAX_ATTEMPTS})`;
-    if(due<today) add('next',`${verb} — overdue since ${niceDay(due,today)}`,'next late');
+    if(due<today) add('next',`${verb} — was due ${niceDay(due,today)}`,'next now');
     else add('next',`${verb} ${niceDay(due,today)}`, due===today?'next now':'next');
   }
-  else if(reached) add('next','No follow-up set — pick a date','next late');
-  else add('next','No follow-up set','next');
   return out;
 }
 function standHtml(st){
