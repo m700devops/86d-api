@@ -4714,7 +4714,10 @@ class _Answer:
             "label_supported": self.label_supported,
             "product_id": self.product_id, "method": self.method,
             "provider_ms": self.provider_ms,
+            # Everything it takes to price this call: cached input bills at a
+            # fraction of the rest, and output includes any thinking.
             "input_tokens": self.stats.get("input_tokens"),
+            "cached_tokens": self.stats.get("cached_tokens"),
             "output_tokens": self.stats.get("output_tokens"),
             "thinking_tokens": self.stats.get("thinking_tokens"),
         }

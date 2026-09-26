@@ -427,7 +427,17 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   `thinking_tokens` is how much of it was thinking, also OpenAI reasoning models' `reasoning_tokens`,
   and is stored in `scan_events.thinking_tokens`) (grep Render logs for `SCAN `; it also carries `path` = fast | both | window | single and
   `second_opinion`), and a `scan_events` row written in the background (plus `second_provider` and
-  `second_answer`, the other provider's reading as JSON)
+  `second_answer`, the other provider's reading as JSON — with its input, cached, output and thinking
+  tokens, so BOTH calls of every scan can be priced). **The real cost per scan** comes from these rows,
+  never from estimates (cached input bills at a fraction of the rest; Gemini's thinking and caching
+  can't be known in advance): tokens per call by provider since a date —
+  `WITH calls AS (SELECT provider, input_tokens, cached_tokens, output_tokens, thinking_tokens FROM
+  scan_events WHERE created_at > '<date>' UNION ALL SELECT second_answer::json->>'provider',
+  (second_answer::json->>'input_tokens')::int, (second_answer::json->>'cached_tokens')::int,
+  (second_answer::json->>'output_tokens')::int, (second_answer::json->>'thinking_tokens')::int FROM
+  scan_events WHERE created_at > '<date>' AND second_answer IS NOT NULL) SELECT provider, count(*),
+  avg(input_tokens), avg(cached_tokens), avg(output_tokens), avg(thinking_tokens) FROM calls GROUP BY
+  provider` — times the providers' current prices; the provider billing pages are the check
   (`_record_scan_event`, never fails a scan; `SCAN_EVENT_FAILED` if it does). The response carries
   `scan_id`; the app keeps it on the bottle row and `PUT /inventory/draft` records the product that
   row holds now in `final_product_id` (`_scan_finals`, after the draft's own commit, in its own

@@ -162,7 +162,7 @@ def providers(monkeypatch):
                     raise
                 if isinstance(outcome, BaseException):
                     raise outcome
-                stats["input_tokens"] = 100
+                stats.update(input_tokens=100, cached_tokens=60, output_tokens=20, thinking_tokens=5)
                 return outcome
             return call
         if openai:
@@ -240,7 +240,11 @@ def test_fast_path_answers_before_the_slow_provider_and_logs_its_verdict(provide
     assert (response.matched_product_id, response.match_method) == ("p-jd", "bar_book")
     assert (event["path"], event["provider"]) == ("fast", "gemini")
     assert event["second_opinion"] == "agree"              # logged once the slow one landed
-    assert json.loads(event["second_answer"])["provider"] == "openai"
+    second = json.loads(event["second_answer"])
+    assert second["provider"] == "openai"
+    # Everything it takes to price the call that wasn't used (cached input is half price)
+    assert {k: second[k] for k in ("input_tokens", "cached_tokens", "output_tokens", "thinking_tokens")} == \
+        {"input_tokens": 100, "cached_tokens": 60, "output_tokens": 20, "thinking_tokens": 5}
     assert writes == [{"name": "Old No. 7", "product_id": "p-jd", "allow_create": True}]  # counted once
 
 
