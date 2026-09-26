@@ -2047,10 +2047,37 @@ def _winning_emails(limit: int = WINNERS_SHOWN) -> list:
             for r in rows if r["body"]]
 
 
-def _draft_context(row: dict, include_log: bool = True) -> str:
+def _sent_emails_to(lead_id: str, limit: int = 3) -> list:
+    """Our latest emails to this lead, oldest first, each marked with whether
+    a reply came back after it — so a follow-up builds on them instead of
+    repeating them, and knows which thread to answer in."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            # A reply is matched the way _touch_stories matches one: mail the
+            # reader tied to this lead (lead_ids is comma-joined), filed after
+            # ours went.
+            cursor.execute("""
+                SELECT e.subject, e.body, e.sent_at, e.to_addr,
+                       EXISTS (SELECT 1 FROM crm_inbox i
+                                WHERE i.status IN ('updated', 'no_change')
+                                  AND e.lead_id = ANY(string_to_array(COALESCE(i.lead_ids, ''), ','))
+                                  AND i.processed_at > e.sent_at) AS replied
+                  FROM crm_sent_emails e
+                 WHERE e.lead_id = %s
+                 ORDER BY e.sent_at DESC LIMIT %s
+            """, (lead_id, limit))
+            rows = [dict(r) for r in cursor.fetchall()]
+    except Exception as exc:
+        print(f"[crm] sent emails unavailable: {exc}", flush=True)
+        return []
+    return list(reversed(rows))
+
+
+def _draft_context(row: dict, include_log: bool = True, sent: Optional[list] = None) -> str:
     """WHAT WE KNOW about this bar: its facts with their sources, the
-    prep-sheet points and (for a first email or a reply; a follow-up's ask
-    carries its own) what's been logged."""
+    prep-sheet points, (for a first email or a reply; a follow-up's ask
+    carries its own) what's been logged, and the emails we already sent them."""
     import pitch
     import venue
 
@@ -2063,7 +2090,9 @@ def _draft_context(row: dict, include_log: bool = True) -> str:
         log = (lead.get("notes") or "").strip()
         if len(log) > DRAFT_LOG_CHARS:
             log = "…" + log[-DRAFT_LOG_CHARS:]
-    return pitch.lead_context(lead, lines, points, log)
+    if sent is None:
+        sent = _sent_emails_to(row["id"])
+    return pitch.lead_context(lead, lines, points, log, sent)
 
 
 def _draft_system() -> str:
@@ -2072,7 +2101,8 @@ def _draft_system() -> str:
 
 
 def _write_draft(row: dict, ask: str, include_log: bool = True,
-                 to_decision_maker: bool = False) -> dict:
+                 to_decision_maker: bool = False, kind: str = "first",
+                 brief: str = "", outreach: bool = True) -> dict:
     """One draft: the cached system (sheet, brain, examples, style), then this
     bar and what to write. Shared by the Email button and the inbox reader's
     overnight replies, so both write from the same brain.
@@ -2082,17 +2112,55 @@ def _write_draft(row: dict, ask: str, include_log: bool = True,
     made to greet the decision maker by name; a reply answers whoever wrote,
     and a revision keeps the greeting the draft already has."""
     import pitch
-    out = _claude_json(_draft_system(), pitch.user_prompt(_draft_context(row, include_log), ask),
-                       pitch.SCHEMA, max_tokens=AI_MIN_TOKENS, timeout=120.0, purpose="draft")
-    subject = str(out.get("subject") or "").strip()[:200]
-    body = str(out.get("body") or "").strip()[:20000]
+    system = _draft_system()
+    sent = _sent_emails_to(row["id"])
+    context = _draft_context(row, include_log, sent)
+    known = f"{context}\n{ask}"
+
+    # Threads we can honestly answer in: emails that went to the address this
+    # one will (a "Re:" to Jed on a thread only Brent ever saw is a fake one).
+    to_now = (row.get("email") or "").strip().lower()
+    threads = [e.get("subject") for e in sent
+               if not to_now or (e.get("to_addr") or "").strip().lower() == to_now]
+
+    def parsed(out: dict) -> tuple:
+        subject = str(out.get("subject") or "").strip()[:200]
+        if kind != "reply":
+            # "Re:" only on a thread we really started (a reply keeps theirs).
+            subject = pitch.honest_re(subject, threads)
+        return subject, str(out.get("body") or "").strip()[:20000]
+
+    subject, body = parsed(_claude_json(system, pitch.user_prompt(context, ask), pitch.SCHEMA,
+                                        max_tokens=AI_MIN_TOKENS, timeout=120.0,
+                                        purpose="draft"))
+    # The checker (pitch.lint): template phrases, spam bait, invented figures,
+    # a second link, shouting, a wall of text. A draft that trips it goes back
+    # ONCE with the list, and the version with fewer problems is kept — a
+    # person reading it, and their spam filter, are the audience.
+    problems = pitch.lint(subject, body, kind, brief, known) if subject and body else []
+    if problems:
+        try:
+            f_subject, f_body = parsed(_claude_json(
+                system, pitch.user_prompt(context, f"{ask}\n\n---\n\nYour draft:\n\nSubject: "
+                                          f"{subject}\n\n{body}\n\n---\n\n"
+                                          + pitch.lint_ask(problems)),
+                pitch.SCHEMA, max_tokens=AI_MIN_TOKENS, timeout=120.0, purpose="draft-fix"))
+            if f_subject and f_body:
+                still = pitch.lint(f_subject, f_body, kind, brief, known)
+                if len(still) <= len(problems):
+                    subject, body, problems = f_subject, f_body, still
+        except Exception as exc:
+            print(f"[crm] DRAFT_FIX_FAILED {exc}", flush=True)
     if not subject or not body:
         raise HTTPException(status_code=502, detail={
             "error": "draft_incomplete",
             "message": "The draft came back empty — try saying it a different way."})
     if to_decision_maker:
         body = pitch.address_to(body, pitch.first_name(pitch.decision_maker(dict(row))[0]))
-    return {"subject": subject, "body": pitch.sign(body)}
+    signed = pitch.sign(body)
+    if outreach and pitch.outreach_footer():
+        signed += "\n\n" + pitch.outreach_footer()
+    return {"subject": subject, "body": signed, "checks": problems}
 
 
 def _reply_ask(mail: dict, brief: str = "") -> str:
@@ -2915,8 +2983,19 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
         ask = _followup_ask(lead, brief)
     else:
         ask = f"Write the email. What it needs to say: {brief}"
+    import pitch
+    if data.reply_to:
+        kind = "reply"
+    elif revising:
+        kind = "revision"
+    else:
+        kind = "followup" if followup else "first"
+    # A reply answers someone who wrote to us; everything else is outreach and
+    # carries the opt-out line. A revision keeps whatever the draft had.
+    outreach = not data.reply_to and (not revising or pitch.OPT_OUT_LINE in (data.body or ""))
     return _write_draft(row, ask, include_log=not followup,
-                        to_decision_maker=not revising and not data.reply_to)
+                        to_decision_maker=not revising and not data.reply_to,
+                        kind=kind, brief=brief, outreach=outreach)
 
 
 class OutgoingEmail(BaseModel):
@@ -2937,6 +3016,8 @@ def mail_status(_: bool = Depends(require_crm_key)):
     import pitch
     return {"configured": mailer.is_configured(), "from": mailer.sender(),
             "host": mailer.HOST, "port": mailer.PORT, "signature": pitch.SIGNATURE,
+            # Under the signature on outreach: the way out (+ postal address).
+            "footer": pitch.outreach_footer(),
             # What clicking the page's title copies (COMPANY_APP_URL).
             "app_url": pitch.APP_URL,
             # The page hides the "draft it for me" box rather than offering a
@@ -2990,8 +3071,10 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
         return _queue_email(lead, to, data)
 
     reply_to = (data.in_reply_to or "").strip() or None
+    # Answering their email, or else a follow-up in our own earlier thread.
+    parent = reply_to or _thread_parent_for(lead_id, data.subject, to)
     try:
-        sent = mailer.send(to, data.subject, data.body, in_reply_to=reply_to)
+        sent = mailer.send(to, data.subject, data.body, in_reply_to=parent)
     except mailer.MailNotConfigured as exc:
         raise HTTPException(status_code=503, detail={
             "error": "mail_not_configured", "message": str(exc)})
@@ -3017,6 +3100,55 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
 
     return {"lead": _lead_row(updated), "undo_id": undo_id, "sent": sent,
             "counters": _counters_row(counters) if counters else None}
+
+
+def _thread_parent(cursor, lead_id: str, subject: Optional[str],
+                   to_addr: Optional[str] = None) -> Optional[str]:
+    """A follow-up titled "Re: <an earlier email's subject>" goes out as a
+    reply IN that thread: the Message-ID of the latest email we sent this
+    lead under that subject — to this same address, when one is given (the
+    new manager never saw the thread with the old one) — or None. A bump in
+    the same conversation reads like a person, keeps the context above it,
+    and doesn't look like a fresh cold blast to the filter.
+
+    The stored email and its Message-ID are separate rows, paired by lead and
+    send time. Within two minutes rather than equal: the scheduled sender used
+    to stamp the two with separate clocks, microseconds apart."""
+    import pitch
+    base = pitch.thread_base(subject)
+    if not base:
+        return None
+    to = (to_addr or "").strip().lower()
+    cursor.execute("""
+        SELECT m.message_id
+          FROM crm_sent_emails e
+          JOIN crm_sent_messages m ON m.lead_id = e.lead_id
+         WHERE e.lead_id = %s
+           AND lower(btrim(regexp_replace(e.subject, '^(\\s*re\\s*:\\s*)+', '', 'i'))) = %s
+           AND (%s = '' OR lower(e.to_addr) = %s)
+           AND abs(extract(epoch FROM m.sent_at::timestamptz - e.sent_at::timestamptz)) < 120
+         ORDER BY e.sent_at DESC,
+                  abs(extract(epoch FROM m.sent_at::timestamptz - e.sent_at::timestamptz))
+         LIMIT 1
+    """, (lead_id, base, to, to))
+    row = cursor.fetchone()
+    return row["message_id"] if row else None
+
+
+def _thread_parent_for(lead_id: str, subject: Optional[str],
+                       to_addr: Optional[str] = None) -> Optional[str]:
+    """`_thread_parent` on its own connection, for the send paths. Threading
+    is a nicety: a failed lookup sends the email unthreaded, never not at
+    all — and a subject that isn't a "Re:" costs no query."""
+    import pitch
+    if not pitch.thread_base(subject):
+        return None
+    try:
+        with get_db() as conn:
+            return _thread_parent(conn.cursor(), lead_id, subject, to_addr)
+    except Exception as exc:
+        print(f"[crm] thread lookup failed: {exc}", flush=True)
+        return None
 
 
 def _queue_email(lead, to: str, data) -> dict:
@@ -3269,8 +3401,10 @@ def run_due_emails(limit: int = 20) -> dict:
                   f"{job['to_addr']} — window gone", flush=True)
             continue
 
+        parent = _thread_parent_for(job["lead_id"], job["subject"], job["to_addr"])
         try:
-            sent_msg = mailer.send(job["to_addr"], job["subject"], job["body"])
+            sent_msg = mailer.send(job["to_addr"], job["subject"], job["body"],
+                                   in_reply_to=parent)
         except Exception as exc:
             failed += 1
             # Left as 'failed' rather than retried forever: a bad address or a
@@ -3296,15 +3430,19 @@ def run_due_emails(limit: int = 20) -> dict:
             continue
 
         sent += 1
+        # ONE timestamp for every record of this send: the Message-ID and the
+        # stored email are paired on it when a later follow-up threads under
+        # this one (_thread_parent). Not `now`: that is the claim cutoff above.
+        sent_at = now_iso()
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE crm_scheduled_emails SET status = 'sent', sent_at = %s "
-                " WHERE id = %s", (now_iso(), job["id"]))
+                " WHERE id = %s", (sent_at, job["id"]))
             try:
-                _remember_sent(cursor, sent_msg.get("message_id"), job["lead_id"], now_iso())
+                _remember_sent(cursor, sent_msg.get("message_id"), job["lead_id"], sent_at)
                 _record_email_sent(cursor, job["lead_id"], job["to_addr"],
-                                   job["subject"], _today(), now_iso(), body=job["body"])
+                                   job["subject"], _today(), sent_at, body=job["body"])
             except Exception as exc:
                 # The mail is already gone; a bookkeeping failure must not make
                 # it look unsent. Say so loudly and keep the 'sent' status.
@@ -5196,7 +5334,7 @@ def process_inbox(days: int = 3) -> dict:
             # Giving up on reading it must never mean ignoring "stop emailing
             # me": the plain-words check needs no model, and an opt-out has to
             # be honoured (CAN-SPAM) however the rest of the mail went.
-            if lead_ids and _inbox.looks_like_opt_out(mail.get("text")):
+            if lead_ids and _inbox.looks_like_opt_out(_inbox.opt_out_text(mail)):
                 try:
                     _record_opt_out(mail, lead_ids)
                     result = {**(result or {}), "opt_out": True}
@@ -5250,7 +5388,7 @@ def _read_reply(mail: dict, lead_ids: list) -> dict:
                        purpose="inbox")
     proposed = out.get("changes") if isinstance(out.get("changes"), list) else []
     # An opt-out is honoured whatever the model thought, if the words say so.
-    opt_out = bool(out.get("opt_out")) or _inbox.looks_like_opt_out(mail.get("text"))
+    opt_out = bool(out.get("opt_out")) or _inbox.looks_like_opt_out(_inbox.opt_out_text(mail))
     if opt_out:
         proposed = []           # _record_opt_out does the writing, and nothing else should
     applied, skipped = _apply_proposed(proposed, back, text, today, allow_logged=False)
@@ -5307,7 +5445,8 @@ def _reply_draft_for(mail: dict, lead_id: str) -> Optional[dict]:
             row = cursor.fetchone()
         if not row:
             return None
-        draft = _write_draft(row, _reply_ask({**mail, "body_text": mail.get("text")}))
+        draft = _write_draft(row, _reply_ask({**mail, "body_text": mail.get("text")}),
+                             kind="reply", outreach=False)
         return {**draft, "to": mail.get("from_addr"), "lead_id": lead_id}
     except Exception as exc:
         print(f"[crm] INBOX_DRAFT_FAILED {mail.get('subject')!r}: {exc}", flush=True)

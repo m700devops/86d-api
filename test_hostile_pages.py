@@ -23,6 +23,7 @@ import contacts  # noqa: E402
 import crm  # noqa: E402
 import inbox  # noqa: E402
 import leadgen  # noqa: E402
+import pitch  # noqa: E402
 import venue  # noqa: E402
 
 N = 800_000
@@ -39,6 +40,8 @@ SHAPES = {
     "quotes": "\n> " * (N // 3), "dashes": "-" * N, "on": "On " * (N // 3),
     "spirits and food": "bourbon pecan whiskey glaze vodka sauce martinique " * (N // 50),
     "selection of": "selection of the best " * (N // 22), "beer and": "beer and " * (N // 9),
+    "capitals": "WORD " * (N // 5), "percents": "9% " * (N // 3),
+    "bullets": "\n  \t" * (N // 4), "re re": "re: " * (N // 4),
 }
 
 
@@ -68,6 +71,10 @@ READERS = {
     "chain check": lambda h: leadgen.looks_like_chain("Olde Town", "https://x.com", h),
     "reply text": inbox.new_text,
     "opt-out check": inbox.looks_like_opt_out,
+    "opt-out subject": lambda h: inbox.opt_out_text({"subject": h[:300], "text": h}),
+    # A reply draft can echo their email back: the checker reads it all.
+    "draft checker": lambda h: pitch.lint(h[:200], h, "first", h[:2000], h),
+    "draft checker, reply": lambda h: pitch.lint("Re: " + h[:200], h, "reply", "", h[:4000]),
     "html email": lambda h: inbox.parse(_mail("html", h)),
     "plain email": lambda h: inbox.parse(_mail("plain", h)),
 }

@@ -1170,6 +1170,13 @@ function refreshSendLabel(dr){
   btn.textContent = chosenTime(dr) ? 'Schedule it' : 'Send it now';
 }
 
+/* What the server's draft checker (pitch.lint) still flagged after its one
+   fix round: a template phrase, a second link, an invented figure. Shown so
+   the operator can fix it by hand or ask for a change — never enforced. */
+const draftNote=(r, ok)=>(r.checks&&r.checks.length)
+  ? 'Drafted. Before you send, worth a look: '+r.checks.slice(0,3).join(' · ')
+  : ok;
+
 async function runDraft(dr, id){
   const brief=dr.querySelector('[data-brief]');
   const btn=dr.querySelector('[data-draft]');
@@ -1193,7 +1200,7 @@ async function runDraft(dr, id){
     brief.value='';
     brief.placeholder='Not right? Say what to change — "shorter", "mention the free trial", "he asked about price"';
     btn.textContent='Redraft';
-    box.className='applied'; box.textContent='Drafted. Edit it yourself or ask for a change, then Send.';
+    box.className='applied'; box.textContent=draftNote(r, 'Drafted. Edit it yourself or ask for a change, then Send.');
   }catch(err){
     box.className='applied err'; box.textContent=err.message;
     btn.textContent=dr.dataset.drafted?'Redraft':'Draft it';
@@ -1414,11 +1421,13 @@ function renderWhereInfo(box, d, l){
       +'change where it sits on the list.</div>':'');
 }
 
-const MAIL_SUBJECT = "Following up — 86'd bar inventory";
+const MAIL_SUBJECT = "86'd, the app from our call";
 /* The hand-written starting point, for when nobody asks the AI. Addressed to
    the decision maker by first name (the lead's contact is who we ask for),
-   and signed exactly the way every AI draft is (the server's signature, from
-   /mail/status, so the two can't drift). */
+   written to the drafter's own rules (one picture, the risk taken away, the
+   App Store link as the only link, one easy ask), and signed exactly the way
+   every AI draft is: the server's signature and the opt-out line under it,
+   from /mail/status, so the two can't drift. */
 const SIGNATURE_DEFAULT="Stephan Khouri\nOwner of 86'd Bar inventory\nWebsite: My86d.com";
 const ROLE_WORDS=new Set(['the','owner','owners','gm','manager','bar','general','head','a','an','bartender','host','hostess','staff','team','someone','unknown']);
 const firstName=n=>{ for(const w of String(n||'').split('(')[0].match(/[A-Za-z][A-Za-z'’-]*/g)||[])
@@ -1426,14 +1435,17 @@ const firstName=n=>{ for(const w of String(n||'').split('(')[0].match(/[A-Za-z][
 const mailBody=(contact,venue)=>
 `Hi ${firstName(contact)||'there'},
 
-Thanks for taking my call. 86'd is an iPhone app that counts your bar by
-pointing the camera at each bottle — it identifies it, you tap in the count,
-and it builds and emails the order to each distributor.
+Thanks for taking my call. Here's the app I mentioned.
 
-Happy to walk you through it whenever suits.
+You point your iPhone at each bottle, it knows what it is, and you tap in the count. Then every distributor gets its order at once. The count and the orders take 10 to 15 minutes.
+
+The first month is free, no card to start:
+${(MAIL&&MAIL.app_url)||APP_URL_DEFAULT}
+
+Worth trying on your next count?
 
 Best,
-${(MAIL&&MAIL.signature)||SIGNATURE_DEFAULT}`;
+${(MAIL&&MAIL.signature)||SIGNATURE_DEFAULT}${MAIL&&MAIL.footer?'\n\n'+MAIL.footer:''}`;
 
 /* Whether the server can send for us. Decided once, on unlock: with a mailbox
    configured the Email button opens a compose box and the send is recorded
@@ -2573,7 +2585,7 @@ async function openFollowupEmail(tr){
     d.dataset.drafted='1';
     d.querySelector('[data-brief]').placeholder='Not right? Say what to change — "shorter", "mention the free trial", "he asked about price"';
     btn.textContent='Redraft';
-    box.textContent='Drafted from your notes. Read it, edit anything, then Send.';
+    box.textContent=draftNote(r, 'Drafted from your notes. Read it, edit anything, then Send.');
   }catch(err){
     box.className='applied err'; box.textContent=err.message;
   }finally{ btn.disabled=false; }
