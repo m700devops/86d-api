@@ -201,8 +201,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   an out-of-office changes nothing unless it names a new contact; never "logged"; plus two
   flags only an inbound email has (`INBOX_SCHEMA` = assist.SCHEMA + `opt_out`, `needs_reply`).
   `looks_like_opt_out()` is a deliberately NARROW backstop ("unsubscribe", "stop emailing",
-  "take us off your list" — never "remove me from the CC", which is routing). Covered by
-  test_inbox.py and test_inbox_replies.py
+  "take us off your list" — never "remove me from the CC", which is routing). It reads the
+  text and a subject THEY wrote (`opt_out_text()` / `their_subject()`): a mail whose subject
+  alone says "Unsubscribe" is read and honoured, while our own subject quoted back in "Re: …"
+  never counts — a drafted subject like "stop sending orders at 1am" must not read as their
+  opt-out. Covered by test_inbox.py, test_inbox_replies.py and test_drafter.py
 - **`process_inbox()` (crm.py) runs every `CRM_INBOX_POLL_MINUTES` (5) from main.py's
   `_inbox_loop`**: `mailer.fetch_recent()` reads INBOX **read-only with BODY.PEEK** — nothing
   is marked read, the operator still sees every reply as new — and each message not yet in
@@ -313,7 +316,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_order_numbers.py test_film.py test_failure_points.py
-  test_owner_rules.py test_lookup_check.py test_data_quality.py -q` (633
+  test_owner_rules.py test_lookup_check.py test_data_quality.py test_drafter.py -q` (688
   tests; test_timezones.py (37 more) needs a dummy `DATABASE_URL` and runs on its own; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
@@ -1085,9 +1088,10 @@ capture. Don't reintroduce them or describe them as current.)
   works", what's on every order, first month free with no card, then $29.99/month, the App
   Store link and the website — each checked against this repo. `EXAMPLE_EMAIL` is the
   owner's own email, given as the reference for substance; `STYLE` asks for more human than
-  that (open with THEM, a founder who has counted bottles at 1am, one easy next step, a
-  2-6 word subject, the App Store link in every email) and keeps the hard rule: no fact,
-  number or URL that isn't on the sheet or in WHAT WE KNOW. `_draft_system(row)` builds WHAT
+  that (relevance first, the founder's own voice with no invented backstory, one easy ask, a
+  short lowercase subject, the App Store link as the only link — see "The drafter is
+  CHECKED" below) and keeps the hard rule: no fact, number or URL that isn't on the sheet or
+  in WHAT WE KNOW. `_draft_system(row)` builds WHAT
   WE KNOW from the lead's venue facts (with sources), the cached prep-sheet points and — for
   a first email; a follow-up's ask carries its own — the logged history. **The owner's sample
   claimed "a unique order number" before the distributor email had one, so the sheet left it
@@ -1129,6 +1133,61 @@ capture. Don't reintroduce them or describe them as current.)
   (first email, follow-up); a reply answers whoever wrote, and a revision keeps its greeting.
   The compose box's hand-written starting text uses the same first-name greeting and the same
   signature (`/mail/status` returns it). Covered by test_pitch.py
+- **The drafter is CHECKED, not just asked** (`pitch.lint()` → `crm._write_draft()`). The bar
+  is the owner's: good, informative, human, never a robot, rarely spam — and a spam filter
+  reads the same signals a person does. STYLE is written around what works in cold email now:
+  relevance first (a line only true of THIS bar), one picture not a feature list, the risk
+  taken away once (free month, no card, cancel any time), ONE easy yes/no ask (interest, not a
+  meeting), short (60-150 words first, 30-90 follow-up), no pressure, a lowercase human subject
+  with no "free"/"trial"/"$"/"%"/"!", and NEVER a backstory for the founder — nothing on the
+  sheet says he tended bar, and an invented line about himself is the one a bar owner
+  remembers. `lint()` catches in code what a prompt can only ask: template phrases
+  (`ROBOT_PHRASES`, curly apostrophes straightened), spam bait (`SPAM_PHRASES`), social proof,
+  statistics and backstory the sheet doesn't have (`UNBACKED_CLAIMS`, any percentage), more
+  than one link (the website is already in the signature), 2+ "!", 3+ dashes, markdown or
+  bullets, a P.S., shouting, over `LIMITS` words, a marketing subject. What the drafter was
+  TOLD (WHAT WE KNOW + the ask) is exempt — the bar's name in capitals, a figure the owner
+  quoted — and the salesperson's brief wins (asked for the website link or a long email, that
+  check stands down; a revision is never judged on length); a reply keeps their subject and
+  any link they asked for. A failing draft goes back to the model ONCE with the list
+  (`lint_ask()`, logged as `AI_USAGE draft-fix`) and the version with FEWER problems is kept;
+  whatever still fails comes back as `checks` and is shown under the draft ("Before you send,
+  worth a look: …") — shown, never enforced. The checker must stay linear (a reply draft can
+  echo a stranger's email): it's in test_hostile_pages.py, where the first versions of the
+  bullet and percentage patterns ran 20s+ on one input. Checked against the owner's own
+  example email, the compose box's default and six realistic good drafts: none flagged
+- **Follow-ups build on what was SENT, and thread.** `_sent_emails_to()` puts our last 3
+  emails to the bar in WHAT WE KNOW (subject, body, and whether a reply came in after it —
+  matched the way `_touch_stories` matches one), so a follow-up never repeats the first email,
+  brings one new thing, and after 2+ unanswered becomes a short, gracious last note. A
+  follow-up subject "Re: <our earlier subject>" goes out IN that thread: `_thread_parent()`
+  finds the Message-ID of the latest email we sent this lead under that subject AT THE SAME
+  ADDRESS (Brent left and Jed is the contact now: Jed never saw Brent's thread, so no "Re:"
+  to it), and both send paths (send-now and the scheduled worker) pass it as
+  In-Reply-To/References. The stored email
+  and its Message-ID are separate rows, paired by send time within two minutes rather than
+  equality: `run_due_emails` used to stamp them with two `now_iso()` calls microseconds apart
+  (it now takes one `sent_at`; its own `now` is the claim cutoff and must not move mid-run).
+  A failed lookup sends unthreaded, never not at all (`_thread_parent_for`), and our own
+  parent is never stamped as an answered inbox reply. A "Re:" with no email of ours behind it
+  comes off a drafted subject (`pitch.honest_re()`, same-address rule): a fake "Re:" is the
+  oldest trick in cold email and a deceptive subject line under CAN-SPAM. Both queries were run on a real Postgres 16
+- **Every OUTREACH email ends with a plain-words way out** under the signature
+  (`pitch.outreach_footer()`: `OPT_OUT_LINE` — "Not the right person, or not something you
+  need? Just reply and say so, and I won't email again." — plus `COMPANY_POSTAL_ADDRESS` when
+  set). CAN-SPAM wants a working opt-out AND a physical postal address on a commercial email,
+  so **COMPANY_POSTAL_ADDRESS should be set on Render**. It also turns "report spam" (what gets
+  a small sender filtered) into "reply no thanks", which the inbox reader files as an opt-out.
+  Never on a reply to someone who wrote to us; a revision keeps it only if the draft on screen
+  had it; `sign()` strips it before re-signing so it can't double
+- **Deliberately NO `List-Unsubscribe` header** (nor Precedence / List-Id): a person's mail
+  client never sets them, and they are what files a message as bulk (Gmail's Promotions tab).
+  The From line carries a person's name — `SPACEMAIL_FROM_NAME`, else the signature's first
+  line, "Stephan Khouri" — because a bare address reads as automated. DNS for my86d.com
+  (checked 2026-09-26): SPF includes spf.spacemail.com, DKIM `spacemail._domainkey` and DMARC
+  (`p=none`, reports to dmarc@my86d.com) are published and MX is Spacemail's. Moving DMARC to
+  `p=quarantine` once its reports look clean is the next deliverability step. Covered by
+  test_drafter.py
 - **ONE MODEL for every CRM AI: `CRM_AI_MODEL` (default `claude-opus-5`) at `CRM_AI_EFFORT`
   (default `medium`)**, the owner's call — notes reader, quick-add, prep sheet, Ask AI, AI
   bar, inbox reader, drafter, School. A NEW env name on purpose: `ANTHROPIC_MODEL` /
@@ -1188,7 +1247,8 @@ capture. Don't reintroduce them or describe them as current.)
 - Outgoing mail is PLAIN TEXT. A one-to-one note to a bar manager should look like a person
   wrote it; an HTML template reads as a blast and filters accordingly. `Date` and
   `Message-ID` are set explicitly — a message missing them is one of the cheapest spam
-  signals there is
+  signals there is — and so is a person's name on the From line; bulk-mail headers are left
+  off on purpose (see "Deliberately NO List-Unsubscribe" above)
 - **Everything on this screen is 12-hour.** Venue clocks, the operator's clock, call windows,
   and the connect-rate-by-hour table (`hour_label`). "13:45 there" is a small tax on every
   glance and this screen is glanced at constantly
@@ -1352,14 +1412,17 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   `https://apps.apple.com/us/app/86d-bar-inventory/id6798359825`), COMPANY_OWNER_NAME,
   COMPANY_OWNER_TITLE, COMPANY_PHONE, COMPANY_PRICE, COMPANY_SIGNATURE — override the master
   sheet's numbers and the email signature
-  (pitch.py). COMPANY_NAME and COMPANY_BLURB are no longer read. COMPANY_APP_URL used to
+  (pitch.py). COMPANY_POSTAL_ADDRESS — the physical address CAN-SPAM wants under every
+  outreach email (`\n` becomes ", "); unset, the footer is the opt-out line alone, so SET IT.
+  COMPANY_OPT_OUT_LINE overrides that line's wording. COMPANY_NAME and COMPANY_BLURB are no longer read. COMPANY_APP_URL used to
   default to empty, and asking the drafter for "the link to the app" got the website
   only, because it may not include a link it wasn't given. A blank env var falls back to
   the default rather than switching the link off
 - SPACEMAIL_USER / SPACEMAIL_PASSWORD — the mailbox the Email button sends from
   (`Stephan@my86d.com`). Unset means the button falls back to a `mailto:` link and nothing is
   recorded. SPACEMAIL_HOST (default `mail.spacemail.com`), SPACEMAIL_PORT (465),
-  SPACEMAIL_FROM_NAME and SPACEMAIL_TIMEOUT are optional
+  SPACEMAIL_FROM_NAME (default: the signature's first line, "Stephan Khouri") and
+  SPACEMAIL_TIMEOUT are optional
 - SPACEMAIL_IMAP_HOST / SPACEMAIL_IMAP_PORT — optional (default the SMTP host, 993): where
   sent copies are filed and replies are read. CRM_INBOX_POLL_MINUTES (5) and CRM_INBOX_BATCH
   (20) tune the inbox reader; it needs the mailbox AND `ANTHROPIC_API_KEY`, else it skips

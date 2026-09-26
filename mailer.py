@@ -59,6 +59,15 @@ class MailFailed(RuntimeError):
     """The send was attempted and didn't work. The message says why."""
 
 
+def _signature_name() -> str:
+    try:
+        import pitch
+        first = (pitch.SIGNATURE.split("\n")[0] or "").strip()
+    except Exception:
+        return ""
+    return first if re.fullmatch(r"[A-Za-z][A-Za-z .'’-]{1,60}", first) else ""
+
+
 def is_configured() -> bool:
     return bool(USER and PASSWORD)
 
@@ -92,7 +101,10 @@ def send(to: str, subject: str, body: str,
         raise MailFailed("The message is empty.")
 
     msg = EmailMessage()
-    msg["From"] = f"{FROM_NAME} <{USER}>" if FROM_NAME else USER
+    # A name on the From line: a bare address reads like an automated sender.
+    # Default: the first line of the signature ("Stephan Khouri").
+    name = FROM_NAME or _signature_name()
+    msg["From"] = f"{name} <{USER}>" if name else USER
     msg["To"] = to
     msg["Subject"] = subject.strip()
     msg["Reply-To"] = reply_to or USER
@@ -100,8 +112,14 @@ def send(to: str, subject: str, body: str,
     # Message-ID is one of the cheapest spam signals there is.
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid(domain=(parseaddr(USER)[1].split("@")[-1] or None))
-    # Answering their email: these two headers are what put the reply under
-    # theirs as one conversation, in their mail app and ours.
+    # Deliberately NO List-Unsubscribe / Precedence / List-Id: a person's mail
+    # client never sets them, and they are what files a message as bulk
+    # (Gmail's Promotions tab). The way out is the plain-words line under the
+    # signature (pitch.OPT_OUT_LINE) — "just reply and say so" — which is what
+    # CAN-SPAM asks for at this volume and what the inbox reader honours.
+    # Answering their email (or following up in our own thread): these two
+    # headers are what put it under the earlier message as one conversation,
+    # in their mail app and ours.
     parent = (in_reply_to or "").strip()
     if parent and re.fullmatch(r"<[^<>\s]{3,490}>", parent):
         msg["In-Reply-To"] = parent

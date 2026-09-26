@@ -47,8 +47,9 @@ def test_the_prompt_has_the_sheet_the_example_and_the_rules():
     p = pitch.system_prompt(pitch.lead_context({"name": "Rioja", "loc": "Denver, CO"}))
     assert "MASTER SHEET" in p and "Cut bar inventory to 15 minutes" in p
     assert "NEVER state a product fact" in p and "who owns 86'd" in p
-    assert "Open with THEM" in p                        # the human part
-    assert "App Store link in every email" in p
+    assert "RELEVANCE FIRST" in p and "ONE EASY ASK" in p      # the human part
+    assert "App Store link, on its own line" in p and "ONLY link in the body" in p
+    assert "Never give him a backstory" in p                  # nothing invented about him
 
 
 def test_what_we_know_is_only_whats_on_file():
@@ -323,7 +324,8 @@ def test_a_first_email_is_signed_and_greets_the_decision_maker(drafted, monkeypa
 
     monkeypatch.setattr(crm, "get_db", contextmanager(lambda: (yield _t.SimpleNamespace(cursor=lambda: _Cur())))) 
     out = crm.draft_lead_email("L1", crm.DraftRequest(brief="first email"))
-    assert out["body"] == "Hi Alex,\n\nBody.\n\nThanks,\n" + SIG
+    # Outreach: the opt-out line goes under the signature.
+    assert out["body"] == "Hi Alex,\n\nBody.\n\nThanks,\n" + SIG + "\n\n" + pitch.OPT_OUT_LINE
 
 
 def test_a_reply_answers_whoever_wrote(drafted, monkeypatch):

@@ -34,6 +34,25 @@ WEBSITE = os.getenv("COMPANY_WEBSITE") or "https://my86d.com"
 SIGNATURE = ((os.getenv("COMPANY_SIGNATURE") or "").replace("\\n", "\n").strip()
              or "Stephan Khouri\nOwner of 86'd Bar inventory\nWebsite: My86d.com")
 
+# Under the signature on every OUTREACH email (not on a reply to someone who
+# wrote to us). A plain-words way out does two jobs: it is what the law asks of
+# a sales email (CAN-SPAM: a way to opt out, and a physical postal address),
+# and it turns "report spam" into "reply no thanks" — spam reports are what
+# get a small sender's mail filtered, a "no thanks" costs nothing and the inbox
+# reader files it as an opt-out. The postal address is added when
+# COMPANY_POSTAL_ADDRESS is set; CAN-SPAM requires one, so it should be.
+OPT_OUT_LINE = (os.getenv("COMPANY_OPT_OUT_LINE") or "").strip() or (
+    "Not the right person, or not something you need? Just reply and say so, and I won't "
+    "email again.")
+POSTAL_ADDRESS = (os.getenv("COMPANY_POSTAL_ADDRESS") or "").replace("\\n", ", ").strip()
+
+
+def outreach_footer() -> str:
+    """What goes under the signature on outreach: the way out, and the
+    postal address when one is configured."""
+    return "\n".join(x for x in (OPT_OUT_LINE, POSTAL_ADDRESS) if x)
+
+
 # The owner's own email, sent as the example of what good looks like. Given
 # to the model as a reference for substance and structure, not a template to
 # copy word for word.
@@ -171,35 +190,71 @@ WHAT WE ASK FOR (one per email or call, never all three)
 - The name of whoever counts and orders, and when they're in."""
 
 
-STYLE = """HOW TO WRITE IT — founder to bar person, 2026, not a 2015 sales template
+STYLE = """HOW TO WRITE IT — one owner writing to another, not a sales team, not a template
 
-The human part comes first:
-- Open with THEM, not us. The first line is about their bar, their night, or the last
-  conversation — a real detail from WHAT WE KNOW below — then why you're writing. If we
-  know nothing specific, open with the job itself: the count at the end of a shift, the
-  clipboard, the orders typed up after close. Never a fake compliment, never "I hope this
-  finds you well", never "I came across your bar".
-- Sound like someone who has stood behind a bar at 1am counting bottles. Plain words,
-  contractions, short paragraphs. Warm, direct, a little dry. Zero hype.
-- If a person was spoken to, name them and what they said, the way you'd remind a friend.
-  A personal detail from the log (a pet, a busy weekend, a new menu) earns one friendly
-  line, never more.
+Every email has to pass one test: would a busy bar owner, reading it on their phone
+between deliveries, believe a real person wrote it to THEM? If a line could be sent to any
+bar in America unchanged, cut it or make it about this bar.
 
-The modern part:
-- One idea per email: inventory and ordering in 10-15 minutes. Don't list every feature.
-- The four-step "how it works" list is allowed and works well for a first email; keep it
-  to those steps. Skip it in a short follow-up unless they asked how it works.
-- Make trying it effortless: the free month, no card, download and go, and the App Store
-  link on its own line.
-- End with ONE easy next step. A low-pressure question they can answer in a word
-  ("Worth a look before your next order day?", "Want me to walk you through it on a
-  call?") or the direct line. Not both a meeting ask and a demo ask and a link ask.
-- Subject: 2-6 words, specific, reads like a person typed it. Their bar's name or the
-  outcome ("Rioja's Sunday count", "inventory in 15 minutes"). No clickbait, no Title Case,
-  no "Quick question", no emoji.
-- Mobile-length: they read this on a phone between deliveries. A first email about as long
-  as the EXAMPLE or shorter; a follow-up half that.
-- No P.S.: the email ends with the signature, so a personal line belongs in the body.
+Sound like the founder, not software:
+- Write as him, in the first person. Plain words, contractions, short sentences, the
+  occasional fragment. Warm, direct, a little dry. Zero hype, no exclamation marks (one at
+  most, and only if a person would say it out loud).
+- Never give him a backstory: no "I spent years behind a bar", "as a former bartender",
+  "I've been there". None of it is on the sheet, and one invented line about himself is
+  the line a bar owner remembers.
+- Write the way you'd text a bar manager you respect. Say "count", "orders", "reps",
+  "Sunday night", not "inventory management solution".
+- The human connection comes from what really happened. If someone was spoken to, name
+  them and what they said, the way you'd remind a friend ("Laura, you said Sundays eat the
+  whole night"). One personal detail from the log (a pet, a big weekend, a new menu) earns
+  one light, friendly line, never more, and never the private specifics (what something
+  cost, anyone's health).
+- Never use these (they're what makes an email read as a robot or a blast): "I hope this
+  finds you well", "I hope you're doing well", "I wanted to reach out", "I'm reaching out",
+  "I came across", "revolutionize", "game-changer", "cutting-edge", "seamless", "streamline",
+  "leverage", "unlock", "elevate", "empower", "take your bar to the next level", "in today's
+  fast-paced", "look no further", "don't hesitate to", "feel free to reach out", "circle
+  back", "touch base", "just following up", "just checking in", "bumping this", "hassle-free",
+  "effortless", "robust", "state-of-the-art", "innovative". Also no "Dear", no "To whom".
+- At most two dashes (— or –) in the whole email; use a period or a comma instead.
+
+What works in 2026 (use it, don't announce it):
+1. RELEVANCE FIRST. The opening line is about them: something from WHAT WE KNOW (their call,
+   who you spoke to, their hours, their cocktail list, a detail from the log), or the job
+   itself (the count after close, the clipboard, orders typed up at 1am). Never a fake
+   compliment, never about us.
+2. ONE PICTURE, NOT A FEATURE LIST. The single idea: the count and the orders in 10-15
+   minutes. Show it the way they'd live it: point the phone at the bottle, tap the count,
+   every rep gets their order at once. The four-step list is fine in a first email; skip
+   it in a follow-up unless they asked how it works.
+3. TAKE AWAY THE RISK. First month free, no card, cancel any time. Said once, plainly.
+4. ONE EASY ASK. End with a question they can answer in one word or one tap — interest,
+   not a meeting: "Worth trying on your next count?", "Want the link for your GM?",
+   "Should I call Thursday before you open?". One ask only. Never "let me know your
+   availability", never a calendar request.
+5. SHORT. A first email: 60-150 words, the four steps included. A follow-up: 30-90 words. A
+   reply: as long as the answer needs and no longer. Short paragraphs, one or two lines each.
+6. NO PRESSURE TACTICS. No fake urgency, no "limited time", no guilt, no "did you see my
+   last email?". Confidence reads as calm.
+
+Follow-ups (when EMAILS WE ALREADY SENT is in WHAT WE KNOW):
+- Never repeat an earlier email. Each one brings ONE new, useful thing: a different pain
+  from the sheet (prices living in someone's head, running out of a top seller on a Friday,
+  the order number that matches the invoice), a detail from a call, or an answer to what
+  they asked.
+- If nothing came back from the last email, write it as a reply in that thread: the
+  subject is "Re: " plus that email's subject word for word (it's what threads it under
+  the first one), and the body a line or two that stands on its own.
+- After two or more emails with no reply, write a short, gracious last note: you won't keep
+  emailing, the free month is there whenever the count gets old, and his direct line. No
+  guilt, no "should I close your file?".
+
+Subject line:
+- 2-6 words, lowercase except names, reads like a person typed it: "{Bar name} count",
+  "the end-of-night count", "your order day", "Laura mentioned the count". No Title Case, no
+  "Quick question", no emoji, no "free", "trial", "offer", "$", "%" or "!" — those are what
+  spam filters and people skip.
 
 Who it's to:
 - Write to the DECISION MAKER — the owner, GM or bar manager who counts and orders. When
@@ -213,16 +268,181 @@ Who it's to:
 Hard rules:
 1. NEVER state a product fact, price, number or URL that is not in the MASTER SHEET, and
    never a fact about the venue that is not in WHAT WE KNOW. No invented customers,
-   testimonials, percentages or "bars like yours saved X". Unsure? Leave it out.
+   testimonials, percentages or "bars like yours". Unsure? Leave it out.
 2. Every person named in the log is someone the sender talked to at the bar. They did
    not tell anyone about 86'd; never say or imply they did.
-3. Include the App Store link in every email unless the salesperson says not to.
-4. Plain text only: no HTML, no markdown, no **bold**. Numbered steps as "1." lines.
-5. Do exactly what the salesperson asked. Their instruction beats the defaults above."""
+3. Include the App Store link, on its own line, unless the salesperson says not to. It is
+   the ONLY link in the body: the website is already in the signature.
+4. Plain text only: no HTML, no markdown, no **bold**, no bullet symbols. Numbered steps
+   as "1." lines.
+5. No P.S. and no sign-off: the email ends at the closing word ("Thanks," / "Best,"); the
+   signature and the opt-out line are added underneath automatically.
+6. Do exactly what the salesperson asked. Their instruction beats the defaults above."""
+
+
+# ── The draft checker: what a person would notice, caught in code ─────────
+#
+# A prompt can only ask. These are the things that make a cold email read as
+# a robot, a blast or spam — to the person and to their spam filter — checked
+# on every draft; `crm._write_draft` sends a draft that fails back ONCE with
+# the list, and keeps whichever version has fewer problems.
+
+ROBOT_PHRASES = (
+    "hope this email finds you", "hope this finds you", "hope you're doing well",
+    "hope you are doing well", "hope all is well", "hope you're well", "i wanted to reach out",
+    "i'm reaching out", "i am reaching out", "reaching out to you", "i came across",
+    "i stumbled upon", "revolutionize", "revolutionise", "game-changer", "game changer",
+    "cutting-edge", "cutting edge", "seamless", "streamline", "leverage", "unlock", "elevate",
+    "empower", "supercharge", "next level", "in today's world", "in today's market",
+    "in today's economy", "in today's industry", "in today's competitive", "fast-paced",
+    "look no further", "don't hesitate", "do not hesitate", "feel free to reach out",
+    "at your earliest convenience", "circle back", "touch base", "just following up",
+    "just checking in", "just wanted to follow", "bumping this", "hassle-free", "effortless",
+    "robust", "state-of-the-art", "best-in-class", "world-class", "innovative", "synergy",
+    "delve", "tailored solution", "i'm excited to share", "we're excited",
+    "did you see my last email", "close your file",
+)
+SPAM_PHRASES = (
+    "click here", "act now", "limited time", "risk-free", "risk free", "guarantee",
+    "no obligation", "special offer", "exclusive deal", "don't miss", "buy now", "sign up now",
+    "urgent", "dear sir", "dear madam", "to whom it may concern", "!!", "$$",
+)
+# Social proof and statistics that don't exist (the sheet has none to quote),
+# and a backstory for the founder the sheet doesn't give him.
+UNBACKED_CLAIMS = (
+    "bars like yours", "hundreds of", "thousands of", "our customers", "customers love",
+    "other bars are", "on average", "years behind the bar", "years behind a bar",
+    "former bartender", "as a bartender myself", "when i was bartending", "when i bartended",
+    "i used to bartend", "i've been there", "i have been there", "been in your shoes",
+    "i ran a bar", "i owned a bar", "my own bar",
+)
+SUBJECT_SPAM = re.compile(r"\b(free|trial|offer|deal|discount|save|urgent|guarantee)\b|[!$%]",
+                          re.I)
+LIMITS = {"first": 170, "followup": 100, "reply": 180}
+_URL = re.compile(r"https?://\S+|\bwww\.\S+", re.I)
+# Linear on any input (a reply draft can echo a stranger's email; see
+# test_hostile_pages): a figure only starts where a run of digits starts, and
+# a bullet only after spaces on its own line, never across newlines.
+_PERCENT = re.compile(r"(?<![\d.])\d+(?:\.\d+)?[ \t]?%|\b\d+(?:\.\d+)? percent\b", re.I)
+_MARKUP = re.compile(r"\*\*|^#{1,3} |^[ \t]*[•*·] ", re.M)
+_SHOUT = re.compile(r"\b[A-Z]{4,}\b")
+
+
+def words(text: str) -> int:
+    return len(re.findall(r"[A-Za-z0-9'’$]+", text or ""))
+
+
+def _plain(text: str) -> str:
+    """Lowercased, with curly apostrophes straightened: the model writes
+    "I’m reaching out" as often as "I'm reaching out"."""
+    return (text or "").lower().replace("’", "'").replace("‘", "'")
+
+
+def lint(subject: str, body: str, kind: str = "first", brief: str = "",
+         known: str = "") -> list:
+    """What a reader (or a spam filter) would trip on in this draft, as
+    instructions to fix. `body` is the model's body, before the signature.
+    Empty when it's clean. Pure.
+
+    The salesperson's own instruction (`brief`) wins: asked for the website
+    link, a longer email or more detail, the check doesn't undo it. A
+    revision (kind "revision") is never judged on length for the same reason,
+    and a REPLY to someone who wrote to us keeps their subject and may carry
+    whatever links they asked for. `known` is what the drafter was told (WHAT
+    WE KNOW and the ask): a figure or a name in capitals that came from there
+    is theirs, not an invention."""
+    problems: list = []
+    asked = _plain(brief)
+    low = _plain(body)
+    told = _plain(known)
+    subj = (subject or "").strip()
+    for phrase in ROBOT_PHRASES:
+        if phrase in low:
+            problems.append(f'"{phrase}" reads like a template — say it the way a person would, '
+                            "or cut it")
+    for phrase in SPAM_PHRASES:
+        if phrase in low:
+            problems.append(f'"{phrase}" is spam-filter bait — cut it')
+    for phrase in UNBACKED_CLAIMS:
+        if phrase in low and phrase not in told:
+            problems.append(f'"{phrase}" claims something we can\'t back — cut it')
+    known_figures = {re.sub(r"\s", "", f) for f in _PERCENT.findall(told)}
+    for pct in _PERCENT.findall(body or ""):
+        if re.sub(r"\s", "", pct.lower()) not in known_figures:
+            problems.append(f'"{pct}" — there are no figures to quote; cut it')
+            break
+    links = _URL.findall(body or "")
+    if kind != "reply" and len(links) > 1 and not re.search(r"link|website|url|site", asked):
+        problems.append(f"{len(links)} links in the body — keep only the App Store link")
+    if (body or "").count("!") > 1:
+        problems.append("more than one exclamation mark — calm reads as confident")
+    if len(re.findall(r"[—–]", body or "")) > 2:
+        problems.append("more than two dashes — they read machine-written; use periods")
+    if _MARKUP.search(body or ""):
+        problems.append("markdown or bullet symbols — plain text only, steps as \"1.\" lines")
+    if re.search(r"\bP\.?S\b", body or ""):
+        problems.append("a P.S. — put that line in the body instead")
+    known_caps = set(_SHOUT.findall(known or ""))
+    shout = next((w for w in _SHOUT.findall(body or "")
+                  if w != "IPHONE" and w not in known_caps), None)
+    if shout:
+        problems.append(f"shouting in capitals ({shout}) — write it normally")
+    limit = LIMITS.get(kind)
+    n = words(body)
+    if limit and n > limit and not re.search(r"long|detail|more|expand|everything|full", asked):
+        problems.append(f"{n} words — keep it under {limit}; it's read on a phone between "
+                        "deliveries")
+    if kind == "reply":
+        return problems             # "Re: <their subject>" is theirs to word
+    if not subj:
+        problems.append("no subject")
+    else:
+        if len(subj.split()) > 7:
+            problems.append("subject over 7 words — 2-6, like a person typed it")
+        m = SUBJECT_SPAM.search(subj)
+        if m:
+            problems.append(f'"{m.group(0)}" in the subject — spam filters and people skip it')
+        caps = [w for w in subj.split() if w[:1].isupper() and w.lower() not in ("i",)]
+        if (len(subj.split()) >= 3 and len(caps) == len(subj.split())
+                and not thread_base(subj)):
+            problems.append("subject in Title Case — reads like marketing; lowercase it")
+    return problems
+
+
+def lint_ask(problems: list) -> str:
+    """The revision request for a draft that failed the checks."""
+    return ("Revise this draft to fix ONLY these problems, keeping everything that is right "
+            "about it (the facts, the greeting, the personal details, the ask):\n- "
+            + "\n- ".join(problems))
+
+
+# ── Threads: "Re:" only where there really is one ─────────────────────────
+
+_RE_PREFIX = re.compile(r"^\s*(?:re\s*:\s*)+", re.I)
+
+
+def thread_base(subject: Optional[str]) -> str:
+    """"Re: Re: Sunday count " -> "sunday count"; "" when it isn't a "Re:"."""
+    if not _RE_PREFIX.match(subject or ""):
+        return ""
+    return _RE_PREFIX.sub("", subject or "").strip().lower()
+
+
+def honest_re(subject: str, sent_subjects: list) -> str:
+    """A "Re:" subject only on a real thread: the subject of an email we sent
+    this bar. A made-up "Re:" pretends to a conversation that never happened
+    — the oldest trick in cold email, and exactly what CAN-SPAM calls a
+    deceptive subject line — so without one the prefix comes off."""
+    base = thread_base(subject)
+    if not base:
+        return subject
+    ours = {_RE_PREFIX.sub("", s or "").strip().lower() for s in sent_subjects or []}
+    return subject if base in ours else _RE_PREFIX.sub("", subject).strip()
 
 
 def lead_context(lead: dict, fact_lines: Optional[list] = None,
-                 points: Optional[list] = None, log: str = "") -> str:
+                 points: Optional[list] = None, log: str = "",
+                 sent: Optional[list] = None) -> str:
     """WHAT WE KNOW about the recipient: only what's on file, each fact with
     where it came from, so the model can personalise without inventing."""
     out = [f"Venue: {lead.get('name') or 'the bar'}"
@@ -246,6 +466,15 @@ def lead_context(lead: dict, fact_lines: Optional[list] = None,
         out.append("Talking points written earlier from those facts: " + " / ".join(points))
     if log:
         out.append("What has happened so far (the sender's own log, oldest first):\n" + log)
+    if sent:
+        shown = []
+        for e in sent:
+            to = f" to {e['to_addr']}" if e.get("to_addr") else ""
+            shown.append(f"[{str(e.get('sent_at') or '')[:10]}]{to} Subject: {e.get('subject')}"
+                         f" — {'they REPLIED after this' if e.get('replied') else 'no reply'}\n"
+                         f"{(e.get('body') or '').strip()[:1500]}")
+        out.append(f"EMAILS WE ALREADY SENT THEM ({len(sent)}, oldest first — never repeat "
+                   "them; build on them):\n" + "\n\n".join(shown))
     if len(out) == 1:
         out.append("Nothing else is known about them. Don't pretend otherwise.")
     return "\n".join(out)
@@ -374,6 +603,9 @@ def sign(body: str) -> str:
     with the signature.
     """
     text = (body or "").replace("\r\n", "\n").strip()
+    footer_lines = {l.strip().lower() for l in (OPT_OUT_LINE, POSTAL_ADDRESS) if l.strip()}
+    text = "\n".join(l for l in text.split("\n")
+                     if l.strip().lower() not in footer_lines).strip()
     paras = re.split(r"\n[ \t]*\n", text)
     ps = ""
     if len(paras) > 1 and _PS_RE.match(paras[-1]):
