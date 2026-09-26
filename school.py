@@ -294,12 +294,16 @@ def vet_prompt(cands: list[dict]) -> tuple[str, str]:
 
 
 def content_prompt() -> tuple[str, str]:
+    import coach
+    # The product and the asks come from the master sheet via coach.py, so a
+    # refreshed pack can't teach a feature 86'd doesn't have or an ask the
+    # company doesn't make (it used to drill "15 minutes Tuesday at 2").
     system = ("You write practice material for one cold caller. " + USE_CASE +
-              " Qualifying rules they follow: full spirits licence verified on the state's own "
-              "records; independent, not a chain; open 2-9 months or a recent ownership change; "
-              "the app is iPhone-only. States with no tip credit (CA, NV, WA, OR) get a labour-cost "
-              "angle; tip-credit states (AZ, TX, CO) lead with time saved and accuracy. "
-              "Reply with JSON only.")
+              " What they sell, exactly: " + coach.PRODUCT +
+              " The asks they make, one per call: " + coach.ASKS_TEXT + ". "
+              "States with no tip credit (CA, NV, WA, OR) get a labour-cost angle; tip-credit "
+              "states (AZ, TX, CO) lead with time saved and accurate orders. Never write an "
+              "answer that promises something the product doesn't do. Reply with JSON only.")
     user = ("Write 10 fresh Gauntlet rounds and 10 fresh test questions, all specific to calling "
             "independent bars. No generic sales trivia. Gauntlet: something an owner, GM or "
             "bartender actually says, and three replies where exactly one is clearly best and the "
@@ -424,6 +428,9 @@ def init_school_tables():
     print("[school] SCHOOL_TABLES_READY", flush=True)
 
 
+RETRY_AFTER_FAIL_HOURS = 6
+
+
 def _last_ok(cursor) -> Optional[datetime]:
     cursor.execute("SELECT started_at FROM crm_school_packs WHERE ok = TRUE ORDER BY started_at DESC LIMIT 1")
     row = cursor.fetchone()
@@ -443,6 +450,16 @@ def refresh_if_due(force: bool = False) -> Optional[dict]:
                        "AND started_at > NOW() - INTERVAL '20 minutes'")
         if cursor.fetchone()["n"]:
             return None
+        # "Due" is measured from the last GOOD pack, so a refresh that failed
+        # (search blocked, the AI down) stayed due — and ran again, with its
+        # paid AI calls, every 15 minutes until midnight. Any attempt, good or
+        # not, now rests it RETRY_AFTER_FAIL_HOURS.
+        if not force:
+            cursor.execute("SELECT COUNT(*) AS n FROM crm_school_packs "
+                           "WHERE started_at > NOW() - make_interval(hours => %s)",
+                           (RETRY_AFTER_FAIL_HOURS,))
+            if cursor.fetchone()["n"]:
+                return None
         cursor.execute("SELECT COUNT(*) AS n FROM crm_school_packs")
         run_no = cursor.fetchone()["n"]
         cursor.execute("SELECT pack FROM crm_school_packs WHERE ok = TRUE ORDER BY started_at DESC LIMIT 4")

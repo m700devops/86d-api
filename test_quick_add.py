@@ -317,8 +317,9 @@ class _Conn:
 def _no_lookup(monkeypatch, website=None, email=None):
     import leadgen
     monkeypatch.setattr(leadgen, "find_venue_website", lambda name, loc=None: website)
+    monkeypatch.setattr(leadgen, "site_is_venue", lambda site, name: True)
     monkeypatch.setattr(leadgen, "find_email_on_site",
-                        lambda site: (email, site + "/contact") if email else (None, None))
+                        lambda site, **kw: (email, site + "/contact") if email else (None, None))
 
 
 def test_quick_add_lead_creates_and_logs_in_one_transaction(monkeypatch):

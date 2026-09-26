@@ -140,6 +140,8 @@ def test_harvests_and_rechecks_wait_first():
     assert run.index("activity.wait_for_quiet()") < run.index("harvest_city(city)")
     recheck = inspect.getsource(leadgen.recheck_restaurant_leads)
     assert recheck.index("activity.wait_for_quiet()") < recheck.index("_http(row[\"website\"]")
+    lookup = inspect.getsource(leadgen.recheck_looked_up_sites)
+    assert lookup.index("activity.wait_for_quiet()") < lookup.index("_http(site")
 
 
 def test_on_demand_lookups_never_wait():
@@ -191,6 +193,53 @@ def test_phone_checks_run_when_its_quiet(monkeypatch):
     crawled = []
     _verify(monkeypatch, crawled)
     assert len(crawled) == 4
+
+
+def _verify_fit(monkeypatch, crawled):
+    rows = [{"lead_id": f"L{i}", "id": f"C{i}", "name": f"Bar {i}", "city": "Denver",
+             "website": f"https://bar{i}.example"} for i in range(4)]
+
+    class Cur:
+        rowcount = 1
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchall(self):
+            return rows if "FROM crm_leads l" in self.sql else []
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+        def commit(self):
+            pass
+
+    @contextmanager
+    def db():
+        yield Conn()
+
+    monkeypatch.setattr(leadgen, "get_db", db)
+    monkeypatch.setattr(leadgen, "_in_window_now", lambda row: True)
+    monkeypatch.setattr(leadgen, "corporate_index", lambda cursor: {})
+    monkeypatch.setattr(leadgen, "check_fit", lambda row, corporate=None:
+                        crawled.append(row["website"]) or {"status": "ok", "note": "full bar"})
+    return leadgen.verify_fit(lead_limit=4, bank_limit=0, budget_s=0.3)
+
+
+def test_fit_checks_skip_their_batch_during_a_count(monkeypatch):
+    monkeypatch.setattr(activity, "_last_scan", None)
+    activity.scan_seen()                             # someone is scanning now
+    crawled = []
+    out = _verify_fit(monkeypatch, crawled)
+    assert crawled == [] and out["leads_checked"] == 0   # left for the next batch
+
+
+def test_fit_checks_run_when_its_quiet(monkeypatch):
+    monkeypatch.setattr(activity, "_last_scan", None)
+    crawled = []
+    out = _verify_fit(monkeypatch, crawled)
+    assert len(crawled) == 4 and out["leads_checked"] == 4
 
 
 # ─── what counts as scanning ─────────────────────────────────────────────────

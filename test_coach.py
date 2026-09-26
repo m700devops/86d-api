@@ -147,3 +147,40 @@ def test_logged_objections_are_read_back_for_practice(monkeypatch):
     monkeypatch.setattr(crm, "_brain_row", lambda: {"playbook": json.dumps({"sections": [
         {"title": "Objections we hear", "points": [{"text": "Price, 3 bars", "evidence": ["A"]}]}]})})
     assert crm._real_objections() == ["already use BevSpot", "too busy", "Price, 3 bars"]
+
+
+# ── the asks the company actually makes ──────────────────────────────────────
+
+def test_practice_drills_the_real_asks():
+    assert "first month free, no card" in coach.ASKS_TEXT
+    _, user = coach.grade_prompt("Owner", "Send me something", "Sure", 5, False)
+    assert coach.ASKS_TEXT in user
+    import school
+    system, _ = school.content_prompt()
+    assert coach.PRODUCT in system and coach.ASKS_TEXT in system
+    assert "2-9 months" not in system                               # lead-research rules, not calling
+
+
+# ── game film: real calls in, coaching out, nothing invented ─────────────────
+
+def test_film_prompt_carries_the_real_calls():
+    system, user = coach.film_prompt([{"bar": "Barrel House", "when": "Tue Sep 23",
+                                       "outcome": "not_interested",
+                                       "notes": "Your notes: said they already have a spreadsheet"}])
+    assert "Barrel House" in user and "not interested" in user and "spreadsheet" in user
+    assert "Only use moments that are in the calls above" in user and coach.ASKS_TEXT in system
+
+
+def test_film_drops_anything_not_tied_to_a_real_call():
+    out = coach.validate_film({
+        "working": {"text": "Asking for the owner by name.", "from": "barrel house"},
+        "costing": {"text": "Pitching the bartender.", "from": "Made Up Bar"},
+        "drills": [
+            {"from": "Barrel House", "who": "Laura", "line": "We have a spreadsheet.",
+             "better": "Makes sense. Who updates it when a rep changes a price?"},
+            {"from": "Nowhere", "who": "x", "line": "y", "better": "z"},
+            {"from": "Barrel House", "who": "Jake", "line": "", "better": "z"}]},
+        ["Barrel House", "Workhorse Bar"])
+    assert out["working"] == {"text": "Asking for the owner by name.", "from": "Barrel House"}
+    assert out["costing"] is None
+    assert [d["line"] for d in out["drills"]] == ["We have a spreadsheet."]

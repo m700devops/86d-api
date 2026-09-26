@@ -16,7 +16,8 @@ if "database" not in sys.modules:
     stub.get_db = lambda: None
     sys.modules["database"] = stub
 
-import crm  # noqa: E402
+import crm
+import pitch  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 NOTES = ("[2026-09-20] call · attempt 1: Spoke with Laura, the GM. Interested, "
@@ -88,7 +89,10 @@ def drafted(monkeypatch):
 
 def test_followup_draft_needs_no_brief(drafted):
     out = crm.draft_lead_email("L1", crm.DraftRequest(followup=True))
-    assert out == {"subject": "following up", "body": "Hi Laura, ..."}
+    assert out["subject"] == "following up"
+    assert out["body"].startswith("Hi Laura, ...")
+    assert out["body"].endswith("Stephan Khouri\nOwner of 86'd Bar inventory\nWebsite: My86d.com"
+                                "\n\n" + pitch.OPT_OUT_LINE)
     assert "paid $800 at the vet" in drafted["ask"]
     assert "NEVER state a product fact" in drafted["system"]   # same facts-only rules
 

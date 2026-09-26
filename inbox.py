@@ -19,12 +19,8 @@ from typing import Optional
 from contacts import strip_non_content
 
 # Shared by thousands of unrelated people, so a matching domain proves nothing.
-FREE_MAIL = {
-    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
-    "outlook.com", "live.com", "msn.com", "icloud.com", "me.com", "mac.com",
-    "aol.com", "comcast.net", "att.net", "sbcglobal.net", "verizon.net",
-    "protonmail.com", "proton.me", "gmx.com", "mail.com", "zoho.com",
-}
+# The full list lives with the other address rules; see contacts.free_mail.
+from contacts import FREE_MAIL_DOMAINS as FREE_MAIL, free_mail  # noqa: E402
 _BOUNCE_RE = re.compile(r"^(mailer-daemon|postmaster|no-?reply|do-?not-?reply)@", re.I)
 # Where the new text ends and the quoted conversation begins.
 _QUOTE_START_RE = re.compile(
@@ -92,9 +88,28 @@ def _domain(addr: Optional[str]) -> str:
 
 
 def worth_reading(mail: dict, own_address: str) -> bool:
-    """Not our own mail, not a bounce robot, and something actually written."""
+    """Not our own mail, not a bounce robot, and something actually written —
+    or an opt-out in the subject alone ("Unsubscribe", "Please stop emailing"
+    with an empty body), which must be honoured like any other."""
     return (bool(mail.get("from_addr")) and mail["from_addr"] != (own_address or "").lower()
-            and not _BOUNCE_RE.match(mail["from_addr"]) and bool(mail.get("text")))
+            and not _BOUNCE_RE.match(mail["from_addr"])
+            and (bool(mail.get("text")) or looks_like_opt_out(their_subject(mail))))
+
+
+_REPLY_PREFIX = re.compile(r"^\s*(?:re|fwd?|aw|sv|antw|res|rif)\s*:", re.I)
+
+
+def their_subject(mail: dict) -> str:
+    """The subject only when THEY wrote it. A reply's subject ("Re: …") is
+    ours quoted back, and a subject of ours ("stop sending orders at 1am")
+    must never read as their opt-out."""
+    subject = mail.get("subject") or ""
+    return "" if _REPLY_PREFIX.match(subject) else subject
+
+
+def opt_out_text(mail: dict) -> str:
+    """What the opt-out backstop reads: the text, and a subject they wrote."""
+    return f"{their_subject(mail)}\n{mail.get('text') or ''}"
 
 
 def match_leads(mail: dict, leads: list, sent: dict) -> list:
@@ -113,7 +128,7 @@ def match_leads(mail: dict, leads: list, sent: dict) -> list:
         email = (lead.get("email") or "").lower()
         if not email or lead["id"] in found:
             continue
-        if email == sender or (dom and dom not in FREE_MAIL and _domain(email) == dom):
+        if email == sender or (dom and not free_mail(dom) and _domain(email) == dom):
             found.append(lead["id"])
     return found
 

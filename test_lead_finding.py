@@ -144,7 +144,7 @@ def test_retries_are_spaced_and_end_in_a_rejection(monkeypatch):
 # ── qualifying ──────────────────────────────────────────────────────────────
 
 def test_no_email_is_a_call_only_lead_not_a_rejection(monkeypatch):
-    _web(monkeypatch, {"https://bar.example/": ("<html>Call (512) 476-0182</html>", 200)})
+    _web(monkeypatch, {"https://bar.example/": ("<html>Barton Tavern — whiskey bar · Call (512) 476-0182</html>", 200)})
     out = leadgen.enrich_candidate(_cand())
     assert out["status"] == "qualified" and out["email"] is None
     assert out["phone_status"] == "confirmed"
@@ -157,20 +157,26 @@ def test_a_restaurant_whose_drinks_are_on_its_menu_page_qualifies(monkeypatch):
             "Tandoori classics · (512) 476-0182</html>")
     _web(monkeypatch, {"https://tandoori.example/": (home, 200),
                        "https://tandoori.example/drink-menu": ("<p>Whisky flights, mango margarita</p>", 200)})
-    out = leadgen.enrich_candidate(_cand(website="https://tandoori.example/", amenity="restaurant"))
+    out = leadgen.enrich_candidate(_cand(name="Tandoori Lounge", website="https://tandoori.example/",
+                                         amenity="restaurant"))
     assert out["status"] == "qualified"
 
 
 def test_a_restaurant_with_no_drinks_anywhere_is_still_rejected(monkeypatch):
     _web(monkeypatch, {"https://burger.example/": ("<a href='/menu'>Menu</a> burgers (512) 476-0182", 200),
                        "https://burger.example/menu": ("<p>burgers, fries, shakes</p>", 200)})
-    out = leadgen.enrich_candidate(_cand(website="https://burger.example/", amenity="restaurant"))
-    assert out["status"] == "rejected" and out["reject_reason"].startswith("restaurant with no sign")
+    out = leadgen.enrich_candidate(_cand(name="Burger Barn", website="https://burger.example/",
+                                         amenity="restaurant"))
+    assert out["status"] == "rejected" and out["reject_reason"].startswith("no sign on their own site")
 
 
-def test_drink_tags_on_the_map_count():
-    for tag in ({"drink:beer": "yes"}, {"drink:wine": "served"}, {"cocktails": "yes"}, {"alcohol": "yes"}):
-        assert leadgen._restaurant_pours("", tag)[0], tag
+def test_drink_tags_on_the_map_count_only_for_spirits():
+    # Beer and wine tags say nothing about a back bar; a spirits or cocktails
+    # tag is one piece of evidence — enough for a bar, not for a restaurant.
+    for tag in ({"drink:beer": "yes"}, {"drink:wine": "served"}, {"alcohol": "yes"}):
+        assert not leadgen._restaurant_pours("", tag)[0], tag
+    assert leadgen.liquor_verdict("", {"cocktails": "yes"}, "", "bar")["status"] == "spirits"
+    assert leadgen.liquor_verdict("", {"cocktails": "yes"}, "", "restaurant")["status"] == "unknown"
 
 
 def test_chain_names_match_whole_words_and_brand_possessives():

@@ -27,7 +27,7 @@ from helpers import (
     classify_level, smooth_level, calculate_variance, generate_order_items,
     normalize_match_text, NORM_SQL, product_match_key, seed_display_name,
     size_ml, sizes_compatible, label_supports, answers_agree, barcode_variants, clean_barcode,
-    duplicate_groups,
+    duplicate_groups, FIRST_ORDER_NUMBER, format_order_number, order_email,
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -42,6 +42,9 @@ import openai
 import os
 import httpx
 import random
+import psycopg2
+import hashlib
+import secrets
 from pydantic import BaseModel, Field
 
 # Startup time for uptime calculation
@@ -108,6 +111,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_inbox_loop())
     asyncio.create_task(_phone_check_loop())
     asyncio.create_task(_playbook_loop())
+    asyncio.create_task(_apple_sync_loop())
     # Cold-call school refresh: every few days at 10am Asia/Manila. Own try,
     # own loop — nothing here may affect the product API or the CRM.
     try:
@@ -353,13 +357,19 @@ def register(user_data: UserCreate):
             }
     except HTTPException:
         raise
+    except psycopg2.IntegrityError:
+        # Two sign-ups for one address at once (a double-tap, a retry): the
+        # first won the unique index, and this one is simply "already exists".
+        raise HTTPException(status_code=400, detail={
+            "error": "email_exists",
+            "message": "An account with this email already exists"
+        })
     except Exception as e:
         print(f"REGISTER ERROR: {e}", file=sys.stderr)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail={
             "error": "server_error",
-            "message": "An unexpected error occurred",
-            "debug": str(e)
+            "message": "An unexpected error occurred"
         })
 
 # Login throttling — in-memory, per-email. Enough to make credential
@@ -379,6 +389,12 @@ def _login_locked(email: str) -> bool:
 
 def _record_login_failure(email: str) -> None:
     _login_failures.setdefault(email, []).append(time.time())
+    # A spray of made-up addresses would otherwise grow this forever (an entry
+    # was only pruned when that same address logged in again) on a 512MB box.
+    if len(_login_failures) > 5000:
+        cutoff = time.time() - LOGIN_LOCKOUT_SECONDS
+        for key in [k for k, v in _login_failures.items() if not v or v[-1] <= cutoff]:
+            _login_failures.pop(key, None)
 
 
 @v1_router.post("/auth/login", response_model=TokenResponse)
@@ -528,16 +544,26 @@ def apple_sign_in(request: AppleSignInRequest):
 
             user_id = generate_id()
             trial_ends = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
-            cursor.execute("""
-                INSERT INTO users (id, email, password_hash, name, business_name, apple_subject,
-                                   auth_provider, terms_accepted_at, privacy_accepted_at,
-                                   trial_started_at, trial_ends_at, subscription_status,
-                                   subscription_tier, created_at, updated_at)
-                VALUES (%s, %s, NULL, %s, %s, %s, 'apple', %s, %s, %s, %s, 'trial', 'starter', %s, %s)
-            """, (
-                user_id, email, request.name, request.business_name, subject,
-                now, now, now, trial_ends, now, now,
-            ))
+            cursor.execute("SAVEPOINT apple_insert")
+            try:
+                cursor.execute("""
+                    INSERT INTO users (id, email, password_hash, name, business_name, apple_subject,
+                                       auth_provider, terms_accepted_at, privacy_accepted_at,
+                                       trial_started_at, trial_ends_at, subscription_status,
+                                       subscription_tier, created_at, updated_at)
+                    VALUES (%s, %s, NULL, %s, %s, %s, 'apple', %s, %s, %s, %s, 'trial', 'starter', %s, %s)
+                """, (
+                    user_id, email, request.name, request.business_name, subject,
+                    now, now, now, trial_ends, now, now,
+                ))
+            except psycopg2.IntegrityError:
+                # Two first sign-ins at once (a double-tap): the other one won
+                # the unique index. A clear retry, not a 500.
+                cursor.execute("ROLLBACK TO SAVEPOINT apple_insert")
+                raise HTTPException(status_code=409, detail={
+                    "error": "account_conflict",
+                    "message": "That account was just created — tap Sign in with Apple again."
+                })
             conn.commit()
 
             if is_private_relay(email):
@@ -2094,8 +2120,15 @@ def list_orders(
             where_clause += " AND o.created_at <= %s"
             params.append(end_date)
         if q:
-            where_clause += " AND o.order_data ILIKE %s"
-            params.append(f"%{q}%")
+            # "1042" or "#1042" finds that order by its number as well as by
+            # any distributor or item name in it.
+            number = q.strip().lstrip("#").strip()
+            if number.isdigit() and len(number) <= 9:
+                where_clause += " AND (o.order_data ILIKE %s OR o.order_number = %s)"
+                params += [f"%{q}%", int(number)]
+            else:
+                where_clause += " AND o.order_data ILIKE %s"
+                params.append(f"%{q}%")
 
         # Get total count
         cursor.execute(f"""
@@ -2125,6 +2158,7 @@ def list_orders(
 
             orders.append({
                 "id": order["id"],
+                "order_number": order.get("order_number"),
                 "session_id": order["session_id"],
                 "location_id": order["location_id"],
                 "location_name": order["location_name"],
@@ -2174,6 +2208,7 @@ def get_order(order_id: str, user_id: str = Depends(get_current_user)):
         return {
             "order": {
                 "id": order["id"],
+                "order_number": order.get("order_number"),
                 "session_id": order["session_id"],
                 "location": {
                     "id": order["location_id"],
@@ -2226,7 +2261,9 @@ def export_order(order_id: str, export_data: OrderExportRequest, user_id: str = 
         location_name = order["location_name"]
         created_at = order["created_at"][:10]  # Just the date
         
-        content_lines = [f"ORDER - {location_name}", created_at, "─" * 40, ""]
+        ref = format_order_number(order.get("order_number"))
+        content_lines = [f"ORDER {ref} - {location_name}" if ref else f"ORDER - {location_name}",
+                         created_at, "─" * 40, ""]
         
         # Group by urgency
         critical = [i for i in items if i.get("urgency") == "critical"]
@@ -2786,6 +2823,11 @@ class SendOrderEmailsRequest(BaseModel):
     location_name: str = "your bar"
     staff_name: str | None = None
     orders: list[DistributorOrder] = Field(min_length=1, max_length=50)
+    # One id per order the app is sending (a count's draft, or one reorder).
+    # A retry after a lost response carries the same id, and a distributor
+    # already emailed this exact order under it is not emailed again. Older
+    # app builds don't send it and get the old behaviour.
+    client_ref: str | None = Field(default=None, max_length=64)
 
 
 def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None, bcc: str | None = None) -> tuple[bool, str | None]:
@@ -2814,9 +2856,113 @@ def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, 
         return (False, str(e))
 
 
+def _next_order_number(conn, cursor, user_id: str) -> int:
+    """The bar's next order number: #1001, #1002, … per account.
+
+    Per account rather than per location because the distributor list, the
+    business name and the email's sign-off are all per account — the number
+    is unique under the name the distributor sees. Taken from a counter on the
+    users row (the UPDATE locks it, so two sends can't draw the same number)
+    and COMMITTED before any email goes: if something failed after the send,
+    a rollback would hand the same number to the next order, and two orders
+    carrying one number is the one thing a reference number must never do. A
+    gap in the sequence costs nothing.
+    """
+    cursor.execute("""
+        UPDATE users SET last_order_number = COALESCE(last_order_number, %s) + 1
+        WHERE id = %s
+        RETURNING last_order_number
+    """, (FIRST_ORDER_NUMBER - 1, user_id))
+    row = cursor.fetchone()
+    conn.commit()
+    return row["last_order_number"] if row else None
+
+
+# A claim still 'sending' after this long belonged to a request that died
+# (a restart mid-send); it can be taken over rather than blocking the order.
+SEND_STALE_MINUTES = 10
+# A 'sent' claim only answers retries this long. A retry after a lost
+# response comes within minutes; the same ref turning up much later with the
+# same items (say, a bar that orders the same two bottles every week, if the
+# app ever failed to start a new ref) is a NEW order, and swallowing it as
+# "already sent" would be a missed delivery — worse than the duplicate.
+SEND_DEDUPE_HOURS = 12
+
+
+def _items_hash(items: list[dict]) -> str:
+    """The same items in any order hash the same; one changed quantity doesn't."""
+    canon = sorted(json.dumps(i, sort_keys=True, default=str) for i in items)
+    return hashlib.sha256("\n".join(canon).encode()).hexdigest()[:32]
+
+
+def _claim_send(user_id: str, ref: str, dist_id: str, ihash: str):
+    """Take the right to email this distributor this order under `ref`.
+    None means it's ours to send; otherwise the claim someone already holds
+    ({status, order_number, email}) — 'sent', or 'sending' right now."""
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    stale = (now_dt - timedelta(minutes=SEND_STALE_MINUTES)).isoformat()
+    expired = (now_dt - timedelta(hours=SEND_DEDUPE_HOURS)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO order_sends (user_id, client_ref, distributor_id, items_hash,
+                                     status, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, 'sending', %s, %s)
+            ON CONFLICT (user_id, client_ref, distributor_id, items_hash) DO UPDATE
+               SET status = 'sending', error = NULL, updated_at = EXCLUDED.updated_at
+             WHERE order_sends.status = 'failed'
+                OR (order_sends.status = 'sending' AND order_sends.updated_at < %s)
+                OR (order_sends.status = 'sent' AND order_sends.updated_at < %s)
+            RETURNING status
+        """, (user_id, ref, dist_id, ihash, now, now, stale, expired))
+        if cursor.fetchone():
+            conn.commit()
+            return None
+        cursor.execute("""
+            SELECT status, order_number, email FROM order_sends
+             WHERE user_id = %s AND client_ref = %s AND distributor_id = %s AND items_hash = %s
+        """, (user_id, ref, dist_id, ihash))
+        held = cursor.fetchone()
+        conn.commit()
+    return dict(held) if held else {"status": "sending", "order_number": None, "email": None}
+
+
+def _finish_send(user_id: str, ref: str, dist_id: str, ihash: str, ok: bool,
+                 order_number, email: str, error) -> None:
+    try:
+        with get_db() as conn:
+            conn.cursor().execute("""
+                UPDATE order_sends SET status = %s, order_number = %s, email = %s, error = %s,
+                                       updated_at = %s
+                 WHERE user_id = %s AND client_ref = %s AND distributor_id = %s AND items_hash = %s
+            """, ("sent" if ok else "failed", order_number if ok else None, email,
+                  (error or "")[:300] or None, now_iso(), user_id, ref, dist_id, ihash))
+            conn.commit()
+    except Exception as exc:
+        # The email's fate is already decided; a stuck 'sending' claim only
+        # makes a retry wait SEND_STALE_MINUTES, it can't double-send.
+        print(f"[send_order_emails] ORDER_CLAIM_UPDATE_FAILED {dist_id}: {exc}", flush=True)
+
+
+def _draw_order_number(user_id: str):
+    with get_db() as conn:
+        return _next_order_number(conn, conn.cursor(), user_id)
+
+
 @v1_router.post("/orders/email")
 def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(get_current_user)):
-    """Send order emails to distributors, one email per distributor."""
+    """Send order emails to distributors, one email per distributor.
+
+    Three separate trips to the database, none held open while Resend answers:
+    read everything the emails need; per distributor, claim → send → record
+    the claim; then save the order for Past Orders. The last one used to share
+    the sends' transaction, so a failure after the emails had gone rolled the
+    record back and answered 500 — and the manager, told it failed, sent it
+    again: a duplicate order on every distributor, a duplicate delivery to pay
+    for. Now a history failure is logged and the response still says what was
+    sent. With a client_ref, a retry after a lost response skips every
+    distributor already emailed this exact order."""
     api_key = os.getenv("RESEND_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail={
@@ -2825,13 +2971,11 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
         })
 
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
-    results = []
-    order_distributors = []  # mirrors `results` but also carries each distributor's line items, for order history
-    all_items = []
+    ref = (request.client_ref or "").strip() or None
 
+    # 1. Everything the emails need, in one short visit.
     with get_db() as conn:
         cursor = conn.cursor()
-
         cursor.execute(
             "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
             (request.location_id, user_id)
@@ -2844,128 +2988,161 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
             (user_id,)
         )
         user_row = cursor.fetchone()
-        business_name = (user_row["business_name"] if user_row else None) or request.location_name
-        manager_name = (user_row["manager_name"] if user_row else None) or (user_row["name"] if user_row else None) or business_name
-        reply_to = user_row["email"] if user_row else None
-        location_suffix = (
-            f" ({request.location_name})"
-            if request.location_name and request.location_name != business_name
-            else ""
+        cursor.execute(
+            "SELECT id, name, email FROM distributors WHERE id = ANY(%s) AND user_id = %s AND deleted_at IS NULL",
+            ([o.distributor_id for o in request.orders], user_id)
         )
+        dists = {r["id"]: r for r in cursor.fetchall()}
 
-        for order in request.orders:
-            item_dicts = [
-                {"name": i.name, "quantity": i.quantity, "size": i.size or None, "price": i.price}
-                for i in order.items
-            ]
-            all_items.extend(item_dicts)
+    business_name = (user_row["business_name"] if user_row else None) or request.location_name
+    manager_name = (user_row["manager_name"] if user_row else None) or (user_row["name"] if user_row else None) or business_name
+    reply_to = user_row["email"] if user_row else None
+    location_suffix = (
+        f" ({request.location_name})"
+        if request.location_name and request.location_name != business_name
+        else ""
+    )
 
-            cursor.execute(
-                "SELECT id, name, email FROM distributors WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
-                (order.distributor_id, user_id)
-            )
-            dist = cursor.fetchone()
-            if not dist:
-                results.append({
-                    "distributor_id": order.distributor_id, "distributor_name": None,
-                    "email": None, "status": "failed", "error": "Distributor not found"
-                })
-                order_distributors.append({
-                    "distributor_id": order.distributor_id, "distributor_name": None,
-                    "email": None, "status": "failed", "items": item_dicts
-                })
-                continue
-            if not dist["email"]:
-                results.append({
-                    "distributor_id": dist["id"], "distributor_name": dist["name"],
-                    "email": None, "status": "no_email",
-                    "error": "No email address on file for this distributor"
-                })
-                order_distributors.append({
-                    "distributor_id": dist["id"], "distributor_name": dist["name"],
-                    "email": None, "status": "no_email", "items": item_dicts
-                })
-                continue
+    results = []
+    order_distributors = []  # what THIS request did, with each distributor's line items, for order history
+    order_number = None      # one number for the whole send, shared by every distributor's email
 
-            lines = []
-            total_qty = 0.0
-            for item in order.items:
-                qty = item.quantity
-                total_qty += qty
-                qty_str = str(int(qty)) if qty == int(qty) else f"{qty:g}"
-                size_str = f" {item.size}" if item.size else ""
-                lines.append(f"- {item.name}{size_str} x {qty_str}")
-
-            total_str = str(int(total_qty)) if total_qty == int(total_qty) else f"{total_qty:g}"
-            subject = f"Order from {business_name} — {today}"
-            body_text = f"""Hi {dist['name']},
-
-This is an order from {business_name}{location_suffix}. Please prepare the following for pickup/delivery:
-
-{chr(10).join(lines)}
-
-Total: {total_str} bottles
-
-Thank you,
-{manager_name}
-{business_name}
-(sent via 86'd bar inventory)"""
-
-            # BCC the bar's own email: proof in the manager's inbox that the
-            # order went out, and a paper trail if a distributor claims they
-            # never received it. "Sent" only means Resend accepted it.
-            ok, error = _send_via_resend(api_key, dist["email"], subject, body_text, reply_to=reply_to, bcc=reply_to)
+    # 2. The sends. No database connection is held while Resend answers.
+    for order in request.orders:
+        item_dicts = [
+            {"name": i.name, "quantity": i.quantity, "size": i.size or None, "price": i.price}
+            for i in order.items
+        ]
+        dist = dists.get(order.distributor_id)
+        if not dist:
+            results.append({
+                "distributor_id": order.distributor_id, "distributor_name": None,
+                "email": None, "status": "failed", "error": "Distributor not found"
+            })
+            order_distributors.append({
+                "distributor_id": order.distributor_id, "distributor_name": None,
+                "email": None, "status": "failed", "items": item_dicts
+            })
+            continue
+        if not dist["email"]:
             results.append({
                 "distributor_id": dist["id"], "distributor_name": dist["name"],
-                "email": dist["email"], "status": "sent" if ok else "failed",
-                "error": error
+                "email": None, "status": "no_email",
+                "error": "No email address on file for this distributor"
             })
             order_distributors.append({
                 "distributor_id": dist["id"], "distributor_name": dist["name"],
-                "email": dist["email"], "status": "sent" if ok else "failed", "items": item_dicts
+                "email": None, "status": "no_email", "items": item_dicts
             })
-            if not ok:
-                print(f"[send_order_emails] failed for {dist['name']} <{dist['email']}>: {error}", flush=True)
+            continue
 
-        # Persist a record of this order for history, regardless of send outcome —
-        # the manager should be able to look back at what was attempted/ordered.
-        now = now_iso()
-        session_id = generate_id()
-        cursor.execute("""
-            INSERT INTO inventory_sessions (id, location_id, user_id, started_at, completed_at, status, total_bottles, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, 'completed', %s, %s, %s)
-        """, (session_id, request.location_id, user_id, now, now, len(all_items), now, now))
+        ihash = _items_hash(item_dicts) if ref else None
+        if ref:
+            held = _claim_send(user_id, ref, dist["id"], ihash)
+            if held is not None:
+                if held["status"] == "sent":
+                    # Already emailed this exact order under this ref — a retry
+                    # after the first response was lost. Report it, don't resend.
+                    results.append({
+                        "distributor_id": dist["id"], "distributor_name": dist["name"],
+                        "email": held["email"] or dist["email"], "status": "sent", "error": None,
+                        "order_number": held["order_number"], "already_sent": True,
+                    })
+                else:
+                    results.append({
+                        "distributor_id": dist["id"], "distributor_name": dist["name"],
+                        "email": dist["email"], "status": "failed",
+                        "error": ("Still sending from your last try — check Past Orders in a "
+                                  "minute before sending again."),
+                    })
+                continue
 
-        order_id = generate_id()
-        sent_emails = [r["email"] for r in results if r["status"] == "sent" and r["email"]]
-        total_cost = sum(
-            item["price"] * item["quantity"] for item in all_items if item.get("price") is not None
+        # Numbered only once an email is really about to go, so an order
+        # where no distributor had an address doesn't burn a number.
+        if order_number is None:
+            order_number = _draw_order_number(user_id)
+        subject, body_text = order_email(
+            order_number, dist["name"], business_name, location_suffix,
+            item_dicts, manager_name, today,
         )
-        order_data = {
-            "distributors": order_distributors,
-            "items": all_items,
-            "business_name": business_name,
-            "manager_name": manager_name,
-            "staff_name": request.staff_name,
-            "location_name": request.location_name,
-            "total_cost": total_cost if total_cost > 0 else None,
-        }
-        cursor.execute("""
-            INSERT INTO orders (id, session_id, location_id, order_data, total_items, estimated_cost, exported_at, export_format, export_destination, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            order_id, session_id, request.location_id, json.dumps(order_data), len(all_items),
-            order_data["total_cost"], now, "email", ", ".join(sent_emails) or None, now
-        ))
-        conn.commit()
+
+        # BCC the bar's own email: proof in the manager's inbox that the
+        # order went out, and a paper trail if a distributor claims they
+        # never received it. "Sent" only means Resend accepted it.
+        ok, error = _send_via_resend(api_key, dist["email"], subject, body_text, reply_to=reply_to, bcc=reply_to)
+        if ref:
+            _finish_send(user_id, ref, dist["id"], ihash, ok, order_number, dist["email"], error)
+        results.append({
+            "distributor_id": dist["id"], "distributor_name": dist["name"],
+            "email": dist["email"], "status": "sent" if ok else "failed",
+            "error": error, "order_number": order_number if ok else None,
+        })
+        order_distributors.append({
+            "distributor_id": dist["id"], "distributor_name": dist["name"],
+            "email": dist["email"], "status": "sent" if ok else "failed", "items": item_dicts
+        })
+        if not ok:
+            print(f"[send_order_emails] failed for {dist['name']} <{dist['email']}>: {error}", flush=True)
+
+    # 3. A record for Past Orders, regardless of send outcome — the manager
+    #    should be able to look back at what was attempted/ordered. A pure
+    #    retry (everything already sent) adds nothing: its order is on file.
+    order_id = None
+    if order_distributors:
+        try:
+            order_id = _save_order_history(request, user_id, order_distributors, results,
+                                           business_name, manager_name, order_number)
+        except Exception as exc:
+            print(f"[send_order_emails] ORDER_HISTORY_FAILED user={user_id} "
+                  f"order_number={order_number}: {exc}", flush=True)
 
     sent = sum(1 for r in results if r["status"] == "sent")
+    if order_number is None:
+        order_number = next((r.get("order_number") for r in results if r.get("order_number")), None)
     return {
         "order_id": order_id,
+        "order_number": order_number,
         "results": results,
         "sent": sent,
         "failed": len(results) - sent,
     }
+
+
+def _save_order_history(request, user_id: str, order_distributors: list, results: list,
+                        business_name: str, manager_name: str, order_number) -> str:
+    all_items = [i for d in order_distributors for i in d["items"]]
+    now = now_iso()
+    session_id = generate_id()
+    order_id = generate_id()
+    sent_emails = [r["email"] for r in results
+                   if r["status"] == "sent" and r["email"] and not r.get("already_sent")]
+    total_cost = sum(
+        item["price"] * item["quantity"] for item in all_items if item.get("price") is not None
+    )
+    order_data = {
+        "distributors": order_distributors,
+        "items": all_items,
+        "business_name": business_name,
+        "manager_name": manager_name,
+        "staff_name": request.staff_name,
+        "location_name": request.location_name,
+        "total_cost": total_cost if total_cost > 0 else None,
+    }
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO inventory_sessions (id, location_id, user_id, started_at, completed_at, status, total_bottles, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, 'completed', %s, %s, %s)
+        """, (session_id, request.location_id, user_id, now, now, len(all_items), now, now))
+        cursor.execute("""
+            INSERT INTO orders (id, session_id, location_id, order_data, total_items, estimated_cost, exported_at, export_format, export_destination, created_at, order_number)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            order_id, session_id, request.location_id, json.dumps(order_data), len(all_items),
+            order_data["total_cost"], now, "email", ", ".join(sent_emails) or None, now, order_number
+        ))
+        conn.commit()
+    return order_id
 
 # ============== BILLING (Stripe) ==============
 # No card is ever collected at signup — every account gets a 30-day trial
@@ -2976,6 +3153,20 @@ Thank you,
 import stripe
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+# Resolved once, whatever the library version calls them: stripe-python has
+# moved its errors around between majors (stripe.error.X -> stripe.X).
+_STRIPE_SIG_ERROR = (getattr(stripe, "SignatureVerificationError", None)
+                     or stripe.error.SignatureVerificationError)
+_STRIPE_ERROR = getattr(stripe, "StripeError", None) or stripe.error.StripeError
+
+
+def _stripe_unavailable(exc: Exception) -> HTTPException:
+    print(f"[billing] STRIPE_ERROR {type(exc).__name__}: {exc}", flush=True)
+    return HTTPException(status_code=502, detail={
+        "error": "billing_unavailable",
+        "message": "Couldn't reach the payment service just now — try again in a minute."
+    })
 
 APP_BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://eight6d-api.onrender.com")
 
@@ -3029,17 +3220,21 @@ def _send_trial_reminder_emails():
         """, (cutoff, now.isoformat()))
         rows = cursor.fetchall()
 
-        for row in rows:
-            try:
-                ends = datetime.fromisoformat(row["trial_ends_at"])
-                if ends.tzinfo is None:
-                    ends = ends.replace(tzinfo=timezone.utc)
-                days_left = max(0, (ends - now).days)
-                display_name = row["manager_name"] or row["name"] or "there"
-                date_str = ends.strftime("%B %d, %Y")
+    # Each send is stamped in its own short transaction, with no connection
+    # held while Resend answers. They used to share one: a single failed
+    # stamp aborted the transaction, every later stamp in the run failed with
+    # it, and those customers got the same email again six hours later.
+    for row in rows:
+        try:
+            ends = datetime.fromisoformat(row["trial_ends_at"])
+            if ends.tzinfo is None:
+                ends = ends.replace(tzinfo=timezone.utc)
+            days_left = max(0, (ends - now).days)
+            display_name = row["manager_name"] or row["name"] or "there"
+            date_str = ends.strftime("%B %d, %Y")
 
-                subject = f"Your 86'd trial ends in {days_left} day{'s' if days_left != 1 else ''}"
-                body = f"""Hi {display_name},
+            subject = f"Your 86'd trial ends in {days_left} day{'s' if days_left != 1 else ''}"
+            body = f"""Hi {display_name},
 
 Your free trial of 86'd ends on {date_str}. After that, you'll need an active subscription to keep scanning, ordering, and tracking your bar's inventory — nothing you've entered will be lost, but you won't be able to use the app again until you subscribe.
 
@@ -3048,17 +3243,18 @@ Open the 86'd app and tap Subscribe to keep going without any interruption.
 Thanks,
 The 86'd team"""
 
-                ok, error = _send_via_resend(api_key, row["email"], subject, body)
-                if ok:
-                    cursor.execute(
+            ok, error = _send_via_resend(api_key, row["email"], subject, body)
+            if ok:
+                with get_db() as conn:
+                    conn.cursor().execute(
                         "UPDATE users SET trial_reminder_sent_at = %s, updated_at = %s WHERE id = %s",
                         (now_iso(), now_iso(), row["id"])
                     )
                     conn.commit()
-                else:
-                    print(f"[trial_reminder] failed to email {row['email']}: {error}", flush=True)
-            except Exception as e:
-                print(f"[trial_reminder] error processing user {row['id']}: {e}", flush=True)
+            else:
+                print(f"[trial_reminder] failed to email {row['email']}: {error}", flush=True)
+        except Exception as e:
+            print(f"[trial_reminder] error processing user {row['id']}: {e}", flush=True)
 
 
 async def _trial_reminder_loop():
@@ -3111,7 +3307,12 @@ def _crawl_window_start(local_now: datetime) -> Optional[datetime]:
 def _in_crawl_window(local_now: datetime) -> bool:
     """Is `local_now` (in the crawl's clock) inside the daily crawl window?"""
     return _crawl_window_start(local_now) is not None
+
+
 LEADGEN_CHECK_INTERVAL_SECONDS = 900                          # 15 min
+
+
+LEADGEN_RETRY_HOURS = 2
 
 
 def _leadgen_should_run_now() -> bool:
@@ -3135,14 +3336,21 @@ def _leadgen_should_run_now() -> bool:
     # midnight still runs once.
     since = window_start.astimezone(timezone.utc).isoformat()
 
+    # A run that failed isn't "ok", so the day stayed due and the next tick
+    # (every 15 minutes) ran again — hammering the free map mirrors until
+    # midnight, which is how an IP gets rate-limited off them. Any attempt in
+    # the last LEADGEN_RETRY_HOURS rests it.
+    retry_since = (datetime.now(timezone.utc) - timedelta(hours=LEADGEN_RETRY_HOURS)).isoformat()
     with _get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT COUNT(*) AS n FROM crm_leadgen_runs "
-            "WHERE ok = TRUE AND started_at >= %s",
-            (since,)
+            "SELECT COUNT(*) FILTER (WHERE ok = TRUE AND started_at >= %s) AS ok_today, "
+            "       COUNT(*) FILTER (WHERE started_at >= %s) AS recent "
+            "  FROM crm_leadgen_runs",
+            (since, retry_since)
         )
-        return cursor.fetchone()["n"] == 0
+        row = cursor.fetchone()
+        return row["ok_today"] == 0 and row["recent"] == 0
 
 
 def _leadgen_tick():
@@ -3213,6 +3421,12 @@ async def _phone_check_loop():
         try:
             import leadgen
             checked = await asyncio.to_thread(leadgen.phone_check_step)
+            # Then the owner's rules (pours liquor, not a strip, not a chain)
+            # for leads listed before them — one after the other, never side
+            # by side, so the crawl stays at two sites at a time.
+            checked += await asyncio.to_thread(leadgen.fit_check_step)
+            # Once: emails a wrong website lookup put on quick-added leads.
+            await asyncio.to_thread(leadgen.recheck_looked_up_sites)
         except Exception as e:
             print(f"[leadgen] PHONE_CHECK_LOOP_ERROR {e}", flush=True)
         await asyncio.sleep(45 if checked else 1800)
@@ -3231,6 +3445,24 @@ async def _playbook_loop():
         except Exception as e:
             print(f"[crm] PLAYBOOK_LOOP_ERROR {e}", flush=True)
         await asyncio.sleep(3 * 3600)
+
+
+async def _apple_sync_loop():
+    """Import App Store Connect analytics in the background, twice a day
+    (crm.apple_sync_if_due decides; the import runs in its own thread).
+
+    The Apple Analytics tab used to be the only thing that imported, so with
+    nobody opening it nothing was fetched — and Apple stops a report request
+    whose reports go unread for long enough, after which no new numbers come
+    at all. An hourly look costs one database read when nothing is due."""
+    await asyncio.sleep(600)
+    while True:
+        try:
+            from crm import apple_sync_if_due
+            await asyncio.to_thread(apple_sync_if_due)
+        except Exception as e:
+            print(f"[crm] APPLE_SYNC_LOOP_ERROR {e}", flush=True)
+        await asyncio.sleep(3600)
 
 
 async def _school_refresh_loop():
@@ -3286,28 +3518,34 @@ def create_checkout_session(user_id: str = Depends(get_current_user)):
             (user_id,)
         )
         row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
+    if not row:
+        raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
 
+    # Stripe is called with no database connection held — a slow Stripe
+    # shouldn't tie up one of the pool's ten.
+    try:
         customer_id = row["stripe_customer_id"]
         if not customer_id:
             customer = stripe.Customer.create(email=row["email"], metadata={"user_id": user_id})
             customer_id = customer.id
-            cursor.execute(
-                "UPDATE users SET stripe_customer_id = %s, updated_at = %s WHERE id = %s",
-                (customer_id, now_iso(), user_id)
-            )
-            conn.commit()
+            with get_db() as conn:
+                conn.cursor().execute(
+                    "UPDATE users SET stripe_customer_id = %s, updated_at = %s WHERE id = %s",
+                    (customer_id, now_iso(), user_id)
+                )
+                conn.commit()
 
-    session = stripe.checkout.Session.create(
-        customer=customer_id,
-        mode="subscription",
-        line_items=[{"price": price_id, "quantity": 1}],
-        success_url=f"{APP_BASE_URL}/billing/success",
-        cancel_url=f"{APP_BASE_URL}/billing/cancel",
-        client_reference_id=user_id,
-        subscription_data={"metadata": {"user_id": user_id}},
-    )
+        session = stripe.checkout.Session.create(
+            customer=customer_id,
+            mode="subscription",
+            line_items=[{"price": price_id, "quantity": 1}],
+            success_url=f"{APP_BASE_URL}/billing/success",
+            cancel_url=f"{APP_BASE_URL}/billing/cancel",
+            client_reference_id=user_id,
+            subscription_data={"metadata": {"user_id": user_id}},
+        )
+    except _STRIPE_ERROR as exc:
+        raise _stripe_unavailable(exc)
     return {"checkout_url": session.url}
 
 
@@ -3335,10 +3573,13 @@ def create_portal_session(user_id: str = Depends(get_current_user)):
             })
         customer_id = row["stripe_customer_id"]
 
-    session = stripe.billing_portal.Session.create(
-        customer=customer_id,
-        return_url=f"{APP_BASE_URL}/billing/success",
-    )
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=f"{APP_BASE_URL}/billing/success",
+        )
+    except _STRIPE_ERROR as exc:
+        raise _stripe_unavailable(exc)
     return {"portal_url": session.url}
 
 
@@ -3488,17 +3729,38 @@ async def billing_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
     try:
-        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
-    except (ValueError, stripe.error.SignatureVerificationError):
+        stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except (ValueError, _STRIPE_SIG_ERROR):
         raise HTTPException(status_code=400, detail={"error": "invalid_signature"})
 
-    obj = event["data"]["object"]
+    # The event is read from the VERIFIED payload as plain JSON, never from
+    # the library's event object. stripe-python 15 stopped making StripeObject
+    # a dict, so `event["data"]["object"].get(...)` raised AttributeError on
+    # every webhook: a customer paid and stayed locked out, and cancellations
+    # never landed. requirements.txt allowed any stripe >= 7, so the next clean
+    # build would have installed it. json.loads works on every version.
+    event = json.loads(payload)
+    # Database work off the event loop: this process serves every request on
+    # one loop, and a blocking query here stalls all of them.
+    await asyncio.to_thread(_apply_billing_event, event)
+    return {"received": True}
+
+
+def _apply_billing_event(event: dict) -> None:
+    obj = (event.get("data") or {}).get("object") or {}
+    kind = event.get("type")
     now = now_iso()
 
     with get_db() as conn:
         cursor = conn.cursor()
 
-        if event["type"] == "checkout.session.completed":
+        if kind == "checkout.session.completed":
+            # A delayed payment method finishes checkout UNPAID; the
+            # subscription's own "active" update activates it once it clears.
+            if obj.get("payment_status") == "unpaid":
+                print(f"[billing] checkout {obj.get('id')} completed unpaid — waiting for the "
+                      f"subscription to go active", flush=True)
+                return
             user_id = obj.get("client_reference_id") or (obj.get("metadata") or {}).get("user_id")
             customer_id = obj.get("customer")
             if user_id:
@@ -3506,9 +3768,11 @@ async def billing_webhook(request: Request):
                     "UPDATE users SET subscription_status = 'active', stripe_customer_id = %s, updated_at = %s WHERE id = %s",
                     (customer_id, now, user_id)
                 )
+                if cursor.rowcount == 0:
+                    print(f"[billing] BILLING_NO_USER checkout for unknown user {user_id}", flush=True)
                 conn.commit()
 
-        elif event["type"] in ("customer.subscription.updated", "customer.subscription.deleted"):
+        elif kind in ("customer.subscription.updated", "customer.subscription.deleted"):
             customer_id = obj.get("customer")
             status = obj.get("status")  # active, past_due, canceled, unpaid, etc.
             # past_due = a renewal charge failed but Stripe is still retrying
@@ -3529,19 +3793,25 @@ async def billing_webhook(request: Request):
                 )
                 conn.commit()
 
-    return {"received": True}
-
 # TEMPORARY — one-off admin utility to activate an account without waiting
 # on Stripe, for pre-launch testing. Guarded by SECRET_KEY as a bearer
 # token. Remove this route once no longer needed.
 @app.post("/admin/activate-account")
 async def admin_activate_account(request: Request):
-    if request.headers.get("x-admin-secret") != os.getenv("SECRET_KEY"):
+    # Constant-time, and never open when SECRET_KEY is unset: a missing header
+    # compared to a missing env var used to be None == None — a pass.
+    expected = os.getenv("SECRET_KEY") or ""
+    given = request.headers.get("x-admin-secret") or ""
+    if not expected or not secrets.compare_digest(given.encode(), expected.encode()):
         raise HTTPException(status_code=403, detail={"error": "forbidden"})
     body = await request.json()
     email = (body.get("email") or "").strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail={"error": "email required"})
+    return await asyncio.to_thread(_admin_activate, email)
+
+
+def _admin_activate(email: str) -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -3678,10 +3948,13 @@ def forgot_password(request: ForgotPasswordRequest):
                     issued_recently = False
 
             if not issued_recently:
-                code = f"{random.randint(0, 999999):06d}"
+                # secrets, not random: the Mersenne Twister's output can be
+                # reconstructed from enough observed values.
+                code = f"{secrets.randbelow(1_000_000):06d}"
                 expires_at = (datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_EXPIRE_MINUTES)).isoformat()
                 cursor.execute("""
-                    UPDATE users SET password_reset_token = %s, password_reset_expires_at = %s
+                    UPDATE users SET password_reset_token = %s, password_reset_expires_at = %s,
+                                     password_reset_attempts = 0
                     WHERE id = %s
                 """, (code, expires_at, row["id"]))
                 conn.commit()
@@ -3706,6 +3979,13 @@ This code expires in {PASSWORD_RESET_EXPIRE_MINUTES} minutes. If you didn't requ
 
     return {"success": True, "message": "If an account exists, a reset code has been sent"}
 
+# Wrong codes allowed against one emailed code before it's thrown away. A
+# 6-digit code has a million values; with no limit, anyone who knew a
+# customer's email could request a code and guess until they owned the
+# account. Five tries leaves room for typos and none for guessing.
+RESET_MAX_ATTEMPTS = 5
+
+
 @v1_router.post("/auth/reset-password")
 def reset_password(request: ResetPasswordRequest):
     """Reset password using the emailed 6-digit code"""
@@ -3713,11 +3993,32 @@ def reset_password(request: ResetPasswordRequest):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id FROM users
-            WHERE email = %s AND password_reset_token = %s AND password_reset_expires_at > %s AND deleted_at IS NULL
-        """, (email, request.token.strip(), now_iso()))
+            SELECT id, password_reset_token, COALESCE(password_reset_attempts, 0) AS attempts
+            FROM users
+            WHERE email = %s AND password_reset_token IS NOT NULL
+              AND password_reset_expires_at > %s AND deleted_at IS NULL
+            FOR UPDATE
+        """, (email, now_iso()))
         row = cursor.fetchone()
-        if not row:
+        given = request.token.strip()
+        if not row or not secrets.compare_digest(given.encode(), (row["password_reset_token"] or "").encode()):
+            if row:
+                attempts = row["attempts"] + 1
+                if attempts >= RESET_MAX_ATTEMPTS:
+                    cursor.execute("""
+                        UPDATE users SET password_reset_token = NULL, password_reset_expires_at = NULL,
+                                         password_reset_attempts = 0
+                         WHERE id = %s
+                    """, (row["id"],))
+                    conn.commit()
+                    print(f"[auth] RESET_CODE_BURNED after {attempts} wrong codes for user {row['id']}", flush=True)
+                    raise HTTPException(status_code=400, detail={
+                        "error": "invalid_token",
+                        "message": "Too many wrong codes — request a new one and use the latest email."
+                    })
+                cursor.execute("UPDATE users SET password_reset_attempts = %s WHERE id = %s",
+                               (attempts, row["id"]))
+                conn.commit()
             raise HTTPException(status_code=400, detail={"error": "invalid_token", "message": "Invalid or expired reset code"})
         password_hash = get_password_hash(request.new_password)
         now = now_iso()
@@ -3725,7 +4026,8 @@ def reset_password(request: ResetPasswordRequest):
         # is exactly when you want all old devices signed out
         cursor.execute("""
             UPDATE users SET password_hash = %s, password_changed_at = %s,
-                             password_reset_token = NULL, password_reset_expires_at = NULL, updated_at = %s
+                             password_reset_token = NULL, password_reset_expires_at = NULL,
+                             password_reset_attempts = 0, updated_at = %s
             WHERE id = %s
         """, (password_hash, now, now, row["id"]))
         conn.commit()
@@ -4953,6 +5255,11 @@ async def _run_providers(openai_key, gemini_key, prompt, request, user_id,
                     failures[name] = e
                     if isinstance(e, _TIMEOUTS):
                         print(f"[analyze_bottle] {name} timed out after {PROVIDER_TIMEOUT}s", flush=True)
+                    elif isinstance(e, openai.AuthenticationError):
+                        # A revoked or wrong key. Loud: every scan now rides on
+                        # Gemini alone, or fails outright with no Gemini key.
+                        print("[analyze_bottle] SCAN_PROVIDER_AUTH_FAILED OpenAI rejected OPENAI_API_KEY"
+                              + (" — Gemini answers alone" if gemini_key else ""), flush=True)
                     elif isinstance(e, GeminiError):
                         print(f"[analyze_bottle] {name} error: {e}", flush=True)
                     elif isinstance(e, (json.JSONDecodeError, ValueError)):
@@ -4977,6 +5284,13 @@ async def _run_providers(openai_key, gemini_key, prompt, request, user_id,
                 raise HTTPException(status_code=504, detail={
                     "error": "ai_timeout",
                     "message": "AI service timed out — image may be too large or service is slow"
+                })
+            if failures and all(_failure_label(e) == "unparseable" for e in failures.values()):
+                # Every provider answered, in something that isn't a reading.
+                event["status"] = "parse_failed"
+                raise HTTPException(status_code=500, detail={
+                    "error": "parse_failed",
+                    "message": f"Could not parse AI response: {list(failures.values())[-1]}"
                 })
             if any(isinstance(e, openai.AuthenticationError) for e in failures.values()) and len(failures) == 1:
                 raise HTTPException(status_code=503, detail={

@@ -215,3 +215,105 @@ def test_a_reply_is_drafted_from_their_own_words(monkeypatch):
     assert "never guess" in ask
     again = crm._reply_ask({"subject": "Re: following up", "body_text": "x"})
     assert 'Subject: "Re: following up"' in again and "Re: Re:" not in again
+
+
+# ── deleting a note off "While you were away" ───────────────────────────────
+
+def _inbox_db(monkeypatch, rows):
+    """crm_inbox as a dict. The UPDATE applies the route's own CASE — stamp
+    the first delete time, or clear it — and every statement is kept."""
+    seen = []
+
+    class Cur:
+        def __init__(self):
+            self.out = []
+
+        def execute(self, sql, params=()):
+            seen.append(sql)
+            if sql.lstrip().startswith("UPDATE crm_inbox"):
+                dismiss, when, mid = params
+                row = rows.get(mid)
+                if row is not None:
+                    row["dismissed_at"] = (row["dismissed_at"] or when) if dismiss else None
+                self.out = [{"message_id": mid, "dismissed_at": row["dismissed_at"]}] if row else []
+            elif "MAX(processed_at)" in sql:
+                self.out = [{"last": max(r["processed_at"] for r in rows.values())}]
+            else:
+                self.out = sorted(rows.values(), key=lambda r: r["processed_at"], reverse=True)
+
+        def fetchone(self):
+            return self.out[0] if self.out else None
+
+        def fetchall(self):
+            return self.out
+
+    class Conn:
+        def cursor(self): return Cur()
+        def commit(self): pass
+
+    @contextmanager
+    def db():
+        yield Conn()
+
+    monkeypatch.setattr(crm, "get_db", db)
+    return seen
+
+
+def _note(mid, at, **extra):
+    now = crm.datetime.now(crm.timezone.utc)
+    return {"message_id": mid, "from_addr": "jed@fbrmgmt.com", "from_name": "Jed",
+            "subject": "Re: hi", "received_at": None, "status": "updated",
+            "result": json.dumps({"reply": "Jed is the new contact",
+                                  "applied": [{"lead_id": "L1", "name": "Olde Town",
+                                               "changed": ["contact"], "undo_id": "u1"}]}),
+            "processed_at": (now - crm.timedelta(hours=at)).isoformat(),
+            "lead_ids": "L1", "opt_out": False, "needs_reply": False, "draft": None,
+            "replied_at": None, "dismissed_at": None, **extra}
+
+
+def test_a_deleted_note_leaves_the_list_and_can_be_put_back(monkeypatch):
+    rows = {"<a@x>": _note("<a@x>", 1), "<b@x>": _note("<b@x>", 2)}
+    seen = _inbox_db(monkeypatch, rows)
+    out = crm.inbox_dismiss(crm.InboxNote(message_id="<a@x>"), True)
+    assert out["dismissed_at"]
+    feed = crm.inbox_feed(72, True)
+    assert [i["message_id"] for i in feed["items"]] == ["<b@x>"]
+    assert [i["message_id"] for i in feed["deleted"]] == ["<a@x>"]
+    assert feed["deleted"][0]["applied"][0]["undo_id"] == "u1"   # the note, whole
+    # Deleting only hides the note. The row stays: the reader treats a
+    # message it has no row for as new mail, so a real DELETE would bring
+    # the email back and apply its changes twice.
+    assert not any(q.lstrip().upper().startswith("DELETE") for q in seen)
+    crm.inbox_restore(crm.InboxNote(message_id="<a@x>"), True)
+    feed = crm.inbox_feed(72, True)
+    assert [i["message_id"] for i in feed["items"]] == ["<a@x>", "<b@x>"]
+    assert feed["deleted"] == []
+
+
+def test_deleting_twice_keeps_the_first_time_and_the_newest_deletion_is_first(monkeypatch):
+    rows = {"<a@x>": _note("<a@x>", 1), "<b@x>": _note("<b@x>", 2)}
+    _inbox_db(monkeypatch, rows)
+    first = crm.inbox_dismiss(crm.InboxNote(message_id="<b@x>"), True)["dismissed_at"]
+    rows["<b@x>"]["dismissed_at"] = "2026-09-25T01:00:00+00:00"
+    assert crm.inbox_dismiss(crm.InboxNote(message_id="<b@x>"), True)["dismissed_at"] \
+        == "2026-09-25T01:00:00+00:00"
+    assert first
+    crm.inbox_dismiss(crm.InboxNote(message_id="<a@x>"), True)
+    feed = crm.inbox_feed(72, True)
+    assert feed["items"] == []
+    assert [i["message_id"] for i in feed["deleted"]] == ["<a@x>", "<b@x>"]
+
+
+def test_deleting_a_note_that_isnt_there_is_a_404(monkeypatch):
+    _inbox_db(monkeypatch, {"<a@x>": _note("<a@x>", 1)})
+    with pytest.raises(HTTPException) as e:
+        crm.inbox_dismiss(crm.InboxNote(message_id="<gone@x>"), True)
+    assert e.value.status_code == 404
+    with pytest.raises(HTTPException):
+        crm.inbox_restore(crm.InboxNote(message_id="<gone@x>"), True)
+
+
+def test_the_delete_routes_are_wired():
+    routes = {r.path: r.endpoint for r in crm.crm_router.routes if hasattr(r, "endpoint")}
+    assert routes["/v1/crm/inbox/dismiss"] is crm.inbox_dismiss
+    assert routes["/v1/crm/inbox/restore"] is crm.inbox_restore

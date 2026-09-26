@@ -21,6 +21,10 @@
   header img{width:46px;height:46px;border-radius:10px}
   header h1{font-size:20px;margin:0;letter-spacing:-0.4px}
   header .sub{color:var(--text3);font-size:12px}
+  /* The title copies the App Store link — it looks like a title, not a button. */
+  .titlebtn{background:none;border:0;padding:0;font:inherit;color:inherit;letter-spacing:inherit;
+            cursor:pointer;border-radius:4px}
+  .titlebtn:hover{color:var(--accent)}
 
   #pipeBody tr[data-id],#yetBody tr[data-id],#fOverdue tr[data-id],#fToday tr[data-id]{cursor:pointer}
   #pipeBody tr[data-id]:hover td,#yetBody tr[data-id]:hover td,
@@ -30,6 +34,13 @@
   .assist-list{margin:8px 0 0;padding-left:18px;font-size:13px;line-height:1.8}
   .assist-list li.undone{opacity:.45;text-decoration:line-through}
   .assist-list button{margin-left:8px;padding:2px 9px;font-size:12px}
+  .awayhead{display:flex;gap:8px;align-items:flex-start;font-size:13px}
+  .awayhead>div{flex:1;min-width:0}
+  .awayhead button,.awaygone button{padding:2px 9px;font-size:12px;flex:none}
+  #fAwayGone summary{cursor:pointer;font-size:13px;margin-top:10px}
+  .awaygone{display:flex;gap:8px;align-items:center;font-size:13px;padding:6px 0;
+            border-top:1px solid var(--line2)}
+  .awaygone>span{flex:1;min-width:0}
   .phok{font-size:11px;color:var(--text3);margin-top:3px;white-space:nowrap}
   .attempts{border-collapse:collapse;font-size:13px;margin:0 0 4px}
   .attempts td{padding:3px 14px 3px 0;border:0;background:none !important;vertical-align:top}
@@ -76,13 +87,33 @@
   .pipebar input{flex:1;min-width:220px}
   .pipebar button{flex:none;white-space:nowrap}
   /* Open / Dead — the CRM tab's only two views. */
-  .stands{font-size:13px;line-height:1.35;min-width:220px}
+  /* WHERE THINGS STAND: the same three-line shape on every row, told apart
+     by an icon and by weight, never by colour — no red anywhere in it (the
+     owner's call: red read as alarm, not information). */
+  .stands{font-size:13px;line-height:1.35;min-width:240px}
+  .sl{display:flex;gap:8px;align-items:flex-start}
+  .sl+.sl{margin-top:4px}
+  .ic{width:14px;height:14px;flex:none;margin-top:2px;fill:none;stroke:currentColor;
+      stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  .sl.head{font-size:14px;font-weight:600;color:var(--text)}
+  .sl .when{font-weight:400;color:var(--text3)}
+  .sl.prior{font-size:12.5px;color:var(--text3)}
+  .sl.next{color:var(--text2)}
+  .sl.next.now{color:var(--text);font-weight:600}
+  .sl.quiet{color:var(--text3);font-weight:400}
+  /* REACHED OUT: one big number, what it's made of underneath. */
+  th.reach,td.reach{text-align:center}
+  th.reach .hash{display:block;font-size:12px;letter-spacing:0;margin-top:2px}
+  td.reach .n{font-size:20px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+  td.reach .mix{display:flex;gap:8px;justify-content:center;margin-top:3px;font-size:12px;
+                color:var(--text3);white-space:nowrap}
+  td.reach .mix span{display:inline-flex;align-items:center;gap:3px}
+  td.reach .mix .ic{width:12px;height:12px;margin-top:0}
   /* Clickable column header — styled as a header, not a button. */
   .thsort{background:none;border:0;padding:0;font:inherit;color:inherit;letter-spacing:inherit;
           cursor:pointer;white-space:nowrap}
   .thsort span{margin-left:4px;color:var(--text3)}
   .thsort:hover,.thsort.on,.thsort.on span{color:var(--accent)}
-  .stands .err{font-weight:600}
   .glance{display:flex;gap:8px;margin-bottom:14px}
   .glance button{font-size:14px;font-weight:700;padding:9px 18px;border-radius:10px}
   .glance button b{margin-left:6px;color:var(--text3);font-weight:700}
@@ -245,6 +276,22 @@
   .applied{margin-top:10px;font-size:12px;color:var(--go)}
 
   .muted{color:var(--text3)} .err{color:var(--stop)}
+  /* AI Brain: the scoreboard it learns from, and a Keep / Wrong on every lesson. */
+  .bboard{border:1px solid var(--line);background:var(--surface2);border-radius:10px;
+          padding:10px 12px;margin:0 0 12px;font-size:13px;line-height:1.55;color:var(--text2)}
+  .bboard b{color:var(--text);font-weight:600}
+  .btry{border:1px solid #FFB02055;background:#FFB02010;border-radius:10px;padding:10px 12px;
+        margin:0 0 12px;font-size:13px;line-height:1.5}
+  .btry button{margin-top:8px;padding:3px 10px;font-size:12px}
+  .bpoint{margin:6px 0;font-size:13px;line-height:1.5}
+  .bpoint .acts{display:inline-flex;gap:4px;margin-left:6px;vertical-align:1px}
+  .bpoint .acts button{padding:1px 8px;font-size:11px;border-radius:6px}
+  .bpoint .acts button.on{border-color:var(--go);color:var(--go)}
+  .btag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;
+        padding:1px 6px;border-radius:5px;margin-left:6px;vertical-align:1px}
+  .btag.new{color:var(--accent);border:1px solid #FF6B3555;background:#FF6B3512}
+  .bmore{margin-top:10px;font-size:13px} .bmore summary{cursor:pointer;color:var(--text2)}
+  .bmore li{margin:4px 0;line-height:1.5} .bmore button{padding:1px 8px;font-size:11px;margin-left:6px}
   .hide{display:none !important}
   .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
         padding:16px;margin-bottom:14px}
@@ -450,7 +497,7 @@
   <header>
     <img src="/crm/icon.png" alt="86'd">
     <div>
-      <h1>86'd — Sales</h1>
+      <h1><button id="copyApp" class="titlebtn" title="Copy the App Store link">86'd — Sales</button></h1>
       <div class="sub">Who to call, and what to say</div>
     </div>
   </header>
@@ -519,8 +566,8 @@
             <p id="pNowW"></p>
             <button class="startbtn" id="pNowGo">Start</button>
           </div>
-          <div id="pVid"></div>
           <div class="ptiles">
+            <button id="pTileFilm"><b>🎬 Review my real calls</b><span>Coaching from your own logged calls.</span></button>
             <button id="pTileCall"><b>📞 Take a call</b><span id="pTileCallS">A tough owner. Get them to try it.</span></button>
             <button id="pTileGaunt"><b>🎯 Gauntlet</b><span>10 fast objections. Works offline.</span></button>
             <button id="pTileTape"><b>🩺 Tape Doctor</b><span id="pTileTapeS">Find 3 mistakes in 90 seconds. Hard.</span></button>
@@ -695,6 +742,15 @@
           </div>
           <div id="cDone" class="hide card"><b>All caught up.</b><p class="muted" style="margin:6px 0 10px">Lines you miss in drills, calls and the Gauntlet come back here: tomorrow, then in 3 days, then a week, then two weeks.</p><button class="go" id="cNext">Next</button></div>
         </div>
+
+        <div id="pFilm" class="hide">
+          <div class="ghead"><button id="fLeave">← Leave</button><div class="t">Game film</div></div>
+          <p class="hint" style="margin:0 0 12px">Your real conversations from the last two weeks, read back by the coach.
+            Voicemails and missed calls aren't film: nothing happened on them. Every drill it finds goes into Replay misses.</p>
+          <div id="fBody"></div>
+          <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+            <button class="go hide" id="fPractise">Practise these now</button><button id="fBack">Back to School</button></div>
+        </div>
       </div>
     </section>
 
@@ -706,18 +762,7 @@
       <div id="askOut" class="askout hide"></div>
       <div class="pipebar">
         <input id="pipeSearch" placeholder="Search a bar, town, contact, email or phone number…">
-        <button class="go" id="pipeAdd">Add a lead</button>
-      </div>
-      <div class="card hide" id="pipeAddPanel" style="margin:10px 0">
-        <p class="hint">Paste or type everything — the bar, their listing, who you spoke to,
-          what happened. It sorts it into the lead, logs the call, and if there's no email it
-          goes and finds one on their website.</p>
-        <textarea id="pipeAddText" rows="5" placeholder="Murphy's Pub, Nashville. Talked to Sarah the bartender, owner is Dave, she said email him — address is on their website"></textarea>
-        <div class="row">
-          <button class="go" id="pipeAddSave">Add lead</button>
-          <button id="pipeAddCancel">Cancel</button>
-        </div>
-        <div class="applied hide" id="pipeAddResult"></div>
+        <button class="go" id="pipeLookup">Look Up</button>
       </div>
       <div class="glance" id="pipeStats"></div>
       <div id="pipeBody"></div>
@@ -738,6 +783,7 @@
         <strong>While you were away</strong>
         <span class="muted" id="fAwayNote" style="font-size:13px"></span>
         <div id="fAwayList" style="margin-top:8px"></div>
+        <div id="fAwayGone"></div>
       </div>
       <div class="card hide" id="fEmpty">
         <strong>No follow-ups due</strong>
@@ -780,6 +826,7 @@
           <strong>What it has learned from your calls</strong>
           <button id="brainRefresh">Re-learn now</button></div>
         <p class="hint" style="margin:4px 0 8px" id="brainWhen"></p>
+        <div id="brainBoard"></div>
         <div id="brainPlaybook"></div>
       </div>
       <details class="card" style="margin-top:12px">
@@ -859,9 +906,12 @@ function toast(m,undoId){
   if(undoId){
     // Ten seconds, not two: noticing you clicked the wrong row takes longer
     // than reading the message. The bar above the list is the real safety
-    // net; this is just the fastest path back.
+    // net; this is just the fastest path back. An undo id puts back a logged
+    // touch; a function undoes anything else (a deleted inbox note).
     const b=document.createElement('button');
-    b.textContent='Undo'; b.onclick=()=>{t.classList.remove('show');undoTouch(undoId);};
+    b.textContent='Undo';
+    b.onclick=()=>{t.classList.remove('show');
+      typeof undoId==='function' ? undoId() : undoTouch(undoId);};
     t.appendChild(b);
   }
   t.classList.add('show');
@@ -1136,6 +1186,13 @@ function refreshSendLabel(dr){
   btn.textContent = chosenTime(dr) ? 'Schedule it' : 'Send it now';
 }
 
+/* What the server's draft checker (pitch.lint) still flagged after its one
+   fix round: a template phrase, a second link, an invented figure. Shown so
+   the operator can fix it by hand or ask for a change — never enforced. */
+const draftNote=(r, ok)=>(r.checks&&r.checks.length)
+  ? 'Drafted. Before you send, worth a look: '+r.checks.slice(0,3).join(' · ')
+  : ok;
+
 async function runDraft(dr, id){
   const brief=dr.querySelector('[data-brief]');
   const btn=dr.querySelector('[data-draft]');
@@ -1159,7 +1216,7 @@ async function runDraft(dr, id){
     brief.value='';
     brief.placeholder='Not right? Say what to change — "shorter", "mention the free trial", "he asked about price"';
     btn.textContent='Redraft';
-    box.className='applied'; box.textContent='Drafted. Edit it yourself or ask for a change, then Send.';
+    box.className='applied'; box.textContent=draftNote(r, 'Drafted. Edit it yourself or ask for a change, then Send.');
   }catch(err){
     box.className='applied err'; box.textContent=err.message;
     btn.textContent=dr.dataset.drafted?'Redraft':'Draft it';
@@ -1380,15 +1437,31 @@ function renderWhereInfo(box, d, l){
       +'change where it sits on the list.</div>':'');
 }
 
-const MAIL_SUBJECT = "Following up — 86'd bar inventory";
+const MAIL_SUBJECT = "86'd, the app from our call";
+/* The hand-written starting point, for when nobody asks the AI. Addressed to
+   the decision maker by first name (the lead's contact is who we ask for),
+   written to the drafter's own rules (one picture, the risk taken away, the
+   App Store link as the only link, one easy ask), and signed exactly the way
+   every AI draft is: the server's signature and the opt-out line under it,
+   from /mail/status, so the two can't drift. */
+const SIGNATURE_DEFAULT="Stephan Khouri\nOwner of 86'd Bar inventory\nWebsite: My86d.com";
+const ROLE_WORDS=new Set(['the','owner','owners','gm','manager','bar','general','head','a','an','bartender','host','hostess','staff','team','someone','unknown']);
+const firstName=n=>{ for(const w of String(n||'').split('(')[0].match(/[A-Za-z][A-Za-z'’-]*/g)||[])
+  if(!ROLE_WORDS.has(w.toLowerCase())) return w[0].toUpperCase()+w.slice(1); return ''; };
 const mailBody=(contact,venue)=>
-`Hi${contact?' '+contact:''},
+`Hi ${firstName(contact)||'there'},
 
-Thanks for taking my call. 86'd is an iPhone app that counts your bar by
-pointing the camera at each bottle — it identifies it, you tap in the count,
-and it builds and emails the order to each distributor.
+Thanks for taking my call. Here's the app I mentioned.
 
-Happy to walk you through it whenever suits.`;
+You point your iPhone at each bottle, it knows what it is, and you tap in the count. Then every distributor gets its order at once. The count and the orders take 10 to 15 minutes.
+
+The first month is free, no card to start:
+${(MAIL&&MAIL.app_url)||APP_URL_DEFAULT}
+
+Worth trying on your next count?
+
+Best,
+${(MAIL&&MAIL.signature)||SIGNATURE_DEFAULT}${MAIL&&MAIL.footer?'\n\n'+MAIL.footer:''}`;
 
 /* Whether the server can send for us. Decided once, on unlock: with a mailbox
    configured the Email button opens a compose box and the send is recorded
@@ -1399,11 +1472,23 @@ async function loadMailStatus(){
   try{ MAIL=await api('/mail/status'); }catch{ MAIL={configured:false,from:null}; }
 }
 
+async function copyText(text){
+  try{ await navigator.clipboard.writeText(text); }
+  catch{ const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);
+         t.select();document.execCommand('copy');t.remove(); }
+}
+/* Click the page's title ("86'd — Sales") and the App Store link is on the
+   clipboard, ready to paste into a text, a DM or an email. The link is the
+   server's (COMPANY_APP_URL, from /mail/status on unlock); before that, the
+   live listing. */
+const APP_URL_DEFAULT='https://apps.apple.com/us/app/86d-bar-inventory/id6798359825';
+$('copyApp').onclick=async()=>{
+  await copyText((MAIL&&MAIL.app_url)||APP_URL_DEFAULT);
+  toast('App Store link copied — paste it anywhere');
+};
 async function copyDigits(el){
   const num=el.dataset.copy;
-  try{ await navigator.clipboard.writeText(num); }
-  catch{ const t=document.createElement('textarea');t.value=num;document.body.appendChild(t);
-         t.select();document.execCommand('copy');t.remove(); }
+  await copyText(num);
   const cls=el.classList.contains('copybtn')?'done':'copied';
   el.classList.add(cls); setTimeout(()=>el.classList.remove(cls),1200);
   if(el.classList.contains('copybtn')) el.textContent='COPIED';
@@ -1704,9 +1789,10 @@ async function loadPipeline(){
           <th>${yet?'STAGE':`<button class="thsort ${PIPE.first?'on':''}" data-sortstage
                title="Click to put a stage at the top">STAGE ${PIPE.first
                ?`<span>· ${esc(STAGE_NAME[PIPE.first])} first</span>`:'<span>⇅</span>'}</button>`}</th>
-          <th>PHONE</th><th>WHERE THINGS STAND</th><th></th>
+          <th>PHONE</th><th>WHERE THINGS STAND</th>
+          ${yet?'':'<th class="reach" title="Every call, email and Facebook message — undone ones don\'t count">REACHED OUT<span class="hash">#</span></th>'}<th></th>
         </tr></thead>
-        <tbody>${d.leads.map((l,i)=>pipeRow(l,S.offset+i+1)).join('')}</tbody>
+        <tbody>${d.leads.map((l,i)=>pipeRow(l,S.offset+i+1,{yet,today:d.today})).join('')}</tbody>
       </table>
     </div></div>
     <div class="pipefoot">
@@ -1820,14 +1906,39 @@ document.addEventListener('click', e=>{
   loadWhereInfo(b.dataset.prep, box, {});
 });
 
-/* WHERE THINGS STAND, as two plain lines: what happened last, and what's next.
-   It used to be one line like "call back 2026-09-25 — Answered · 1 try": a raw
-   date, "call back" whether a person asked for one or nobody picked up, and
-   nothing to say it was overdue. Hover shows the latest note. */
+/* WHERE THINGS STAND — at most three short lines, in the same order on every
+   row so the eye always knows where to look:
+     1. the latest thing that happened, and when (bold): a call and how it
+        went, an email, a Facebook message, or their reply
+     2. how the last CALL went, when line 1 isn't a call (grey) — emailing
+        after a voicemail must not hide the voicemail
+     3. what's next, only when something IS next (grey; bold when it's due
+        today or was due already — never red). No follow-up booked means no
+        third line: none is assumed unless the log sets one
+   An icon per kind of thing instead of colours. It used to be built from the
+   lead's stored last_outcome alone, which an email overwrites with
+   "emailed" — a value this screen had no words for — so a call and then an
+   email read "Called · yesterday". The lines now come from the touch log
+   (crm.touch_story). Hover shows the latest note. */
 const MAX_ATTEMPTS=6;   // crm.py MAX_ATTEMPTS: 5 retries on the ladder, then retired
-function niceDay(ymd){
+const ICON={
+  call:'<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>',
+  email:'<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+  fb:'<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+  reply:'<polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>',
+  next:'<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+  done:'<path d="M20 6 9 17l-5-5"/>',
+  stop:'<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+  clock:'<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+};
+const icon=k=>`<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICON[k]||''}</svg>`;
+const ymdLocal=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+/* "today", "yesterday", "Friday", "Mon, Sep 22". `ref` is the day counted
+   from (the server's, for follow-up dates); default this device's. */
+function niceDay(ymd, ref){
   if(!ymd) return '';
-  const d=new Date(ymd+'T12:00:00'), t=new Date(); t.setHours(12,0,0,0);
+  const d=new Date(ymd+'T12:00:00'), t=ref?new Date(ref+'T12:00:00'):new Date();
+  t.setHours(12,0,0,0);
   const diff=Math.round((d-t)/86400000);
   if(diff===0) return 'today';
   if(diff===1) return 'tomorrow';
@@ -1835,64 +1946,107 @@ function niceDay(ymd){
   const txt=d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
   return diff>1&&diff<7 ? d.toLocaleDateString('en-US',{weekday:'long'}) : txt;
 }
+// A moment (a call, an email) as the operator's own day — the date part of
+// the UTC stamp is a day behind for the whole Manila morning.
+const dayOf=at=>{ const d=new Date(at); return isNaN(d)?niceDay(String(at||'').slice(0,10)):niceDay(ymdLocal(d)); };
 function latestNote(l){
   const lines=(l.notes||'').split('\n').filter(x=>x.trim());
   const last=lines[lines.length-1]||'';
   // "[date] call · attempt N: summary — Your notes: …" -> the summary part
   return last.replace(/^\[[^\]]*\][^:]*:\s*/,'').split(' — Your notes:')[0].trim();
 }
-function standing(l){
-  const note=latestNote(l);
-  const when=niceDay((l.last_touch_at||'').slice(0,10));
-  const who=l.contact?l.contact.split(/[(,]/)[0].trim():'';
-  const hasSystem=/already (?:has|have|uses?|using|got)|has a system|have a system|using (?:an? )?(?:app|system|software)/i.test(l.notes||'');
-  const last={
+// Who picked up on the latest logged call ("Spoke to: Lesley (bartender)").
+function spokeTo(l){
+  const calls=(l.notes||'').split('\n').filter(x=>/^\[[^\]]*\] call\b/.test(x));
+  const m=/Spoke to: ([^·\n—]+)/.exec(calls[calls.length-1]||'');
+  return m ? m[1].split(/[(,]/)[0].trim() : '';
+}
+const askFor=l=>l.contact?l.contact.split(/[(,]/)[0].trim():'';
+const hasSystem=l=>/already (?:has|have|uses?|using|got)|has a system|have a system|using (?:an? )?(?:app|system|software)/i.test(l.notes||'');
+// How a call went, in a few words.
+function callSaid(outcome, l){
+  const who=spokeTo(l)||askFor(l);
+  return ({
     answered:`Talked to ${who||'someone'}`,
     callback:`${who||'They'} asked for a callback`,
     voicemail:'Left a voicemail',
     no_answer:'Nobody picked up',
     gatekeeper:"Manager wasn't in",
-    not_interested:hasSystem?'Already has a system':'Said no',
-    logged:'Logged a call',
-  }[l.last_outcome];
-  const out={last:'', next:'', lastTone:'', nextTone:'muted', note};
-  if(l.status==='won'){ out.last=last?`${last} · ${when}`:'Signed up'; out.next='Customer — signed up';
-    out.nextTone='win-good'; return out; }
-  if(l.status==='dead'){ out.last=(last||'Said no')+(when?` · ${when}`:''); out.next="Don't call again";
-    out.nextTone='muted'; return out; }
-  if(!l.last_touch_at&&!l.last_outcome){ out.last='Not called yet'; out.lastTone='muted';
-    out.next=l.queued_email_at?'Email queued':'On the call list'; return out; }
-  out.last=(last||'Called')+(when?` · ${when}`:'');
+    not_interested:hasSystem(l)?'Already has a system':'Said no',
+    wrong_number:'Wrong number',
+  })[outcome] || 'Called';
+}
+function standing(l, today){
+  const out={lines:[], note:latestNote(l)};
+  const add=(ic,text,cls,when)=>out.lines.push({ic,text,cls,when});
+  const t=l.last_touch, rep=l.last_reply;
+  const replied=rep && (!t || Date.parse(rep.at)>Date.parse(t.at));
 
-  const tries=l.attempts||0;
-  const reached=['answered','callback','gatekeeper'].includes(l.last_outcome);
-  const due=l.followup_date, today=new Date().toISOString().slice(0,10);
-  if(l.queued_email_at){ out.next='Email queued to send'; }
+  // 1. the latest thing that happened
+  if(replied) add('reply', rep.opt_out?'Asked us to stop emailing':'They replied', 'head', dayOf(rep.at));
+  else if(t) add(t.kind==='email'?'email':t.kind==='fb'?'fb':'call',
+                 t.kind==='email'?'Emailed':t.kind==='fb'?'Messaged on Facebook':callSaid(t.outcome,l),
+                 'head', dayOf(t.at));
+  else if(l.last_touch_at||l.last_outcome)      // worked before the touch log, or set by hand
+    add(l.last_outcome==='emailed'?'email':'call',
+        l.last_outcome==='emailed'?'Emailed':callSaid(l.last_outcome,l), 'head',
+        l.last_touch_at?dayOf(l.last_touch_at):'');
+  else add('call','Not called yet','head quiet');
+
+  // 2. how the last call went, if line 1 isn't it
+  const call=l.last_call;
+  if(call && out.lines[0].ic!=='call') add('call', callSaid(call.outcome,l), 'prior', dayOf(call.at));
+
+  // 3. what's next
+  const callOutcome=call?call.outcome:(l.last_outcome!=='emailed'?l.last_outcome:null);
+  const reached=['answered','callback','gatekeeper'].includes(callOutcome);
+  const who=askFor(l), due=l.followup_date;
+  today=today||ymdLocal(new Date());
+  if(l.status==='won') add('done','Customer — signed up','next');
+  else if(l.status==='dead') add('stop', rep&&rep.opt_out?"Don't email again":"Don't call again",'next');
+  else if(replied && rep.needs_reply && !rep.answered && !rep.opt_out)
+    add('reply','Answer their email — draft in Follow-ups','next now');
+  else if(!t&&!l.last_touch_at&&!l.last_outcome)
+    add('next', l.queued_email_at?'Email scheduled to send':'On the call list','next');
+  else if(l.queued_email_at) add('clock','Email scheduled to send','next');
   else if(due){
-    const overdue=due<today, isToday=due===today;
-    const verb=l.last_outcome==='callback'&&who?`Call ${who} back`
-             : l.last_outcome==='gatekeeper'?'Call back for the manager'
-             : reached?'Follow up'
-             : `Try again (attempt ${Math.min(tries+1,MAX_ATTEMPTS)} of ${MAX_ATTEMPTS})`;
-    out.next=overdue?`${verb} — overdue since ${niceDay(due)}`:`${verb} ${niceDay(due)}`;
-    out.nextTone=overdue?'err':isToday?'win-good':'muted';
+    const tries=l.attempts||0;
+    const verb=callOutcome==='callback'&&who?`Call ${who} back`
+             : callOutcome==='gatekeeper'?'Call back for the manager'
+             : reached||!call?'Follow up'
+             : `Call again (call ${Math.min(tries+1,MAX_ATTEMPTS)} of ${MAX_ATTEMPTS})`;
+    if(due<today) add('next',`${verb} — was due ${niceDay(due,today)}`,'next now');
+    else add('next',`${verb} ${niceDay(due,today)}`, due===today?'next now':'next');
   }
-  else if(reached){ out.next='No follow-up set — pick a date'; out.nextTone='err'; }
-  else out.next=`${tries} tr${tries===1?'y':'ies'} so far`;
   return out;
 }
+function standHtml(st){
+  return st.lines.map(x=>`<div class="sl ${x.cls}">${icon(x.ic)}<span>${esc(x.text)}${
+    x.when?`<span class="when"> · ${esc(x.when)}</span>`:''}</span></div>`).join('');
+}
+/* REACHED OUT: every call, email and Facebook message, one each — a call
+   then two follow-up emails is 3. Undone ones don't count. */
+function reachHtml(l){
+  const t=l.tries||{total:0,call:0,email:0,fb:0};
+  // Worked, but not one call or email logged here (the stage was set by hand,
+  // or it predates the log): a 0 beside "Emailed" would contradict itself.
+  if(!t.total&&(l.last_touch_at||l.last_outcome))
+    return '<div class="n muted" title="No call or email logged here — the stage was set by hand">—</div>';
+  const mix=[['call',t.call,'call'],['email',t.email,'email'],['fb',t.fb,'Facebook message']]
+    .filter(([,n])=>n).map(([k,n,w])=>`<span title="${n} ${w}${n===1?'':'s'}">${icon(k)}${n}</span>`).join('');
+  return `<div class="n">${t.total||0}</div>${mix?`<div class="mix">${mix}</div>`:''}`;
+}
 
-function pipeRow(l,n){
+function pipeRow(l,n,opt={}){
   /* Two lines per row instead of eight columns. Everything that was a column
      of its own — email, town, who to ask for — is still here, just stacked
      under the name where it reads as one thing about one bar rather than
      eight separate things to track across. */
-  const touch=(l.last_touch_at||'').slice(0,10);
   const who=l.contact ? `ask for ${l.contact}`
           : (l.manager_name ? `ask if ${l.manager_name} is still ${l.manager_role||'there'}` : '');
   const sub=[who, l.email, l.loc].filter(Boolean).join(' · ');
 
-  const st=standing(l);
+  const st=standing(l, opt.today);
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}"
               data-contact="${esc(l.contact||'')}">
     <td class="rownum">${n}</td>
@@ -1903,9 +2057,8 @@ function pipeRow(l,n){
       ? `<div class="phcell"><span class="digits" data-copy="${esc(l.phone_dial)}">${esc(l.phone_dial)}</span>`
         +`<button class="copybtn" data-act="copy" data-copy="${esc(l.phone_dial)}">COPY</button></div>`
       : '<span class="muted">no number</span>'}</td>
-    <td class="stands" title="${esc(st.note)}">
-      <div class="${st.lastTone}">${esc(st.last)}</div>
-      <div class="${st.nextTone}">${esc(st.next)}</div></td>
+    <td class="stands" title="${esc(st.note)}">${standHtml(st)}</td>
+    ${opt.yet?'':`<td class="reach">${reachHtml(l)}</td>`}
     <td><div class="acts">
       <button class="go" data-act="log">Log</button>
       <button data-act="mail">Email</button>
@@ -2008,19 +2161,20 @@ $('pipeBody').onclick=async e=>{
     tr.nextElementSibling.remove(); return;
   }
   const d=document.createElement('tr'); d.className='drawer';
+  const cols=tr.children.length;   // 7 on the CRM tab, 6 in Yet to Contact
   if(btn.dataset.act==='view'){
     let l;
     try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
     d.dataset.mode='view';
-    d.innerHTML=leadDetailsCell(l, 6);
+    d.innerHTML=leadDetailsCell(l, cols);
   } else if(btn.dataset.act==='edit'){
     let l;
     try{ l=(await api('/leads/'+id)).lead; }catch(err){ return toast(err.message); }
     d.dataset.mode='edit';
-    d.innerHTML=leadEditCell(l, 6);
+    d.innerHTML=leadEditCell(l, cols);
   } else if(btn.dataset.act==='log'){
     d.dataset.mode='log';
-    d.innerHTML=`<td colspan="6">
+    d.innerHTML=`<td colspan="${cols}">
       <p class="hint">What happened? Type it however it comes out, or hit a button.</p>
       <textarea rows="3" placeholder="spoke to Dave, wants a callback Tuesday"></textarea>
       <div class="row">
@@ -2043,7 +2197,7 @@ $('pipeBody').onclick=async e=>{
       return;
     }
     d.className='drawer mailer'; d.dataset.mode='mail';
-    d.innerHTML=composeDrawer(addr, tr.dataset.contact);
+    d.innerHTML=composeDrawer(addr, tr.dataset.contact, cols);
     setTimeout(()=>{ wireSlots(d); loadSlots(d, id); }, 0);
   }
   tr.after(d);
@@ -2115,57 +2269,19 @@ async function pipeDrawer(dr,e){
   }
 }
 
-// A bare name-only prompt() used to be the whole "Add a lead" flow, which
-// left every real field ("fill the rest in with Edit") for later. This
-// creates the lead AND logs the call that prompted adding it, in the same
-// step, through the same AI reader /debrief uses on an existing lead — so
-// a call to a bar that was never in the pipeline has somewhere to go
-// besides typed-in-by-hand.
-//
-// The bar name is its own field, typed directly, NOT pulled from the free
-// text by the model. It used to be: real notes pasted straight off a
-// website's contact block ("Olde Town Tavern & Grill at (720) 242-9667...
-// Website: Olde Town Tavern & Grill, Called this place...") came back
-// "couldn't tell which bar this was" — messy pasted text plus an
-// instruction to never guess is exactly what makes a cautious model
-// withhold a name that's sitting right there. A required field can't fail
-// to arrive; the model only extracts what's genuinely optional now.
-$('pipeAdd').onclick=()=>{
-  const box=$('pipeAddPanel');
-  box.classList.toggle('hide');
-  if(!box.classList.contains('hide')){
-    $('pipeAddText').value='';
-    $('pipeAddResult').className='applied hide';
-    $('pipeAddText').focus();
-  }
-};
-$('pipeAddCancel').onclick=()=>{ $('pipeAddPanel').classList.add('hide'); };
-$('pipeAddSave').onclick=async()=>{
-  const text=$('pipeAddText').value.trim();
-  const box=$('pipeAddResult'); box.className='applied hide';
-  if(!text){ box.className='applied err'; box.textContent='Say what happened on the call.';
-             return $('pipeAddText').focus(); }
-  const btn=$('pipeAddSave'); btn.disabled=true; btn.textContent='Adding… (checking their website)';
-  try{
-    const r=await api('/leads/quick-add',{method:'POST',body:JSON.stringify({text})});
-    box.className='applied';
-    // A bar already in the book gets the call on its existing row, and the
-    // message says so — otherwise "Added" would read like a second copy.
-    box.textContent=(r.applied.matched_existing
-        ? `${r.lead.name} was already in your book — logged the call on it`
-        : `Added ${r.lead.name}`)
-      +`${r.applied.status?' — '+r.applied.status:''}.`
-      +(r.applied.followup_date?` Follow up ${r.applied.followup_date}.`:'')
-      +(r.applied.email_found_on?` Found ${r.lead.email} on their site.`:'')
-      +(r.applied.email_lookup?` Email: ${r.applied.email_lookup}.`:'');
-    toast(r.applied.matched_existing?'Call logged':'Lead added', r.undo_id);
-    $('pipeAddText').value='';
-    PIPE.q=''; $('pipeSearch').value=''; PIPE.offset=0;
-    await loadPipeline();
-  }catch(err){
-    box.className='applied err'; box.textContent=err.message;
-  }finally{ btn.disabled=false; btn.textContent='Add lead'; }
-};
+// "Look Up" finds what's typed in the search box now, without waiting for
+// the typing pause. It was "Add a lead", which opened a paste box the owner
+// found didn't add anything; a new bar is added by telling the AI in the box
+// above (it creates the lead and logs the call — /assist, see CLAUDE.md).
+function lookUp(){
+  clearTimeout(pipeTimer);
+  const v=$('pipeSearch').value.trim();
+  if(!v){ $('pipeSearch').focus(); return toast('Type a bar, town, contact, email or phone to look up'); }
+  PIPE.q=v; PIPE.offset=0;
+  loadPipeline().catch(x=>toast(x.message));
+}
+$('pipeLookup').onclick=lookUp;
+$('pipeSearch').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); lookUp(); } };
 
 /* ── follow-ups ───────────────────────────────────────────────────────── */
 function tryCell(l){
@@ -2193,24 +2309,69 @@ function miniTable(list){
     </tr>`).join('')}</tbody></table></div>`;
 }
 /* Replies the inbox reader handled on its own (crm.process_inbox): who wrote,
-   what the AI made of it, what it changed — each lead with Undo. */
+   what the AI made of it, what it changed — each lead with Undo. A note the
+   operator already knows about can be deleted: only the note goes (the lead
+   changes stay, each with its own Undo), a toast offers Undo for ten seconds,
+   and "Deleted (n)" underneath keeps it one click from coming back after. */
 async function loadAway(){
   let d;
   try{ d=await api('/inbox'); }catch{ return; }
-  const card=$('fAway');
-  card.classList.toggle('hide', !d.items.length && !d.last_processed);
+  const card=$('fAway'), deleted=d.deleted||[];
+  card.classList.toggle('hide', !d.items.length && !deleted.length && !d.last_processed);
   $('fAwayNote').textContent = d.last_processed
     ? ` — replies from bars, read and filed automatically. Last checked ${touchWhen(d.last_processed)}.` : '';
-  $('fAwayList').innerHTML = d.items.length ? d.items.map(it=>`
-    <div class="awayitem" data-msg="${esc(it.message_id||'')}" data-lead="${esc(it.lead_id||'')}"
-         data-to="${esc(it.from_addr||'')}" style="padding:8px 0;border-top:1px solid var(--line2)">
-      <div style="font-size:13px"><strong>${esc(it.from)}</strong>
-        <span class="muted">· ${esc(it.subject||'')} · ${esc(touchWhen(it.processed_at))}</span></div>
-      ${assistResult({reply:it.reply, question:null, applied:it.applied, skipped:it.skipped})}
-      ${awayReply(it)}
-    </div>`).join('')
-    : '<p class="muted" style="margin:0;font-size:13px">No replies from bars yet.</p>';
+  // A reply being edited survives the redraw: this list is redrawn after
+  // every send, delete and put-back, and a draft typed into one note must not
+  // be lost to a click on another.
+  const typed={};
+  $('fAwayList').querySelectorAll('.awayitem').forEach(el=>{
+    const box=el.querySelector('.replybox');
+    if(box) typed[el.dataset.msg]={s:box.querySelector('[data-rsubject]').value,
+                                   b:box.querySelector('[data-rbody]').value};
+  });
+  $('fAwayList').innerHTML = d.items.length ? d.items.map(awayItem).join('') : awayEmpty(deleted.length);
+  $('fAwayList').querySelectorAll('.awayitem').forEach(el=>{
+    const t=typed[el.dataset.msg], box=el.querySelector('.replybox');
+    if(t && box){ box.querySelector('[data-rsubject]').value=t.s; box.querySelector('[data-rbody]').value=t.b; }
+  });
+  awayGone(deleted);
 }
+function awayEmpty(deletedN){
+  return `<p class="muted" style="margin:0;font-size:13px">${deletedN
+    ? 'All caught up — nothing new from bars.' : 'No replies from bars yet.'}</p>`;
+}
+function awayItem(it){
+  return `<div class="awayitem" data-msg="${esc(it.message_id||'')}" data-lead="${esc(it.lead_id||'')}"
+       data-to="${esc(it.from_addr||'')}" style="padding:8px 0;border-top:1px solid var(--line2)">
+    <div class="awayhead"><div><strong>${esc(it.from)}</strong>
+      <span class="muted">· ${esc(it.subject||'')} · ${esc(touchWhen(it.processed_at))}</span></div>
+      <button class="del" data-away-del title="Take this note off the list. What it changed on the lead stays — use Undo beside a change to reverse that.">Delete</button></div>
+    ${assistResult({reply:it.reply, question:null, applied:it.applied, skipped:it.skipped})}
+    ${awayReply(it)}
+  </div>`;
+}
+/* Deleted notes, newest deletion first — the safety net for a mistake
+   noticed after the toast has gone. Stays open across redraws once opened. */
+function awayGone(list){
+  const box=$('fAwayGone'), open=box.querySelector('details')?.open;
+  box.innerHTML = list.length ? `<details${open?' open':''}>
+    <summary class="muted">Deleted (${list.length}) — put one back</summary>
+    ${list.map(g=>`<div class="awaygone" data-msg="${esc(g.message_id||'')}">
+      <span><strong>${esc(g.from)}</strong> <span class="muted">· ${esc(g.subject||'')}
+        · deleted ${esc(touchWhen(g.dismissed_at))}</span></span>
+      <button data-away-restore>Put back</button></div>`).join('')}
+  </details>` : '';
+}
+async function awayRestore(msg){
+  try{ await api('/inbox/restore',{method:'POST',body:JSON.stringify({message_id:msg})});
+       toast('Put back'); await loadAway(); }
+  catch(err){ toast(err.message); }
+}
+$('fAwayGone').onclick=async e=>{
+  const b=e.target.closest('[data-away-restore]'); if(!b) return;
+  b.disabled=true; b.textContent='Putting back…';
+  await awayRestore(b.closest('.awaygone').dataset.msg);
+};
 /* What a reply needs from you. An opt-out is final; a question or real
    interest gets a reply drafted overnight (never sent by itself), ready to
    edit and send — threaded under their email. */
@@ -2234,6 +2395,17 @@ function replyBox(dr){
 }
 $('fAwayList').onclick=async e=>{
   const item=e.target.closest('.awayitem');
+  const delBtn=e.target.closest('[data-away-del]');
+  if(item && delBtn){
+    const msg=item.dataset.msg;
+    delBtn.disabled=true; delBtn.textContent='Deleting…';
+    try{
+      await api('/inbox/dismiss',{method:'POST',body:JSON.stringify({message_id:msg})});
+      toast('Deleted', ()=>awayRestore(msg));
+      await loadAway();
+    }catch(err){ toast(err.message); delBtn.disabled=false; delBtn.textContent='Delete'; }
+    return;
+  }
   const draftBtn=e.target.closest('[data-away-draft]'), sendBtn=e.target.closest('[data-away-send]');
   if(!item || !(draftBtn||sendBtn)) return $('fAssistOut').onclick(e);  // same Undo handling
   const lead=item.dataset.lead, msg=item.dataset.msg;
@@ -2429,7 +2601,7 @@ async function openFollowupEmail(tr){
     d.dataset.drafted='1';
     d.querySelector('[data-brief]').placeholder='Not right? Say what to change — "shorter", "mention the free trial", "he asked about price"';
     btn.textContent='Redraft';
-    box.textContent='Drafted from your notes. Read it, edit anything, then Send.';
+    box.textContent=draftNote(r, 'Drafted from your notes. Read it, edit anything, then Send.');
   }catch(err){
     box.className='applied err'; box.textContent=err.message;
   }finally{ btn.disabled=false; }
@@ -2481,8 +2653,10 @@ const USER_STAGES=[['','All'],['trial','Trial'],['active','Paying'],['canceled',
 
 /* ── AI Brain ─────────────────────────────────────────────────────────── */
 let brainPoll=null, brainWait=null;   // brainWait: {from, until} after "Re-learn now"
+let brainData=null;
 async function loadBrain(){
   const d=await api('/brain');
+  brainData=d;
   if(brainWait && (d.playbook_refreshed_at!==brainWait.from || d.playbook_error!==brainWait.err
                    || Date.now()>brainWait.until)) brainWait=null;
   if(brainWait) d.refreshing=true;
@@ -2492,22 +2666,71 @@ async function loadBrain(){
   $('brainSheet').textContent=d.master_sheet||'';
   const pb=d.playbook;
   $('brainWhen').textContent = d.refreshing ? 'Learning from the log now — this takes a minute…'
-    : d.playbook_refreshed_at ? `Learned ${touchWhen(d.playbook_refreshed_at)} from your calls, emails and replies. It re-learns about once a day when there's something new.`
+    : d.playbook_refreshed_at ? `Learned ${touchWhen(d.playbook_refreshed_at)} from your calls, emails, replies and signups. It re-learns about once a day when there's something new, building on what it already knows.`
     : `It starts learning once ${d.min_touches} calls and emails are logged, then keeps learning about once a day.`;
   $('brainRefresh').disabled=!!d.refreshing;
+  // The numbers it learns from — counted by the server, never by the AI.
+  const board=d.scoreboard||[];
+  $('brainBoard').innerHTML = board.length
+    ? `<div class="bboard"><b>The numbers it learns from</b>${board.map(l=>`<div>${esc(l)}</div>`).join('')}</div>` : '';
+  const fresh=new Set((d.diff&&d.diff.new)||[]);
+  const point=p=>`<li class="bpoint" data-pid="${esc(p.id||'')}">${esc(p.text)}`
+    + (!p.pinned&&fresh.has(p.id)?'<span class="btag new">new</span>':'')
+    + `<span class="muted"> — ${esc((p.evidence||[]).join(', ')||'kept by you')}</span>`
+    + `<span class="acts"><button data-keep="${p.pinned?0:1}" class="${p.pinned?'on':''}"
+         title="${p.pinned?'Stop keeping it no matter what':'Keep this lesson through every re-learn, in these words'}">${p.pinned?'Kept ✓':'Keep'}</button>`
+    + `<button data-wrong title="Take it out now, and never let it be learned again">Wrong</button></span></li>`;
+  const dropped=(d.diff&&d.diff.dropped)||[], rejected=d.rejected||[];
   $('brainPlaybook').innerHTML =
     (d.playbook_error?`<p class="err" style="font-size:13px">Last try failed: ${esc(d.playbook_error)}</p>`:'')
     + (pb&&pb.sections&&pb.sections.length
       ? (pb.summary?`<p style="margin:0 0 10px">${esc(pb.summary)}</p>`:'')
+        + (pb.try_next?`<div class="btry"><strong>Try next:</strong> ${esc(pb.try_next)}<br>
+            <button id="brainTryAdd">Add it to my instructions</button></div>`:'')
         + pb.sections.map(sec=>`<div style="margin:10px 0">
             <div style="font-weight:600;font-size:14px">${esc(sec.title)}</div>
-            <ul style="margin:4px 0 0;padding-left:18px">${sec.points.map(p=>`
-              <li style="margin:4px 0;font-size:13px;line-height:1.5">${esc(p.text)}
-                <span class="muted"> — ${esc(p.evidence.join(', '))}</span></li>`).join('')}</ul></div>`).join('')
-      : '<p class="muted" style="margin:0;font-size:13px">Nothing learned yet.</p>');
+            <ul style="margin:4px 0 0;padding-left:18px">${sec.points.map(point).join('')}</ul></div>`).join('')
+      : '<p class="muted" style="margin:0;font-size:13px">Nothing learned yet.</p>')
+    + (dropped.length?`<details class="bmore"><summary>Dropped at the last re-learn (${dropped.length})</summary>
+        <ul>${dropped.map(t=>`<li class="muted">${esc(t)}</li>`).join('')}</ul></details>`:'')
+    + (rejected.length?`<details class="bmore"><summary>You marked wrong (${rejected.length}) — it will never say these</summary>
+        <ul>${rejected.slice().reverse().map(r=>`<li>${esc(r.text)}<button data-unreject="${esc(r.id)}"
+          title="It may learn this again if the log backs it">Allow again</button></li>`).join('')}</ul></details>`:'');
   clearTimeout(brainPoll);
   if(d.refreshing && TAB==='brain') brainPoll=setTimeout(()=>loadBrain().catch(()=>{}),8000);
 }
+$('brainPlaybook').addEventListener('click',async e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  if(b.id==='brainTryAdd'){
+    const t=(brainData&&brainData.playbook&&brainData.playbook.try_next)||''; if(!t) return;
+    const notes=$('brainNotes'); const cur=notes.value.trim();
+    if(cur.includes(t)){ toast('Already in your instructions'); return; }
+    b.disabled=true;
+    try{
+      const r=await api('/brain/notes',{method:'PUT',body:JSON.stringify({text:(cur?cur+'\n':'')+t})});
+      notes.value=(cur?cur+'\n':'')+t;
+      $('brainSaved').textContent=`Saved ${touchWhen(r.owner_notes_updated_at)}`;
+      toast('Added — every AI follows it from now on');
+    }catch(err){ toast(err.message); b.disabled=false; }
+    return;
+  }
+  const li=b.closest('[data-pid]');
+  try{
+    b.disabled=true;
+    if(b.dataset.unreject){
+      await api('/brain/unreject',{method:'POST',body:JSON.stringify({id:b.dataset.unreject})});
+      toast('It can learn that again if your calls back it');
+    }else if(li && b.dataset.keep!==undefined){
+      const keep=b.dataset.keep==='1';
+      await api('/brain/keep',{method:'POST',body:JSON.stringify({id:li.dataset.pid,keep})});
+      toast(keep?'Kept — it stays through every re-learn':'No longer kept — it stays while your calls back it');
+    }else if(li && b.hasAttribute('data-wrong')){
+      await api('/brain/wrong',{method:'POST',body:JSON.stringify({id:li.dataset.pid})});
+      toast('Removed — no email, prep sheet or practice will use it, and it won’t be learned again');
+    }
+    await loadBrain();
+  }catch(err){ toast(err.message); b.disabled=false; }
+});
 $('brainSave').onclick=async()=>{
   const b=$('brainSave'); b.disabled=true;
   try{
@@ -2661,25 +2884,51 @@ const agoShort=iso=>{
   return m<1?'just now':m<60?`${m} min ago`:m<1440?`${Math.round(m/60)}h ago`:`${Math.round(m/1440)}d ago`;
 };
 
-function appleTile(k,win){
+const shortDay=iso=>{
+  if(!iso) return '';
+  const d=new Date(iso+'T12:00:00');
+  return isNaN(d)?iso:d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+};
+/* What a tile covers, in words. Sessions, installs, deletions and crashes are
+   full Monday–Sunday weeks from Apple's weekly files (its daily files leave
+   out any day with fewer than five users, which for a young app is most
+   days); the rest are days, and say so when the data starts partway through
+   the window instead of passing 12 days off as 30. */
+function applePeriod(k,win,since){
+  if(k.value==null) return '';
+  if(k.period==='weeks'){
+    const some=k.weeks_covered!=null && k.weeks_covered<k.weeks;
+    const from=some&&k.daily&&k.daily.length?k.daily[0].day:k.from;
+    return `${some?k.weeks_covered+' of '+k.weeks+' weeks':k.weeks===1?'last full week':'last '+k.weeks+' full weeks'}`
+      +` · ${shortDay(from)} – ${shortDay(k.to)}`;
+  }
+  if(k.partial) return 'days with 5+ users only · full weekly figures arrive on Fridays';
+  if(k.days_covered!=null && k.days_covered<win) return `${k.days_covered} of ${win} days · data starts ${shortDay(since)}`;
+  return '';
+}
+
+function appleTile(k,win,since){
   const unit=k.unit||(k.key==='proceeds'?'$':'');
+  const weekly=k.period==='weeks';
+  const span=weekly?(k.weeks===1?'week':k.weeks+' weeks'):win+' days';
   let delta='';
   if(k.change_pct!=null){
     const up=k.change_pct>0, flat=k.change_pct===0;
     const good=flat?null:(up===k.up_is_good);
     const sign=up?'+':'';
     delta=`<div class="delta ${good==null?'':good?'good':'bad'}">${sign}${k.change_pct}${k.change_is_points?' pts':'%'}
-      <span>vs previous ${win} days</span></div>`;
+      <span>vs previous ${span}</span></div>`;
   }else if(k.value!=null){
     delta=`<div class="delta"><span>no earlier data to compare</span></div>`;
   }
   const daily=k.daily||[];
   const max=Math.max(0,...daily.map(d=>d.value));
-  const bars=daily.length&&max>0?`<div class="spark" role="img" aria-label="${esc(k.label)} per day">${
+  const bars=daily.length&&max>0?`<div class="spark" role="img" aria-label="${esc(k.label)} per ${weekly?'week':'day'}">${
     daily.map((d,i)=>`<i style="height:${Math.max(2,d.value/max*100)}%"
-      class="${i===daily.length-1?'now':''}" title="${esc(d.day)}: ${esc(compact(d.value,unit))}"></i>`).join('')}</div>`:'';
+      class="${i===daily.length-1?'now':''}" title="${esc(weekly?'Week of '+d.day:d.day)}: ${esc(compact(d.value,unit))}"></i>`).join('')}</div>`:'';
+  const per=applePeriod(k,win,since);
   return `<div class="atile"><div class="al">${esc(k.label)}</div>
-    <div class="av">${esc(compact(k.value,unit))}</div>${delta}${bars}</div>`;
+    <div class="av">${esc(compact(k.value,unit))}</div>${per?`<div class="muted small">${esc(per)}</div>`:''}${delta}${bars}</div>`;
 }
 
 async function loadApple(){
@@ -2708,7 +2957,7 @@ async function loadApple(){
         <span class="muted">${esc(d.app?.bundle_id||'')}</span></div>
       <div class="aseg">${[7,30,90].map(w=>`<button data-win="${w}" class="${w===win?'on':''}">${w} days</button>`).join('')}</div>
       <div class="muted small">${d.syncing?'Importing from Apple…':'Synced '+esc(agoShort(d.last_sync_at))}
-        ${d.through?` · data through ${esc(d.through)}`:''}</div>
+        ${d.through?` · data ${d.since?esc(shortDay(d.since))+' – ':'through '}${esc(shortDay(d.through))}`:''}</div>
       <div class="row" style="margin:0">
         <button id="apSync" ${d.syncing?'disabled':''}>${d.syncing?'Importing…':'Sync now'}</button>
         ${d.source==='saved'?'<button class="del" id="apDisconnect">Disconnect</button>':''}
@@ -2718,8 +2967,8 @@ async function loadApple(){
   const has=d.kpis&&d.kpis.some(k=>k.value!=null);
   const wait=!has?`<div class="banner">${d.syncing?'Importing from Apple — this can take a minute.'
       :'No numbers yet. After you first connect, Apple takes about 1–2 days to produce the '
-      +'first reports. This tab imports them automatically whenever you open it.'}</div>`:'';
-  const tiles=has?`<div class="agrid">${d.kpis.map(k=>appleTile(k,win)).join('')}</div>`:'';
+      +'first reports. They\'re imported automatically twice a day, and whenever you open this tab.'}</div>`:'';
+  const tiles=has?`<div class="agrid">${d.kpis.map(k=>appleTile(k,win,d.since)).join('')}</div>`:'';
   const tables=(d.reports||[]).map(r=>`<div class="zbar"><span class="name">${esc(r.report.toUpperCase())}</span></div>
     <div class="zone"><div class="sheetwrap"><table class="sheet"><thead><tr>
       <th>WHAT</th><th>MEASURE</th><th>LAST 7 DAYS</th><th>LAST ${win} DAYS</th><th>PREVIOUS ${win} DAYS</th><th>CHANGE</th>
@@ -2888,7 +3137,7 @@ function loadSchoolPanel(){
   prView('pHome'); prRender(); window.scrollTo(0,0); loadSchool();
   return Promise.resolve();
 }
-function prView(id){ ['pHome','pSch','pGame','pGaunt','pTape','pCards'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
+function prView(id){ ['pHome','pSch','pGame','pGaunt','pTape','pCards','pFilm'].forEach(v=>$(v).classList.toggle('hide',v!==id)); window.scrollTo(0,0); }
 $('pTileBack').onclick=()=>switchTab($('tabs').querySelector('button[data-tab="calls"]'));
 
 /* ── content banks ── */
@@ -2897,7 +3146,7 @@ const P_MODS=[
   ['The reason, as a problem','One sentence naming a problem they already have. No features.','“Most bar owners I talk to lose a couple of hours a week counting bottles and retyping it into orders, and the order still comes in wrong. Is that you, or have you got it handled?”','30+minutes+to+presidents+club+problem+proposition','opener'],
   ['Discovery','Ask, then stop talking. Find out about prices, distributors, and who does the counts.','“Who does your counts, and when?” · “How many distributors?” · “When a price changes, where does that get written down?”','sales+discovery+questions+cold+call','discovery'],
   ['Objections','Acknowledge, ask about it, then answer. Don\'t argue with the first no.','“Totally fair, most people have a system. Out of curiosity, what does yours look like on a Sunday night?”','handling+cold+call+objections+josh+braun','objections'],
-  ['The ask','Small and specific: 15 minutes, on their own iPhone, before service.','“Worth 15 minutes Tuesday around 2, before you open? I\'ll put your actual price list on your phone so you can see it working.”','booking+meeting+on+cold+call','ask'],
+  ['The ask','One small ask, never three. Best: try it on their next count, free for the first month, no card. If not that, a short call with Stephan, or the name of whoever orders and when they\'re in.','“Want to try it on your next count? The first month\'s free and there\'s no card. I\'ll email you the link right now, and your next count is on your phone.”','cold+call+close+free+trial','ask'],
   ['Gatekeepers & voicemail','Whoever answers is on your side. Get the owner\'s name and when they\'re in.','“Quick one: who handles the liquor orders there? … Perfect. When\'s Maria usually in before service?”','cold+call+gatekeeper+voicemail+script','opener']
 ];
 /* Every video is embeddable, under 21 minutes, and checked by hand: [id, title, channel, length, topic].
@@ -2951,24 +3200,24 @@ document.addEventListener('click',e=>{
 });
 const P_QUIZ=[
   ['Which opener does Gong\'s data say hurts booking rates most?',['“How have you been?”','“Did I catch you at a bad time?”','“The reason I\'m calling is…”','“I know this is out of the blue.”'],1,'Asking if it\'s a bad time invites “yes, bye.” It cost about 40% in Gong\'s data.'],
-  ['A bar opened 5 weeks ago. Call now?',['Yes, get in early','No: under 2 months, no settled distributors or prices yet','Only in California','Only by email'],1,'The window is 2–9 months open, or an ownership change.'],
+  ['First real conversation. What do you ask for?',['Everything at once: a trial, a demo and a meeting','Try it on their next count: free month, no card','A one-hour demo next month','Their budget'],1,'One small ask. Trying it on their own next count is the easiest yes to give.'],
   ['Owner: “We already have a system.” First move?',['Explain why 86\'d is better','Offer a discount','Acknowledge it, then ask what it looks like on a busy night','Call back next month'],2,'Acknowledge and ask. Their answer shows you where it hurts.'],
   ['Strongest pitch in Nevada?',['Labour cost: no tip credit, so every counting hour is full wage','Time savings only','Android support','Chain-wide rollout'],0,'NV, like CA, WA and OR, has no tip credit, so the labour maths works for you.'],
   ['“My staff use Android.” You say…',['It works fine','Be straight: it\'s iPhone-only. Does the owner or manager have an iPhone?','Change the subject','Android is coming soon'],1,'It\'s iOS-only. Find out who has an iPhone, and never promise what doesn\'t exist.'],
-  ['Where do you verify a full spirits licence?',['The cocktail menu','Instagram','The state\'s own licence records','Yelp'],2,'Never go by a menu or photos. Always check the state\'s own records.'],
-  ['Strongest way to end the call?',['“Can I send you some info?”','“Let me know if you\'re interested.”','“15 minutes Tuesday at 2, before you open, on your own price list?”','“What\'s your budget?”'],2,'Small, specific, and about their own data.'],
+  ['“Does it work with my POS?” You say…',['“Yes, it plugs right in.”','“It doesn\'t connect to a POS. It counts the bottles and sends the orders to your reps.”','Change the subject','“That\'s coming soon.”'],1,'It doesn\'t connect to a POS. Say what it does do, and never promise what it doesn\'t.'],
+  ['Strongest way to end the call?',['“Can I send you some info?”','“Let me know if you\'re interested.”','“Want to try it on your next count? First month free, no card, I\'ll email the link now.”','“What\'s your budget?”'],2,'Small, specific, and on their own next count.'],
   ['A bartender picks up. Best move?',['Pitch them','Ask who handles liquor orders and when they\'re in','Hang up','Leave a long message'],1,'Get a name and a time to call back.'],
   ['What\'s the pause after a question for?',['Filling silence','Letting them think and answer. The silence does the work','Sounding friendly','Keeping it short'],1,'Ask, then stop talking.'],
   ['A “problem proposition” is…',['A list of features','A pain they already feel, said in their words','A discount','A case study'],1,'Name the problem, not the product.'],
   ['Strongest pitch in Arizona?',['Full-wage labour cost','Time saved and fewer ordering mistakes','Android support','Tax savings'],1,'AZ has a tip credit, so lead with time and accuracy, not labour cost.'],
   ['A bar changed hands 3 months ago. Good lead?',['No, too new','Yes: ownership transfers count, and new owners inherit messy processes','Only if it\'s a chain','Only in Nevada'],1,'An ownership change of an operating bar is in the window.'],
   ['Why skip bars open longer than 9 months?',['They\'re closing','They usually have an entrenched process already','They can\'t afford it','Licence rules'],1,'Past 9 months, habits are set and the pain feels normal.'],
-  ['A Las Vegas Strip casino bar calls you back. Qualified?',['Yes, big volume','No: casino-operated venues buy centrally','Only on weekends','Only with a manager'],1,'Strip and casino venues are corporate. Independents cluster off-Strip.'],
-  ['In Washington, a “Tavern” licence means…',['Full spirits','Beer and wine only','Nightclub','Restaurant'],1,'In WA, Tavern means beer and wine only. Always check that state\'s definition.'],
+  ['“So the camera tells you how full the bottle is?”',['“Yes, it reads the level.”','“No. The camera identifies the bottle, and you tap in the count.”','“Sometimes.”','“In the next version.”'],1,'It identifies the bottle; you enter the count. Never claim it reads fill levels.'],
+  ['What does trying 86\'d cost a bar on day one?',['The first month up front','Nothing: the first month is free and there\'s no card to start','A setup fee','A one-year contract'],1,'First month free, no card to start, cancel any time from the app.'],
   ['“How much is it?” in the first 20 seconds. Best reply?',['Give the full price breakdown','“Fair question. Depends on how many bottles. Roughly how many do you carry?”','Dodge it','“It\'s cheap”'],1,'Answer honestly and turn it into a discovery question.'],
   ['“Just email me.” Best reply?',['“Sure, what\'s your email?” and hang up','“Happy to. So I send the right thing, is counting or ordering the bigger headache?”','Argue','Ignore it'],1,'Agree, then earn one more answer so the email is worth opening.'],
   ['The best time to label an emotion is…',['Never','When they sound stressed or annoyed: “Sounds like it\'s been a long week”','After the close','Only by email'],1,'Labels lower tension so they can keep listening.'],
-  ['A no-oriented question looks like…',['“Do you want to save time?”','“Would it be crazy to look at this for 15 minutes?”','“Can I show you a demo?”','“Is now good?”'],1,'People feel safe saying no, and “no, not crazy” is a yes.'],
+  ['A no-oriented question looks like…',['“Do you want to save time?”','“Would it be crazy to try it on your next count?”','“Can I show you a demo?”','“Is now good?”'],1,'People feel safe saying no, and “no, not crazy” is a yes.'],
   ['On a discovery call, who should talk more?',['You','The owner','Equal','Doesn\'t matter'],1,'Top reps listen more than they talk.'],
   ['Your voice at the end of a statement should…',['Go up, like a question','Go down, sounding certain','Get faster','Get louder'],1,'Downward inflection sounds confident. Upward sounds unsure.'],
   ['Most meetings from cold outreach come…',['On the first dial','After several attempts','Only by email','Never'],1,'Persistence wins. Check your own attempt numbers under Numbers.'],
@@ -2993,7 +3242,7 @@ const P_FINDS=[
   ['Label','Chris Voss','<b>Name the emotion.</b> “Sounds like it\'s been a long week” lowers a stressed owner\'s guard faster than any pitch.'],
   ['No','Chris Voss','<b>Ask for a no.</b> “Would it be crazy to look at this before your next count?” People feel safe saying no, and “no, not crazy” is a yes.'],
   ['↓','Tone','<b>End statements on a downward note.</b> Rising at the end makes everything sound like a question, and uncertain reps don\'t get meetings.'],
-  ['2–9 mo','86\'d','<b>Timing is the silent qualifier.</b> Newer than 2 months, they have no prices or reps to organise yet. Older than 9, the pain feels normal.']
+  ['1 ask','86\'d','<b>Make one ask, not three.</b> Trying it on their next count is free and needs no card, so it\'s the easiest yes to give. A short call with Stephan, or the name of whoever orders and when they\'re in, are the fallbacks.']
 ];
 const GAUNT=[
   ['Owner, mid-delivery','“Who is this? I\'ve got a truck at the back.”',['“Did I catch you at a bad time?”','“It\'s [name] with 86\'d. Sounds like a bad moment. 20 seconds now, or call back at 2?”','Launch into the pitch'],1,'Name the moment and give them control.'],
@@ -3010,7 +3259,7 @@ const GAUNT=[
   ['Owner, curious','“So what does it actually do?”',['List every feature','“Short version: it remembers every price you pay and turns your count into an order. What\'s the worse part for you, counting or ordering?”','“It\'s complicated.”'],1,'One sentence, then back to them.'],
   ['Owner, no time','“I don\'t have time to learn new software.”',['“It\'s easy!”','“Fair. How long does counting take you now?”','“Make time.”'],1,'Compare against the time they already lose.'],
   ['Owner, cost','“I can\'t afford another subscription.”',['“It pays for itself!”','“Understood. What does a missed or wrong order cost you in a week?”','Offer a discount straight away'],1,'Put a number on their current cost first.'],
-  ['Owner, trust','“Where\'s my data going?”',['“Don\'t worry about it.”','“It\'s your price list, it stays yours, and you can export it. What would you need to feel OK with it?”','“The cloud.”'],1,'Take the concern seriously and ask what they need.'],
+  ['Owner, trust','“Where\'s my data going?”',['“Don\'t worry about it.”','“It\'s your price list and it stays yours. What would you need to feel OK trying it?”','“The cloud.”'],1,'Take the concern seriously and ask what they need.'],
   ['Owner, maybe','“Call me next month.”',['“OK!”','“Will do. What changes next month? Just so I call at the right time.”','“Why wait?”'],1,'Find out what really changes.'],
   ['New owner','“I just bought the place, it\'s chaos.”',['“Congrats, want a demo?”','“Congrats. Did the old owner leave you any price records?”','“Call when it\'s calm.”'],1,'Ownership changes often come with no records. Ask.'],
   ['Owner, testing you','“Why should I trust a startup?”',['“We\'re the best.”','“Fair. You shouldn\'t on my word. Try it on one count and judge it on that.”','“Everyone trusts us.”'],1,'Lower the risk instead of arguing.'],
@@ -3018,7 +3267,7 @@ const GAUNT=[
   ['Owner, voicemail','(voicemail beep)',['Leave a 60-second pitch','“Hi, it\'s [name], about the Sunday counts. I\'ll try you Tuesday at 2.”','Hang up without a message'],1,'Short, specific, with a promised time.'],
   ['Owner, positive','“Actually, counts do kill my Sundays.”',['Start the pitch','“How long do they take, start to finish?”','“Great, sign up!”'],1,'Dig deeper before you pitch.'],
   ['Owner, comparing','“How are you different from BevSpot?”',['Trash BevSpot','“What do you like or not like about what you\'re using now?”','“We\'re cheaper.”'],1,'Let them tell you the gap.'],
-  ['Owner, ready','“OK, what\'s the next step?”',['“I\'ll send info.”','“15 minutes Tuesday at 2, before you open, on your real price list. That work?”','“Whenever you want.”'],1,'Specific time, their data.'],
+  ['Owner, ready','“OK, what\'s the next step?”',['“I\'ll send info.”','“Try it on your next count: download 86\'d, the first month\'s free, no card. I\'ll email you the link now. Best address?”','“Whenever you want.”'],1,'One small step, on their own next count.'],
   ['Owner, hesitant','“I need to talk to my partner.”',['“Can\'t you decide?”','“Makes sense. What will your partner ask that I can answer now?”','“OK, bye.”'],1,'Prepare them to sell it for you.']
 ];
 
@@ -3065,9 +3314,8 @@ $('pMods').onclick=e=>{
 $('pMods').onchange=e=>{ if(e.target.id!=='mDone') return; PR.mods['m'+(PR.mi|0)]=e.target.checked; prSave(); prRender(); };
 function prVids(){
   $('pFilms').innerHTML=ROT.films.map(vidHTML).join('');
-  // One short video a day, 10 minutes or less, rotating through the whole library.
-  const short=DAILY.length?DAILY:VIDS.filter(v=>vSecs(v)<=630), v=short[dayNum()%short.length];
-  $('pVid').innerHTML=`<div class="todayvid">${vidHTML(v).replace('<div class="vmeta">','<div class="vmeta hide">')}<div><div class="glabel" style="margin:0 0 4px">TODAY'S VIDEO · ${v[3]}</div><b>${esc(v[1])}</b><div class="muted" style="font-size:12px">${esc(v[2])}${PR.watched[v[0]]?' · ✓ watched':''}</div></div></div>`;
+  // No video on the home screen: watching isn't a warm-up, and the minutes
+  // before a calling session belong to the calls. The library stays in Learn.
   const n=Object.keys(PR.watched).length;
   $('pWatched').textContent=`${n} of ${VIDS.length} videos watched.`+(n<VIDS.length?' Unwatched ones keep rotating in.':' All of them. Nice.');
 }
@@ -3084,11 +3332,11 @@ $('sHome').onclick=()=>{ prView('pHome'); prRender(); };
 
 /* ── replay misses: spaced repetition of your own fumbles ── */
 const BOX_DAYS=[0,1,3,7,14];
-function addCard(ctx,front,back){
-  if(!front||!back) return;
-  if(PR.cards.some(c=>c.front===front&&c.back===back)) return;
-  PR.cards.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),ctx,front,back,box:1,due:dayNum()+1});
-  PR.cards=PR.cards.slice(-150); prSave();
+function addCard(ctx,front,back,now){
+  if(!front||!back) return false;
+  if(PR.cards.some(c=>c.front===front&&c.back===back)) return false;
+  PR.cards.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),ctx,front,back,box:1,due:dayNum()+(now?0:1)});
+  PR.cards=PR.cards.slice(-150); prSave(); return true;
 }
 const dueCards=()=>PR.cards.filter(c=>c.box<BOX_DAYS.length&&c.due<=dayNum());
 let CQ=[], CUR=null, CSEEN=0;
@@ -3122,7 +3370,8 @@ function skillLevels(){
   return out;
 }
 const RANKS=[[0,'Barback'],[60,'Bartender'],[200,'Head Bartender'],[450,'Bar Manager'],[900,'Beverage Director'],[2000,'Closer']];
-function xp(){ return PR.scores.reduce((a,s)=>a+(s.kind==='game'?(s.pts||0):s.kind==='quiz'?s.score*5:s.kind==='gaunt'?Math.round((s.pts||0)/5):s.kind==='cards'?10:s.kind==='tape'?Math.round((s.pts||0)/3):(s.score||0)*3),0)
+// 'rehearse' scores come from the retired Rehearse-a-real-call mode; they keep their XP.
+function xp(){ return PR.scores.reduce((a,s)=>a+(s.kind==='game'||s.kind==='rehearse'?(s.pts||0):s.kind==='film'?15:s.kind==='quiz'?s.score*5:s.kind==='gaunt'?Math.round((s.pts||0)/5):s.kind==='cards'?10:s.kind==='tape'?Math.round((s.pts||0)/3):(s.score||0)*3),0)
   + Object.values(PR.mods).filter(Boolean).length*20 + Object.keys(PR.lines).length*15 + Object.keys(PR.watched).length*5; }
 function streak(){
   const days=new Set(PR.scores.map(s=>s.day||s.at.slice(0,10))); let n=0; const d=new Date();
@@ -3143,18 +3392,24 @@ ROT.guests=pick(Object.keys(GUEST_META),2,7);
 const unlocked=b=>b.level===1||wins(LADDER[b.level-2].id).length>0;
 const nextLadder=()=>LADDER.find(b=>unlocked(b)&&!wins(b.id).length);
 
+/* Today's set is the loop a working day actually runs: warm up on the
+   pushback you're really getting, take one practice call, then (after
+   calling) review how the real calls went. The warm-up falls back to a
+   Quick-Think when nothing is due in Replay. */
 function dailySet(){
   const lv=skillLevels(); let weakest=null;
   SKILLS.forEach(s=>{ if(lv[s[0]]!=null&&(!weakest||lv[s[0]]<lv[weakest[0]])) weakest=s; });
   const due=dueCards().length;
   const warm=due?{kind:'cards',t:`Replay ${due} line${due===1?'':'s'} you fumbled.`,w:'Say each one out loud before you flip. Takes 2 minutes.',go:cOpen}
-                :{kind:'gaunt',t:'Run the Gauntlet.',w:'10 fast objections, 12 seconds each. Wakes your brain up.',go:xOpen};
-  const drill={kind:'drill',t:weakest&&lv[weakest[0]]<7?`One rep on your ${weakest[1].toLowerCase()}.`:'One 25-second curveball.',
-    w:weakest?`Weakest skill right now: ${weakest[1]} (${lv[weakest[0]].toFixed(1)}/10).`:'Claude throws a line, you answer before the clock runs out.',
-    go:()=>{ openSchool('pDrill'); $('dNew').click(); }};
+    :{kind:'drill',t:'One real objection, 25 seconds.',
+      w:(weakest?`Weakest skill right now: ${weakest[1]} (${lv[weakest[0]].toFixed(1)}/10). `:'')+'Built from what prospects actually said on your calls.',
+      go:()=>{ openSchool('pDrill'); $('dNew').click(); }};
   const nb=nextLadder(), gid=nb?nb.id:ROT.guests[0], gname=nb?nb.name:GUEST_META[gid][0];
-  const call={kind:'game',t:`Win a call against ${gname}.`,w:nb?`Level ${nb.level}. ${nb.tag}`:`Guest this rotation. ${GUEST_META[gid][1]}`,go:()=>gStart(gid)};
-  return [warm,drill,call];
+  const game={kind:'game',t:`Win a call against ${gname}.`,w:nb?`Level ${nb.level}. ${nb.tag}`:`Guest this rotation. ${GUEST_META[gid][1]}`,go:()=>gStart(gid)};
+  const film={kind:'film',t:'After your calls: watch the film.',
+    w:'Make your calls first. Then the coach reads your real conversations back to you, and anything you fumbled comes back in Replay.',
+    go:fOpen};
+  return [warm,game,film];
 }
 let PNOW=null;
 function prRender(){
@@ -3177,10 +3432,11 @@ function prRender(){
   const set=dailySet(), state=set.map(s=>doneToday(s.kind)), i=state.indexOf(false);
   $('pDots').innerHTML=state.map((d,j)=>`<i class="${d?'done':(j===i?'cur':'')}"></i>`).join('');
   if(i<0){ $('pNowK').textContent='TODAY\'S SET · DONE';
-    PNOW={t:'Warmed up. Go make real calls.',w:'Everything after this is bonus. The call list is waiting.',go:()=>showPractice(false)};
+    PNOW={t:'Done for today. Go make the next call.',w:'Everything after this is bonus. The call list is waiting.',
+          go:()=>switchTab($('tabs').querySelector('button[data-tab="calls"]'))};
   } else { $('pNowK').textContent=`TODAY'S SET · ${i+1} OF 3`; PNOW=set[i]; }
   $('pNowT').textContent=PNOW.t; $('pNowW').textContent=PNOW.w;
-  $('pNowGo').textContent=i<0?'Go to the call list':'Start';
+  $('pNowGo').textContent=i<0?'Go to the call list':PNOW.kind==='film'?'Review my calls':'Start';
   if(!$('gPick').classList.contains('hide')) gBossList();
 }
 function openSchool(id){ sOpen({pDrill:'drill',pLines:'drill',pTest:'test',pMods:'learn'}[id]||'learn'); }
@@ -3380,14 +3636,43 @@ async function gStart(id){
   const rule=ROT.rule, rmod=(BINFO.challenges&&BINFO.challenges[rule]&&BINFO.challenges[rule].patience)||0;
   G={id,name,level:meta?meta.level:2,guest:!meta,rule,patience:Math.max(20,Math.min(100,b.patience+rmod)),trust:10,found:[],log:[],
      busy:false,speaking:true,over:false,interrupts:0,maxLines:rule==='speed'?10:MAX_LINES,ints:rule==='storm'?4:2,intP:rule==='storm'?0.55:0.28};
+  gBegin(tok, rule==='gatekeeper'?'Hey, this is the bar — who\'s calling?':b.opening, '— ringing —');
+}
+function gBegin(tok, opening, ringLine){
   $('gSend').disabled=false; gMeters();
-  ring(); gMsg('ev','— ringing —');
-  const opening=rule==='gatekeeper'?'Hey, this is the bar — who\'s calling?':b.opening;
-  setTimeout(()=>{ if(tok!==gToken||!G) return; gMsg('them',opening); G.log.push({role:'owner',text:opening}); gMeters(); say(opening,id,()=>gYourTurn(tok)); },1100);
+  ring(); gMsg('ev',ringLine);
+  setTimeout(()=>{ if(tok!==gToken||!G) return; gMsg('them',opening); G.log.push({role:'owner',text:opening}); gMeters(); say(opening,G.id,()=>gYourTurn(tok)); },1100);
   // Patience leaks only while it's your turn to talk. Hesitate and they're gone.
   gTick=setInterval(()=>{ if(!G||G.busy||G.speaking||G.over) return; G.patience=Math.max(0,G.patience-1); gMeters();
     if(G.patience<=0) gEnd('lost','You went quiet too long. Click.'); },2500);
 }
+
+/* ── Game film: the coach reads your real calls back to you ── */
+let FILM=null;
+async function fOpen(){
+  prView('pFilm'); $('fPractise').classList.add('hide');
+  $('fBody').innerHTML='<div class="muted">Reading your calls…</div>';
+  let r;
+  try{ r=await api('/coach/film',{method:'POST'}); }
+  catch(e){ $('fBody').innerHTML=`<div class="card">${esc(e.message)}</div>`; return; }
+  FILM=r;
+  if(!r.calls){ $('fBody').innerHTML=`<div class="card muted" style="font-size:13px">${esc(r.note||'Nothing to review yet.')}</div>`; return; }
+  let added=0;
+  (r.drills||[]).forEach(d=>{ if(addCard(`From your call with ${d.from}`,`${d.who}: “${d.line}”`,d.better,true)) added++; });
+  const note=(k,x)=>x?`<div class="find"><div class="v">${k}<small>${esc(x.from)}</small></div><p>${esc(x.text)}</p></div>`:'';
+  $('fBody').innerHTML=`<p class="muted" style="font-size:12px;margin:0 0 10px">${r.calls} real conversation${r.calls===1?'':'s'} reviewed.</p>`
+    +note('Keep',r.working)+note('Fix',r.costing)
+    +((r.drills||[]).length?`<div class="glabel" style="margin-top:14px">FROM YOUR CALLS</div>`
+      +r.drills.map(d=>`<div class="card" style="margin-bottom:8px"><div class="muted" style="font-size:12px">${esc(d.from)} · ${esc(d.who)}</div>
+        <div class="pline" style="font-size:15px">“${esc(d.line)}”</div><div class="say">${esc(d.better)}</div></div>`).join('')
+      :'<p class="muted" style="font-size:13px">No drills this time.</p>')
+    +(added?`<p class="muted" style="font-size:12px">${added} added to Replay misses, due today.</p>`:'');
+  $('fPractise').classList.toggle('hide',!dueCards().length);
+  prScore({kind:'film',score:Math.min(10,(r.drills||[]).length*2)});
+}
+$('fPractise').onclick=()=>cOpen();
+$('fBack').onclick=$('fLeave').onclick=()=>{ prView('pHome'); prRender(); };
+$('pTileFilm').onclick=()=>fOpen();
 $('gMic').onclick=()=>{ if(rec){ try{ rec.stop(); }catch{} return; } try{ speechSynthesis.cancel(); }catch{} listen($('gIn'),$('gMic'),null); };
 $('gSend').onclick=()=>gSend();
 $('gIn').onkeydown=e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); gSend(); } };
@@ -3438,7 +3723,7 @@ async function gEnd(result, why){
   } else $('eTape').innerHTML='';
   prScore(rec3);
 }
-$('eAgain').onclick=()=>{ const id=G&&G.id; if(id) gStart(id); else gOpen(); };
+$('eAgain').onclick=()=>{ const g=G; if(g&&g.id) gStart(g.id); else gOpen(); };
 $('ePick').onclick=()=>gOpen();
 $('eNext').onclick=()=>{ gQuit(); prView('pHome'); prRender(); };
 $('gLeave').onclick=()=>{ gQuit(); prView('pHome'); prRender(); };
@@ -3456,7 +3741,7 @@ const TAPES=[
     ['rep','Makes sense. Anyway, let me know if you\'re ever interested and I can send some info.'],['owner','Sure. Bye.']],
     m:[[0,'bad_time','Handed him the easy exit in the first line.','“Hey Sal, it\'s Chris with 86\'d. I know I\'m catching you during prep. 30 seconds on why I called?”'],
        [6,'feature_dump','He just told you his pain, and you answered with a feature list.','“Three hours on a Sunday, then four texts. What would you do with that night back?”'],
-       [12,'weak_ask','He admitted the pain twice and you ended on “let me know.”','“Worth 15 minutes Tuesday at 2, before you open, on your real price list?”']]},
+       [12,'weak_ask','He admitted the pain twice and you ended on “let me know.”','“Want to try it on your next count? First month free, no card. I\'ll email the link now.”']]},
   {owner:'Dana, The Copper Owl, Reno',lines:[
     ['rep','Hi Dana, it\'s Chris with 86\'d. The reason I\'m calling is bar inventory. Can I have 30 seconds, and you tell me if it\'s worth more?'],['owner','Fine, 30 seconds.'],
     ['rep','Most owners I talk to lose hours to counts and still get wrong orders. Is that you, or have you got it handled?'],['owner','We use BevSpot. It\'s fine.'],
@@ -3475,10 +3760,10 @@ const TAPES=[
     ['rep','Sorry, back up. You said chaos since the manager left. What\'s fallen through the cracks?'],['owner','Nobody knows what we pay for anything. The reps just bill us.'],
     ['rep','How much would you guess you\'ve overpaid since then?'],['owner','No idea. That\'s the problem.'],
     ['rep','Want to book a full demo with our team for next month? It\'s about an hour.'],['owner','An hour? No.'],
-    ['rep','Understood. Smaller: 15 minutes Tuesday before you open, just on your top 20 bottles?'],['owner','…Fine, Tuesday.']],
+    ['rep','Understood. Smaller, then: try it free on your next count, just your top 20 bottles?'],['owner','…Fine. Send me the link.']],
     m:[[0,'fake_rapport','Flattery before a name or a reason. He doesn\'t know who you are yet.','“Hey Marcus, it\'s Chris with 86\'d. I know this is out of the blue. Can I tell you why I called?”'],
        [4,'missed_pain','He said “chaos since we lost our manager” and you pitched a feature.','“Lost your manager. What\'s slipped since then?”'],
-       [10,'rushed_ask','A one-hour demo next month is a big ask, and you hadn\'t earned it yet.','“15 minutes before you open Tuesday, on your top 20 bottles?”']]}
+       [10,'rushed_ask','A one-hour demo next month is a big ask, and you hadn\'t earned it yet.','“Try it free on your next count, just your top 20 bottles?”']]}
 ];
 let TP=null, tpT=null;
 const tpHard=()=>PR.scores.filter(s2=>s2.kind==='tape'&&s2.perfect).length>=2;

@@ -1,10 +1,18 @@
-"""database._getconn: a caller waits for a free connection instead of failing
-the moment all of them are checked out — except on the event loop, where
-waiting would stall every request. No database: the pool is faked.
+"""database.get_db under load: with every connection checked out, a caller
+WAITS for one (up to POOL_WAIT_SECONDS) instead of failing on the spot, gives
+its slot back however its own code ends, and a connection returned to a pool
+drained meanwhile is closed rather than turned into a 500. Plus the rule that
+keeps the wait harmless: no async function calls get_db() directly — a wait on
+the event loop would stall every request the process serves.
+
+No database: the pool is faked, the semaphore and threads are real.
 """
-import asyncio
+import ast
+import glob
 import importlib.util
 import os
+import threading
+import time
 
 import psycopg2.pool
 import pytest
@@ -24,55 +32,149 @@ def _real_database_module():
 db = _real_database_module()
 
 
+class Conn:
+    cursor_factory = None
+
+    def __init__(self):
+        self.closed = False
+
+    def cursor(self):
+        conn = self
+
+        class Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql, params=()):
+                assert not conn.closed
+
+        return Cur()
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
 class Pool:
-    """Hands out a connection once `busy` getconn calls have found none free."""
-    def __init__(self, busy, closed=False):
-        self.busy, self.closed, self.calls = busy, closed, 0
+    """psycopg2's ThreadedConnectionPool as get_db sees it: getconn raises
+    PoolError the moment `size` connections are out — it never waits."""
+    def __init__(self, size, drained_on_return=False):
+        self.size, self.out, self.closed = size, 0, False
+        self.drained_on_return = drained_on_return
+        self.lock = threading.Lock()
 
     def getconn(self):
-        self.calls += 1
-        if self.closed:
-            raise psycopg2.pool.PoolError("connection pool is closed")
-        if self.calls <= self.busy:
-            raise psycopg2.pool.PoolError("connection pool exhausted")
-        return "conn"
+        with self.lock:
+            if self.out >= self.size:
+                raise psycopg2.pool.PoolError("connection pool exhausted")
+            self.out += 1
+            return Conn()
+
+    def putconn(self, conn, close=False):
+        with self.lock:
+            if self.drained_on_return:
+                raise psycopg2.pool.PoolError("trying to put unkeyed connection")
+            self.out -= 1
 
 
 @pytest.fixture
-def naps(monkeypatch):
-    slept = []
-    monkeypatch.setattr(db.time, "sleep", slept.append)
-    return slept
+def pool(monkeypatch):
+    """A pool of two behind two slots, as POOL_MAX of each would be."""
+    fake = Pool(2)
+    monkeypatch.setattr(db, "_pool", fake)
+    monkeypatch.setattr(db, "_slots", threading.BoundedSemaphore(2))
+    return fake
 
 
-def test_a_burst_waits_for_a_free_connection(naps):
-    pool = Pool(busy=3)
-    assert db._getconn(pool) == "conn" and pool.calls == 4
-    assert naps == [0.02, 0.04, 0.08]                  # short, growing waits
+def _hold(release: threading.Event, holding: threading.Barrier):
+    """A request that has its connection and is busy with it until `release`."""
+    with db.get_db():
+        holding.wait(timeout=5)
+        release.wait(timeout=5)
 
 
-def test_it_gives_up_after_the_wait(monkeypatch, naps):
-    clock = iter([0.0] + [0.0] * 5 + [db.POOL_WAIT_SEC + 1] * 50)
-    monkeypatch.setattr(db.time, "monotonic", lambda: next(clock))
-    with pytest.raises(psycopg2.pool.PoolError):
-        db._getconn(Pool(busy=10 ** 6))
-    assert len(naps) < 20
+def _busy(n, release):
+    holding = threading.Barrier(n + 1)
+    threads = [threading.Thread(target=_hold, args=(release, holding)) for _ in range(n)]
+    for t in threads:
+        t.start()
+    holding.wait(timeout=5)          # every connection is now checked out
+    return threads
 
 
-def test_a_closed_pool_is_not_waited_on(naps):
-    with pytest.raises(psycopg2.pool.PoolError):
-        db._getconn(Pool(busy=0, closed=True))
-    assert naps == []
+def test_the_next_caller_waits_for_a_free_connection(pool):
+    release = threading.Event()
+    threads = _busy(2, release)
+    threading.Timer(0.3, release.set).start()
+    started = time.monotonic()
+    with db.get_db() as conn:        # the pool alone would raise here, at once
+        waited = time.monotonic() - started
+        assert isinstance(conn, Conn)
+    for t in threads:
+        t.join(timeout=5)
+    assert waited >= 0.25 and pool.out == 0
 
 
-def test_never_waits_on_the_event_loop(naps):
-    async def on_loop():
-        return db._getconn(Pool(busy=1))
-    with pytest.raises(psycopg2.pool.PoolError):
-        asyncio.run(on_loop())
-    assert naps == []
+def test_it_gives_up_after_the_wait(pool, monkeypatch, capsys):
+    monkeypatch.setattr(db, "POOL_WAIT_SECONDS", 0.2)
+    release = threading.Event()
+    threads = _busy(2, release)
+    started = time.monotonic()
+    try:
+        with pytest.raises(psycopg2.pool.PoolError):
+            with db.get_db():
+                pass
+        assert 0.15 <= time.monotonic() - started < 2
+        assert "DB_POOL_WAIT_TIMEOUT" in capsys.readouterr().out
+    finally:
+        release.set()
+        for t in threads:
+            t.join(timeout=5)
 
 
-def test_get_db_uses_it():
-    import inspect
-    assert "_getconn(pool)" in inspect.getsource(db.get_db.__wrapped__)
+def test_a_failed_request_gives_its_slot_back(pool, monkeypatch):
+    monkeypatch.setattr(db, "POOL_WAIT_SECONDS", 0.2)
+    for _ in range(5):               # more failures than there are slots
+        with pytest.raises(RuntimeError):
+            with db.get_db():
+                raise RuntimeError("the route's own bug")
+    started = time.monotonic()
+    with db.get_db():
+        pass
+    assert time.monotonic() - started < 0.1 and pool.out == 0
+
+
+def test_a_connection_returned_to_a_drained_pool_is_closed_not_an_error(pool):
+    pool.drained_on_return = True
+    with db.get_db() as conn:
+        pass                         # the work succeeded; giving it back must not 500
+    assert conn.closed
+
+
+def test_no_async_function_calls_get_db_directly():
+    """A wait for a connection on the event loop would stall every request, so
+    async code reaches the database through a thread (asyncio.to_thread, the
+    scan path's _on_scan_thread), never with get_db() in its own body."""
+    offenders = []
+    for path in sorted(glob.glob("*.py")):
+        if path.startswith("test_"):
+            continue
+        with open(path) as f:
+            tree = ast.parse(f.read())
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.AsyncFunctionDef):
+                continue
+            stack = list(ast.iter_child_nodes(fn))
+            while stack:
+                node = stack.pop()
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    continue          # a nested def runs wherever it is called from
+                if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "get_db":
+                    offenders.append(f"{path}:{node.lineno} {fn.name}")
+                stack.extend(ast.iter_child_nodes(node))
+    assert offenders == []

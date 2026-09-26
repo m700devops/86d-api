@@ -147,6 +147,10 @@ def init_crm_tables():
             ("call_brief", "TEXT"),                 # the talking points written from them
             ("phone_status", "TEXT"),               # does their own site vouch for it
             ("phone_note", "TEXT"),                 # what the check found, in words
+            # The owner's rules (pours liquor, not a tourist strip, not a
+            # chain): 'ok' or 'blocked', and the evidence or the reason.
+            ("fit_status", "TEXT"),
+            ("fit_note", "TEXT"),
         ]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -175,6 +179,15 @@ def init_crm_tables():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sched_due "
                        "ON crm_scheduled_emails(status, send_at)")
+        # The lead's email when this was queued: if it changes before the
+        # send ("Brent has left, email Jed"), the queued mail is held rather
+        # than sent to the old address. NULL on rows queued before this.
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'crm_scheduled_emails' AND column_name = 'lead_email_at_queue'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE crm_scheduled_emails ADD COLUMN lead_email_at_queue TEXT")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sched_lead "
                        "ON crm_scheduled_emails(lead_id)")
 
@@ -217,10 +230,12 @@ def init_crm_tables():
                        "ON crm_inbox(processed_at DESC)")
         # What the reply said (so a reply to it can be written from their own
         # words), whether it was an opt-out or needs answering, the reply the
-        # AI drafted overnight, and when it was answered.
+        # AI drafted overnight, when it was answered, and when the operator
+        # took its note off "While you were away" (dismissed_at — the row
+        # itself is never deleted; see inbox_dismiss).
         for col, col_type in [("body_text", "TEXT"), ("opt_out", "BOOLEAN"),
                               ("needs_reply", "BOOLEAN"), ("draft", "TEXT"),
-                              ("replied_at", "TEXT")]:
+                              ("replied_at", "TEXT"), ("dismissed_at", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'crm_inbox' AND column_name = %s
@@ -316,10 +331,25 @@ def init_crm_tables():
                 playbook_refreshed_at TEXT,
                 playbook_touches INTEGER,
                 playbook_error TEXT,
+                pinned TEXT,
+                rejected TEXT,
+                playbook_prev TEXT,
+                playbook_diff TEXT,
+                scoreboard TEXT,
                 CONSTRAINT crm_ai_brain_single_row CHECK (id = 1)
             )
         """)
         cursor.execute("INSERT INTO crm_ai_brain (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
+        # The owner's corrections (pinned / rejected lessons), the playbook
+        # before the last refresh and what changed, and the scoreboard the
+        # model was shown. See playbook.py.
+        for col in ("pinned", "rejected", "playbook_prev", "playbook_diff", "scoreboard"):
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'crm_ai_brain' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE crm_ai_brain ADD COLUMN {col} TEXT")
 
         conn.commit()
 
@@ -456,7 +486,7 @@ LEAD_COLUMNS = (
     "opening_hours", "opener",
     "lead_score", "email_kind", "tz_name", "queued_email_at", "venue_facts",
     "manager_name", "manager_role", "manager_source", "manager_seen_at",
-    "phone_status", "phone_note",
+    "phone_status", "phone_note", "fit_status", "fit_note",
 )
 
 # How long to wait before the next dial, by attempt number. Spread across days
@@ -491,6 +521,29 @@ BAD_PHONE = ("conflict", "unconfirmed", "wrong")
 def _dial_ok(row) -> bool:
     """Whether a lead's number may be offered for dialling at all."""
     return row.get("source") != "leadgen" or row.get("phone_status") in TRUSTED_PHONE
+
+
+def _fit_ok(row) -> bool:
+    """Whether a generated lead passed the owner's rules: pours liquor (shown
+    on its own site), not on a main tourist strip, not a chain. Until the
+    background check has looked (leadgen.verify_fit), it isn't offered. The
+    operator's own entries are trusted as typed."""
+    return row.get("source") != "leadgen" or row.get("fit_status") == "ok"
+
+
+# The call list's order, the owner's priority 4 (2026-09-25): a lead with an
+# email first. Then a name to ask for, the kind of mailbox, fewest tries, fit.
+# (1-3 — chains, liquor, tourist strips — are filters, never an order.)
+_KIND_RANK = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
+
+
+def _reach(lead: dict) -> tuple:
+    return (0 if lead.get("email") else 1,
+            0 if lead.get("manager_name") else 1,
+            _KIND_RANK.get(lead.get("email_kind"), 2),
+            lead.get("attempts") or 0,
+            -(lead.get("lead_score") or 0),
+            lead["name"])
 
 # "Nobody picked up" in the operator's own words. There was no outcome for
 # this at all, so a call that rang out with no way to leave a message had
@@ -588,6 +641,70 @@ def _tries(kind_counts) -> dict:
         if kind in TRY_KINDS:
             out[kind] += n
     return out
+
+
+def touch_story(touches, replies=()) -> dict:
+    """What the CRM tab's WHERE THINGS STAND and REACHED OUT are drawn from,
+    for one lead. Pure.
+
+    `touches`: its crm_touches rows ({kind, outcome, at}) with undone ones
+    already left out. `replies`: its crm_inbox rows ({processed_at, opt_out,
+    needs_reply, replied_at}).
+
+    Read from the touch log, not the lead's `last_outcome`: sending an email
+    overwrites that with "emailed", so a call and then an email used to lose
+    the call's result and read as "Called yesterday". Here the latest touch
+    of ANY kind and the latest CALL are kept apart, and a reply that came in
+    after them counts too.
+    """
+    def at(row):
+        return str(row.get("at") or "")
+
+    touches = [t for t in touches if t.get("outcome") != "undone"]
+    last = max(touches, key=at, default=None)
+    last_call = max((t for t in touches if t.get("kind") == "call"), key=at, default=None)
+    reply = max(replies, key=lambda r: str(r.get("processed_at") or ""), default=None)
+    counts: dict = {}
+    for t in touches:
+        counts[t.get("kind")] = counts.get(t.get("kind"), 0) + 1
+    return {
+        "tries": _tries(counts.items()),
+        "last_touch": ({"kind": last.get("kind"), "outcome": last.get("outcome"), "at": at(last)}
+                       if last else None),
+        "last_call": ({"outcome": last_call.get("outcome"), "at": at(last_call)}
+                      if last_call else None),
+        "last_reply": ({"at": str(reply.get("processed_at") or ""),
+                        "opt_out": bool(reply.get("opt_out")),
+                        "needs_reply": bool(reply.get("needs_reply")),
+                        "answered": bool(reply.get("replied_at"))} if reply else None),
+    }
+
+
+def _touch_stories(cursor, lead_ids) -> dict:
+    """`touch_story()` for a page of leads: two queries, whatever the page size."""
+    ids = [i for i in lead_ids if i]
+    if not ids:
+        return {}
+    cursor.execute("""
+        SELECT lead_id, kind, outcome, at FROM crm_touches
+         WHERE lead_id = ANY(%s) AND outcome IS DISTINCT FROM 'undone'
+    """, (ids,))
+    touches: dict = {}
+    for r in cursor.fetchall():
+        touches.setdefault(r["lead_id"], []).append(r)
+    # crm_inbox.lead_ids is a comma-joined list: one reply can be about
+    # several venues (one management company's).
+    cursor.execute("""
+        SELECT lead_ids, processed_at, opt_out, needs_reply, replied_at FROM crm_inbox
+         WHERE status IN ('updated', 'no_change')
+           AND string_to_array(COALESCE(lead_ids, ''), ',') && %s::text[]
+    """, (ids,))
+    wanted, replies = set(ids), {}
+    for r in cursor.fetchall():
+        for i in (r["lead_ids"] or "").split(","):
+            if i in wanted:
+                replies.setdefault(i, []).append(r)
+    return {i: touch_story(touches.get(i, []), replies.get(i, [])) for i in ids}
 
 
 def _touch_counts(cursor, lead_ids) -> dict:
@@ -811,6 +928,8 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                  LIMIT %s OFFSET %s""",
             params + order_params + [limit, offset])
         leads = [_lead_row(row) for row in cursor.fetchall()]
+        # Every call, email and reply behind WHERE THINGS STAND and REACHED OUT.
+        stories = _touch_stories(cursor, [lead["id"] for lead in leads])
 
         # Always the totals for the whole pipeline, not for the current filter:
         # the counts are the tab labels, and a tab that renumbers itself when
@@ -827,8 +946,11 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     for lead in leads:
         lead["window"] = _call_window(lead.get("tz_offset_hours"),
                                       lead.get("opening_hours"), lead.get("tz_name"))
+        lead.update(stories.get(lead["id"]) or touch_story([]))
+    # The page decides "overdue" against this, the same day Follow-ups uses —
+    # not the browser's UTC date, which is a day behind in Manila's morning.
     return {"leads": leads, "count": len(leads), "matching": matching,
-            "offset": offset, "limit": limit,
+            "offset": offset, "limit": limit, "today": _today(),
             "counts": {**{k: by_status.get(k, 0) for k in VALID_STATUSES},
                        **view_counts, "all": everything}}
 
@@ -1099,6 +1221,11 @@ def _load_counters_locked(cursor) -> dict:
                 playbook_refreshed_at TEXT,
                 playbook_touches INTEGER,
                 playbook_error TEXT,
+                pinned TEXT,
+                rejected TEXT,
+                playbook_prev TEXT,
+                playbook_diff TEXT,
+                scoreboard TEXT,
                 CONSTRAINT crm_ai_brain_single_row CHECK (id = 1)
             )
         """)
@@ -1225,10 +1352,11 @@ def _email_domain(email: Optional[str]) -> str:
     if not email or "@" not in email:
         return ""
     domain = email.split("@")[-1].lower().strip()
-    # A shared mailbox provider says nothing about which business this is.
-    if domain in {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
-                  "aol.com", "icloud.com", "me.com", "live.com", "msn.com",
-                  "comcast.net", "verizon.net", "att.net"}:
+    # A shared mailbox provider says nothing about which business this is —
+    # the one full list (contacts.free_mail), not a second short copy: a
+    # signup on cox.net was credited to whichever lead also used cox.net.
+    from contacts import free_mail
+    if free_mail(domain):
         return ""
     return domain
 
@@ -1600,10 +1728,15 @@ def delete_user(user_id: str, _: bool = Depends(require_crm_key)):
     """
     with get_db() as conn:
         cursor = conn.cursor()
+        # The address is freed the same way the app's own "delete my account"
+        # does it. Without this the row kept its email under users' UNIQUE
+        # index, so the person could never sign up again with that address:
+        # registration's own check skips deleted rows, and the insert failed.
         cursor.execute(
-            "UPDATE users SET deleted_at=%s, updated_at=%s "
+            "UPDATE users SET deleted_at=%s, updated_at=%s, "
+            "email = CONCAT(email, '.deleted.', %s) "
             "WHERE id=%s AND deleted_at IS NULL",
-            (now_iso(), now_iso(), user_id),
+            (now_iso(), now_iso(), generate_id()[:8], user_id),
         )
         deleted = cursor.rowcount > 0
         conn.commit()
@@ -1914,10 +2047,37 @@ def _winning_emails(limit: int = WINNERS_SHOWN) -> list:
             for r in rows if r["body"]]
 
 
-def _draft_context(row: dict, include_log: bool = True) -> str:
+def _sent_emails_to(lead_id: str, limit: int = 3) -> list:
+    """Our latest emails to this lead, oldest first, each marked with whether
+    a reply came back after it — so a follow-up builds on them instead of
+    repeating them, and knows which thread to answer in."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            # A reply is matched the way _touch_stories matches one: mail the
+            # reader tied to this lead (lead_ids is comma-joined), filed after
+            # ours went.
+            cursor.execute("""
+                SELECT e.subject, e.body, e.sent_at, e.to_addr,
+                       EXISTS (SELECT 1 FROM crm_inbox i
+                                WHERE i.status IN ('updated', 'no_change')
+                                  AND e.lead_id = ANY(string_to_array(COALESCE(i.lead_ids, ''), ','))
+                                  AND i.processed_at > e.sent_at) AS replied
+                  FROM crm_sent_emails e
+                 WHERE e.lead_id = %s
+                 ORDER BY e.sent_at DESC LIMIT %s
+            """, (lead_id, limit))
+            rows = [dict(r) for r in cursor.fetchall()]
+    except Exception as exc:
+        print(f"[crm] sent emails unavailable: {exc}", flush=True)
+        return []
+    return list(reversed(rows))
+
+
+def _draft_context(row: dict, include_log: bool = True, sent: Optional[list] = None) -> str:
     """WHAT WE KNOW about this bar: its facts with their sources, the
-    prep-sheet points and (for a first email or a reply; a follow-up's ask
-    carries its own) what's been logged."""
+    prep-sheet points, (for a first email or a reply; a follow-up's ask
+    carries its own) what's been logged, and the emails we already sent them."""
     import pitch
     import venue
 
@@ -1930,7 +2090,9 @@ def _draft_context(row: dict, include_log: bool = True) -> str:
         log = (lead.get("notes") or "").strip()
         if len(log) > DRAFT_LOG_CHARS:
             log = "…" + log[-DRAFT_LOG_CHARS:]
-    return pitch.lead_context(lead, lines, points, log)
+    if sent is None:
+        sent = _sent_emails_to(row["id"])
+    return pitch.lead_context(lead, lines, points, log, sent)
 
 
 def _draft_system() -> str:
@@ -1938,20 +2100,67 @@ def _draft_system() -> str:
     return pitch.system_prompt(_knowledge(), _winning_emails())
 
 
-def _write_draft(row: dict, ask: str, include_log: bool = True) -> dict:
+def _write_draft(row: dict, ask: str, include_log: bool = True,
+                 to_decision_maker: bool = False, kind: str = "first",
+                 brief: str = "", outreach: bool = True) -> dict:
     """One draft: the cached system (sheet, brain, examples, style), then this
     bar and what to write. Shared by the Email button and the inbox reader's
-    overnight replies, so both write from the same brain."""
+    overnight replies, so both write from the same brain.
+
+    Every draft ends with the owner's signature (pitch.sign — in code, not
+    left to the prompt). A fresh outreach draft (`to_decision_maker`) is also
+    made to greet the decision maker by name; a reply answers whoever wrote,
+    and a revision keeps the greeting the draft already has."""
     import pitch
-    out = _claude_json(_draft_system(), pitch.user_prompt(_draft_context(row, include_log), ask),
-                       pitch.SCHEMA, max_tokens=AI_MIN_TOKENS, timeout=120.0, purpose="draft")
-    subject = str(out.get("subject") or "").strip()[:200]
-    body = str(out.get("body") or "").strip()[:20000]
+    system = _draft_system()
+    sent = _sent_emails_to(row["id"])
+    context = _draft_context(row, include_log, sent)
+    known = f"{context}\n{ask}"
+
+    # Threads we can honestly answer in: emails that went to the address this
+    # one will (a "Re:" to Jed on a thread only Brent ever saw is a fake one).
+    to_now = (row.get("email") or "").strip().lower()
+    threads = [e.get("subject") for e in sent
+               if not to_now or (e.get("to_addr") or "").strip().lower() == to_now]
+
+    def parsed(out: dict) -> tuple:
+        subject = str(out.get("subject") or "").strip()[:200]
+        if kind != "reply":
+            # "Re:" only on a thread we really started (a reply keeps theirs).
+            subject = pitch.honest_re(subject, threads)
+        return subject, str(out.get("body") or "").strip()[:20000]
+
+    subject, body = parsed(_claude_json(system, pitch.user_prompt(context, ask), pitch.SCHEMA,
+                                        max_tokens=AI_MIN_TOKENS, timeout=120.0,
+                                        purpose="draft"))
+    # The checker (pitch.lint): template phrases, spam bait, invented figures,
+    # a second link, shouting, a wall of text. A draft that trips it goes back
+    # ONCE with the list, and the version with fewer problems is kept — a
+    # person reading it, and their spam filter, are the audience.
+    problems = pitch.lint(subject, body, kind, brief, known) if subject and body else []
+    if problems:
+        try:
+            f_subject, f_body = parsed(_claude_json(
+                system, pitch.user_prompt(context, f"{ask}\n\n---\n\nYour draft:\n\nSubject: "
+                                          f"{subject}\n\n{body}\n\n---\n\n"
+                                          + pitch.lint_ask(problems)),
+                pitch.SCHEMA, max_tokens=AI_MIN_TOKENS, timeout=120.0, purpose="draft-fix"))
+            if f_subject and f_body:
+                still = pitch.lint(f_subject, f_body, kind, brief, known)
+                if len(still) <= len(problems):
+                    subject, body, problems = f_subject, f_body, still
+        except Exception as exc:
+            print(f"[crm] DRAFT_FIX_FAILED {exc}", flush=True)
     if not subject or not body:
         raise HTTPException(status_code=502, detail={
             "error": "draft_incomplete",
             "message": "The draft came back empty — try saying it a different way."})
-    return {"subject": subject, "body": body}
+    if to_decision_maker:
+        body = pitch.address_to(body, pitch.first_name(pitch.decision_maker(dict(row))[0]))
+    signed = pitch.sign(body)
+    if outreach and pitch.outreach_footer():
+        signed += "\n\n" + pitch.outreach_footer()
+    return {"subject": subject, "body": signed, "checks": problems}
 
 
 def _reply_ask(mail: dict, brief: str = "") -> str:
@@ -2023,19 +2232,98 @@ def _knowledge(playbook: bool = True) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
-def _playbook_inputs(cursor, today: str) -> tuple[str, list, int]:
-    """(the digest the model reads, the bar names it may cite, touch count)."""
+def _json_list(value) -> list:
+    try:
+        v = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+
+
+def _scoreboard(cursor, cutoff: str) -> dict:
+    """The log's counts over the window, for playbook.scoreboard_lines():
+    dials and what they reached, emails and replies, where the worked bars
+    stand, and how many became app signups. Undone touches never count."""
+    cursor.execute("""
+        SELECT COUNT(*) FILTER (WHERE kind = 'call') AS dials,
+               COUNT(*) FILTER (WHERE kind = 'call' AND connected) AS connects,
+               COUNT(*) FILTER (WHERE kind = 'call'
+                                AND outcome IN ('answered', 'callback', 'not_interested')) AS conversations,
+               COUNT(*) FILTER (WHERE kind = 'call' AND outcome = 'gatekeeper') AS gatekeepers,
+               COUNT(*) FILTER (WHERE kind = 'call' AND outcome = 'callback') AS callbacks,
+               COUNT(*) FILTER (WHERE kind = 'call' AND outcome = 'not_interested') AS not_interested
+          FROM crm_touches
+         WHERE outcome IS DISTINCT FROM 'undone' AND at >= %s
+    """, (cutoff,))
+    s = dict(cursor.fetchone() or {})
+    cursor.execute("""
+        SELECT COUNT(*) AS emails,
+               COUNT(*) FILTER (WHERE EXISTS (
+                   SELECT 1 FROM crm_inbox i
+                    WHERE i.lead_ids LIKE '%%' || t.lead_id || '%%'
+                      AND i.processed_at > t.at
+                      AND i.status IN ('updated', 'no_change')
+                      AND COALESCE(i.opt_out, FALSE) = FALSE)) AS email_replies
+          FROM crm_touches t
+         WHERE t.kind = 'email' AND t.outcome IS DISTINCT FROM 'undone' AND t.at >= %s
+    """, (cutoff,))
+    s.update(dict(cursor.fetchone() or {}))
+    cursor.execute("""
+        SELECT attempt, COUNT(*) AS dials, COUNT(*) FILTER (WHERE connected) AS connects
+          FROM crm_touches
+         WHERE kind = 'call' AND outcome IS DISTINCT FROM 'undone'
+           AND attempt IS NOT NULL AND at >= %s
+         GROUP BY attempt ORDER BY attempt
+    """, (cutoff,))
+    s["by_attempt"] = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("""
+        SELECT local_hour AS hour, COUNT(*) AS dials, COUNT(*) FILTER (WHERE connected) AS connects
+          FROM crm_touches
+         WHERE kind = 'call' AND outcome IS DISTINCT FROM 'undone'
+           AND local_hour IS NOT NULL AND at >= %s
+         GROUP BY local_hour
+    """, (cutoff,))
+    s["by_hour"] = [dict(r) for r in cursor.fetchall()]
+    cursor.execute("""
+        SELECT COUNT(*) AS worked,
+               COUNT(*) FILTER (WHERE status = 'warm') AS warm,
+               COUNT(*) FILTER (WHERE status = 'won') AS won,
+               COUNT(*) FILTER (WHERE status = 'dead') AS dead
+          FROM crm_leads WHERE last_touch_at >= %s
+    """, (cutoff,))
+    s.update(dict(cursor.fetchone() or {}))
+    # A signup counts whenever it happened: the few there are matter most.
+    cursor.execute("""
+        SELECT COUNT(*) AS signups,
+               COUNT(*) FILTER (WHERE u.subscription_status = 'active') AS paying
+          FROM crm_leads l JOIN users u ON u.id = l.matched_user_id AND u.deleted_at IS NULL
+         WHERE l.last_touch_at IS NOT NULL
+    """)
+    s.update(dict(cursor.fetchone() or {}))
+    s["days"] = PLAYBOOK_DAYS
+    return s
+
+
+def _playbook_inputs(cursor, today: str, row: Optional[dict] = None) -> dict:
+    """What a refresh reads: the digest, the bar names it may cite (every
+    worked bar in the window, not only the ones that fit in the digest — so a
+    lesson backed by a bar from three weeks ago still validates), the touch
+    count, and the scoreboard with the percentages a point may quote."""
     import playbook as _pb
 
+    row = row or {}
     cutoff = (datetime.now(timezone.utc) - timedelta(days=PLAYBOOK_DAYS)).isoformat()
     cursor.execute("SELECT COUNT(*) AS n FROM crm_touches WHERE outcome IS DISTINCT FROM 'undone'")
     touches = cursor.fetchone()["n"]
     cursor.execute("""
-        SELECT id, name, loc, status, last_outcome, notes FROM crm_leads
-         WHERE last_touch_at IS NOT NULL AND last_touch_at >= %s
-         ORDER BY last_touch_at DESC LIMIT 150
+        SELECT l.id, l.name, l.loc, l.status, l.last_outcome, l.notes,
+               u.subscription_status AS customer
+          FROM crm_leads l
+          LEFT JOIN users u ON u.id = l.matched_user_id AND u.deleted_at IS NULL
+         WHERE l.last_touch_at IS NOT NULL AND (l.last_touch_at >= %s OR u.id IS NOT NULL)
+         ORDER BY l.last_touch_at DESC LIMIT 1500
     """, (cutoff,))
-    leads = cursor.fetchall()
+    leads = [dict(l) for l in cursor.fetchall()]
     names = {l["id"]: l["name"] for l in leads}
     cursor.execute("""
         SELECT from_name, from_addr, subject, lead_ids, result, processed_at FROM crm_inbox
@@ -2065,28 +2353,41 @@ def _playbook_inputs(cursor, today: str) -> tuple[str, list, int]:
                "subject": e["subject"] or "(subject not kept)",
                "replied": replied_at.get(e["lead_id"], "") > (e["at"] or "")}
               for e in cursor.fetchall()]
-    return _pb.digest(leads, replies, emails, today), list(names.values()), touches
+    board = _pb.scoreboard_lines(_scoreboard(cursor, cutoff))
+    digest = _pb.digest(leads, replies, emails, today, scoreboard=board,
+                        current=_playbook_of(row), pinned=_json_list(row.get("pinned")),
+                        rejected=_json_list(row.get("rejected")))
+    return {"digest": digest, "names": list(names.values()), "touches": touches,
+            "scoreboard": board, "percents": _pb.percents_in(board)}
 
 
 def refresh_playbook(force: bool = False) -> dict:
-    """Rewrite the playbook from the log if there's something new to learn.
+    """Re-learn the playbook from the log if there's something new to learn.
 
     Skips (no model call) when fewer than PLAYBOOK_MIN_TOUCHES calls/emails
     are logged at all, or — unless forced — when the last refresh is under
     PLAYBOOK_EVERY_HOURS old or fewer than PLAYBOOK_NEW_TOUCHES touches have
-    been logged since. One refresh at a time.
+    been logged since. One refresh at a time. The owner's pins and rejections
+    are applied from the row as it stands at SAVE time, under a lock, so a
+    click made while the model was thinking isn't overwritten.
     """
     import playbook as _pb
 
     if not _playbook_lock.acquire(blocking=False):
         return {"skipped": "a refresh is already running"}
     try:
+        try:
+            # The newest signups count as results in this refresh, not the next.
+            rematch_attribution()
+        except Exception as exc:
+            print(f"[crm] attribution before the playbook failed: {exc}", flush=True)
         today = _today()
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM crm_ai_brain WHERE id = 1")
             row = dict(cursor.fetchone() or {})
-            digest, names, touches = _playbook_inputs(cursor, today)
+            inputs = _playbook_inputs(cursor, today, row)
+        touches = inputs["touches"]
         if touches < PLAYBOOK_MIN_TOUCHES:
             return {"skipped": f"only {touches} calls and emails logged so far — "
                                f"it starts learning at {PLAYBOOK_MIN_TOUCHES}"}
@@ -2096,28 +2397,41 @@ def refresh_playbook(force: bool = False) -> dict:
         if not force and row.get("playbook") and (fresh or quiet):
             return {"skipped": "nothing new to learn since the last refresh"}
         try:
-            # A background job reading up to 150 bars' notes: give it room.
-            out = _claude_json(_pb.SYSTEM, digest, _pb.SCHEMA, timeout=300.0, purpose="playbook")
-            pb = _pb.clean(out, names)
+            # A background job reading a long log: give it room.
+            out = _claude_json(_pb.SYSTEM, inputs["digest"], _pb.SCHEMA, timeout=300.0,
+                               purpose="playbook")
+            pb = _pb.clean(out, inputs["names"], allowed_percents=inputs["percents"],
+                           rejected=_json_list(row.get("rejected")))
             error = None
         except HTTPException as exc:
             pb, error = None, str((exc.detail or {}).get("message") if isinstance(exc.detail, dict)
                                   else exc.detail)[:300]
+        change = None
         with get_db() as conn:
             cursor = conn.cursor()
             if pb is not None:
+                cursor.execute("SELECT playbook, pinned, rejected FROM crm_ai_brain "
+                               "WHERE id = 1 FOR UPDATE")
+                live = dict(cursor.fetchone() or {})
+                pb = _pb.finalize(pb, _json_list(live.get("pinned")),
+                                  _json_list(live.get("rejected")))
+                change = _pb.diff(_playbook_of(live), pb)
                 cursor.execute("""
-                    UPDATE crm_ai_brain SET playbook = %s, playbook_refreshed_at = %s,
-                           playbook_touches = %s, playbook_error = NULL WHERE id = 1
-                """, (json.dumps(pb), now_iso(), touches))
+                    UPDATE crm_ai_brain SET playbook = %s, playbook_prev = %s, playbook_diff = %s,
+                           scoreboard = %s, playbook_refreshed_at = %s, playbook_touches = %s,
+                           playbook_error = NULL WHERE id = 1
+                """, (json.dumps(pb), live.get("playbook"), json.dumps(change),
+                      json.dumps(inputs["scoreboard"]), now_iso(), touches))
             else:
                 cursor.execute("UPDATE crm_ai_brain SET playbook_error = %s WHERE id = 1",
                                (error,))
             conn.commit()
-        points = sum(len(sec["points"]) for sec in (pb or {}).get("sections", []))
+        points = len(_pb.all_points(pb))
         print(f"[crm] PLAYBOOK_REFRESHED points={points} touches={touches}"
+              + (f" new={len(change['new'])} dropped={len(change['dropped'])}" if change else "")
               + (f" error={error}" if error else ""), flush=True)
-        return {"refreshed": pb is not None, "points": points, "error": error}
+        return {"refreshed": pb is not None, "points": points, "error": error,
+                "new": len(change["new"]) if change else 0}
     finally:
         _playbook_lock.release()
 
@@ -2133,18 +2447,45 @@ class OwnerNotes(BaseModel):
     text: str = Field(default="", max_length=8000)
 
 
+def _live_scoreboard(stored) -> list:
+    """The scoreboard as of now, for the page; the stored one (what the model
+    last saw) if the numbers can't be read."""
+    import playbook as _pb
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=PLAYBOOK_DAYS)).isoformat()
+        with get_db() as conn:
+            return _pb.scoreboard_lines(_scoreboard(conn.cursor(), cutoff))
+    except Exception as exc:
+        print(f"[crm] scoreboard unavailable: {exc}", flush=True)
+        try:
+            v = json.loads(stored or "[]")
+            return v if isinstance(v, list) else []
+        except (TypeError, ValueError):
+            return []
+
+
 @crm_router.get("/brain", response_model=dict)
 def brain(_: bool = Depends(require_crm_key)):
     """Everything the AI works from: the master sheet (fixed, from pitch.py),
-    the owner's standing instructions and the learned playbook."""
+    the owner's standing instructions and the learned playbook — plus the
+    scoreboard it learns from, what changed at the last re-learn, and the
+    lessons the owner kept or marked wrong."""
     import pitch
     row = _brain_row()
+    try:
+        change = json.loads(row.get("playbook_diff") or "null")
+    except (TypeError, ValueError):
+        change = None
     return {"master_sheet": pitch.master_sheet(),
             "owner_notes": row.get("owner_notes") or "",
             "owner_notes_updated_at": row.get("owner_notes_updated_at"),
             "playbook": _playbook_of(row),
             "playbook_refreshed_at": row.get("playbook_refreshed_at"),
             "playbook_error": row.get("playbook_error"),
+            "diff": change if isinstance(change, dict) else None,
+            "pinned": _json_list(row.get("pinned")),
+            "rejected": _json_list(row.get("rejected")),
+            "scoreboard": _live_scoreboard(row.get("scoreboard")),
             "refreshing": _playbook_lock.locked(),
             "min_touches": PLAYBOOK_MIN_TOUCHES}
 
@@ -2161,6 +2502,95 @@ def save_owner_notes(data: OwnerNotes, _: bool = Depends(require_crm_key)):
         """, (data.text.strip(), now))
         conn.commit()
     return {"saved": True, "owner_notes_updated_at": now}
+
+
+class BrainPoint(BaseModel):
+    id: str = Field(min_length=6, max_length=40)
+    keep: bool = True
+
+
+def _brain_edit(fn) -> dict:
+    """Read the brain row under a lock, let `fn` change (playbook, pinned,
+    rejected), write all three back. The owner's clicks and a refresh never
+    interleave: both take this row lock."""
+    import playbook as _pb
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT playbook, pinned, rejected FROM crm_ai_brain WHERE id = 1 FOR UPDATE")
+        row = dict(cursor.fetchone() or {})
+        pb = _playbook_of(row) or {"summary": "", "sections": []}
+        pinned, rejected = _json_list(row.get("pinned")), _json_list(row.get("rejected"))
+        result = fn(pb, pinned, rejected)
+        pb = _pb.finalize(pb, pinned, rejected)
+        cursor.execute("UPDATE crm_ai_brain SET playbook = %s, pinned = %s, rejected = %s "
+                       "WHERE id = 1", (json.dumps(pb), json.dumps(pinned), json.dumps(rejected)))
+        conn.commit()
+    return result
+
+
+def _find_point(pb: dict, pinned: list, pid: str) -> dict:
+    import playbook as _pb
+    point = next((p for p in _pb.all_points(pb) if p.get("id") == pid), None) \
+        or next((p for p in pinned if p.get("id") == pid), None)
+    if point is None:
+        raise HTTPException(status_code=404, detail={
+            "error": "not_found", "message": "That lesson isn't in the playbook any more — reload."})
+    return point
+
+
+@crm_router.post("/brain/keep", response_model=dict)
+def brain_keep(data: BrainPoint, _: bool = Depends(require_crm_key)):
+    """Pin a lesson (keep=true) so every re-learn keeps it, in these words;
+    or unpin it (keep=false), and it lives or goes with the evidence again."""
+    import playbook as _pb
+
+    def edit(pb, pinned, rejected):
+        point = _find_point(pb, pinned, data.id)
+        pinned[:] = [p for p in pinned if p.get("id") != data.id]
+        if data.keep:
+            pinned.append({"id": point["id"], "text": point["text"],
+                           "evidence": list(point.get("evidence") or []),
+                           "section": point.get("section"), "at": now_iso()})
+            del pinned[:-_pb.MAX_PINNED]
+        else:
+            # Unpinned, it goes back to being an ordinary point for now.
+            for sec in pb.get("sections") or []:
+                if (sec.get("title") or "") == (point.get("section") or ""):
+                    if not any(p.get("id") == data.id for p in sec["points"]):
+                        sec["points"].insert(0, {"id": point["id"], "text": point["text"],
+                                                 "evidence": list(point.get("evidence") or [])})
+        return {"kept": data.keep, "pinned": len(pinned)}
+
+    return _brain_edit(edit)
+
+
+@crm_router.post("/brain/wrong", response_model=dict)
+def brain_wrong(data: BrainPoint, _: bool = Depends(require_crm_key)):
+    """The owner says a lesson is wrong: it leaves the playbook now (so no
+    draft or prep sheet uses it from this moment), and every later re-learn
+    is told never to write it or anything like it."""
+    import playbook as _pb
+
+    def edit(pb, pinned, rejected):
+        point = _find_point(pb, pinned, data.id)
+        pinned[:] = [p for p in pinned if p.get("id") != data.id]
+        rejected[:] = [r for r in rejected if r.get("id") != data.id]
+        rejected.append({"id": point["id"], "text": point["text"], "at": now_iso()})
+        del rejected[:-_pb.MAX_REJECTED]
+        return {"rejected": True}
+
+    return _brain_edit(edit)
+
+
+@crm_router.post("/brain/unreject", response_model=dict)
+def brain_unreject(data: BrainPoint, _: bool = Depends(require_crm_key)):
+    """Take back a "wrong": the lesson may be learned again if the log backs it."""
+    def edit(pb, pinned, rejected):
+        before = len(rejected)
+        rejected[:] = [r for r in rejected if r.get("id") != data.id]
+        return {"restored": len(rejected) < before}
+
+    return _brain_edit(edit)
 
 
 @crm_router.post("/brain/refresh", response_model=dict)
@@ -2338,15 +2768,27 @@ def lead_brief(lead_id: str, refresh: bool = False, quick: bool = False,
     return answer(brief, False)
 
 
+def _notes_website(notes: Optional[str]) -> Optional[str]:
+    """The venue's website as the notes carry it: a "Website:" line first,
+    else the first URL — never one a later line says is not theirs (the
+    wrong-lookup clean-up writes that), and never the page an email was
+    merely found on. Used by the prep sheet and the wrong-number lookup."""
+    from leadgen import domain_of, flagged_domains
+    bad = flagged_domains(notes)
+    text = notes or ""
+    labelled = re.findall(r"Website: (https?://[^\s|,;·]+)", text)
+    for url in labelled + _URL_IN_TEXT.findall(text):
+        if domain_of(url) not in bad:
+            return url
+    return None
+
+
 def _venue_profile(row) -> dict:
     """The plain facts on file for the prep sheet, all already stored: what
     kind of place, their website, the hours the map lists. Nothing here is
     fetched or generated, and nothing here decides where a lead sorts — a
     bare profile is just a bare profile."""
-    website = row.get("cand_website")
-    if not website:
-        found = re.search(r"https?://[^\s|,;]+", row.get("notes") or "")
-        website = found.group(0) if found else None
+    website = row.get("cand_website") or _notes_website(row.get("notes"))
     return {"kind": row.get("cand_amenity"), "website": website,
             "hours": row.get("opening_hours")}
 
@@ -2541,7 +2983,19 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
         ask = _followup_ask(lead, brief)
     else:
         ask = f"Write the email. What it needs to say: {brief}"
-    return _write_draft(row, ask, include_log=not followup)
+    import pitch
+    if data.reply_to:
+        kind = "reply"
+    elif revising:
+        kind = "revision"
+    else:
+        kind = "followup" if followup else "first"
+    # A reply answers someone who wrote to us; everything else is outreach and
+    # carries the opt-out line. A revision keeps whatever the draft had.
+    outreach = not data.reply_to and (not revising or pitch.OPT_OUT_LINE in (data.body or ""))
+    return _write_draft(row, ask, include_log=not followup,
+                        to_decision_maker=not revising and not data.reply_to,
+                        kind=kind, brief=brief, outreach=outreach)
 
 
 class OutgoingEmail(BaseModel):
@@ -2559,8 +3013,13 @@ class OutgoingEmail(BaseModel):
 def mail_status(_: bool = Depends(require_crm_key)):
     """Whether the server can send, so the page knows which button to show."""
     import mailer
+    import pitch
     return {"configured": mailer.is_configured(), "from": mailer.sender(),
-            "host": mailer.HOST, "port": mailer.PORT,
+            "host": mailer.HOST, "port": mailer.PORT, "signature": pitch.SIGNATURE,
+            # Under the signature on outreach: the way out (+ postal address).
+            "footer": pitch.outreach_footer(),
+            # What clicking the page's title copies (COMPANY_APP_URL).
+            "app_url": pitch.APP_URL,
             # The page hides the "draft it for me" box rather than offering a
             # button that can only fail.
             "ai": bool(os.getenv("ANTHROPIC_API_KEY"))}
@@ -2612,8 +3071,10 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
         return _queue_email(lead, to, data)
 
     reply_to = (data.in_reply_to or "").strip() or None
+    # Answering their email, or else a follow-up in our own earlier thread.
+    parent = reply_to or _thread_parent_for(lead_id, data.subject, to)
     try:
-        sent = mailer.send(to, data.subject, data.body, in_reply_to=reply_to)
+        sent = mailer.send(to, data.subject, data.body, in_reply_to=parent)
     except mailer.MailNotConfigured as exc:
         raise HTTPException(status_code=503, detail={
             "error": "mail_not_configured", "message": str(exc)})
@@ -2639,6 +3100,55 @@ def send_lead_email(lead_id: str, data: OutgoingEmail,
 
     return {"lead": _lead_row(updated), "undo_id": undo_id, "sent": sent,
             "counters": _counters_row(counters) if counters else None}
+
+
+def _thread_parent(cursor, lead_id: str, subject: Optional[str],
+                   to_addr: Optional[str] = None) -> Optional[str]:
+    """A follow-up titled "Re: <an earlier email's subject>" goes out as a
+    reply IN that thread: the Message-ID of the latest email we sent this
+    lead under that subject — to this same address, when one is given (the
+    new manager never saw the thread with the old one) — or None. A bump in
+    the same conversation reads like a person, keeps the context above it,
+    and doesn't look like a fresh cold blast to the filter.
+
+    The stored email and its Message-ID are separate rows, paired by lead and
+    send time. Within two minutes rather than equal: the scheduled sender used
+    to stamp the two with separate clocks, microseconds apart."""
+    import pitch
+    base = pitch.thread_base(subject)
+    if not base:
+        return None
+    to = (to_addr or "").strip().lower()
+    cursor.execute("""
+        SELECT m.message_id
+          FROM crm_sent_emails e
+          JOIN crm_sent_messages m ON m.lead_id = e.lead_id
+         WHERE e.lead_id = %s
+           AND lower(btrim(regexp_replace(e.subject, '^(\\s*re\\s*:\\s*)+', '', 'i'))) = %s
+           AND (%s = '' OR lower(e.to_addr) = %s)
+           AND abs(extract(epoch FROM m.sent_at::timestamptz - e.sent_at::timestamptz)) < 120
+         ORDER BY e.sent_at DESC,
+                  abs(extract(epoch FROM m.sent_at::timestamptz - e.sent_at::timestamptz))
+         LIMIT 1
+    """, (lead_id, base, to, to))
+    row = cursor.fetchone()
+    return row["message_id"] if row else None
+
+
+def _thread_parent_for(lead_id: str, subject: Optional[str],
+                       to_addr: Optional[str] = None) -> Optional[str]:
+    """`_thread_parent` on its own connection, for the send paths. Threading
+    is a nicety: a failed lookup sends the email unthreaded, never not at
+    all — and a subject that isn't a "Re:" costs no query."""
+    import pitch
+    if not pitch.thread_base(subject):
+        return None
+    try:
+        with get_db() as conn:
+            return _thread_parent(conn.cursor(), lead_id, subject, to_addr)
+    except Exception as exc:
+        print(f"[crm] thread lookup failed: {exc}", flush=True)
+        return None
 
 
 def _queue_email(lead, to: str, data) -> dict:
@@ -2679,10 +3189,11 @@ def _queue_email(lead, to: str, data) -> dict:
         replaced = cursor.rowcount
         cursor.execute("""
             INSERT INTO crm_scheduled_emails
-                (id, lead_id, to_addr, subject, body, send_at, status, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
+                (id, lead_id, to_addr, subject, body, send_at, status, created_at,
+                 lead_email_at_queue)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s)
         """, (queue_id, lead["id"], to, data.subject.strip(), data.body,
-              when.isoformat(), now_iso()))
+              when.isoformat(), now_iso(), lead.get("email") or ""))
         cursor.execute("UPDATE crm_leads SET queued_email_at = %s WHERE id = %s",
                        (when.isoformat(), lead["id"]))
         conn.commit()
@@ -2773,6 +3284,28 @@ def cancel_scheduled(queue_id: str, _: bool = Depends(require_crm_key)):
     return {"cancelled": True}
 
 
+def _queued_mail_hold(lead: Optional[dict], to_addr: str,
+                      email_at_queue: Optional[str] = None) -> Optional[str]:
+    """Why a queued email must not go now, or None. Pure.
+
+    The address rule is "the lead's email CHANGED since queueing", never
+    "differs from To": the compose box may deliberately send somewhere else
+    (a cell given on a call), and that must still go. Rows queued before the
+    snapshot existed (email_at_queue None) aren't judged on it."""
+    if not lead:
+        return "the lead was deleted"
+    if lead.get("status") == "dead":
+        return "the lead is marked dead (they said no) since this was queued"
+    if lead.get("status") == "won":
+        return "they signed up since this was queued"
+    now_email = (lead.get("email") or "").strip().lower()
+    if (email_at_queue is not None and now_email != email_at_queue.strip().lower()
+            and now_email != (to_addr or "").strip().lower()):
+        return (f"the lead's email changed to {lead.get('email') or 'nothing'} since this "
+                f"was queued to {to_addr} — check it and send again")
+    return None
+
+
 def run_due_emails(limit: int = 20) -> dict:
     """Send whatever is due. Called on a timer; safe to call at any moment.
 
@@ -2816,14 +3349,26 @@ def run_due_emails(limit: int = 20) -> dict:
         except ValueError:
             late_minutes = 0
         # They may have opted out after this was queued: that wins, always.
+        # So does anything else that changed since: the lead said no or
+        # signed up, was deleted, or now carries a different address (a reply
+        # said "Brent has left, email Jed") — mail queued to the old one would
+        # go to the wrong person, or to a bar that already said no.
         with get_db() as conn:
             cursor = conn.cursor()
             opted_out = _email_suppressed(cursor, job["to_addr"])
             if opted_out:
+                opted_out = f"{job['to_addr']} {opted_out}"
+            else:
+                cursor.execute("SELECT status, email FROM crm_leads WHERE id = %s",
+                               (job["lead_id"],))
+                lead_now = cursor.fetchone()
+                opted_out = _queued_mail_hold(lead_now, job["to_addr"],
+                                              job.get("lead_email_at_queue"))
+            if opted_out:
                 cursor.execute("""
                     UPDATE crm_scheduled_emails SET status = 'failed', last_error = %s
                      WHERE id = %s
-                """, (f"Not sent: {job['to_addr']} {opted_out}.", job["id"]))
+                """, (f"Not sent: {opted_out}.", job["id"]))
                 cursor.execute("""
                     UPDATE crm_leads SET queued_email_at = NULL
                      WHERE id = %s AND NOT EXISTS (
@@ -2833,7 +3378,7 @@ def run_due_emails(limit: int = 20) -> dict:
                 conn.commit()
         if opted_out:
             skipped += 1
-            print(f"[crm] held back a queued email to {job['to_addr']} — opted out", flush=True)
+            print(f"[crm] held back a queued email to {job['to_addr']} — {opted_out}", flush=True)
             continue
         if late_minutes > STALE_AFTER_MINUTES:
             skipped += 1
@@ -2856,8 +3401,10 @@ def run_due_emails(limit: int = 20) -> dict:
                   f"{job['to_addr']} — window gone", flush=True)
             continue
 
+        parent = _thread_parent_for(job["lead_id"], job["subject"], job["to_addr"])
         try:
-            sent_msg = mailer.send(job["to_addr"], job["subject"], job["body"])
+            sent_msg = mailer.send(job["to_addr"], job["subject"], job["body"],
+                                   in_reply_to=parent)
         except Exception as exc:
             failed += 1
             # Left as 'failed' rather than retried forever: a bad address or a
@@ -2883,15 +3430,19 @@ def run_due_emails(limit: int = 20) -> dict:
             continue
 
         sent += 1
+        # ONE timestamp for every record of this send: the Message-ID and the
+        # stored email are paired on it when a later follow-up threads under
+        # this one (_thread_parent). Not `now`: that is the claim cutoff above.
+        sent_at = now_iso()
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE crm_scheduled_emails SET status = 'sent', sent_at = %s "
-                " WHERE id = %s", (now_iso(), job["id"]))
+                " WHERE id = %s", (sent_at, job["id"]))
             try:
-                _remember_sent(cursor, sent_msg.get("message_id"), job["lead_id"], now_iso())
+                _remember_sent(cursor, sent_msg.get("message_id"), job["lead_id"], sent_at)
                 _record_email_sent(cursor, job["lead_id"], job["to_addr"],
-                                   job["subject"], _today(), now_iso(), body=job["body"])
+                                   job["subject"], _today(), sent_at, body=job["body"])
             except Exception as exc:
                 # The mail is already gone; a bookkeeping failure must not make
                 # it look unsent. Say so loudly and keep the 'sent' status.
@@ -3450,8 +4001,12 @@ def wrong_number(lead_id: str, _: bool = Depends(require_crm_key)):
     # the website it was found on.
     website = row.get("cand_website")
     if not website:
-        found = _URL_IN_TEXT.search(row.get("notes") or "")
-        website = found.group(0) if found else None
+        # From the notes, the site has to name the bar before its number is
+        # trusted: a wrong website there would swap in another venue's line.
+        from leadgen import site_is_venue
+        website = _notes_website(row.get("notes"))
+        if website and not site_is_venue(website, row.get("name") or ""):
+            website = None
     new = None
     if website:
         try:
@@ -3636,6 +4191,9 @@ def export_csv(scope: str = "today", _: bool = Depends(require_crm_key)):
     for row in rows:
         if row.get("phone_status") in BAD_PHONE:
             continue      # a number the website check found wrong never reaches a dialer
+        if row.get("fit_status") == "blocked" or (
+                scope != "all" and not row.get("last_touch_at") and not _fit_ok(row)):
+            continue      # the owner's rules: chains, beer-and-wine rooms, tourist strips
         window = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"))
         writer.writerow([
             row["name"], row["phone"] or "", row["email"] or "", row["loc"] or "",
@@ -3699,7 +4257,7 @@ def call_list(_: bool = Depends(require_crm_key)):
         lead = _lead_row(row)
         # A number that didn't validate, or that the venue's own site doesn't
         # vouch for, is never offered for dialling.
-        if not lead["phone_ok"] or not _dial_ok(row):
+        if not lead["phone_ok"] or not _dial_ok(row) or not _fit_ok(row):
             continue
         usable += 1
         lead["call_window"] = _call_window(row.get("tz_offset_hours"),
@@ -3726,15 +4284,7 @@ def call_list(_: bool = Depends(require_crm_key)):
         # couldn't classify — an unclassified one is usually the venue's own
         # mailbox (oshaughnessyspub@gmail.com), which somebody there actually
         # reads.
-        kind_rank = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
-        return (
-            WINDOW_RANK.get(lead["call_window"].get("state"), 2),
-            0 if lead.get("manager_name") else 1,
-            kind_rank.get(lead.get("email_kind"), 2),
-            lead.get("attempts") or 0,
-            -(lead.get("lead_score") or 0),
-            lead["name"],
-        )
+        return (WINDOW_RANK.get(lead["call_window"].get("state"), 2), *_reach(lead))
 
     def build_zones(by_zone: dict) -> list:
         # Every zone appears, empty or not. The sub-tabs have to be in the same
@@ -3868,13 +4418,16 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
         lead = _lead_row(row)
         # About one map number in five isn't the bar's any more: only numbers
         # the venue's own website vouches for are dialled. See leadgen.
-        if not lead["phone_ok"] or not _dial_ok(row):
+        if not lead["phone_ok"] or not _dial_ok(row) or not _fit_ok(row):
             continue
         window = _call_window(row.get("tz_offset_hours"), row.get("opening_hours"),
                               row.get("tz_name"))
         lead["call_window"] = window
         lead["zone"] = ZONE_LABELS.get(row.get("tz_offset_hours"), "—")
-        if window["good_now"]:
+        # Only a venue in its own calling window is "ready". A row with no
+        # timezone has no window at all — it used to count as ready around
+        # the clock.
+        if window["good_now"] and window.get("state") != "unknown":
             ready.append(lead)
         elif window.get("state") == "early":
             soon.append(lead)
@@ -3885,13 +4438,7 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
             # noisier, and at 3am in Iloilo a noisier call beats no call.
             rest.append(lead)
 
-    def reach(lead):
-        kind_rank = {"personal": 0, "owner": 1, "unknown": 2, "role": 3}
-        return (0 if lead.get("manager_name") else 1,
-                kind_rank.get(lead.get("email_kind"), 2),
-                lead.get("attempts") or 0,
-                -(lead.get("lead_score") or 0),
-                lead["name"])
+    reach = _reach
 
     ready.sort(key=reach)
     # The nearly-ready ones are ordered by the clock instead: the point of
@@ -4232,9 +4779,27 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
         return re.sub(r"\s+", " ", v).strip()[:limit] if isinstance(v, str) and v.strip() else None
 
     FIELD_LIMITS = {"contact": 200, "email": 320, "phone": 50}
+    import assist as _assist
     for field, limit in FIELD_LIMITS.items():
         value = _text("ask_for", limit) if field == "contact" else None
         value = value or _text(field, limit)
+        # An email or number goes on the lead only if it is really in what
+        # the operator typed — or, for an email, it's the one quick-add read
+        # off the venue's own site. A model's misreading or guess used to be
+        # saved straight over a good address; the AI bar already had this
+        # rule (assist.clean_change), the notes path didn't.
+        verified = bool(extracted.get("_verified"))
+        if value and field == "email" and not (
+                verified or _assist.grounded(value, raw_text or "")
+                or value == extracted.get("_email_from_site")):
+            applied.setdefault("not_saved", []).append(
+                f"email {value} — it isn't in your notes")
+            value = None
+        if value and field == "phone" and not (
+                verified or _assist.phone_grounded(value, raw_text or "")):
+            applied.setdefault("not_saved", []).append(
+                f"phone {value} — it isn't in your notes")
+            value = None
         if value:
             sets.append(f"{field} = %s"); params.append(value)
             applied[field] = value
@@ -4511,6 +5076,9 @@ def _apply_assist_change(cursor, lead, clean: dict, today: str, now: str) -> str
         if fields.get("followup_date"):
             extracted["followup_in_days"] = (
                 date.fromisoformat(fields["followup_date"]) - date.fromisoformat(today)).days
+        # clean_change already checked every field against the WHOLE message;
+        # their_words is only this lead's part of it.
+        extracted["_verified"] = True
         _, _, undo_id, _ = _apply_call_notes(
             cursor, lead, extracted, lg["their_words"], lg["kind"], today, now)
         # What the call-notes write doesn't cover. Still under the same undo:
@@ -4596,7 +5164,8 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
         f"{_ask_when(t['at'], tz)} | {alias_of.get(t['lead_id'], '?')} | {t['kind']} | "
         f"{t['outcome'] or ''}" for t in touches])
     history = [t.model_dump() for t in data.history][-4:]
-    out = _claude_json(_assist.SYSTEM, _assist.message_block(text, history), _assist.SCHEMA,
+    out = _claude_json(_assist.BAR_SYSTEM, _assist.message_block(text, history),
+                       _assist.BAR_SCHEMA,
                        context=_assist.context_block(book, _assist.dates_table(today_d), log),
                        purpose="ai-bar")
 
@@ -4605,7 +5174,51 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
     question = str(question).strip()[:1000] if question else None
     proposed = out.get("changes") if isinstance(out.get("changes"), list) else []
 
+    # A bar that isn't in the book can't be CHANGED — it has to be added. The
+    # bar used to have no way to do that: "Added NE Moose Bar & Grill as a new
+    # lead" came back over "couldn't match 'NE Moose Bar & Grill' to a lead",
+    # and nothing was saved. New bars go through the same path as "Add a lead"
+    # (_quick_add): the lead, the call, the follow-up, and a bar that IS in the
+    # book after all gets the call logged on its existing row.
+    new_texts = _assist.new_lead_texts(out, text, back)
+    stray = [c for c in proposed if isinstance(c, dict)
+             and re.fullmatch(r"L\d+", str(c.get("lead") or "").strip())
+             and str(c.get("lead")).strip() not in back]
+    proposed = [c for c in proposed if isinstance(c, dict)
+                and str(c.get("lead") or "").strip() in back]
     applied, skipped = _apply_proposed(proposed, back, text, today)
+    skipped += [{"lead": None, "why": f"couldn't match {c['lead']!r} to a lead"} for c in stray]
+    added: list = []
+    for part in new_texts:
+        try:
+            made = _quick_add(part)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            skipped.append({"lead": None, "why": "couldn't add the new bar — "
+                            + str(detail.get("message") or exc.detail)})
+            continue
+        except Exception as exc:
+            print(f"[crm] AI_BAR_ADD_FAILED {exc}", flush=True)
+            skipped.append({"lead": None, "why": "couldn't add the new bar — try Add a lead"})
+            continue
+        lead = made["lead"]
+        existing = (made.get("applied") or {}).get("matched_existing")
+        changed = [("already in your book — logged the call on it" if existing
+                    else "added as a new lead")]
+        if lead.get("last_outcome"):
+            changed.append(f"logged call ({lead['last_outcome'].replace('_', ' ')})")
+        if lead.get("contact"):
+            changed.append(f"ask for {lead['contact']}")
+        if lead.get("followup_date"):
+            changed.append(f"follow-up → {lead['followup_date']}")
+        applied.append({"lead_id": lead["id"], "name": lead["name"],
+                        "changed": changed, "undo_id": made.get("undo_id")})
+        added.append(lead["name"])
+    if added:
+        said = ", ".join(added)
+        reply = (reply + " " if reply else "") + f"Saved: {said}."
+    elif not applied and new_texts:
+        reply = "Nothing was saved — see below."
     return {"reply": reply, "question": question, "applied": applied, "skipped": skipped}
 
 
@@ -4662,6 +5275,10 @@ def _apply_proposed(proposed: list, back: dict, text: str, today: str,
 INBOX_BATCH = int(os.getenv("CRM_INBOX_BATCH", "20"))   # emails handled per pass, max
 
 
+INBOX_MAX_TRIES = 3
+_INBOX_FAILS: dict = {}     # message_id -> failed passes, this process
+
+
 def process_inbox(days: int = 3) -> dict:
     import assist as _assist
     import inbox as _inbox
@@ -4705,7 +5322,24 @@ def process_inbox(days: int = 3) -> dict:
                 draft = _reply_draft_for(mail, lead_ids[0])
         tally[status] += 1
         if status == "failed":
-            continue          # not recorded, so the next pass tries it again
+            # Not recorded, so the next pass tries it again — but only
+            # INBOX_MAX_TRIES times. Each try is a paid model call, and a mail
+            # that always fails used to be retried every 5 minutes for as long
+            # as it stayed in the fetch window (up to 20 of them a pass).
+            fails = _INBOX_FAILS[mail["message_id"]] = _INBOX_FAILS.get(mail["message_id"], 0) + 1
+            if fails < INBOX_MAX_TRIES:
+                continue
+            print(f"[crm] INBOX_GAVE_UP after {fails} tries: {mail.get('subject')!r}", flush=True)
+            _INBOX_FAILS.pop(mail["message_id"], None)
+            # Giving up on reading it must never mean ignoring "stop emailing
+            # me": the plain-words check needs no model, and an opt-out has to
+            # be honoured (CAN-SPAM) however the rest of the mail went.
+            if lead_ids and _inbox.looks_like_opt_out(_inbox.opt_out_text(mail)):
+                try:
+                    _record_opt_out(mail, lead_ids)
+                    result = {**(result or {}), "opt_out": True}
+                except Exception as exc:
+                    print(f"[crm] INBOX_OPT_OUT_FAILED {mail.get('from_addr')}: {exc}", flush=True)
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -4754,7 +5388,7 @@ def _read_reply(mail: dict, lead_ids: list) -> dict:
                        purpose="inbox")
     proposed = out.get("changes") if isinstance(out.get("changes"), list) else []
     # An opt-out is honoured whatever the model thought, if the words say so.
-    opt_out = bool(out.get("opt_out")) or _inbox.looks_like_opt_out(mail.get("text"))
+    opt_out = bool(out.get("opt_out")) or _inbox.looks_like_opt_out(_inbox.opt_out_text(mail))
     if opt_out:
         proposed = []           # _record_opt_out does the writing, and nothing else should
     applied, skipped = _apply_proposed(proposed, back, text, today, allow_logged=False)
@@ -4811,7 +5445,8 @@ def _reply_draft_for(mail: dict, lead_id: str) -> Optional[dict]:
             row = cursor.fetchone()
         if not row:
             return None
-        draft = _write_draft(row, _reply_ask({**mail, "body_text": mail.get("text")}))
+        draft = _write_draft(row, _reply_ask({**mail, "body_text": mail.get("text")}),
+                             kind="reply", outreach=False)
         return {**draft, "to": mail.get("from_addr"), "lead_id": lead_id}
     except Exception as exc:
         print(f"[crm] INBOX_DRAFT_FAILED {mail.get('subject')!r}: {exc}", flush=True)
@@ -4839,42 +5474,99 @@ def _email_suppressed(cursor, addr: Optional[str]) -> Optional[str]:
     return (row["reason"] or "on the do-not-email list") if row else None
 
 
+INBOX_SHOWN = 50        # notes on "While you were away"
+INBOX_DELETED_SHOWN = 30  # deleted notes that can still be put back
+
+
+def _inbox_item(r):
+    """One crm_inbox row as the page shows it."""
+    try:
+        result = json.loads(r["result"] or "{}")
+    except ValueError:
+        result = {}
+    try:
+        draft = json.loads(r["draft"]) if r["draft"] else None
+    except ValueError:
+        draft = None
+    return {"from": r["from_name"] or r["from_addr"], "from_addr": r["from_addr"],
+            "subject": r["subject"], "received_at": r["received_at"],
+            "processed_at": r["processed_at"], "status": r["status"],
+            "reply": result.get("reply"), "applied": result.get("applied") or [],
+            "skipped": result.get("skipped") or [],
+            "message_id": r["message_id"],
+            "lead_id": (r["lead_ids"] or "").split(",")[0] or None,
+            "opt_out": bool(r["opt_out"]), "needs_reply": bool(r["needs_reply"]),
+            "draft": draft, "replied_at": r["replied_at"],
+            "dismissed_at": r.get("dismissed_at")}
+
+
 @crm_router.get("/inbox", response_model=dict)
 def inbox_feed(hours: int = 72, _: bool = Depends(require_crm_key)):
-    """What the inbox reader did lately — Follow-ups' "While you were away"."""
+    """What the inbox reader did lately — Follow-ups' "While you were away".
+    Notes the operator deleted are left out of `items` and listed, most
+    recently deleted first, under `deleted`, so one deleted by mistake can
+    still be put back after the toast's Undo is gone."""
     since = (datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 720)))).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT message_id, from_addr, from_name, subject, received_at, status,
-                   result, processed_at, lead_ids, opt_out, needs_reply, draft, replied_at
+                   result, processed_at, lead_ids, opt_out, needs_reply, draft, replied_at,
+                   dismissed_at
               FROM crm_inbox
              WHERE status IN ('updated', 'no_change') AND processed_at >= %s
-             ORDER BY processed_at DESC LIMIT 50
+             ORDER BY processed_at DESC LIMIT 200
         """, (since,))
         rows = cursor.fetchall()
         cursor.execute("SELECT MAX(processed_at) AS last FROM crm_inbox")
         last = cursor.fetchone()["last"]
-    items = []
-    for r in rows:
-        try:
-            result = json.loads(r["result"] or "{}")
-        except ValueError:
-            result = {}
-        try:
-            draft = json.loads(r["draft"]) if r["draft"] else None
-        except ValueError:
-            draft = None
-        items.append({"from": r["from_name"] or r["from_addr"], "from_addr": r["from_addr"],
-                      "subject": r["subject"], "received_at": r["received_at"],
-                      "processed_at": r["processed_at"], "status": r["status"],
-                      "reply": result.get("reply"), "applied": result.get("applied") or [],
-                      "skipped": result.get("skipped") or [],
-                      "message_id": r["message_id"],
-                      "lead_id": (r["lead_ids"] or "").split(",")[0] or None,
-                      "opt_out": bool(r["opt_out"]), "needs_reply": bool(r["needs_reply"]),
-                      "draft": draft, "replied_at": r["replied_at"]})
-    return {"items": items, "last_processed": last}
+    items = [_inbox_item(r) for r in rows if not r.get("dismissed_at")]
+    deleted = sorted((_inbox_item(r) for r in rows if r.get("dismissed_at")),
+                     key=lambda it: it["dismissed_at"], reverse=True)
+    return {"items": items[:INBOX_SHOWN], "deleted": deleted[:INBOX_DELETED_SHOWN],
+            "last_processed": last}
+
+
+class InboxNote(BaseModel):
+    message_id: str = Field(..., min_length=1, max_length=1000)
+
+
+def _set_dismissed(message_id, dismiss):
+    """Stamp (or clear) dismissed_at on one note. A second delete keeps the
+    first time, so "deleted 2h ago" stays true."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE crm_inbox
+               SET dismissed_at = CASE WHEN %s THEN COALESCE(dismissed_at, %s) END
+             WHERE message_id = %s
+         RETURNING message_id, dismissed_at
+        """, (bool(dismiss), now_iso(), message_id))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={
+                "error": "not_found", "message": "That note isn't in the inbox log any more."})
+        conn.commit()
+    return {"message_id": row["message_id"], "dismissed_at": row["dismissed_at"]}
+
+
+@crm_router.post("/inbox/dismiss", response_model=dict)
+def inbox_dismiss(data: InboxNote, _: bool = Depends(require_crm_key)):
+    """Take a note off "While you were away" — the operator already knows.
+
+    Only the NOTE goes. What the reply changed on the lead stays (each change
+    has its own Undo), an opt-out stays on the do-not-email list, and the row
+    is kept, only stamped: the reader treats a message it has no row for as
+    new mail, so deleting the row would bring the email back on the next pass
+    and apply its changes a second time."""
+    return _set_dismissed(data.message_id, True)
+
+
+@crm_router.post("/inbox/restore", response_model=dict)
+def inbox_restore(data: InboxNote, _: bool = Depends(require_crm_key)):
+    """Put a deleted note back on the list — the Undo, and the Restore button
+    under "Deleted"."""
+    return _set_dismissed(data.message_id, False)
 
 
 @crm_router.post("/inbox/check", response_model=dict)
@@ -5036,6 +5728,15 @@ def ask_crm(data: AskCRM, _: bool = Depends(require_crm_key)):
 import apple as _apple
 
 APPLE_STALE_HOURS = 6        # opening the tab re-syncs when data is older than this
+# main.py's loop imports on its own when the last import is older than this,
+# whether or not anyone opens the tab: new numbers keep arriving, and Apple
+# never sees the report request go unread long enough to stop it.
+APPLE_BACKGROUND_HOURS = 12
+# Bumped whenever the way a file is READ changes. A file read by an older
+# parser counts as not imported, so the next sync reads it again (Apple keeps
+# serving recent files) and its dates are replaced with the new reading.
+# 2: page views split by page, weekly usage files, dates replaced whole.
+APPLE_PARSER = 2
 _apple_lock = threading.Lock()
 _apple_state: dict = {"running": False}
 
@@ -5065,6 +5766,24 @@ def init_apple_tables():
                 PRIMARY KEY (report, day, dim, metric)
             )
         """)
+        # Apple's WEEKLY files for the usage reports (sessions, installs and
+        # deletions, crashes), keyed by the Monday the week starts on. Kept
+        # apart from the daily rows: a week's total sitting beside its days
+        # would be counted twice by anything that sums a table.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_apple_weekly (
+                report TEXT NOT NULL, week TEXT NOT NULL, dim TEXT NOT NULL,
+                metric TEXT NOT NULL, value DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (report, week, dim, metric)
+            )
+        """)
+        # Which version of the parser read each file (see APPLE_PARSER).
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'crm_apple_instances' AND column_name = 'parser'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE crm_apple_instances ADD COLUMN parser INTEGER")
         conn.commit()
 
 
@@ -5125,6 +5844,49 @@ def _apple_client(cfg: dict) -> "_apple.ASC":
     return _apple.ASC(cfg["key_id"], cfg["issuer_id"], cfg["private_key"])
 
 
+def _apple_already(inst_id: str) -> bool:
+    """Imported before, by the parser in use now (an older reading is read again)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM crm_apple_instances WHERE id = %s AND parser >= %s",
+                       (inst_id, APPLE_PARSER))
+        return cursor.fetchone() is not None
+
+
+def _apple_save_instance(inst_id: str, report: str, pdate: str, totals: dict,
+                         grain: str = "DAILY") -> None:
+    """Store one of Apple's files: its totals REPLACE every date it carries.
+
+    A newer file restates each date it carries in full ("instances from a
+    more recent processingDate overwrite instances with an earlier
+    processingDate … don't merge records", Apple's own rule; apple.sync()
+    saves oldest first). So a date's rows are deleted and written again as a
+    set: never merged with an earlier file's, never left beside a row the
+    earlier file had and this one doesn't."""
+    table, col = (("crm_apple_weekly", "week") if grain == "WEEKLY"
+                  else ("crm_apple_metrics", "day"))
+    report = report[:200]
+    days = sorted({day for day, _, _ in totals})
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if days:
+            cursor.execute(f"DELETE FROM {table} WHERE report = %s AND {col} = ANY(%s)",
+                           (report, days))
+        for (day, dim, metric), value in totals.items():
+            cursor.execute(f"""
+                INSERT INTO {table} (report, {col}, dim, metric, value)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (report, {col}, dim, metric) DO UPDATE SET value = EXCLUDED.value
+            """, (report, day, dim[:200], metric[:120], value))
+        cursor.execute("""
+            INSERT INTO crm_apple_instances (id, report, processing_date, imported_at, parser)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET imported_at = EXCLUDED.imported_at,
+                                           parser = EXCLUDED.parser
+        """, (inst_id, report, pdate, now_iso(), APPLE_PARSER))
+        conn.commit()
+
+
 def _apple_sync_job():
     """One background import. Errors are stored for the page, never raised."""
     try:
@@ -5141,28 +5903,7 @@ def _apple_sync_job():
         if request_id != cfg.get("request_id"):
             _apple_save(request_id=request_id)
 
-        def already(inst_id):
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1 FROM crm_apple_instances WHERE id = %s", (inst_id,))
-                return cursor.fetchone() is not None
-
-        def save(inst_id, report, pdate, totals):
-            with get_db() as conn:
-                cursor = conn.cursor()
-                for (day, dim, metric), value in totals.items():
-                    cursor.execute("""
-                        INSERT INTO crm_apple_metrics (report, day, dim, metric, value)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (report, day, dim, metric) DO UPDATE SET value = EXCLUDED.value
-                    """, (report[:200], day, dim[:200], metric[:120], value))
-                cursor.execute("""
-                    INSERT INTO crm_apple_instances (id, report, processing_date, imported_at)
-                    VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING
-                """, (inst_id, report[:200], pdate, now_iso()))
-                conn.commit()
-
-        result = _apple.sync(asc, request_id, already, save)
+        result = _apple.sync(asc, request_id, _apple_already, _apple_save_instance)
         _apple_save(last_sync_at=now_iso(), last_sync_ok=True, last_error=None)
         print(f"[crm] APPLE_SYNC ok reports={result['reports']} imported={result['imported']} "
               f"partial={result['partial']}", flush=True)
@@ -5186,6 +5927,28 @@ def _apple_start_sync() -> bool:
     return True
 
 
+def _apple_stale(last_sync_at: Optional[str], hours: float) -> bool:
+    if not last_sync_at:
+        return True
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(
+            last_sync_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return age > timedelta(hours=hours)
+
+
+def apple_sync_if_due(hours: float = APPLE_BACKGROUND_HOURS) -> bool:
+    """Start an import when the last one is older than `hours` (main.py's
+    loop). The tab used to be the only thing that imported: with nobody
+    opening it, nothing was fetched, and Apple stops a report request whose
+    reports go unread for long enough."""
+    cfg = _apple_config()
+    if not cfg["connected"] or not _apple_stale(cfg.get("last_sync_at"), hours):
+        return False
+    return _apple_start_sync()
+
+
 def _apple_status(cfg: dict) -> dict:
     return {
         "connected": cfg["connected"], "source": cfg.get("source"),
@@ -5205,24 +5968,28 @@ def apple_analytics(window: int = 30, _: bool = Depends(require_crm_key)):
     """Status + everything imported so far. Kicks off a sync when stale."""
     window = 7 if window <= 7 else 90 if window >= 90 else 30
     cfg = _apple_config()
-    if cfg["connected"]:
-        last = cfg.get("last_sync_at")
-        stale = True
-        if last:
-            try:
-                age = datetime.now(timezone.utc) - datetime.fromisoformat(last.replace("Z", "+00:00"))
-                stale = age > timedelta(hours=APPLE_STALE_HOURS)
-            except ValueError:
-                pass
-        if stale:
-            _apple_start_sync()
+    if cfg["connected"] and _apple_stale(cfg.get("last_sync_at"), APPLE_STALE_HOURS):
+        _apple_start_sync()
+    now = datetime.now(timezone.utc)
+    weeks = _apple.WEEKS_FOR.get(window, 4)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT report, day, dim, metric, value FROM crm_apple_metrics "
                        "WHERE day >= %s",
-                       ((datetime.now(timezone.utc) - timedelta(days=2 * window + 10)).strftime("%Y-%m-%d"),))
+                       ((now - timedelta(days=2 * window + 10)).strftime("%Y-%m-%d"),))
         rows = [dict(r) for r in cursor.fetchall()]
-    return {**_apple_status(_apple_config()), **_apple.summarize(rows, window)}
+        cursor.execute("SELECT report, week, dim, metric, value FROM crm_apple_weekly "
+                       "WHERE week >= %s",
+                       ((now - timedelta(weeks=2 * weeks + 3)).strftime("%Y-%m-%d"),))
+        weekly = [dict(r) for r in cursor.fetchall()]
+        # Where the data starts (Apple sends nothing from before the reports
+        # were first requested): no tile compares against days before it.
+        cursor.execute("SELECT MIN(day) AS d FROM crm_apple_metrics")
+        since = (cursor.fetchone() or {}).get("d")
+        cursor.execute("SELECT MIN(week) AS w FROM crm_apple_weekly")
+        since_week = (cursor.fetchone() or {}).get("w")
+    return {**_apple_status(_apple_config()),
+            **_apple.summarize(rows, window, weekly=weekly, since=since, since_week=since_week)}
 
 
 class AppleConnect(BaseModel):
@@ -5377,6 +6144,11 @@ def _find_existing_lead(cursor, name: str, loc: Optional[str], phones,
 # test_routes.py now checks every CRM route lands on the function it names.
 @crm_router.post("/leads/quick-add", response_model=dict, status_code=201)
 def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
+    """Add a lead from pasted notes — see _quick_add()."""
+    return _quick_add(data.text, data.name)
+
+
+def _quick_add(text: str, name_override: Optional[str] = None) -> dict:
     """Describe a call to a bar that isn't in the CRM yet — paste whatever you
     have — and get back a new lead with the call logged and every detail kept.
 
@@ -5390,10 +6162,10 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
     address off it, the same way the lead generator does.
     """
     today = _today()
-    extracted = _quick_add_extract(data.text, today)
+    extracted = _quick_add_extract(text, today)
 
-    name = _clean(data.name, 200) or _clean(extracted.get("name"), 200) \
-        or _name_from_text(data.text)
+    name = _clean(name_override, 200) or _clean(extracted.get("name"), 200) \
+        or _name_from_text(text)
     if not name:
         raise HTTPException(status_code=422, detail={
             "error": "no_name",
@@ -5405,13 +6177,22 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
     found_via = None
     if not _clean(extracted.get("email"), 320):
         try:
+            import leadgen
             from leadgen import find_venue_website, find_email_on_site
             if not website:
+                # Looked up, not given: it only counts if the map hit is this
+                # bar in this town AND the site itself names the bar. A guess
+                # gave NE Moose Bar & Grill another restaurant's email.
                 website = find_venue_website(name, loc)
+                if website and not leadgen.site_is_venue(website, name):
+                    print(f"[crm] quick-add: {website} doesn't name {name!r}; not used",
+                          flush=True)
+                    website = None
             if website:
-                email, page = find_email_on_site(website)
+                email, page = find_email_on_site(website, venue_name=name)
                 if email:
                     extracted["email"] = email
+                    extracted["_email_from_site"] = email
                     found_via = page
         except Exception as exc:
             print(f"[crm] quick-add email lookup failed: {exc}", flush=True)
@@ -5437,7 +6218,7 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
         from leadgen import phones_in
         phones = sorted(phones_in(" ".join(filter(None, [
             str(extracted.get("phone") or ""), str(extracted.get("other_phones") or ""),
-            data.text]))))
+            text]))))
         lead = _find_existing_lead(cursor, name, loc, phones,
                                    _clean(extracted.get("email"), 320))
         matched = lead is not None
@@ -5451,7 +6232,7 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
             lead = cursor.fetchone()
 
         updated, applied, undo_id, counters = _apply_call_notes(
-            cursor, lead, extracted, data.text, "call", today, now)
+            cursor, lead, extracted, text, "call", today, now)
         if matched:
             # After the call's own note, and still under its undo: the
             # snapshot was taken before either.
@@ -5712,7 +6493,7 @@ def coach_turn(data: TurnRequest, _: bool = Depends(require_crm_key)):
     system, user = _coach.turn_prompt(
         data.boss, [t.model_dump() for t in data.transcript], data.said,
         data.patience, data.trust, data.found, data.interrupt, data.challenge)
-    out = _ask_claude(system, user, max_tokens=400, temperature=0.8)
+    out = _ask_claude(system, user, max_tokens=400, temperature=0.8, purpose="school")
     return _coach.apply_turn(data.boss, data.patience, data.trust, data.found, out)
 
 
@@ -5721,10 +6502,48 @@ def coach_review(data: ReviewRequest, _: bool = Depends(require_crm_key)):
     _known_boss(data.boss)
     system, user = _coach.review_prompt(data.boss, [t.model_dump() for t in data.transcript],
                                         data.result)
-    out = _ask_claude(system, user, max_tokens=500)
+    out = _ask_claude(system, user, max_tokens=700, purpose="school")
     scores = {k: _coach.clamp(out.get(k), 0, 10) for k in ("opener", "discovery", "objections", "ask")}
     return {**scores, "turning_point": str(out.get("turning_point") or "")[:400],
             "redo": str(out.get("redo") or "")[:400]}
+
+
+FILM_DAYS = 14
+FILM_CALLS = 15
+
+
+def _local_day(at: Optional[str]) -> str:
+    """"Tue Sep 23" in the operator's own clock, for the coach's call list."""
+    t = _parse_utc(at)
+    return t.astimezone(_operator_tz()).strftime("%a %b %d") if t else ""
+
+
+@crm_router.post("/coach/film", response_model=dict)
+def coach_film(_: bool = Depends(require_crm_key)):
+    """Game film: the founder's own recent conversations, read back as
+    coaching — one thing working, the pattern costing the most, and drills
+    built from what prospects actually said (the page files them into
+    Replay). Voicemails and ring-outs aren't film; nothing happened on them."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=FILM_DAYS)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT ON (t.lead_id) t.lead_id, t.at, t.outcome, l.name, l.notes
+              FROM crm_touches t JOIN crm_leads l ON l.id = t.lead_id
+             WHERE t.kind = 'call' AND t.at >= %s
+               AND t.outcome IN ('answered', 'callback', 'not_interested', 'gatekeeper')
+             ORDER BY t.lead_id, t.at DESC
+        """, (cutoff,))
+        rows = sorted(cursor.fetchall(), key=lambda r: r["at"] or "", reverse=True)[:FILM_CALLS]
+    if not rows:
+        return {"working": None, "costing": None, "drills": [], "calls": 0,
+                "note": f"No real conversations logged in the last {FILM_DAYS} days yet — "
+                        "voicemails and missed calls don't count. Make a few calls first."}
+    calls = [{"bar": r["name"], "when": _local_day(r["at"]), "outcome": r["outcome"],
+              "notes": " / ".join(_lead_history(dict(r), lines=2).splitlines())} for r in rows]
+    system, user = _coach.film_prompt(calls)
+    out = _ask_claude(system, user, max_tokens=1200, purpose="school")
+    return {**_coach.validate_film(out, [r["name"] for r in rows]), "calls": len(rows)}
 
 
 class TapeRequest(BaseModel):

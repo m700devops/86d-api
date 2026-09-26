@@ -28,7 +28,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   Follow-ups — with School, Yet to Contact, Apple Analytics and Customers behind a burger top right:
   those are looked at occasionally and thought about once, and in the tab row they competed
   with the three things a working day actually needs. The burger turns orange when the open
-  page lives inside it. Single self-contained file, no build step;
+  page lives inside it. **Clicking the title ("86'd — Sales", on every page) copies the App
+  Store link** to paste anywhere — `app_url` from `/mail/status` (COMPANY_APP_URL), loaded on
+  unlock, else the live listing (`APP_URL_DEFAULT`). Single self-contained file, no build step;
   replacing this file replaces the UI. Holds no credentials — the operator types the key and
   it lives in their browser's localStorage. **The Call list tab is one button and one table,
   nothing else.** It used to carry a focus card, a clock, a queued-email banner, an undo
@@ -53,9 +55,12 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   ONE ongoing report request (`ensure_report_request`, reused if it exists — Apple allows one
   per app), Apple then produces a daily INSTANCE per report as gzipped TSVs behind pre-signed
   URLs (downloaded WITHOUT the bearer token), and `sync()` imports each instance once
-  (`crm_apple_instances`) into `crm_apple_metrics (report, day, dim, metric, value)`. Only
-  "Standard" reports — the "Detailed" variants hold the same numbers split finer and would
-  double every total. Report columns vary, so `aggregate()` never assumes them: a column is
+  (`crm_apple_instances`) into `crm_apple_metrics (report, day, dim, metric, value)`.
+  Engagement, commerce and usage reports (`wanted_reports()`, by Apple's `category`), never a
+  "Detailed" one — those hold the same numbers split finer and would double every total.
+  It used to keep only names containing "Standard", which also dropped App Crashes (it has
+  one version, no "Standard"): the Crashes tile could never show a number. Report columns
+  vary, so `aggregate()` never assumes them: a column is
   a metric if its name says it counts something, and the numbers split by the first present
   of `DIM_PREFERENCE` (Event, Download Type, …). **The first reports take Apple about 1–2
   days after connecting**; the tab says so instead of looking broken. `summarize()` ends its
@@ -65,12 +70,51 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   Key ID and .p8. Routes in crm.py: `GET /v1/crm/apple` (status + tiles + tables; starts a
   background import when data is older than `APPLE_STALE_HOURS`), `POST /apple/connect`
   (checks the key against Apple BEFORE saving, so a typo fails with Apple's reason),
-  `/apple/sync`, `/apple/disconnect`. The .p8 is stored Fernet-encrypted with a key derived
+  `/apple/sync`, `/apple/disconnect` (and a background import twice a day — see below). The .p8 is stored Fernet-encrypted with a key derived
   from `SECRET_KEY` and never returned to the page; rotating `SECRET_KEY` makes it unreadable
   and the tab asks to reconnect. Env vars `APPLE_ISSUER_ID` / `APPLE_KEY_ID` /
   `APPLE_PRIVATE_KEY` (+ optional `APPLE_APP_ID`) override the saved key. The key needs the
   **Admin** role, because creating the report request does. Covered by test_apple.py; grep
   Render logs for `APPLE_SYNC`
+- **Apple Analytics counts what App Store Connect counts, from the day it was connected
+  (2026-09-26).** Checked against Apple's own docs (Analytics Reports "Data Completeness and
+  Corrections" and "Protecting user privacy", and App Store Connect's "Metric definitions"):
+  - **No history, by the owner's choice.** An `ONGOING` request "provides current data" only;
+    the past needs a separate `ONE_TIME_SNAPSHOT` request (back to 2024-01-01), which the owner
+    declined — "good analytics moving forward". The page says where the data starts
+    (`since`), a tile whose window starts before it says "12 of 30 days", and nothing is
+    compared against a window before it (`previous`/`change_pct` null, "no earlier data").
+  - **The newest file wins, and a date is replaced WHOLE.** A daily file carries the newest
+    day plus the full, restated numbers for the few days before it (late events), and Apple's
+    rule is that the later `processingDate` wins. `sync()` now saves instances OLDEST first
+    (it used Apple's listing order, so an older file could put incomplete numbers back over
+    complete ones), and `crm._apple_save_instance()` deletes every row for each date the file
+    carries before writing it (never merged, never a stale row left beside the new set).
+  - **App Store Connect's definitions**: Impressions INCLUDE product page views (the report's
+    Impression event doesn't — `aggregate()` keeps a page view's page, "Page view · Product
+    page", so they're added back); Product page views are the product page and the StoreKit
+    "store sheet" only, never version history / privacy / developer / in-app event pages
+    (`PRODUCT_PAGE`); Downloads are first-time + redownloads, never updates or restores;
+    Conversion is downloads ÷ UNIQUE-device impressions (it was ÷ total impressions).
+  - **Usage tiles come from WEEKLY files.** Apple doesn't produce a usage report (sessions,
+    installs/deletions, crashes) for any DAY with fewer than five users who share analytics,
+    and applies the same rule per week; App Store Connect applies its five-device minimum over
+    the whole range. For a young app the daily files miss most quiet days, so `sync()` also
+    imports WEEKLY instances for usage reports (`is_usage()`) into `crm_apple_weekly (report,
+    week, dim, metric, value)`, and those tiles show the last N full Mon–Sun weeks
+    (`WEEKS_FOR`: 7→1, 30→4, 90→13), a week Apple skipped counting as nothing rather than
+    being slid past. Until a weekly file exists (they come on Fridays) a usage tile shows the
+    daily sum flagged `partial` ("days with 5+ users only")
+  - **The request stays alive.** Apple stops a request whose reports go unread for long
+    (`stoppedDueToInactivity`), after which nothing new ever arrives. The tab used to be the
+    only thing that imported; main.py's `_apple_sync_loop` now looks hourly and
+    `apple_sync_if_due()` imports when the last one is older than `APPLE_BACKGROUND_HOURS`
+    (12). `ensure_report_request()` replaces a stopped request instead of trusting a saved id
+    Apple still answers for.
+  - **`APPLE_PARSER` (2)** is stamped on every imported file (`crm_apple_instances.parser`); a
+    file read by an older parser counts as not imported, so the next sync reads it again and
+    its dates are rebuilt. Bump it whenever the way a file is READ changes. Run on a real
+    Postgres 16 from today's schema: migration, re-read, date replacement and the route
 - static/icon.png, static/favicon.png — the app logo, copied from the mobile repo's assets and
   served via the allowlisted `/crm/{asset}` route (NOT a directory mount — that would be one
   traversal away from serving the repo). Re-copy from 86d-mobile/assets when rebranding
@@ -140,30 +184,72 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   writes are in crm.py (`/v1/crm/assist`). Covered by test_assist.py
 - playbook.py — **the company brain**, pure. Two halves kept apart: the OWNER'S STANDING
   INSTRUCTIONS (typed on the burger's **AI Brain** page, `crm_ai_brain.owner_notes`; the owner
-  is the authority, so facts in them may be stated) and the PLAYBOOK the AI learns from the log
-  (calls with the operator's own words and labelled details, inbound replies, emails and
-  whether they got a reply). `clean()` is the gate: every point must cite a bar actually in
-  the log, or it's dropped — that's what stops a "learning" playbook filling with generic
-  sales advice. `render()` gives prompts counts, never other bars' names. `crm.refresh_playbook()`
-  only calls the model with >= `PLAYBOOK_MIN_TOUCHES` (5) touches logged, and (unless forced)
-  after `PLAYBOOK_EVERY_HOURS` (20) with >= `PLAYBOOK_NEW_TOUCHES` (3) new ones; main.py's
-  `_playbook_loop` checks every 3h; `POST /v1/crm/brain/refresh` forces one;
-  `GET /v1/crm/brain`, `PUT /v1/crm/brain/notes`. `crm._knowledge()` is what the drafter,
-  prep sheet and School read; the master sheet stays the only source of product facts. Log:
-  `PLAYBOOK_REFRESHED`, `PLAYBOOK_FAILED`. Covered by test_playbook.py
+  is the authority, so facts in them may be stated) and the PLAYBOOK the AI learns from the log.
+  `crm._knowledge()` is what the drafter, prep sheet and School read; the master sheet stays
+  the only source of product facts. How it learns — each piece covered by test_playbook.py:
+  - **Toward the RESULT, not the stage name.** Each refresh runs `rematch_attribution()` first,
+    and the digest marks a bar that went on to sign up (`SIGNED UP (trial)` / `PAYING
+    CUSTOMER`, from `users.subscription_status` via `matched_user_id`), listed FIRST.
+    Sections follow the funnel (`SECTION_TITLES`): Reaching the decision maker → Objections
+    → What gets a callback, a download or a yes → How bars do it today → Emails that get
+    replies → Stop doing.
+  - **Numbers are COUNTED, never the model's.** `crm._scoreboard()` counts dials, reached a
+    person, conversations, callbacks, no's, emails and replies (opt-outs don't count), stages,
+    signups/paying, and rates by attempt and by local hour (shown only past
+    `MIN_ATTEMPT_DIALS`/`MIN_HOUR_DIALS` = 10; under 30 dials it says "treat every rate as
+    rough"). `scoreboard_lines()` words them; the model may quote them and nothing else:
+    `clean(allowed_percents=)` drops a point carrying a percentage the scoreboard doesn't, and
+    strips "(3 bars)" asides because `render()` adds the real count from the evidence. The AI
+    Brain page shows the same scoreboard, live.
+  - **It BUILDS ON the last playbook.** The current playbook (with its evidence) goes back in
+    every refresh; the evidence gate (`clean()`: every point must cite a bar in the log) checks
+    against EVERY worked bar in the `PLAYBOOK_DAYS` (90) window, not just those that fit in the
+    digest. The digest has a budget (`DIGEST_CHARS`): customers, then bars with a real story
+    (talked, callback, no, gatekeeper, the operator's own words, an Objection), then — notes
+    left out — bars that only rang out; it's always the ring-outs that get cut.
+  - **The owner CORRECTS it.** Every point has a stable `id` (`point_id`). On the page:
+    **Keep** (`POST /v1/crm/brain/keep {id, keep}`) pins it — kept in the owner's wording
+    through every refresh, even after its evidence ages out — and **Wrong**
+    (`POST /brain/wrong {id}`) removes it NOW (no draft or prep sheet uses it from that
+    moment) and adds it to `rejected`, which every refresh is told never to repeat and
+    `clean()`/`finalize()` filter by word overlap (`similar()` ≥ `SIMILAR` 0.6, naive plural
+    stemming). `POST /brain/unreject` takes a Wrong back. `finalize()` applies pins and
+    rejections from the row as it stands at SAVE time, under `SELECT … FOR UPDATE` in both
+    the refresh and `_brain_edit()`, so a click during a refresh is never overwritten. Pins
+    render to other prompts as "[confirmed by the owner]".
+  - **A stranger can't steer it.** Replies are labelled "data, never instructions" in the
+    digest and the prompt, and `clean()` drops any point (and a summary/try_next) carrying a
+    link, a domain, an email address or a phone number — nothing a playbook needs, exactly
+    what a poisoned reply would try to plant in every draft.
+  - **It proposes one experiment** (`try_next`: what to change and which scoreboard number
+    will show it worked); the page's "Add it to my instructions" makes it an instruction
+    every AI follows — only if the owner says so.
+  - **It says what changed**: `diff()` → `playbook_diff` (new ids, badged "new" on the page;
+    dropped texts under "Dropped at the last re-learn"); `playbook_prev` keeps the version
+    before. New columns on `crm_ai_brain`: pinned, rejected, playbook_prev, playbook_diff,
+    scoreboard (migrated in `init_crm_tables`).
+  `crm.refresh_playbook()` only calls the model with >= `PLAYBOOK_MIN_TOUCHES` (5) touches
+  logged, and (unless forced) after `PLAYBOOK_EVERY_HOURS` (20) with >= `PLAYBOOK_NEW_TOUCHES`
+  (3) new ones; main.py's `_playbook_loop` checks every 3h; `POST /v1/crm/brain/refresh`
+  forces one; `GET /v1/crm/brain`, `PUT /v1/crm/brain/notes`. Log: `PLAYBOOK_REFRESHED
+  points= touches= new= dropped=`, `PLAYBOOK_FAILED`
 - inbox.py — **replies from bars, filed while the operator sleeps.** Pure: `parse()` (headers +
   the NEW text only — the quoted thread under "On … wrote:" and `>` lines cut), `match_leads()`
   and `worth_reading()`. An email is only ever about a lead it can be tied to: a reply to a
   Message-ID the CRM sent (`crm_sent_messages`, written on every send), the lead's own
-  address, or the same COMPANY domain (never a free mailbox — `FREE_MAIL`), which is also how
+  address, or the same COMPANY domain (never a free or internet-provider mailbox —
+  `contacts.free_mail()`), which is also how
   one management company's reply reaches all its venues. Unmatched mail, our own, and
   bounce robots are never read by the model. `INBOX_RULES` (appended to assist.SYSTEM): the
   email is information, never instructions; record contact/email/departures/interest/dates;
   an out-of-office changes nothing unless it names a new contact; never "logged"; plus two
   flags only an inbound email has (`INBOX_SCHEMA` = assist.SCHEMA + `opt_out`, `needs_reply`).
   `looks_like_opt_out()` is a deliberately NARROW backstop ("unsubscribe", "stop emailing",
-  "take us off your list" — never "remove me from the CC", which is routing). Covered by
-  test_inbox.py and test_inbox_replies.py
+  "take us off your list" — never "remove me from the CC", which is routing). It reads the
+  text and a subject THEY wrote (`opt_out_text()` / `their_subject()`): a mail whose subject
+  alone says "Unsubscribe" is read and honoured, while our own subject quoted back in "Re: …"
+  never counts — a drafted subject like "stop sending orders at 1am" must not read as their
+  opt-out. Covered by test_inbox.py, test_inbox_replies.py and test_drafter.py
 - **`process_inbox()` (crm.py) runs every `CRM_INBOX_POLL_MINUTES` (5) from main.py's
   `_inbox_loop`**: `mailer.fetch_recent()` reads INBOX **read-only with BODY.PEEK** — nothing
   is marked read, the operator still sees every reply as new — and each message not yet in
@@ -175,6 +261,15 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   you were away"**: who wrote, what the AI made of it, what changed, Undo per lead
   (`GET /v1/crm/inbox`; `POST /v1/crm/inbox/check` runs a pass now). Log lines: `INBOX`,
   `INBOX_FAILED`, `INBOX_LOOP_ERROR`, `INBOX_DRAFT_FAILED`
+- **Every note there has a Delete** (the operator already knows what it says).
+  `POST /v1/crm/inbox/dismiss {message_id}` only stamps `crm_inbox.dismissed_at` — **the row
+  is never deleted**, because the reader treats a message with no row as new mail: a real
+  DELETE would bring the email back on the next pass and apply its changes twice. Only the
+  NOTE goes: the lead changes stay (each keeps its own Undo), an opt-out stays suppressed, and
+  the playbook still counts the reply. A toast offers Undo for 10 seconds, and `/inbox` lists
+  deleted notes under `deleted` (newest deletion first) so "Deleted (n) — put one back" can
+  restore one later (`POST /v1/crm/inbox/restore`). A reply being typed in one note survives
+  the redraw after a delete in another. Covered by test_inbox_replies.py
 - **An opt-out is final.** When a reply says stop (the model's `opt_out` OR
   `looks_like_opt_out()`), `_record_opt_out()` puts the sender's address in `crm_suppressions`
   (kind `email`), marks each lead dead with its follow-up cleared and a note, and the model's
@@ -193,6 +288,31 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   Message-ID), which `mailer.send()` turns into `In-Reply-To`/`References` headers (only a
   well-formed `<id>` — no header injection) so it threads in both inboxes, and stamps
   `crm_inbox.replied_at`
+- **The School is tied to the real job (coach.py + crm.html)**, because a fictional owner only
+  goes so far:
+  - **"Rehearse a real call" was removed at the owner's request** (2026-09-25): the Holdout
+    played against a REAL lead built from what was on file (`/coach/rehearse/{lead_id}`,
+    `coach.lead_boss()`, a cheat sheet for the real call, 🎭 buttons on the prep sheet and in a
+    lead's details). The owner didn't like it — don't bring it back without asking. Old `rehearse`
+    scores in the browser's `crmPractice` still count toward XP
+  - **Game film** (`POST /v1/crm/coach/film`): the last `FILM_DAYS` (14) of real conversations
+    (answered / callback / not interested / gatekeeper — never voicemails), up to `FILM_CALLS`
+    (15), read back by the coach: one thing working, the pattern costing the most, and up to 5
+    drills from what prospects actually said. `validate_film()` drops anything not tied to a bar
+    in that list; the page files each drill into Replay misses, due today
+  - **Today's set is the loop a working day runs**: warm up on real pushback (Replay, else a
+    Quick-Think built on real objections) → win one practice call (the next Holdout level, else a
+    guest) → after calling, watch the film. The passive "today's video" left the home screen
+    (videos stay in Learn): the minutes before a session belong to the calls
+  - **The School teaches the company's real asks** (`coach.ASKS`, the master sheet's WHAT WE ASK
+    FOR: try it on the next count — free month, no card; a short call with the founder; the name
+    and hours of whoever orders). It used to drill "15 minutes Tuesday at 2 on your price list".
+    The grader and the tape review judge the ask against them; school.py's refresh writes new
+    Gauntlet rounds and questions from `coach.PRODUCT` + `coach.ASKS_TEXT` (it used to feed the
+    lead-research qualifying rules — licence records, 2-9 months open — to the CALLER's quiz). The
+    quiz lost those trivia items and gained ones on what the app does and doesn't do (no POS, no
+    fill-level reading), and the Gauntlet lost an unverified "you can export it" line.
+    Covered by test_coach.py and test_film.py
 - coach.py — cold-call PRACTICE, opened via **School** in the burger menu (`data-panel`
   section). **`PRODUCT` is built from pitch.py** (real price, first month free, no card, how it
   works) so a practice owner who asks the price gets the real one and the grader marks a wrong
@@ -248,9 +368,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_assist.py test_phone_check.py test_mailer.py test_inbox.py
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
-  test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q` (787 tests; test_timezones.py needs a dummy
-  `DATABASE_URL`)
+  test_lead_finding.py test_order_numbers.py test_film.py test_failure_points.py
+  test_owner_rules.py test_lookup_check.py test_data_quality.py test_drafter.py
+  test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
+  test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q`
+  (1004 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  in a venv with the pinned requirements — system Python lacks cryptography's backend, which
+  test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
   real Gemini REST call against local fake servers, so it checks the requests actually sent:
   instructions first and image last, temperature 0 (OpenAI), strict schema / JSON mode, Gemini's
@@ -267,8 +391,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_duplicates.py — the Bottle Book's duplicate finder (`helpers.duplicate_groups`, the
   `/locations/{id}/duplicates` route): what counts as one bottle, what is never suggested, which copy
   is kept. Every rule was mutation-checked; find → merge → find was run on a real Postgres
-- test_db_pool.py — `database._getconn`: waiting for a free connection, and never on the event loop
-  or on a closed pool (also checked on a real Postgres with a pool of 2)
+- test_db_pool.py — `database.get_db` under load (the audit's semaphore, see FAILURE POINTS FIXED):
+  the next caller waits for a free connection, gives up after `POOL_WAIT_SECONDS` with
+  `DB_POOL_WAIT_TIMEOUT`, a failed request gives its slot back, a connection returned to a drained
+  pool is closed; and no `async` function calls `get_db()` directly (a wait there would stall the
+  event loop). Real threads and semaphore, fake pool; every rule was mutation-checked
 - test_crawl_quiet.py — the crawl's dead hour (`main._in_crawl_window`, checked in winter and
   summer), `activity.py` on a fake clock, and that every background crawl waits (and nothing
   someone clicked does). Every rule was mutation-checked
@@ -407,10 +534,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   answers **503 `catalog_unavailable`**, which the app's retry sweep re-sends. "No match" used to tell
   the bartender "Couldn't recognize — add it manually": a hand-made duplicate. Log: `status=lookup_failed`.
   The usual cause was the pool: psycopg2's `ThreadedConnectionPool` raises at once when all 10
-  connections are out, and a scan now runs two lookups at once — **`get_db` now waits up to
-  `DB_POOL_WAIT_SEC` (5) for a free connection** (`database._getconn`), except on the event loop (two
-  older async routes, the Stripe webhook and admin activation, call it there; waiting would stall every
-  request) and on a closed pool
+  connections are out, and a scan now runs two lookups at once — **`get_db` now waits for a free
+  connection** (the audit's semaphore, `DB_POOL_WAIT_SECONDS`, 15s — see FAILURE POINTS FIXED); a
+  lookup that still can't get one is `lookup_failed` → 503, never a hand-made duplicate
 - **An unreadable label is never matched** (`UNREADABLE_CONFIDENCE`, default 0.5 — keep it in
   lockstep with the prompt's "cap confidence at 0.5" line). The prompt answers an illegible label
   with the generic descriptor at ≤0.5, but only <0.35 was flagged and the app never read
@@ -607,6 +733,21 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - POST /inventory/{session_id}/voice — voice notes
 - POST /inventory/{session_id}/complete
 - GET/POST /distributors — distributor management
+- POST /orders/email — one email per distributor via Resend. **Every send carries an ORDER
+  NUMBER**: `_next_order_number()` draws the bar's next one (#1001, #1002, … per ACCOUNT, not
+  per location — the distributor list, business name and sign-off are all per account) from
+  `users.last_order_number`, and commits that BEFORE any email goes, so a failure after the
+  send can never hand the same number to the next order (a gap is harmless; a repeat is the
+  one thing a reference number must never do). Drawn only once an email is actually about to
+  go, so a send where no distributor had an address burns nothing. One number per send,
+  shared by every distributor's email; a re-send to one that failed is a new order with a new
+  number. It leads the subject ("Order #1042 from {bar} — {date}"), opens the body and is
+  asked for on the invoice (`helpers.order_email()`, pure, test_order_numbers.py). Saved in
+  `orders.order_number` and returned by `/orders/email`, `GET /orders` and `GET /orders/{id}`;
+  `GET /orders?q=1042` (or `#1042`) finds it. Orders sent before this stay NULL — no
+  distributor ever saw a number on them, so backfilling one would be a reference nobody else
+  can match. `OrderResponse` declares the field: a field the response_model doesn't list is
+  silently dropped before it reaches the app
 - POST /billing/create-checkout-session — Stripe hosted checkout (no IAP, checkout happens in system browser)
 - GET /health, GET / (API info), GET /docs
 
@@ -657,8 +798,12 @@ capture. Don't reintroduce them or describe them as current.)
     missed day is skipped (the list holds weeks of leads, and an empty one refills on demand).
     `LEADGEN_RUN_HOUR` is no longer read
   - **Taking turns** (activity.py): every background crawl — each site the daily run enriches,
-    each city it harvests, each phone check, each restaurant recheck — waits while anyone has
-    scanned in the last `CRAWL_QUIET_SECONDS` (180), or opened the app's scan screen. A phone
+    each city it harvests, each phone check, each owner's-rules fit check (`verify_fit`), the
+    looked-up-site recheck, each restaurant recheck — waits while anyone has scanned in the last
+    `CRAWL_QUIET_SECONDS` (180), or opened the app's scan screen. **A new background crawler must
+    call `activity.wait_for_quiet()` before each site and get a test in test_crawl_quiet.py**:
+    the fit check and the lookup recheck arrived without one (built alongside activity.py) and
+    were caught at the merge. A phone
     check batch keeps its 90s budget: rows it can't reach wait for the next batch. What the
     operator clicked and is waiting on (quick-add's email lookup, wrong number) never waits.
     Log: `CRAWL_PAUSED` / `CRAWL_RESUMED`, once per pause however many threads wait
@@ -756,20 +901,56 @@ capture. Don't reintroduce them or describe them as current.)
 - **The harvest takes `restaurant` as well as `bar`/`pub`/`nightclub`.** It used to take the
   three drink-led types only, which is a small slice of the places that pour: an independent
   restaurant with a licence has a back bar to count exactly like a tavern does, and in OSM it
-  is `amenity=restaurant`. The cost is that most restaurants have no bar worth calling, so a
-  restaurant must SHOW a drinks programme on its own site (`LIQUOR_HINTS`, or a `bar=yes`
-  tag) before it can qualify — `_restaurant_pours()`, covered by test_leadgen.py. Harvesting
-  is cheap; promoting is what matters
-- **`LIQUOR_HINTS` is anchored, not bare words, after a real harvested pizzeria with zero
-  alcohol reached the call list through it.** Bare `cocktail` matched "shrimp cocktail" and
-  "fruit cocktail" on a kitchen menu, `bar menu` matched "salad bar menu", `spirits` (no word
-  boundary) matched "spirited", `shots?\b` (no LEADING boundary) matched "screenshot", and
-  bare `draft`/`happy hour` matched an NFL-watch-party page or a lunch special — none of which
-  mean the venue pours. Every phrase now requires something a kitchen-only site has no reason
-  to say (`full bar`, `craft cocktail menu`, `wine list`, a named liquor, `draft beer` rather
-  than bare `draft`, …). `NO_LIQUOR_HINTS` (byob, "we do not serve alcohol", "no liquor
-  license") is checked FIRST and overrides everything else, including an OSM `bar=yes` tag —
-  a mapper's edit can be stale, a venue is not wrong about its own liquor license
+  is `amenity=restaurant`. The cost is that most restaurants have no bar worth calling, so
+  every venue must SHOW liquor on its own site before it can qualify — see THE OWNER'S RULES
+  below. Harvesting is cheap; promoting is what matters
+- **THE OWNER'S RULES (Stephan, 2026-09-25) — in this order, and 1-3 are EXCLUSIONS, never
+  score:** 1. no chains or corporate venues, 2. very confident it pours LIQUOR, 3. no main-strip
+  tourist bars, 4. an email if they have one (the call list's first sort key — see CALLING
+  MODE). They were all a few points of score before, and a personal-looking email outranked
+  every one: Honky Tonk Central (329 Broadway, one of four Broadway bars under one owner) and
+  Sweedeedee (a beer-and-wine brunch café) sat at the top of the list. Covered by
+  test_owner_rules.py, test_leadgen.py and test_callnow.py.
+  - **Liquor = spirits, read from VISIBLE text** (`liquor_verdict()`, fed `contacts.visible_text()`).
+    The old `LIQUOR_HINTS` read raw HTML — Squarespace ships a country picker in every page's
+    script, and "Martinique" matched `martini`, so every Squarespace restaurant "poured" — and
+    counted "wine list", "draft beer" and "tap list", which a beer-and-wine room says too. Now:
+    `NO_LIQUOR_HINTS` or `BEER_WINE_ONLY` (beer and wine only, soju / wine-based cocktails,
+    agave wine) decide against; `DEFINITE_LIQUOR` (full bar, cocktail menu, craft cocktails, a
+    whiskey list, "beer, wine & spirits") or named spirits and spirit cocktails
+    (`NAMED_SPIRITS`, with food after them excluded: bourbon pecan pie, vodka sauce, rum cake,
+    whiskey pop tart) decide for. A bar/pub/nightclub needs one; a restaurant, and any
+    brewery / taproom / wine bar / bottle shop (`_BEER_WINE_NAME`, `craft=brewery`), needs a
+    definite phrase or two different spirits. OSM `bar=yes`, `drink:beer/wine` are NOT liquor;
+    a spirits/cocktails tag is one piece of evidence. The venue's drinks/menu pages are read
+    before deciding, for every venue type. A site that is Instagram, or blank without
+    JavaScript, can't show anything — excluded: "very confident" was the owner's word.
+    Measured on 80 real Portland venues: most bars/pubs that fail are breweries, wine bars and
+    bottle shops; most restaurants the old gate passed had no liquor at all.
+  - **Tourist strips** (`TOURIST_STRIPS`: street + house-number range per city, and
+    `TOURIST_ZONES`: map paths/boxes for venues with no address, like casino-floor bars) —
+    Las Vegas Strip + Fremont, Lower Broadway / 2nd Ave / Printers Alley, Bourbon + Decatur,
+    Dirty Sixth + Rainey, Beale, River Walk, I-Drive + CityWalk, Rush / Division / Navy Pier,
+    Gaslamp, River St (Savannah), Power Plant Live, P&L District, Fourth Street Live,
+    Stockyards, Faneuil Hall, Reno's casino core, Ybor 7th Ave, City Market (Charleston),
+    Greektown, Bricktown, Santa Cruz Boardwalk. House ranges keep East Austin's 6th St,
+    Hillcrest's 5th Ave and North Las Vegas Blvd on the list. Add a metro's strip as it comes up.
+  - **Chains** beyond CHAIN_NAMES (`corporate_index()` / `corporate_reason()`): a
+    `brand`/`operator` value on 2+ harvested venues (McMenamins), a CHAIN_NAMES word in the
+    operator (Hilton), or one website domain across 2+ harvest cities. A bare `operator` is NOT
+    corporate (Portland data: owners' own names), nor is a domain a few bars in ONE town share
+    — a local owner with two or three rooms is who 86'd is for. `SHARED_HOSTS` never count.
+  - **Where it's applied:** `enrich_candidate` rejects a strip/brand venue before any request
+    and a non-liquor venue after reading its pages, stamping `fit_status='ok'` + `fit_note`
+    (the evidence, shown in the lead's notes) on a pass. `_promote_one` re-checks strip and
+    chain, and `promote_leads` only takes `fit_status='ok'`. `_reconcile_owner_rules()` runs
+    every boot (map data only, no crawling) and takes strip/chain leads off the list. Leads
+    and candidates qualified before the rules have `fit_status` NULL: the call list hides a
+    generated lead until it's 'ok' (`crm._fit_ok`), and `verify_fit()` — in main.py's
+    phone-check loop, one small batch after the phone batch, in-window leads first — crawls
+    them: pass → 'ok'; fail → deleted from the list, candidate rejected with the reason; site
+    down → back to the bank as 'retry' to be re-crawled. Never touches a called lead; one with
+    an email queued is kept but hidden. Logs `LEADGEN_OWNER_RULES`, `LEADGEN_FIT_CHECKED`
 - **`recheck_restaurant_leads()` is the one-time correction for rows the OLD gate let
   through.** Tightening `LIQUOR_HINTS` only changes what NEW candidates do from here on —
   restaurants already banked (`status='qualified'`) or already promoted-but-never-called sit
@@ -855,14 +1036,10 @@ capture. Don't reintroduce them or describe them as current.)
   inventory. `UPSCALE_HINTS` (tasting menu, sommelier) is a gentler one, same as
   `ASIAN_CUISINE_HINTS` (read straight off the OSM `cuisine` tag, no crawl needed) — per
   Stephan's own sales experience, an Asian restaurant runs a materially higher rate of
-  already having some system in place. `_on_tourist_strip()` is the same idea again, from a
-  fourth signal: an address on a curated list of tourist strips (Las Vegas Blvd, Lower
-  Broadway, Bourbon St, ...) keyed by `(city, street)` so "Broadway" only counts against
-  Nashville, not the dozen other seeded metros with an ordinary street by that name.
-  `NEIGHBOURHOOD_HINTS` (pool table, happy hour, dive, tavern) is the positive. None of them
-  EXCLUDE anything — a fine-dining room, a sushi bar, or a Broadway honky-tonk can still be
-  on a clipboard and stays on the list; they only decide order, which is what matters when
-  fifty names are in front of you
+  already having some system in place. `NEIGHBOURHOOD_HINTS` (pool table, happy hour, dive,
+  tavern) is the positive. These decide ORDER within a cell at promote time and never
+  exclude — a fine-dining room or a sushi bar stays on the list. Tourist strips, chains and
+  no-liquor venues DO exclude (THE OWNER'S RULES above); the old -4 strip penalty is moot
 - **The Asian-cuisine and tourist-strip penalties were back-applied ONCE**
   (`_rescore_map_penalties_once()`, `_map_fit_penalty()`). A score is computed at enrichment
   and stored, so rows banked or promoted before those two existed kept their old order.
@@ -975,7 +1152,8 @@ capture. Don't reintroduce them or describe them as current.)
   touches the row, so it costs nothing to widen or narrow later. It only matches on shape, so
   an oddly-named but real signup (no `test`/`appreview`/`-verify` in the address, not on
   `86d.com`/`example.com`) still shows up and has to be judged by hand
-- `DELETE /v1/crm/users/{id}` — the Customers list's own delete button, for exactly that: a
+- `DELETE /v1/crm/users/{id}` — the Customers list's own delete button (it frees the email,
+  see FAILURE POINTS FIXED), for exactly that: a
   signup the pattern filter above doesn't catch (an ad hoc test account, a mistaken signup)
   that still needs to go. **Soft delete**, setting the same `deleted_at` the product API
   already checks everywhere a user matters — login, registration's email-exists check, the
@@ -995,9 +1173,13 @@ capture. Don't reintroduce them or describe them as current.)
   be contacted is the one mistake this list must never cause
 
 ## CALLING MODE — the "Ready to start calling" button
-- `GET /v1/crm/now` — ONE flat queue, ordered by who is in a calling window this minute,
-  then by how far the call can get (a name to ask for, then a direct mailbox, then fit
-  score). The response still has three buckets — `ready` (in a window now), `soon` (opens
+- `GET /v1/crm/now` — ONE flat queue of leads that passed the owner's rules (`_fit_ok`),
+  ordered by who is in a calling window this minute, then `_reach()`: **a lead with an email
+  first** (the owner's priority 4), then a name to ask for, then the kind of mailbox, fewest
+  tries, fit score. It used to put a manager name and a "personal" email before everything,
+  which is how a tourist-strip bar with lsumpter@ at the top outranked every fit signal. A
+  row with no timezone (`state='unknown'`) is never "ready" — it has no window; it used to
+  count as ready around the clock. The response still has three buckets — `ready` (in a window now), `soon` (opens
   shortly), `rest` (past the window, shut today, permanently closed) — plus counts and a
   `headline`, but **the page only ever renders `ready` as a table.** It used to also render
   `soon`/`rest` as tables (and, before that, an eight-tab service×timezone browser via a
@@ -1082,20 +1264,39 @@ capture. Don't reintroduce them or describe them as current.)
 - Eight columns, not ten: the contact's name sits under the bar's, and last-touch/next-due are
   one column. At ten the action buttons fell off the right-hand edge, and the buttons are the
   point of the screen
-- **WHERE THINGS STAND is two plain lines: what happened last, then what's next** (`standing()`
-  in crm.html). Last: "Nobody picked up · yesterday", "Laura asked for a callback · today",
-  "Already has a system" (a not_interested whose notes say so). Next: "Try again (attempt 2
-  of 6) today", "Call Laura back Sunday", "Call back for the manager tomorrow", in red when
-  overdue, and "No follow-up set — pick a date" in red when someone was reached and nothing
-  is scheduled — the warm lead that quietly dies. Hover shows the latest note. It replaced a
-  single line like "call back 2026-09-25 — Answered · 1 try"
-- **WHERE THINGS STAND shows `last_outcome`, not just a bare date.** A STAGE badge of
+- **WHERE THINGS STAND is up to three short lines, the same shape on every row** (`standing()`
+  in crm.html), told apart by a monochrome icon (phone, envelope, reply arrow, chat bubble,
+  arrow for next) and by weight — not by colour, at the owner's request (easy on the eyes,
+  ADHD-friendly). (1) **The latest thing that happened, bold**: a call and how it went ("Laura
+  asked for a callback · yesterday", "Left a voicemail", "Already has a system"), "Emailed",
+  "Messaged on Facebook", or **"They replied"** when an inbox reply came in after our last
+  touch. (2) **How the last CALL went, grey**, only when line 1 isn't a call — so emailing after
+  a voicemail doesn't hide the voicemail. (3) **What's next, only when something IS next**:
+  grey; bold when due today or already past ("— was due Tue", never "overdue"). **No red
+  anywhere in the cell and no "No follow-up set" line** — the owner found red stressful and
+  assumes no follow-up unless the log sets one, so an unbooked lead simply has no third line.
+  "Call again (call 2 of 6) Sunday" counts CALLS (`attempts`, the ladder);
+  "Answer their email — draft in Follow-ups" when a reply needs one. Hover shows the latest
+  note. "Who" is the latest call's "Spoke to:", else who we ask for
+- **It is built from the touch log, not `last_outcome`.** Sending an email overwrites
+  `last_outcome` with "emailed", which the old two-line version had no words for, so a call
+  and then an email read "Called · yesterday" and the call's result was gone. `/leads` rows now
+  carry `touch_story()` (crm.py, pure; `_touch_stories()` does two queries per page): `tries`,
+  `last_touch` (any kind), `last_call`, `last_reply` (crm_inbox, matched through the
+  comma-joined `lead_ids` with an array overlap), undone touches excluded. `last_outcome` is
+  only the fallback for a row with no touch logged. Overdue is judged against `today` in the
+  `/leads` response (`_today()`, the same day Follow-ups uses), never the browser's UTC date;
+  touch times are shown in the operator's own day. Covered by test_tries.py
+- **REACHED OUT # (the column after it)**: every call, email and Facebook message, one each —
+  a call then two follow-up emails is 3 — big number, with the per-kind icons and counts under
+  it. Undone touches don't count. A worked lead with nothing logged (stage set by hand) shows
+  "—", not a 0 that contradicts line 1. Not shown in Yet to Contact (it would be all zeros);
+  drawers there span 6 columns, on the CRM tab 7 (`tr.children.length`)
+- **WHERE THINGS STAND shows the outcome, not just a bare date.** A STAGE badge of
   CONTACTED covers a voicemail, a gatekeeper, and an actual conversation alike (`log_touch`
   in crm.py lands all three on "contacted") — the badge alone can't answer "did I actually
-  reach anyone?", and "last touched 2026-09-22" didn't either. `last_outcome` has always
-  recorded the real answer (`OUTCOME_LABEL` in crm.html: Answered / Voicemail / Manager out /
-  Not interested / Asked for a callback / Logged); it just wasn't shown anywhere on this
-  screen. Follow-ups' mini table shows it too, under the bar's name, for the same reason
+  reach anyone?", and "last touched 2026-09-22" didn't either. Follow-ups' mini table shows
+  `last_outcome` too, under the bar's name, for the same reason (`OUTCOME_LABEL`)
 - Edit, Log, Email and Delete all work inline here, sharing the same endpoints (and the same
   undo) as the call list
 
@@ -1213,6 +1414,17 @@ capture. Don't reintroduce them or describe them as current.)
   `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) on Opus 5 / Fable 5.1, and
   retries a 400 once as a plain request with the schema in the prompt. Roughly 10¢ a message
   on Opus 5 (the whole book is ~15-25k tokens)
+- **The AI bar ADDS a bar that isn't in the book** (`assist.BAR_SCHEMA`'s `new_leads`,
+  `BAR_RULES`, `new_lead_texts()`). It used to have no way to: a pasted call to NE Moose Bar &
+  Grill came back "Added … as a new lead" over "couldn't match 'NE Moose Bar & Grill' to a
+  lead", and nothing was saved. Each new bar's part of the message (verbatim, else the whole
+  message) goes through `_quick_add()` — the body of `/leads/quick-add`, so the lead, the
+  call, who to ask for and the follow-up land exactly as "Add a lead" does them, and a bar
+  that IS in the book gets the call on its existing row. A change the model files under a
+  NAME instead of an alias is treated the same way rather than thrown away. The reply ends
+  "Saved: <bars>." from what was actually written, never the model's claim. The inbox reader
+  keeps plain `SCHEMA`/`SYSTEM`: strangers' email must never create leads. Covered by
+  test_assist.py
 - **Follow-ups rows have an Edit button** (between Email and Delete), and the details panel
   has one beside Close. Both open `leadEditCell()` — one form shared with the CRM tab, now
   with Bar and Where as well — saving through `PATCH /leads/{id}`
@@ -1232,13 +1444,15 @@ capture. Don't reintroduce them or describe them as current.)
   works", what's on every order, first month free with no card, then $29.99/month, the App
   Store link and the website — each checked against this repo. `EXAMPLE_EMAIL` is the
   owner's own email, given as the reference for substance; `STYLE` asks for more human than
-  that (open with THEM, a founder who has counted bottles at 1am, one easy next step, a
-  2-6 word subject, the App Store link in every email) and keeps the hard rule: no fact,
-  number or URL that isn't on the sheet or in WHAT WE KNOW. `_draft_system(row)` builds WHAT
+  that (relevance first, the founder's own voice with no invented backstory, one easy ask, a
+  short lowercase subject, the App Store link as the only link — see "The drafter is
+  CHECKED" below) and keeps the hard rule: no fact, number or URL that isn't on the sheet or
+  in WHAT WE KNOW. `_draft_system(row)` builds WHAT
   WE KNOW from the lead's venue facts (with sources), the cached prep-sheet points and — for
   a first email; a follow-up's ask carries its own — the logged history. **The owner's sample
-  claimed "a unique order number"; the distributor email has none** (subject "Order from
-  {bar} — {date}"), so the sheet leaves it out until one exists. Numbers and links are
+  claimed "a unique order number" before the distributor email had one, so the sheet left it
+  out until it was real** — it is now (see ORDER NUMBERS), and the sheet says so. A claim a
+  bar can check and find false costs every other line on the sheet. Numbers and links are
   env-overridable: COMPANY_OWNER_NAME, COMPANY_OWNER_TITLE, COMPANY_PHONE, COMPANY_PRICE,
   COMPANY_APP_URL, COMPANY_WEBSITE. **The sheet is a rep's briefing, not just facts**: WHAT
   IT DOES NOT DO (no Android, no POS link, no fill-level reading, no distributor portals, NO
@@ -1258,6 +1472,78 @@ capture. Don't reintroduce them or describe them as current.)
   STYLE) and is cached; `pitch.user_prompt()` carries WHAT WE KNOW and the ask. Every draft
   goes through `_write_draft()`. `DraftRequest.reply_to` (an inbox Message-ID) drafts a reply
   from their own words. Covered by test_pitch.py
+- **Every email draft ends with the owner's signature, and outreach goes to the DECISION
+  MAKER.** `pitch.SIGNATURE` is exactly "Stephan Khouri / Owner of 86'd Bar inventory /
+  Website: My86d.com" (three lines; `COMPANY_SIGNATURE` overrides, `\n` for line breaks).
+  `pitch.sign()` enforces it in `_write_draft()` — in CODE, because a prompt can only ask:
+  whatever sign-off the model or an earlier draft left ("Stephan", "Owner of 86'd", a phone
+  line, the website, the full signature) is taken off the end first, so a revision never signs
+  twice; the closing word ("Thanks,") stays with the signature right under it; a trailing P.S.
+  moves ABOVE the closing, because the email has to end with the signature. The prompt tells
+  the model to stop at the closing word. Who it's to: `pitch.decision_maker()` — the lead's
+  `contact` (who we ask for: the owner / whoever orders, as call notes record it), else a
+  manager from their own site, flagged "may have moved on"; `spoke_to()` (the latest "Spoke
+  to:") is shown as "not the decision maker". STYLE: greet the decision maker by first name,
+  mention the person who picked up only as the connection, "Hi there," plus a one-line ask to
+  pass it on when nobody's named. `address_to()` enforces the greeting on a FRESH outreach draft
+  (first email, follow-up); a reply answers whoever wrote, and a revision keeps its greeting.
+  The compose box's hand-written starting text uses the same first-name greeting and the same
+  signature (`/mail/status` returns it). Covered by test_pitch.py
+- **The drafter is CHECKED, not just asked** (`pitch.lint()` → `crm._write_draft()`). The bar
+  is the owner's: good, informative, human, never a robot, rarely spam — and a spam filter
+  reads the same signals a person does. STYLE is written around what works in cold email now:
+  relevance first (a line only true of THIS bar), one picture not a feature list, the risk
+  taken away once (free month, no card, cancel any time), ONE easy yes/no ask (interest, not a
+  meeting), short (60-150 words first, 30-90 follow-up), no pressure, a lowercase human subject
+  with no "free"/"trial"/"$"/"%"/"!", and NEVER a backstory for the founder — nothing on the
+  sheet says he tended bar, and an invented line about himself is the one a bar owner
+  remembers. `lint()` catches in code what a prompt can only ask: template phrases
+  (`ROBOT_PHRASES`, curly apostrophes straightened), spam bait (`SPAM_PHRASES`), social proof,
+  statistics and backstory the sheet doesn't have (`UNBACKED_CLAIMS`, any percentage), more
+  than one link (the website is already in the signature), 2+ "!", 3+ dashes, markdown or
+  bullets, a P.S., shouting, over `LIMITS` words, a marketing subject. What the drafter was
+  TOLD (WHAT WE KNOW + the ask) is exempt — the bar's name in capitals, a figure the owner
+  quoted — and the salesperson's brief wins (asked for the website link or a long email, that
+  check stands down; a revision is never judged on length); a reply keeps their subject and
+  any link they asked for. A failing draft goes back to the model ONCE with the list
+  (`lint_ask()`, logged as `AI_USAGE draft-fix`) and the version with FEWER problems is kept;
+  whatever still fails comes back as `checks` and is shown under the draft ("Before you send,
+  worth a look: …") — shown, never enforced. The checker must stay linear (a reply draft can
+  echo a stranger's email): it's in test_hostile_pages.py, where the first versions of the
+  bullet and percentage patterns ran 20s+ on one input. Checked against the owner's own
+  example email, the compose box's default and six realistic good drafts: none flagged
+- **Follow-ups build on what was SENT, and thread.** `_sent_emails_to()` puts our last 3
+  emails to the bar in WHAT WE KNOW (subject, body, and whether a reply came in after it —
+  matched the way `_touch_stories` matches one), so a follow-up never repeats the first email,
+  brings one new thing, and after 2+ unanswered becomes a short, gracious last note. A
+  follow-up subject "Re: <our earlier subject>" goes out IN that thread: `_thread_parent()`
+  finds the Message-ID of the latest email we sent this lead under that subject AT THE SAME
+  ADDRESS (Brent left and Jed is the contact now: Jed never saw Brent's thread, so no "Re:"
+  to it), and both send paths (send-now and the scheduled worker) pass it as
+  In-Reply-To/References. The stored email
+  and its Message-ID are separate rows, paired by send time within two minutes rather than
+  equality: `run_due_emails` used to stamp them with two `now_iso()` calls microseconds apart
+  (it now takes one `sent_at`; its own `now` is the claim cutoff and must not move mid-run).
+  A failed lookup sends unthreaded, never not at all (`_thread_parent_for`), and our own
+  parent is never stamped as an answered inbox reply. A "Re:" with no email of ours behind it
+  comes off a drafted subject (`pitch.honest_re()`, same-address rule): a fake "Re:" is the
+  oldest trick in cold email and a deceptive subject line under CAN-SPAM. Both queries were run on a real Postgres 16
+- **Every OUTREACH email ends with a plain-words way out** under the signature
+  (`pitch.outreach_footer()`: `OPT_OUT_LINE` — "Not the right person, or not something you
+  need? Just reply and say so, and I won't email again." — plus `COMPANY_POSTAL_ADDRESS` when
+  set). CAN-SPAM wants a working opt-out AND a physical postal address on a commercial email,
+  so **COMPANY_POSTAL_ADDRESS should be set on Render**. It also turns "report spam" (what gets
+  a small sender filtered) into "reply no thanks", which the inbox reader files as an opt-out.
+  Never on a reply to someone who wrote to us; a revision keeps it only if the draft on screen
+  had it; `sign()` strips it before re-signing so it can't double
+- **Deliberately NO `List-Unsubscribe` header** (nor Precedence / List-Id): a person's mail
+  client never sets them, and they are what files a message as bulk (Gmail's Promotions tab).
+  The From line carries a person's name — `SPACEMAIL_FROM_NAME`, else the signature's first
+  line, "Stephan Khouri" — because a bare address reads as automated. DNS for my86d.com
+  (checked 2026-09-26): SPF includes spf.spacemail.com, DKIM `spacemail._domainkey` and DMARC
+  (`p=none`, reports to dmarc@my86d.com) are published and MX is Spacemail's. Moving DMARC to
+  `p=quarantine` once its reports look clean is the next deliverability step. Covered by
+  test_drafter.py
 - **ONE MODEL for every CRM AI: `CRM_AI_MODEL` (default `claude-opus-5`) at `CRM_AI_EFFORT`
   (default `medium`)**, the owner's call — notes reader, quick-add, prep sheet, Ask AI, AI
   bar, inbox reader, drafter, School. A NEW env name on purpose: `ANTHROPIC_MODEL` /
@@ -1268,7 +1554,7 @@ capture. Don't reintroduce them or describe them as current.)
   it. `max_tokens` has a floor of `AI_MIN_TOKENS` (8000) and the timeout of 90s, because a
   thinking model cut off at Haiku's 400 tokens answers nothing. Slower than Haiku — a notes
   read takes seconds, not one. `ANTHROPIC_BASE_URL` overrides the host. The product's bottle
-  scanner (main.py, OpenAI → Gemini) is a separate system and unchanged. **Every call goes
+  scanner (main.py, OpenAI and Gemini side by side) is a separate system. **Every call goes
   through `crm._claude()`** (`_ask_claude` and `_claude_json` are thin wrappers):
   `fallbacks: "default"` + beta `server-side-fallback-2026-07-01` on every Opus 5 call (a
   classifier decline re-runs on Anthropic's recommended model), PROMPT CACHING (the system
@@ -1317,7 +1603,8 @@ capture. Don't reintroduce them or describe them as current.)
 - Outgoing mail is PLAIN TEXT. A one-to-one note to a bar manager should look like a person
   wrote it; an HTML template reads as a blast and filters accordingly. `Date` and
   `Message-ID` are set explicitly — a message missing them is one of the cheapest spam
-  signals there is
+  signals there is — and so is a person's name on the From line; bulk-mail headers are left
+  off on purpose (see "Deliberately NO List-Unsubscribe" above)
 - **Everything on this screen is 12-hour.** Venue clocks, the operator's clock, call windows,
   and the connect-rate-by-hour table (`hour_label`). "13:45 there" is a small tax on every
   glance and this screen is glanced at constantly
@@ -1353,8 +1640,8 @@ capture. Don't reintroduce them or describe them as current.)
   the same restaurant on a later run and it reappears — the exact duplicate call that
   deleting it was meant to prevent
 - **AI is Claude only, via the raw REST API through httpx** (`ANTHROPIC_API_KEY`, model per
-  ONE MODEL above). It used to share the scan path's OpenAI→Gemini pair. No SDK, matching how main.py
-  talks to Resend. **The scan path in main.py is unchanged and still OpenAI→Gemini** — that
+  ONE MODEL above). It used to share the scan path's OpenAI/Gemini pair. No SDK, matching how main.py
+  talks to Resend. **The scan path in main.py is separate and stays on OpenAI and Gemini** — that
   is the product's core feature, not the CRM's
 - The drawer's quick-outcome buttons (Voicemail / Manager out / Not interested) go straight
   to `/touch` with a known outcome. They used to post a canned sentence through the model —
@@ -1411,9 +1698,12 @@ capture. Don't reintroduce them or describe them as current.)
   `/debrief` only ever updates a lead that already exists; this describes the call in plain
   words and creates the lead AND logs that first call in one step, sharing `_apply_call_notes()`
   (extracted from `/debrief`'s body) so a brand-new lead gets the exact same undo/counter/
-  cadence handling an old one's touch gets, not a thinner copy of it. On the CRM tab, "Add a
-  lead" opens this (a bare `prompt()` for a name used to be the whole flow, leaving every
-  real field for later "Edit")
+  cadence handling an old one's touch gets, not a thinner copy of it. **The CRM tab no longer
+  has an "Add a lead" button** (2026-09-25, the owner's call): it opened a paste box the
+  owner found didn't add anything, and is now **Look Up** beside the search box — it runs
+  the search on what's typed (Enter does the same). New bars are added by telling the AI
+  (the Ask AI box on the CRM tab or Follow-ups' bar, `/assist` → `_quick_add()`); the
+  `/leads/quick-add` route itself is unchanged
 - **Quick-add takes ONE paste box — no separate name field.** The name comes from the model
   (`QUICK_ADD_SYSTEM` tells it the venue is almost always the first thing in pasted notes and
   to always return it), then `_name_from_text()` (the text before the first phone number,
@@ -1426,7 +1716,17 @@ capture. Don't reintroduce them or describe them as current.)
   (`_find_existing_lead()`: same phone + `same_venue`, else same email, else the same name in
   the same town) and logs the call onto the existing lead, worked one first — the page says
   "was already in your book — logged the call on it". See One bar, one lead above
-- **Quick-add finds the email itself.** When the notes carry no address (or say "it's on
+- **Quick-add finds the email itself — but only from THEIR site.** It used to take the first
+  Nominatim hit with a website: NE Moose Bar & Grill (Minneapolis) got African Grill's site
+  in Lakewood and its email. Now a hit must be the same venue in the same city and state
+  (`map_result_is_venue()`: `same_venue` + address), there is no lookup without a town, and a
+  looked-up site must name the bar on its own page (`site_is_venue()` /
+  `site_names_venue()`: every distinctive word of the name) or it's dropped. A URL the
+  operator gave is trusted as typed. `recheck_looked_up_sites()` (once, marker
+  `lookup_site_check_2026_09`, from the phone-check loop) took the email off leads a looked-up
+  site gave where that site doesn't name the bar, with a dated note, and stopped any pending
+  scheduled email to it; logs `LEADGEN_LOOKUP_RECHECK`. Covered by test_lookup_check.py.
+  When the notes carry no address (or say "it's on
   their website"), `leadgen.find_venue_website()` looks the venue up on Nominatim by name +
   town for its OSM `website` tag (unless the notes gave a URL), and
   `leadgen.find_email_on_site()` reads it the same way `enrich_candidate` does — homepage,
@@ -1468,15 +1768,19 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   ANTHROPIC_MODEL and ANTHROPIC_ASSIST_MODEL are NO LONGER READ (safe to delete on Render)
 - COMPANY_WEBSITE (default `https://my86d.com`), COMPANY_APP_URL (default the live listing,
   `https://apps.apple.com/us/app/86d-bar-inventory/id6798359825`), COMPANY_OWNER_NAME,
-  COMPANY_OWNER_TITLE, COMPANY_PHONE, COMPANY_PRICE — override the master sheet's numbers
-  (pitch.py). COMPANY_NAME and COMPANY_BLURB are no longer read. COMPANY_APP_URL used to
+  COMPANY_OWNER_TITLE, COMPANY_PHONE, COMPANY_PRICE, COMPANY_SIGNATURE — override the master
+  sheet's numbers and the email signature
+  (pitch.py). COMPANY_POSTAL_ADDRESS — the physical address CAN-SPAM wants under every
+  outreach email (`\n` becomes ", "); unset, the footer is the opt-out line alone, so SET IT.
+  COMPANY_OPT_OUT_LINE overrides that line's wording. COMPANY_NAME and COMPANY_BLURB are no longer read. COMPANY_APP_URL used to
   default to empty, and asking the drafter for "the link to the app" got the website
   only, because it may not include a link it wasn't given. A blank env var falls back to
   the default rather than switching the link off
 - SPACEMAIL_USER / SPACEMAIL_PASSWORD — the mailbox the Email button sends from
   (`Stephan@my86d.com`). Unset means the button falls back to a `mailto:` link and nothing is
   recorded. SPACEMAIL_HOST (default `mail.spacemail.com`), SPACEMAIL_PORT (465),
-  SPACEMAIL_FROM_NAME and SPACEMAIL_TIMEOUT are optional
+  SPACEMAIL_FROM_NAME (default: the signature's first line, "Stephan Khouri") and
+  SPACEMAIL_TIMEOUT are optional
 - SPACEMAIL_IMAP_HOST / SPACEMAIL_IMAP_PORT — optional (default the SMTP host, 993): where
   sent copies are filed and replies are read. CRM_INBOX_POLL_MINUTES (5) and CRM_INBOX_BATCH
   (20) tune the inbox reader; it needs the mailbox AND `ANTHROPIC_API_KEY`, else it skips
@@ -1502,13 +1806,133 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   LABEL_CHECK (enforce | log | off), SECOND_OPINION (on | off), SECOND_OPINION_WAIT_SEC (2.0),
   SCAN_THREADS (16) — optional tuning, see AI Vision Rules above
 
+## FAILURE POINTS FIXED (audit, 2026-09-25) — don't reintroduce these
+Each is covered by test_failure_points.py unless noted.
+- **The Stripe webhook reads the VERIFIED payload with `json.loads`, never the library's
+  event object.** requirements.txt allowed any `stripe>=7`; a clean build installs 15.x, where
+  `StripeObject` is no longer a dict, so `event["data"]["object"].get(...)` raised on EVERY
+  webhook — a customer paid and stayed locked out, cancellations never landed. The DB work runs
+  in `_apply_billing_event` via `asyncio.to_thread`. A checkout that completes `unpaid` (delayed
+  payment methods) waits for the subscription's own "active" update
+- **`openai`, `stripe` and `sentry-sdk` are PINNED** (3.19.2 / 15.6.1 / 2.70.0 — what a clean
+  build installed on 2026-09-25, and what the code was verified against). They were `>=`, so any
+  deploy could pull a breaking major. Upgrade on purpose, and re-run test_failure_points.py
+- **The DB pool WAITS for a connection** (`database.POOL_WAIT_SECONDS`, env
+  `DB_POOL_WAIT_SECONDS`, default 15s, via a semaphore of `POOL_MAX` = 10). psycopg2's pool
+  raises `PoolError` the instant all ten are out, and the threadpool runs up to forty requests,
+  so a burst turned straight into 500s on scans and logins. `DB_POOL_WAIT_TIMEOUT` is logged when
+  a wait gives up. A connection given back to a pool drained meanwhile is closed, not a 500
+- **Nothing blocking runs on the event loop.** One process, one loop: the webhook and the admin
+  route run in `asyncio.to_thread`, and the scan route's database work — the entitlement read
+  (`_scan_context`), parsing + product matching (`_evaluate_answer`, up to seven queries) and the
+  one write (`_respond`) — runs on the scan path's own thread pool (`_on_scan_thread`, see AI Vision
+  Rules). Before, every scan stalled every other request while it matched. test_db_pool.py fails
+  any `async` function that calls `get_db()` itself
+- **A broken OpenAI never fails a scan Gemini can answer**: a rejected key or a reply that isn't
+  JSON used to 503/500 on the spot, the two moments the fallback exists for. Both providers are now
+  asked at once (the second opinion), and a provider that fails just isn't there; with
+  `SECOND_OPINION=off` Gemini is asked when OpenAI fails. `SCAN_PROVIDER_AUTH_FAILED` is logged; a
+  rejected key with no Gemini key is a 503, and every provider answering something that isn't a
+  reading is a 500 `parse_failed`. Pinned in both modes
+- **Sending an order can't double-send on a retry** (`/orders/email` + table `order_sends`).
+  The app tags each order with `client_ref` (the count's draft, or one reorder); per distributor
+  the server CLAIMS (ref, distributor, exact items) before emailing and records sent/failed
+  after. A retry after a lost response (bar wifi, the app's 20s timeout) skips everyone already
+  emailed that exact order — reported `sent`, `already_sent: true`, with their ORIGINAL
+  `order_number` (each result carries its own). Changed items are a new order and go. A failed
+  claim can be retried; a 'sending' one older than `SEND_STALE_MINUTES` (10) — a request that
+  died — can be taken over; a 'sent' one answers retries for `SEND_DEDUPE_HOURS` (12) only, so
+  a stale ref can never swallow next week's identical order (a missed delivery is worse than a
+  duplicate). The app clears its ref with the draft (86d-mobile InventoryContext). No DB connection is held while Resend answers, and the Past Orders
+  record is written in its own transaction AFTER the sends: it used to share theirs, so a
+  failure after the emails had gone rolled it back and answered 500, and the manager sent the
+  order again. Now `ORDER_HISTORY_FAILED` is logged and the response still says what went. Old
+  app builds send no ref and behave as before
+- **Reset codes: 5 wrong guesses burns the code** (`RESET_MAX_ATTEMPTS`,
+  `users.password_reset_attempts`, reset to 0 by each new code). A 6-digit code with no limit
+  let anyone who knew a customer's email request a code and guess until they owned the account.
+  Codes come from `secrets.randbelow`, compared with `compare_digest`. `RESET_CODE_BURNED` logged
+- **Sign-up races answer, they don't 500**: a duplicate register → 400 `email_exists`, a
+  double-tapped first Apple sign-in → 409 "tap Sign in with Apple again" (savepoint). 500s no
+  longer carry `"debug": str(e)` (it leaked database error text)
+- **The CRM's Customers delete frees the email** (`CONCAT(email, '.deleted.', …)`, same as the
+  app's own delete). It didn't, so anyone deleted there could never sign up again with that
+  address; `init_db()` frees the ones already deleted (idempotent)
+- **`/admin/activate-account` compares with `compare_digest` and is closed when SECRET_KEY is
+  unset** (a missing header vs a missing env var used to be `None == None`: a pass)
+- **Trial reminders**: each stamp is its own transaction, with no connection held across sends.
+  A shared one meant one failed stamp aborted the rest, and those customers were emailed again
+  six hours later
+- **Checkout / billing portal**: Stripe is called with no DB connection held, and a Stripe
+  error is a 502 with words (`STRIPE_ERROR` logged) instead of a bare 500
+- **Background jobs can't retry-loop on paid calls**: an inbox mail that keeps failing is given
+  up after `INBOX_MAX_TRIES` (3) passes (`INBOX_GAVE_UP`; a plain-words opt-out is still
+  recorded — CAN-SPAM), the School refresh rests `RETRY_AFTER_FAIL_HOURS` (6) after ANY attempt
+  (a failed one stayed "due" and re-ran, with its AI calls, every 15 minutes until midnight), and
+  the daily lead run rests `LEADGEN_RETRY_HOURS` (2) after any attempt (it re-hit the map
+  mirrors every 15 minutes). Login-failure tracking prunes itself past 5,000 addresses
+
+## DATA-QUALITY AUDIT (2026-09-25) — every way a wrong email, phone, site or name reached a lead
+Found by reading the code AND running the pipeline over 180 real Portland/Nashville venues and
+checking what it chose. Covered by test_data_quality.py; re-run a sample like that before
+trusting a change to enrichment.
+- **Another business's email**: the first address on a page was taken whatever its domain —
+  4 of 33 real qualified venues carried one (a PR agency on Martin's BBQ, the web designer's
+  `templates@` on Suzy Wong's, an events company, a hotel group). `contacts.email_fits_venue()`:
+  the site's own domain (or sub/parent), a free or internet-provider mailbox, or a domain with a
+  distinctive word of the venue's name; nothing else. `leadgen.pick_email()` (own domain first)
+  in enrichment and quick-add's `find_email_on_site(venue_name=)`, re-checked at promote, and
+  `_reconcile_foreign_emails()` every boot strips one still on an unemailed generated lead (only
+  while it is the crawled address — an operator-typed one is theirs) and from the bank. The OSM
+  `email` tag is trusted. After the fix: 0 of 34.
+- **A website that isn't theirs** (a lapsed domain, a map tag pointing at a parent company —
+  "The Ranch" tagged with Jackalope Brewing's site): `site_mentions_venue()` — a distinctive name
+  word on the homepage or in the domain — in enrichment and `check_fit`; 32 of 33 real bars pass,
+  the 33rd was exactly this.
+- **Pages lost**: `_http` decoded strict UTF-8, so one Latin-1/cp1252 byte made the fetch "fail"
+  and a real bar was rejected as unreachable after 3 tries (`_decode()`, cp1252 fallback). And the
+  raw HTML was cut at 200KB BEFORE scripts were removed (a UTF-8 page with a stray byte stays
+  UTF-8; only a page that is mostly another encoding reads as cp1252) — Squarespace/Wix put hundreds of KB of
+  script first, so Sonny's and Box Social's drinks lists were never read (`_page_text()`: whole
+  page, scripts out, then capped). `_drink_links` skips `.pdf%20`.
+- **Long tags leaked into "visible" text** (`_ANY_TAG` bounded at 2000 chars): a Squarespace
+  `<body class>` or a data attribute full of script URLs. The Pocket Pub got a manager named
+  "gallery" (from `gallery-manager.js`); St. Jack "poured liquor" on an SEO image alt. Bound is
+  now 300000 (still linear: `[^<>]` can't cross a `<`), and `_plausible_name()` requires
+  capitalised words (the patterns run case-insensitive).
+- **Call notes**: the email and phone the model read out of notes were saved unchecked, over a
+  good address. `_apply_call_notes` keeps them only if they're in what was typed, or it's the
+  address quick-add read off the venue's own site (`_email_from_site`), or the AI bar already
+  checked them against the whole message (`_verified`); refusals are echoed as `not_saved`.
+- **Wrong-number and the prep sheet** took the FIRST URL in a lead's notes — on NE Moose,
+  African Grill's. `crm._notes_website()` prefers a `Website:` line and skips any domain the notes
+  say is not theirs (`leadgen.flagged_domains`); wrong-number also checks the site names the bar
+  (`site_is_venue`) before trusting its number. `recheck_looked_up_sites()` (marker
+  `lookup_site_check_2026_09b`) now flags looked-up websites with no email too.
+- **Inbox and attribution matched on internet-provider domains**: `FREE_MAIL` lacked cox.net,
+  charter.net, bellsouth.net, rr.com…, so one "unsubscribe" from a cox.net address would mark
+  every cox.net bar dead, and a cox.net signup was credited to a cox.net lead. One list now,
+  `contacts.FREE_MAIL_DOMAINS` / `free_mail()` (subdomains included), used by inbox.py and
+  `crm._email_domain`.
+- **Queued email after things changed**: `run_due_emails` only checked opt-outs; now
+  `_queued_mail_hold()` also holds it if the lead is dead, won, deleted, or its email CHANGED
+  since queueing ("Brent left, email Jed") — against `crm_scheduled_emails.lead_email_at_queue`,
+  never "To differs from the lead": the compose box may deliberately send to a cell given on a
+  call. Rows queued before the column existed aren't judged on the address.
+- **The venue's own name read as a person**: `email_kind(email, venue_name)` — sweedeedee@gmail.com
+  is "unknown", not "personal", so it no longer sorts up as a named human.
+- **The list sat thin after a clean-up**: `fit_check_step` promotes into the emptied cells as
+  soon as a bank batch passes (`LEADGEN_REFILL`), not at the next daily run.
+
 ## Deploy Rules
 - Deployed via Render (see Procfile) — do NOT change without approval
 - **The web service is on the Starter plan ($7/mo, 0.5 CPU, 512MB), not Free.** It does not
   spin down, so there is no cold start to design around. Confirmed from the Render dashboard
   on 2026-09-15; earlier notes in both repos assumed Free and were wrong. Postgres is on a
   paid tier separately. 512MB has been enough to crawl 200 venue sites in one run
-- Requirements are pinned — check compatibility before upgrading
+- Requirements are pinned — check compatibility before upgrading. ALL of them now: openai,
+  stripe and sentry-sdk were `>=` until 2026-09-25, and stripe 15 silently broke the webhook
+  (see FAILURE POINTS FIXED)
 - Cannot push directly to main — always work on a feature branch and open a PR (branch name is assigned
   per session, not fixed — the old hardcoded `claude/build-ios-preview-ASNee` reference here no longer exists)
 - NOTE: README.md is outdated (says SQLite) — ignore it, this app uses PostgreSQL

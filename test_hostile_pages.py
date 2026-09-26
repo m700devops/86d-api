@@ -20,8 +20,10 @@ if "database" not in sys.modules:
     sys.modules["database"] = stub
 
 import contacts  # noqa: E402
+import crm  # noqa: E402
 import inbox  # noqa: E402
 import leadgen  # noqa: E402
+import pitch  # noqa: E402
 import venue  # noqa: E402
 
 N = 800_000
@@ -36,6 +38,10 @@ SHAPES = {
     "json phones": '"telephone":"' * (N // 13), "caps": "Ab " * (N // 3),
     "at words": "info at " * (N // 8), "dot words": "x dot " * (N // 6),
     "quotes": "\n> " * (N // 3), "dashes": "-" * N, "on": "On " * (N // 3),
+    "spirits and food": "bourbon pecan whiskey glaze vodka sauce martinique " * (N // 50),
+    "selection of": "selection of the best " * (N // 22), "beer and": "beer and " * (N // 9),
+    "capitals": "WORD " * (N // 5), "percents": "9% " * (N // 3),
+    "bullets": "\n  \t" * (N // 4), "re re": "re: " * (N // 4),
 }
 
 
@@ -50,6 +56,14 @@ READERS = {
     "contact links": lambda h: leadgen._contact_urls("https://x.com", h),
     "find_manager": lambda h: contacts.find_manager(h, "https://x.com/about"),
     "restaurant gate": lambda h: leadgen._restaurant_pours(h, {}),
+    "liquor verdict": lambda h: leadgen.liquor_verdict(contacts.visible_text(h), {}, "", "bar"),
+    "liquor verdict, raw text": lambda h: leadgen.liquor_verdict(h, {}, "", "restaurant"),
+    "site names venue": lambda h: leadgen.site_names_venue(h, "NE Moose Bar & Grill"),
+    "site mentions venue": lambda h: leadgen.site_mentions_venue(h, "https://x.com", "Olde Town"),
+    "page text": leadgen._page_text,
+    "pick email": lambda h: leadgen.pick_email(leadgen.extract_emails(h), "https://x.com", "Olde"),
+    "flagged domains": leadgen.flagged_domains,
+    "notes website": crm._notes_website,
     "opener": lambda h: leadgen.opener_line(h, "bar"),
     "stack signals": leadgen._stack_signals,
     "venue facts": lambda h: venue.extract_facts({}, h),
@@ -57,6 +71,10 @@ READERS = {
     "chain check": lambda h: leadgen.looks_like_chain("Olde Town", "https://x.com", h),
     "reply text": inbox.new_text,
     "opt-out check": inbox.looks_like_opt_out,
+    "opt-out subject": lambda h: inbox.opt_out_text({"subject": h[:300], "text": h}),
+    # A reply draft can echo their email back: the checker reads it all.
+    "draft checker": lambda h: pitch.lint(h[:200], h, "first", h[:2000], h),
+    "draft checker, reply": lambda h: pitch.lint("Re: " + h[:200], h, "reply", "", h[:4000]),
     "html email": lambda h: inbox.parse(_mail("html", h)),
     "plain email": lambda h: inbox.parse(_mail("plain", h)),
 }

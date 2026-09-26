@@ -10,8 +10,20 @@ meters move, but it never gets the final say on winning: `apply_turn()` clamps
 every number and only honours "yes, I'll try it" once trust and discovered
 pains actually clear the bar. Left to itself a model agrees too easily — being
 agreeable is the thing it's best at — and a game you can't lose teaches nothing.
-"""
 
+Two things tie practice to the real job, because a fictional owner only goes
+so far:
+
+- REAL PUSHBACK (`curveball_prompt(real=)`): about half the drill lines are
+  built from objections prospects really gave on this rep's calls.
+- GAME FILM (`film_prompt()`, `validate_film()`): the rep's own logged calls,
+  read back as coaching — one thing working, one pattern costing calls, and
+  drills built from what prospects actually said, which the page files into
+  Replay. A drill must come from a call in the log, or it's dropped.
+
+(A "rehearse a real call" mode — the game played against a real lead built
+from what was on file — was tried and removed at the owner's request.)
+"""
 from typing import Optional
 
 WIN_TRUST = 70
@@ -195,6 +207,13 @@ def _product() -> str:
 
 PRODUCT = _product()
 
+# The three asks the company actually makes (pitch.py's WHAT WE ASK FOR).
+# Practice drills these, not a generic "book the meeting".
+ASKS = ("try it on their next count: download from the App Store, first month free, no card",
+        "a short call with the founder to see it",
+        "the name of whoever counts and orders, and when they're in")
+ASKS_TEXT = "; ".join(f"({i + 1}) {a}" for i, a in enumerate(ASKS))
+
 LEVELS = {"warm": "curious but guarded", "busy": "short and distracted",
           "hostile": "annoyed, with a tricky objection"}
 
@@ -235,7 +254,9 @@ def grade_prompt(who: str, line: str, answer: str, seconds: int, timed_out: bool
             f"Rep replied{' (ran out of time)' if timed_out else ''} after {seconds}s: {answer}\n\n"
             "Score 0-10 on: acknowledging them, staying calm, asking a question that keeps "
             "the call alive, brevity, no feature-dumping, honesty (never claim Android "
-            "support, a wrong price or a feature it doesn't have), sounding like a person. Return {\"score\": n, \"skill\": one of "
+            "support, a wrong price or a feature it doesn't have), sounding like a person, and "
+            f"— when it's time to ask — making ONE of the company's asks: {ASKS_TEXT}. "
+            "Return {\"score\": n, \"skill\": one of "
             "\"opener\",\"discovery\",\"objections\",\"ask\" (the skill this moment tested), "
             "\"worked\": \"one sentence\", \"fix\": \"one sentence\", "
             "\"better\": \"a stronger line to say, max 35 words\"}.")
@@ -304,6 +325,7 @@ def review_prompt(boss_id: str, transcript: list[dict], result: str) -> tuple[st
     lines = "\n".join(("REP: " if t.get("role") == "rep" else "OWNER: ") + str(t.get("text", ""))[:600]
                       for t in transcript[-40:])
     user = (f"Practice call to {b['name']}. Outcome: {result}.\n\n{lines}\n\n"
+            f"Judge the ask against the company's own asks: {ASKS_TEXT}.\n"
             "Score 0-10 each. Return {\"opener\": n, \"discovery\": n, \"objections\": n, "
             "\"ask\": n, \"turning_point\": \"the moment the call turned, quoted, one sentence\", "
             "\"redo\": \"one line to say differently next time, max 30 words\"}.")
@@ -412,3 +434,61 @@ def tape_score(mistake_lines: list[int], picks: list[int], seconds_left: int) ->
     if perfect:
         pts += 30 + max(0, seconds_left)
     return {"hits": hits, "false": false, "missed": len(real) - hits, "pts": pts, "perfect": perfect}
+
+
+# ── game film: the rep's own real calls, read back as coaching ───────────────
+
+def film_prompt(calls: list) -> tuple[str, str]:
+    """`calls`: [{"bar", "when", "outcome", "notes"}] — real logged calls,
+    newest first, with the rep's own words where they typed them."""
+    system = ("You are a blunt, practical cold-call coach reviewing a founder's REAL calls to "
+              "independent bars. He sells " + PRODUCT + f" His asks: {ASKS_TEXT}. "
+              "Coach from what the log shows, never from generic sales advice. Reply with JSON only.")
+    listing = "\n".join(f"- [{c.get('when', '')}] {str(c.get('bar', ''))[:120]} — "
+                        f"{str(c.get('outcome', '')).replace('_', ' ')}: {str(c.get('notes', ''))[:700]}"
+                        for c in calls[:15])
+    user = ("REAL CALLS (newest first; \"Your notes:\" is what the founder typed right after):\n"
+            f"{listing}\n\n"
+            "Return {\"working\": {\"text\": \"one thing that is working, one sentence\", "
+            "\"from\": \"bar name\"}, \"costing\": {\"text\": \"the one pattern costing him the "
+            "most, one sentence\", \"from\": \"bar name\"}, \"drills\": [up to 5 of {\"from\": "
+            "\"bar name exactly as listed\", \"who\": \"who said it, 2-5 words\", \"line\": \"what "
+            "the prospect said, as close to the notes as possible, max 30 words\", \"better\": "
+            "\"a stronger answer he can say next time, max 40 words, honest to what 86'd does\"}]}. "
+            "Only use moments that are in the calls above. If the log is too thin to coach from, "
+            "return empty text and no drills.")
+    return system, user
+
+
+def validate_film(out: dict, bars: list) -> dict:
+    """What the coach wrote, minus anything not tied to a real call."""
+    known = {str(b).strip().lower(): str(b) for b in bars if str(b).strip()}
+
+    def real_bar(name) -> Optional[str]:
+        k = str(name or "").strip().lower()
+        if k in known:
+            return known[k]
+        for kk, orig in known.items():
+            if len(k) >= 4 and (k in kk or kk in k):
+                return orig
+        return None
+
+    def note(x) -> Optional[dict]:
+        if not isinstance(x, dict):
+            return None
+        text, bar = str(x.get("text") or "").strip()[:300], real_bar(x.get("from"))
+        return {"text": text, "from": bar} if text and bar else None
+
+    drills = []
+    for d in (out.get("drills") or [])[:8]:
+        if not isinstance(d, dict):
+            continue
+        bar = real_bar(d.get("from"))
+        line, better = str(d.get("line") or "").strip()[:300], str(d.get("better") or "").strip()[:400]
+        if bar and line and better:
+            drills.append({"from": bar, "who": str(d.get("who") or "The owner").strip()[:60],
+                           "line": line, "better": better})
+        if len(drills) >= 5:
+            break
+    return {"working": note(out.get("working")), "costing": note(out.get("costing")),
+            "drills": drills}
