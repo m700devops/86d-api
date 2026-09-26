@@ -762,6 +762,9 @@ def init_db():
         # what it said (JSON).
         for col in ("path", "second_opinion", "second_provider", "second_answer"):
             cursor.execute(f"ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS {col} TEXT")
+        # How much of output_tokens (what the provider bills) was thinking:
+        # Gemini's thoughtsTokenCount, an OpenAI reasoning model's reasoning_tokens.
+        cursor.execute("ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS thinking_tokens INTEGER")
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_scan_events_created
             ON scan_events(created_at)

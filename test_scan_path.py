@@ -36,12 +36,12 @@ def _fresh_clients():
     # A client's connections belong to the event loop that opened them, and each
     # test runs its own loop.
     main._openai_clients.clear()
-    main._gemini_models.clear()
+    main._gemini_clients.clear()
     main._openai_plain_models.clear()
     main._gemini_plain_models.clear()
     yield
     main._openai_clients.clear()
-    main._gemini_models.clear()
+    main._gemini_clients.clear()
     main._openai_plain_models.clear()
     main._gemini_plain_models.clear()
 
@@ -172,7 +172,8 @@ def test_sdk_sends_the_structured_request(fake_openai):
     assert body["messages"][0]["role"] == "system"
     assert body["temperature"] == 0
     assert body["response_format"]["type"] == "json_schema"
-    assert stats == {"input_tokens": 3400, "cached_tokens": 2560, "output_tokens": 40}
+    assert stats == {"input_tokens": 3400, "cached_tokens": 2560, "output_tokens": 40,
+                     "thinking_tokens": None}                # gpt-4o doesn't reason
 
 
 def test_rejected_structured_request_falls_back_to_plain_and_remembers(fake_openai):
@@ -223,69 +224,196 @@ def test_warmup_warms_the_client_scans_use(fake_openai, monkeypatch):
     assert "sk-warm" in main._openai_clients
 
 
-# ─── Gemini ───────────────────────────────────────────────────────────────────
+# ─── Gemini (its REST API, called directly) ───────────────────────────────────
 
-class FakeGeminiModel:
-    def __init__(self, reject_json=False):
-        self.calls = []
-        self.reject_json = reject_json
-
-    def generate_content(self, contents, generation_config=None, request_options=None):
-        self.calls.append(generation_config)
-        if generation_config and self.reject_json:
-            raise type("InvalidArgument", (Exception,), {})("400 response_mime_type not supported")
-        return type("Response", (), {"text": json.dumps(GOOD), "usage_metadata": None})()
+GEMINI_USAGE = {"promptTokenCount": 4950, "cachedContentTokenCount": 3800,
+                "candidatesTokenCount": 70, "thoughtsTokenCount": 180, "totalTokenCount": 5200}
 
 
-def test_gemini_is_configured_once(monkeypatch):
-    configured, built = [], []
-    monkeypatch.setattr(main.genai, "configure", lambda **kw: configured.append(kw))
-    monkeypatch.setattr(main.genai, "GenerativeModel", lambda name: built.append(name) or FakeGeminiModel())
-    assert main._gemini_model("g-key") is main._gemini_model("g-key")
-    assert len(configured) == 1 and len(built) == 1
+class FakeGemini:
+    """A local stand-in for Gemini's REST API. Records every request (method,
+    path, API-key header, body). `reject` decides which bodies get a 400,
+    `status` forces an error on every POST, `delay` stalls the reply."""
+
+    def __init__(self, reject=lambda body: False, status=200, delay=0.0, missing=False, reply=None):
+        self.requests = []
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _send(self, code, payload):
+                data = json.dumps(payload).encode()
+                try:
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass                     # the caller gave up, as it should
+
+            def do_GET(self):
+                fake.requests.append(("GET", self.path, self.headers.get("x-goog-api-key"), None))
+                if missing:
+                    self._send(404, {"error": {"code": 404, "message": "model not found", "status": "NOT_FOUND"}})
+                else:
+                    self._send(200, {"name": "models/" + self.path.rsplit("/", 1)[-1]})
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                fake.requests.append(("POST", self.path, self.headers.get("x-goog-api-key"), body))
+                if delay:
+                    import time as _t
+                    _t.sleep(delay)
+                if status != 200:
+                    self._send(status, {"error": {"code": status, "message": "unavailable", "status": "UNAVAILABLE"}})
+                elif reject(body):
+                    self._send(400, {"error": {"code": 400, "message": "Invalid JSON payload", "status": "INVALID_ARGUMENT"}})
+                else:
+                    self._send(200, reply if reply is not None else {
+                        "candidates": [{"content": {"role": "model", "parts": [{"text": json.dumps(GOOD)}]},
+                                        "finishReason": "STOP"}],
+                        "usageMetadata": GEMINI_USAGE})
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/v1beta"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def posts(self):
+        return [r for r in self.requests if r[0] == "POST"]
 
 
-def test_gemini_asks_for_json_and_falls_back_when_refused(monkeypatch):
-    model = FakeGeminiModel(reject_json=True)
-    monkeypatch.setattr(main, "_gemini_model", lambda key: model)
-    text = asyncio.run(main._call_gemini("g-key", main.BOTTLE_PROMPT, IMAGE))
-    assert json.loads(text) == GOOD
-    assert model.calls == [{"response_mime_type": "application/json"}, None]
+@pytest.fixture
+def fake_gemini(monkeypatch):
+    servers = []
+
+    def start(**kwargs):
+        server = FakeGemini(**kwargs)
+        servers.append(server)
+        monkeypatch.setattr(main, "GEMINI_API_BASE", server.url)
+        return server
+
+    yield start
+    for server in servers:
+        server.server.shutdown()
+
+
+def _gemini(stats=None):
+    return asyncio.run(main._call_gemini("g-key", main.BOTTLE_PROMPT, IMAGE, stats))
+
+
+def test_gemini_reads_the_instructions_first_and_thinks_low(fake_gemini):
+    server = fake_gemini()
+    stats = {}
+    assert json.loads(_gemini(stats)) == GOOD
+    [(method, path, key, body)] = server.requests
+    assert (method, path) == ("POST", f"/v1beta/models/{main.GEMINI_MODEL}:generateContent")
+    assert key == "g-key" and "key=" not in path            # in a header, never in a URL or a log
+    text, image = body["contents"][0]["parts"]
+    assert text == {"text": main.BOTTLE_PROMPT}            # the same text first on every scan: cacheable
+    assert image == {"inlineData": {"mimeType": "image/jpeg", "data": IMAGE}}
+    assert body["generationConfig"] == {"responseMimeType": "application/json",
+                                        "thinkingConfig": {"thinkingLevel": "LOW"}}
+    assert "temperature" not in body["generationConfig"]   # Google: keep Gemini 3 at its default
+    # What Google bills: the answer AND the thinking (the old SDK logged the answer alone)
+    assert stats == {"input_tokens": 4950, "cached_tokens": 3800, "output_tokens": 250, "thinking_tokens": 180}
+
+
+@pytest.mark.parametrize("setting, sent", [("MINIMAL", {"thinkingLevel": "MINIMAL"}),
+                                           ("HIGH", {"thinkingLevel": "HIGH"}), ("DEFAULT", None)])
+def test_the_thinking_level_is_a_setting(fake_gemini, monkeypatch, setting, sent):
+    server = fake_gemini()
+    monkeypatch.setattr(main, "GEMINI_THINKING", setting)
+    _gemini()
+    assert server.posts()[0][3]["generationConfig"].get("thinkingConfig") == sent
+
+
+def test_a_refused_full_request_falls_back_to_plain_and_is_remembered(fake_gemini):
+    server = fake_gemini(reject=lambda body: "generationConfig" in body)
+    assert json.loads(_gemini()) == GOOD
+    full, plain = server.posts()
+    assert "generationConfig" in full[3] and "generationConfig" not in plain[3]
     assert main.GEMINI_MODEL in main._gemini_plain_models
+    _gemini()
+    assert len(server.posts()) == 3                          # straight to plain from then on
 
 
-class RecordingGeminiClient:
-    """Stands in for the Gemini SDK's own client, under a REAL GenerativeModel,
-    so what the SDK hands its RPC layer is what gets checked."""
-    def __init__(self, reject_json=False):
-        self.reject_json, self.kwargs = reject_json, []
-
-    def generate_content(self, request, **kwargs):
-        from google.generativeai import protos
-        self.kwargs.append(kwargs)
-        if self.reject_json and request.generation_config.response_mime_type:
-            raise type("InvalidArgument", (Exception,), {})("400 response_mime_type not supported")
-        return protos.GenerateContentResponse(candidates=[protos.Candidate(
-            content=protos.Content(parts=[protos.Part(text=json.dumps(GOOD))]))])
+def test_a_bad_photo_does_not_switch_gemini_to_plain(fake_gemini):
+    fake_gemini(reject=lambda body: True)                    # every request refused
+    with pytest.raises(main.GeminiError):
+        _gemini()
+    assert main.GEMINI_MODEL not in main._gemini_plain_models
 
 
-@pytest.mark.parametrize("reject_json", [False, True])
-def test_every_gemini_call_is_one_short_attempt(monkeypatch, reject_json):
-    """The SDK's defaults are a 600s deadline and retrying a 503 for 600s, on a
-    thread the scan can't stop: with Gemini down that emptied the scan pool."""
-    real = main.genai.GenerativeModel(main.GEMINI_MODEL)
-    real._client = RecordingGeminiClient(reject_json=reject_json)
-    monkeypatch.setattr(main, "_gemini_model", lambda key: real)
-    monkeypatch.setattr(main, "_gemini_plain_models", set())
-    asyncio.run(main._call_gemini("g-key", main.BOTTLE_PROMPT, IMAGE))   # JSON mode (and its fallback)
-    asyncio.run(main._call_gemini("g-key", main.BOTTLE_PROMPT, IMAGE))   # remembered plain, if refused
+def test_a_gemini_error_is_not_retried(fake_gemini):
+    server = fake_gemini(status=503)
+    with pytest.raises(main.GeminiError) as err:
+        _gemini()
+    assert len(server.posts()) == 1                           # the other provider is the retry
+    assert main._failure_label(err.value) == "http_503"
+    import httpx
+    assert main._failure_label(httpx.ReadTimeout("slow")) == "timeout"   # both time limits say timeout
+
+
+def test_a_slow_gemini_is_cut_off_at_the_time_limit(fake_gemini, monkeypatch):
+    """The old SDK call ran on a thread that could only be abandoned, not
+    stopped; this is an async request the time limit cancels."""
+    import time
+    fake_gemini(delay=3)
+    monkeypatch.setattr(main, "PROVIDER_TIMEOUT", 0.3)
+    started = time.monotonic()
+    with pytest.raises(BaseException) as err:
+        _gemini()
+    assert time.monotonic() - started < 1.5
+    assert main._failure_label(err.value) == "timeout"
+
+
+def test_blocked_or_empty_answers_fall_through_and_thoughts_are_never_the_answer():
+    with pytest.raises(ValueError):
+        main._gemini_text({"promptFeedback": {"blockReason": "SAFETY"}})
+    with pytest.raises(ValueError):
+        main._gemini_text({"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": []}}]})
+    assert main._gemini_text({"candidates": [{"content": {"parts": [
+        {"text": "let me look at the label", "thought": True}, {"text": " {\"name\": \"x\"} "}]}}]}) == '{"name": "x"}'
+
+
+def test_gemini_warm_up_looks_the_model_up_and_spends_nothing(fake_gemini, monkeypatch):
+    server = fake_gemini()
     monkeypatch.setenv("GEMINI_API_KEY", "g-key")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    asyncio.run(main._warm_providers())
-    calls = real._client.kwargs
-    assert len(calls) == (4 if reject_json else 3)   # refused JSON mode costs one more
-    for kw in calls:
-        assert kw["retry"] is None and kw["timeout"] <= main.PROVIDER_TIMEOUT
+    assert asyncio.run(main._warm_providers())["gemini"] is True
+    assert server.requests == [("GET", f"/v1beta/models/{main.GEMINI_MODEL}", "g-key", None)]
+
+
+def test_a_retired_gemini_model_fails_the_warm_up_loudly(fake_gemini, monkeypatch, capsys):
+    fake_gemini(missing=True)
+    monkeypatch.setenv("GEMINI_API_KEY", "g-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert asyncio.run(main._warm_providers())["gemini"] is False
+    assert "NOT available: gemini" in capsys.readouterr().out
+
+
+def test_one_gemini_connection_pool_per_loop(fake_gemini):
+    fake_gemini()
+
+    async def two_scans():
+        first = main._gemini_client("g-key")
+        await main._call_gemini("g-key", main.BOTTLE_PROMPT, IMAGE)
+        await main._call_gemini("g-key", main.BOTTLE_PROMPT, IMAGE)
+        return first is main._gemini_client("g-key"), first
+    same, client = asyncio.run(two_scans())
+    assert same
+    assert client._transport._pool._keepalive_expiry == main.AI_KEEPALIVE_SECONDS
+
+
+def test_openai_reasoning_tokens_are_the_thinking_figure():
+    from types import SimpleNamespace as NS
+    usage = NS(prompt_tokens=5000, completion_tokens=400, prompt_tokens_details=NS(cached_tokens=3968),
+               completion_tokens_details=NS(reasoning_tokens=320))
+    assert main._openai_usage(NS(usage=usage)) == {
+        "input_tokens": 5000, "cached_tokens": 3968, "output_tokens": 400, "thinking_tokens": 320}
 
 
 # ─── what happens to the answer ───────────────────────────────────────────────

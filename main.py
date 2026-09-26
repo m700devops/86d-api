@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 import asyncio
 import functools
+import weakref
 import time
 from concurrent.futures import ThreadPoolExecutor
 import uuid
@@ -37,7 +38,6 @@ from apple_auth import (
 from crm import crm_router, init_crm_tables
 import activity
 from leadgen import init_leadgen_tables
-import google.generativeai as genai
 import openai
 import os
 import httpx
@@ -3929,6 +3929,20 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 # var means the next retirement is a dashboard edit, not a deploy.
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
+# How much Gemini thinks before it answers: minimal | low | medium | high, or
+# "default" for whatever the model does unasked (medium, on 3.6 Flash). Gemini 3
+# models always think, it's billed as output, and it's time the bartender waits;
+# reading a label needs little of it. "low" because every current Flash model
+# takes it (3.7 and 3.8 dropped "minimal"). A dashboard edit, like the model.
+_GEMINI_LEVELS = ("MINIMAL", "LOW", "MEDIUM", "HIGH", "DEFAULT")
+GEMINI_THINKING = (os.getenv("GEMINI_THINKING", "low").strip().upper() or "LOW")
+if GEMINI_THINKING not in _GEMINI_LEVELS:
+    print(f"[startup] GEMINI_THINKING={GEMINI_THINKING!r} is not one of "
+          f"{', '.join(v.lower() for v in _GEMINI_LEVELS)} — using low", flush=True)
+    GEMINI_THINKING = "LOW"
+# Gemini's REST API. Overridable so the tests can point it at a local fake.
+GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+
 # Scan accuracy config — override via environment variables if needed.
 # CONFIDENCE_THRESHOLD:     AI confidence below this triggers needs_rescan=True.
 # LEVEL_DEADBAND:           half-width of the hysteresis deadband (±) around
@@ -4065,14 +4079,18 @@ except ImportError:  # openai < 3
 # away, so the warm-up the app fires when the scan screen opens warmed nothing a
 # scan used. Keyed by API key so a changed key gets a new client.
 _openai_clients: dict = {}
-_gemini_models: dict = {}
+# Gemini's: {event loop: {api key: httpx.AsyncClient}}. An async client's
+# connections belong to the loop that opened them; the server has one loop,
+# anything else (a test, a script) gets its own client instead of a dead one.
+_gemini_clients: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 # The scan path's own worker threads. asyncio.to_thread uses the default pool,
 # which this process shares with the CRM's background jobs — the daily lead run,
 # the inbox reader, phone checks, the playbook and School refreshes — some of
-# which hold a thread for minutes. A scan now puts up to three pieces of work on
-# threads at once (both answers' lookups, and the whole Gemini call, since its
-# SDK is synchronous), and must never queue behind a lead run.
+# which hold a thread for minutes. A scan puts up to two pieces of work on
+# threads at once (both answers' lookups), and must never queue behind a lead
+# run. (The Gemini call used to take a thread too, for its synchronous SDK; it's
+# a plain async HTTP call now — see _call_gemini.)
 _SCAN_POOL = ThreadPoolExecutor(max_workers=max(4, int(os.getenv("SCAN_THREADS", "16"))),
                                 thread_name_prefix="scan")
 
@@ -4112,18 +4130,22 @@ def _openai_client(api_key: str) -> "openai.AsyncOpenAI":
     return client
 
 
-def _gemini_model(api_key: str):
-    """The cached GenerativeModel. genai.configure() empties the SDK's client
-    cache every time it runs, so calling it per scan (as this used to) built a new
-    gRPC channel for every scan. The model object keeps the client it creates on
-    first use, so configuring once and reusing the model keeps the channel."""
-    cache_key = (api_key, GEMINI_MODEL)
-    model = _gemini_models.get(cache_key)
-    if model is None:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        _gemini_models[cache_key] = model
-    return model
+def _gemini_client(api_key: str) -> httpx.AsyncClient:
+    """The shared Gemini connection pool (see _gemini_clients). The key goes in
+    a header, never the URL, so it can't end up in a log line. No retries: httpx
+    makes none, and the other provider is this path's retry."""
+    per_loop = _gemini_clients.setdefault(asyncio.get_running_loop(), {})
+    client = per_loop.get(api_key)
+    if client is None:
+        client = httpx.AsyncClient(
+            base_url=GEMINI_API_BASE,
+            headers={"x-goog-api-key": api_key},
+            timeout=PROVIDER_TIMEOUT,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20,
+                                keepalive_expiry=AI_KEEPALIVE_SECONDS),
+        )
+        per_loop[api_key] = client
+    return client
 
 
 def _openai_is_reasoning(model: str) -> bool:
@@ -4181,10 +4203,13 @@ def _openai_usage(response) -> dict:
     if usage is None:
         return {}
     details = getattr(usage, "prompt_tokens_details", None)
+    out_details = getattr(usage, "completion_tokens_details", None)
     return {
         "input_tokens": getattr(usage, "prompt_tokens", None),
         "cached_tokens": getattr(details, "cached_tokens", None) if details else None,
+        # Billed output; a reasoning model's thinking is already inside it.
         "output_tokens": getattr(usage, "completion_tokens", None),
+        "thinking_tokens": getattr(out_details, "reasoning_tokens", None) if out_details else None,
     }
 
 
@@ -4224,51 +4249,97 @@ async def _call_openai(api_key: str, prompt: str, image_data: str, stats: Option
     return message.content.strip()
 
 
-def _gemini_options(timeout: float) -> dict:
-    """One attempt, over in `timeout` seconds. The SDK's own defaults are a 600s
-    deadline and retrying a 503 for up to 600s — and its call is synchronous, on
-    a thread that asyncio.wait_for can stop waiting for but cannot stop. With
-    Gemini down, every scan left a scan-pool thread busy for up to ten minutes;
-    the pool also runs every scan's database work, so after a few dozen scans
-    scanning stopped for everyone, OpenAI healthy or not. The other provider is
-    this path's retry, as with OpenAI's max_retries=0."""
-    return {"timeout": timeout, "retry": None}
+class GeminiError(Exception):
+    """Gemini answered with an HTTP error (a bad request, a rejected key, a rate
+    limit, an outage)."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(f"Gemini HTTP {status}: {detail}")
+        self.status = status
+
+
+def _gemini_request(prompt: str, image_data: str, plain: bool = False) -> dict:
+    """The generateContent body: the instructions first — the same text on every
+    scan, so Google can reuse it from its cache — then the photo. JSON mode and
+    the thinking level (GEMINI_THINKING) unless `plain`, which is the bare
+    request, for a model that turns those down."""
+    body: dict = {"contents": [{"role": "user", "parts": [
+        {"text": prompt},
+        {"inlineData": {"mimeType": "image/jpeg", "data": image_data}},
+    ]}]}
+    if not plain:
+        config: dict = {"responseMimeType": "application/json"}   # a JSON object, never prose around one
+        if GEMINI_THINKING != "DEFAULT":
+            config["thinkingConfig"] = {"thinkingLevel": GEMINI_THINKING}
+        body["generationConfig"] = config
+    return body
+
+
+def _gemini_text(data: dict) -> str:
+    """The answer's text. Raises ValueError when there is none (blocked, cut
+    off), so the scan falls through to the other provider."""
+    candidates = data.get("candidates") or []
+    if not candidates:
+        reason = (data.get("promptFeedback") or {}).get("blockReason")
+        raise ValueError(f"Gemini returned no answer (blocked: {reason})")
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and not p.get("thought"))
+    if not text.strip():
+        raise ValueError(f"Gemini returned no text (finishReason: {candidates[0].get('finishReason')})")
+    return text.strip()
+
+
+def _gemini_usage(data: dict) -> dict:
+    """Token counts for the scan log. Output is what Google BILLS: the answer
+    plus the thinking, which it counts separately (thoughtsTokenCount) — the SDK
+    this replaced reported the answer alone, so the log understated Gemini."""
+    u = data.get("usageMetadata") or {}
+    reply, thinking = u.get("candidatesTokenCount"), u.get("thoughtsTokenCount")
+    return {
+        "input_tokens": u.get("promptTokenCount"),
+        "cached_tokens": u.get("cachedContentTokenCount"),
+        "output_tokens": None if reply is None and thinking is None else (reply or 0) + (thinking or 0),
+        "thinking_tokens": thinking,
+    }
 
 
 async def _call_gemini(api_key: str, prompt: str, image_data: str, stats: Optional[dict] = None) -> str:
-    import base64
-    model = _gemini_model(api_key)
-    image_bytes = base64.b64decode(image_data)
-    contents = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}]
-    options = _gemini_options(PROVIDER_TIMEOUT)
+    """One Gemini scan call, over its REST API; returns the model's text.
 
-    def _generate():
-        # JSON mode: the reply is a JSON object, never prose around one.
-        if GEMINI_MODEL not in _gemini_plain_models:
-            try:
-                return model.generate_content(
-                    contents, generation_config={"response_mime_type": "application/json"},
-                    request_options=options)
-            except Exception as e:
-                if "invalid" not in type(e).__name__.lower() and "400" not in str(e):
-                    raise
-                print(f"[analyze_bottle] Gemini rejected JSON mode (model={GEMINI_MODEL}): {e} "
-                      f"— retrying as a plain request", flush=True)
-                response = model.generate_content(contents, request_options=options)
-                _gemini_plain_models.add(GEMINI_MODEL)
-                return response
-        return model.generate_content(contents, request_options=options)
+    Direct HTTP, like the CRM's calls to Claude, because the only Google SDK that
+    runs on this app's pinned httpx (google-generativeai 0.8.3) can't set Gemini
+    3's thinking level — and its call was synchronous, on a thread asyncio could
+    stop waiting for but not stop. This one is a plain async request: the
+    PROVIDER_TIMEOUT gate cancels it outright, and httpx never retries."""
+    client = _gemini_client(api_key)
+    path = f"/models/{GEMINI_MODEL}:generateContent"
 
-    response = await asyncio.wait_for(_on_scan_thread(_generate), timeout=PROVIDER_TIMEOUT)
+    async def _post(plain: bool) -> dict:
+        response = await client.post(path, json=_gemini_request(prompt, image_data, plain=plain))
+        if response.status_code != 200:
+            raise GeminiError(response.status_code, response.text[:300])
+        return response.json()
+
+    async def _attempt() -> dict:
+        if GEMINI_MODEL in _gemini_plain_models:
+            return await _post(plain=True)
+        try:
+            return await _post(plain=False)
+        except GeminiError as e:
+            if e.status != 400:
+                raise
+            print(f"[analyze_bottle] Gemini rejected the full request (model={GEMINI_MODEL}): {e} "
+                  f"— retrying as a plain request", flush=True)
+            data = await _post(plain=True)
+            _gemini_plain_models.add(GEMINI_MODEL)
+            print(f"[analyze_bottle] SCAN_GEMINI_PLAIN model={GEMINI_MODEL} — plain request worked; "
+                  f"JSON mode and the thinking level stay off for this model until restart", flush=True)
+            return data
+
+    data = await asyncio.wait_for(_attempt(), timeout=PROVIDER_TIMEOUT)
     if stats is not None:
-        usage = getattr(response, "usage_metadata", None)
-        if usage is not None:
-            stats.update({
-                "input_tokens": getattr(usage, "prompt_token_count", None),
-                "cached_tokens": getattr(usage, "cached_content_token_count", None),
-                "output_tokens": getattr(usage, "candidates_token_count", None),
-            })
-    return response.text.strip()
+        stats.update(_gemini_usage(data))
+    return _gemini_text(data)
 
 
 async def _warm_providers() -> dict:
@@ -4276,10 +4347,10 @@ async def _warm_providers() -> dict:
     the cold-path setup (observed ~8s extra on the first scan). Best-effort,
     never raises.
 
-    OpenAI is warmed with a model lookup, not a completion: it opens a
+    Both are warmed with a model lookup, not a completion: it opens a
     connection in the same pool the scans use, costs no tokens, and fails
-    loudly (404) when OPENAI_MODEL has been retired. A 1-token completion
-    also broke on reasoning models, which reject `max_tokens`."""
+    loudly (404) when the configured model has been retired. A 1-token
+    completion also broke on reasoning models, which reject `max_tokens`."""
     openai_key = os.getenv("OPENAI_API_KEY")
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     warmed = {"openai": False, "gemini": False}
@@ -4301,16 +4372,12 @@ async def _warm_providers() -> dict:
 
     if gemini_key:
         try:
-            model = _gemini_model(gemini_key)
-            await asyncio.wait_for(
-                asyncio.to_thread(
-                    model.generate_content,
-                    "ping",
-                    generation_config={"max_output_tokens": 1},
-                    request_options=_gemini_options(8),
-                ),
-                timeout=8,
-            )
+            # A model lookup, like OpenAI's: opens a connection in the pool the
+            # scans use, costs nothing, and 404s when GEMINI_MODEL is retired.
+            response = await asyncio.wait_for(
+                _gemini_client(gemini_key).get(f"/models/{GEMINI_MODEL}", timeout=8), timeout=8)
+            if response.status_code != 200:
+                raise GeminiError(response.status_code, response.text[:200])
             warmed["gemini"] = True
         except Exception as e:
             print(f"[warm] Gemini warm-up failed (non-fatal): {e}", flush=True)
@@ -4649,6 +4716,7 @@ class _Answer:
             "provider_ms": self.provider_ms,
             "input_tokens": self.stats.get("input_tokens"),
             "output_tokens": self.stats.get("output_tokens"),
+            "thinking_tokens": self.stats.get("thinking_tokens"),
         }
 
 
@@ -4796,9 +4864,14 @@ def _process_ai_result(text: str, request: ScanAnalyzeRequest, user_id: str,
     return _respond(_decide([answer]), request, user_id, event)
 
 
+_TIMEOUTS = (asyncio.TimeoutError, openai.APITimeoutError, httpx.TimeoutException)
+
+
 def _failure_label(error: BaseException) -> str:
-    if isinstance(error, (asyncio.TimeoutError, openai.APITimeoutError)):
+    if isinstance(error, _TIMEOUTS):
         return "timeout"
+    if isinstance(error, GeminiError):
+        return f"http_{error.status}"
     if isinstance(error, (json.JSONDecodeError, ValueError)):
         return "unparseable"
     return type(error).__name__
@@ -4875,8 +4948,10 @@ async def _run_providers(openai_key, gemini_key, prompt, request, user_id,
                     answers[name] = task.result()
                 except Exception as e:
                     failures[name] = e
-                    if isinstance(e, (asyncio.TimeoutError, openai.APITimeoutError)):
+                    if isinstance(e, _TIMEOUTS):
                         print(f"[analyze_bottle] {name} timed out after {PROVIDER_TIMEOUT}s", flush=True)
+                    elif isinstance(e, GeminiError):
+                        print(f"[analyze_bottle] {name} error: {e}", flush=True)
                     elif isinstance(e, (json.JSONDecodeError, ValueError)):
                         print(f"[analyze_bottle] {name} answer unusable ({e})", flush=True)
                     else:
@@ -4954,10 +5029,10 @@ def _record_scan_event(event: dict) -> None:
                      name, brand, category, product_type, confidence,
                      match_method, matched_product_id, needs_rescan,
                      provider_ms, total_ms, input_tokens, cached_tokens, output_tokens,
-                     image_kb, label_text, label_supported,
+                     thinking_tokens, image_kb, label_text, label_supported,
                      path, second_opinion, second_provider, second_answer, created_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO NOTHING
             """, (
                 event["id"], event["user_id"], event.get("location_id"), event.get("status"),
@@ -4966,7 +5041,7 @@ def _record_scan_event(event: dict) -> None:
                 event.get("product_type"), event.get("confidence"),
                 event.get("match_method"), event.get("matched_product_id"), event.get("needs_rescan"),
                 event.get("provider_ms"), event.get("total_ms"), event.get("input_tokens"),
-                event.get("cached_tokens"), event.get("output_tokens"),
+                event.get("cached_tokens"), event.get("output_tokens"), event.get("thinking_tokens"),
                 event.get("image_kb"), event.get("label_text"), event.get("label_supported"),
                 event.get("path"), event.get("second_opinion"), event.get("second_provider"),
                 event.get("second_answer"), now_iso(),
@@ -4978,7 +5053,7 @@ def _record_scan_event(event: dict) -> None:
 
 def _write_scan_log(event: dict) -> None:
     fields = ("status", "path", "provider", "model", "provider_ms", "total_ms", "input_tokens",
-              "cached_tokens", "output_tokens", "confidence", "match_method",
+              "cached_tokens", "output_tokens", "thinking_tokens", "confidence", "match_method",
               "label_supported", "second_opinion", "image_kb", "fallback_from", "id")
     print("[scan] SCAN " + " ".join(f"{k}={event.get(k) if event.get(k) is not None else '-'}"
                                     for k in fields), flush=True)

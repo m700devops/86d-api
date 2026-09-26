@@ -249,12 +249,14 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q` (775 tests; test_timezones.py needs a dummy
+  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q` (787 tests; test_timezones.py needs a dummy
   `DATABASE_URL`)
-- test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
-  against a local fake server, so it checks the request actually sent: instructions first and
-  image last, temperature 0, strict schema, no SDK retries, one shared client, the plain-request
-  fallback. Product matching and the scan log are stubbed; no network, no database
+- test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
+  real Gemini REST call against local fake servers, so it checks the requests actually sent:
+  instructions first and image last, temperature 0 (OpenAI), strict schema / JSON mode, Gemini's
+  thinking level, the key in a header, no retries, the time limit cancelling a slow reply, one shared
+  client, the plain-request fallback, billed tokens including thinking, warm-ups that spend nothing.
+  Product matching and the scan log are stubbed; no network, no database
 - test_second_opinion.py — the second opinion: `helpers.answers_agree`, the pure `_decide`, and
   `_run_providers` with fake providers on REAL delays (fast path, wait window, failures, a rejected
   key, the total cap cancelling both calls, the one-bar inference). Every rule was mutation-checked
@@ -345,20 +347,29 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - **An app build that sends no `location_id` gets the account's location when there is exactly
   one** (`_scan_context`, in the same thread hop as the entitlement check) — most accounts are one
   bar, and without it older builds could never use the bar's own book or the fast path
-- **One client per provider for the life of the process** (`_openai_client()`, `_gemini_model()`).
+- **One client per provider for the life of the process** (`_openai_client()`, `_gemini_client()`).
   Every scan used to build a new client, so every scan paid a fresh TCP + TLS handshake, and
-  `/scans/warm` warmed a client that was immediately thrown away; `genai.configure()` per call also
-  emptied the Gemini SDK's client cache. Idle connections are kept `AI_KEEPALIVE_SECONDS` (120) —
-  the HTTP library's default of 5s is shorter than the gap between two bottles. The OpenAI client
-  has `max_retries=0`: the SDK's own retries (twice, honouring retry-after) ran inside the 9-second
-  provider window, so a rate-limited OpenAI used it all up before Gemini started. **Every Gemini call
-  passes `request_options` of one attempt within `PROVIDER_TIMEOUT` (`_gemini_options`)**: the SDK's
-  defaults are a 600s deadline and retrying a 503 for 600s, on a synchronous call running on a scan-pool
-  thread that `asyncio.wait_for` stops waiting for but cannot stop. With Gemini down (and it is asked on
-  every scan now), each scan left a thread busy for up to ten minutes; the pool also runs every scan's
-  database work, so scanning would have stopped for everyone within a few dozen scans, OpenAI healthy
-  or not. test_scan_path.py checks all four call paths through a real `GenerativeModel` OpenAI is warmed
-  with `models.retrieve` (no tokens, and a 404 when `OPENAI_MODEL` has been retired)
+  `/scans/warm` warmed a client that was immediately thrown away. Idle connections are kept
+  `AI_KEEPALIVE_SECONDS` (120) — the HTTP library's default of 5s is shorter than the gap between two
+  bottles. The OpenAI client has `max_retries=0`: the SDK's own retries (twice, honouring retry-after)
+  ran inside the 9-second provider window, so a rate-limited OpenAI used it all up before Gemini
+  started. Both are warmed with a model lookup (no tokens, and a 404 when the configured model has
+  been retired)
+- **Gemini is called over its REST API directly with the app's httpx** (`_call_gemini`,
+  `generateContent`), like the CRM calls Claude — there is NO Google SDK. The one that runs on the
+  pinned httpx 0.26 (`google-generativeai==0.8.3`, removed) could not set Gemini 3's thinking level,
+  and its call was synchronous, on a scan-pool thread `asyncio.wait_for` could stop waiting for but
+  not stop (with its defaults — a 600s deadline, 503s retried for 600s — a Gemini outage would have
+  emptied the pool and stopped scanning for everyone). Now: one async request, cancelled outright by
+  the `PROVIDER_TIMEOUT` gate, never retried (the other provider is the retry), the key in an
+  `x-goog-api-key` header (never a URL), one pool per event loop (`_gemini_clients`). **Gemini 3
+  always thinks before answering, billed as output and waited for** — 3.6 Flash defaults to medium;
+  `GEMINI_THINKING` (default `low`: every current Flash model takes it, 3.7/3.8 dropped `minimal`;
+  `default` sends nothing) sets `generationConfig.thinkingConfig.thinkingLevel`, the field and
+  uppercase values Google's own current SDK sends. `GEMINI_API_BASE` overrides the host (the tests'
+  fake server). A 400 on the full request retries once as the bare request (no JSON mode, no thinking
+  level) and remembers the model as plain only if that succeeds (`SCAN_GEMINI_PLAIN`). Errors are
+  logged as `http_<status>` in `fallback_from`
 - **The request** (`_openai_request()`): BOTTLE_PROMPT as the system message FIRST, then the image,
   then `SCAN_USER_TEXT`. OpenAI caches a repeated prompt PREFIX automatically; with the image first
   (as it was) the ~2,600 identical instruction tokens were re-read in full on every scan. Strict
@@ -371,8 +382,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   old plain request is tried; the model is remembered as plain (`_openai_plain_models`,
   `SCAN_OPENAI_PLAIN` in the log) ONLY if the plain one succeeds, so a 400 caused by one bad photo
   can't switch structured output off for everyone. Gemini gets JSON mode the same way
-  (`_gemini_plain_models`). Gemini's temperature is left alone: Google's guidance for Gemini 3
-  models is to keep the default
+  (`_gemini_plain_models`; see the REST bullet above). Gemini's temperature is left alone: Google's
+  guidance for Gemini 3 models is to keep the default
 - **The model writes down what it read before it answers, and the server checks the answer
   against it.** `label_text` is the FIRST field of `SCAN_SCHEMA` (strict output writes keys in
   schema order, so the reading is committed before the name), and `helpers.label_supports()`
@@ -410,8 +421,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   said exactly that and parked the saved row for a manual retry. A 5xx is what the app's automatic
   retry sweep picks up. `null` still means no bottle
 - **Every scan is measured.** One `[scan] SCAN status= provider= model= provider_ms= total_ms=
-  input_tokens= cached_tokens= output_tokens= confidence= match_method= image_kb= fallback_from= id=`
-  line (grep Render logs for `SCAN `; it also carries `path` = fast | both | window | single and
+  input_tokens= cached_tokens= output_tokens= thinking_tokens= confidence= match_method= image_kb=
+  fallback_from= id=` line (`output_tokens` is what the provider BILLS — for Gemini the answer plus
+  its thinking, `thoughtsTokenCount`, which the old SDK didn't report so the log understated Gemini;
+  `thinking_tokens` is how much of it was thinking, also OpenAI reasoning models' `reasoning_tokens`,
+  and is stored in `scan_events.thinking_tokens`) (grep Render logs for `SCAN `; it also carries `path` = fast | both | window | single and
   `second_opinion`), and a `scan_events` row written in the background (plus `second_provider` and
   `second_answer`, the other provider's reading as JSON)
   (`_record_scan_event`, never fails a scan; `SCAN_EVENT_FAILED` if it does). The response carries
@@ -482,8 +496,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   seed_data.py alone never reaches a database seeded under the old name. `rename_seed_products()` runs
   every boot before seeding, renames only `source='seed'` rows (same id, so every bar's par, price and
   distributor stay put), and keeps the old name as an alias. Log: `SEED_RENAMED`
-- The route's database work (entitlement check, lookups, the one write) and the synchronous Gemini
-  call run on the scan path's OWN thread pool (`_SCAN_POOL`, `SCAN_THREADS`, default 16) —
+- The route's database work (entitlement check, lookups, the one write) runs on the scan path's
+  OWN thread pool (`_SCAN_POOL`, `SCAN_THREADS`, default 16; the Gemini call used to as well, before
+  it became an async HTTP request) —
   psycopg2 blocks, the route shares one event loop with every other request, and the default
   pool `asyncio.to_thread` uses is shared with the CRM's background jobs (the daily lead run, the
   inbox reader, phone checks, School), some of which hold a thread for minutes
@@ -1428,6 +1443,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - OPENAI_API_KEY — primary bottle-scan provider; without it, scanning falls straight to Gemini
 - GEMINI_API_KEY or GOOGLE_API_KEY — fallback bottle-scan provider; without it, no fallback if OpenAI fails
 - OPENAI_MODEL / GEMINI_MODEL — optional, override the scan models when a provider retires one
+- GEMINI_THINKING — optional, how much Gemini thinks per scan: minimal | low (default) | medium | high |
+  default (the model's own: medium on 3.6 Flash). Billed as output and waited for; see AI Vision Rules
 - RESEND_API_KEY — order emails and password resets cannot send without it
 - STRIPE_SECRET_KEY — checkout/billing endpoints 503 without it
 - STRIPE_PRICE_ID — checkout endpoint 503s without it, nobody can subscribe
