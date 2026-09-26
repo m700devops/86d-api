@@ -53,9 +53,12 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   ONE ongoing report request (`ensure_report_request`, reused if it exists — Apple allows one
   per app), Apple then produces a daily INSTANCE per report as gzipped TSVs behind pre-signed
   URLs (downloaded WITHOUT the bearer token), and `sync()` imports each instance once
-  (`crm_apple_instances`) into `crm_apple_metrics (report, day, dim, metric, value)`. Only
-  "Standard" reports — the "Detailed" variants hold the same numbers split finer and would
-  double every total. Report columns vary, so `aggregate()` never assumes them: a column is
+  (`crm_apple_instances`) into `crm_apple_metrics (report, day, dim, metric, value)`.
+  Engagement, commerce and usage reports (`wanted_reports()`, by Apple's `category`), never a
+  "Detailed" one — those hold the same numbers split finer and would double every total.
+  It used to keep only names containing "Standard", which also dropped App Crashes (it has
+  one version, no "Standard"): the Crashes tile could never show a number. Report columns
+  vary, so `aggregate()` never assumes them: a column is
   a metric if its name says it counts something, and the numbers split by the first present
   of `DIM_PREFERENCE` (Event, Download Type, …). **The first reports take Apple about 1–2
   days after connecting**; the tab says so instead of looking broken. `summarize()` ends its
@@ -65,12 +68,51 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   Key ID and .p8. Routes in crm.py: `GET /v1/crm/apple` (status + tiles + tables; starts a
   background import when data is older than `APPLE_STALE_HOURS`), `POST /apple/connect`
   (checks the key against Apple BEFORE saving, so a typo fails with Apple's reason),
-  `/apple/sync`, `/apple/disconnect`. The .p8 is stored Fernet-encrypted with a key derived
+  `/apple/sync`, `/apple/disconnect` (and a background import twice a day — see below). The .p8 is stored Fernet-encrypted with a key derived
   from `SECRET_KEY` and never returned to the page; rotating `SECRET_KEY` makes it unreadable
   and the tab asks to reconnect. Env vars `APPLE_ISSUER_ID` / `APPLE_KEY_ID` /
   `APPLE_PRIVATE_KEY` (+ optional `APPLE_APP_ID`) override the saved key. The key needs the
   **Admin** role, because creating the report request does. Covered by test_apple.py; grep
   Render logs for `APPLE_SYNC`
+- **Apple Analytics counts what App Store Connect counts, from the day it was connected
+  (2026-09-26).** Checked against Apple's own docs (Analytics Reports "Data Completeness and
+  Corrections" and "Protecting user privacy", and App Store Connect's "Metric definitions"):
+  - **No history, by the owner's choice.** An `ONGOING` request "provides current data" only;
+    the past needs a separate `ONE_TIME_SNAPSHOT` request (back to 2024-01-01), which the owner
+    declined — "good analytics moving forward". The page says where the data starts
+    (`since`), a tile whose window starts before it says "12 of 30 days", and nothing is
+    compared against a window before it (`previous`/`change_pct` null, "no earlier data").
+  - **The newest file wins, and a date is replaced WHOLE.** A daily file carries the newest
+    day plus the full, restated numbers for the few days before it (late events), and Apple's
+    rule is that the later `processingDate` wins. `sync()` now saves instances OLDEST first
+    (it used Apple's listing order, so an older file could put incomplete numbers back over
+    complete ones), and `crm._apple_save_instance()` deletes every row for each date the file
+    carries before writing it (never merged, never a stale row left beside the new set).
+  - **App Store Connect's definitions**: Impressions INCLUDE product page views (the report's
+    Impression event doesn't — `aggregate()` keeps a page view's page, "Page view · Product
+    page", so they're added back); Product page views are the product page and the StoreKit
+    "store sheet" only, never version history / privacy / developer / in-app event pages
+    (`PRODUCT_PAGE`); Downloads are first-time + redownloads, never updates or restores;
+    Conversion is downloads ÷ UNIQUE-device impressions (it was ÷ total impressions).
+  - **Usage tiles come from WEEKLY files.** Apple doesn't produce a usage report (sessions,
+    installs/deletions, crashes) for any DAY with fewer than five users who share analytics,
+    and applies the same rule per week; App Store Connect applies its five-device minimum over
+    the whole range. For a young app the daily files miss most quiet days, so `sync()` also
+    imports WEEKLY instances for usage reports (`is_usage()`) into `crm_apple_weekly (report,
+    week, dim, metric, value)`, and those tiles show the last N full Mon–Sun weeks
+    (`WEEKS_FOR`: 7→1, 30→4, 90→13), a week Apple skipped counting as nothing rather than
+    being slid past. Until a weekly file exists (they come on Fridays) a usage tile shows the
+    daily sum flagged `partial` ("days with 5+ users only")
+  - **The request stays alive.** Apple stops a request whose reports go unread for long
+    (`stoppedDueToInactivity`), after which nothing new ever arrives. The tab used to be the
+    only thing that imported; main.py's `_apple_sync_loop` now looks hourly and
+    `apple_sync_if_due()` imports when the last one is older than `APPLE_BACKGROUND_HOURS`
+    (12). `ensure_report_request()` replaces a stopped request instead of trusting a saved id
+    Apple still answers for.
+  - **`APPLE_PARSER` (2)** is stamped on every imported file (`crm_apple_instances.parser`); a
+    file read by an older parser counts as not imported, so the next sync reads it again and
+    its dates are rebuilt. Bump it whenever the way a file is READ changes. Run on a real
+    Postgres 16 from today's schema: migration, re-read, date replacement and the route
 - static/icon.png, static/favicon.png — the app logo, copied from the mobile repo's assets and
   served via the allowlisted `/crm/{asset}` route (NOT a directory mount — that would be one
   traversal away from serving the repo). Re-copy from 86d-mobile/assets when rebranding
@@ -316,7 +358,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_order_numbers.py test_film.py test_failure_points.py
-  test_owner_rules.py test_lookup_check.py test_data_quality.py test_drafter.py -q` (688
+  test_owner_rules.py test_lookup_check.py test_data_quality.py test_drafter.py -q` (701
   tests; test_timezones.py (37 more) needs a dummy `DATABASE_URL` and runs on its own; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)

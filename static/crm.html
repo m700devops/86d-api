@@ -2868,25 +2868,51 @@ const agoShort=iso=>{
   return m<1?'just now':m<60?`${m} min ago`:m<1440?`${Math.round(m/60)}h ago`:`${Math.round(m/1440)}d ago`;
 };
 
-function appleTile(k,win){
+const shortDay=iso=>{
+  if(!iso) return '';
+  const d=new Date(iso+'T12:00:00');
+  return isNaN(d)?iso:d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+};
+/* What a tile covers, in words. Sessions, installs, deletions and crashes are
+   full Monday–Sunday weeks from Apple's weekly files (its daily files leave
+   out any day with fewer than five users, which for a young app is most
+   days); the rest are days, and say so when the data starts partway through
+   the window instead of passing 12 days off as 30. */
+function applePeriod(k,win,since){
+  if(k.value==null) return '';
+  if(k.period==='weeks'){
+    const some=k.weeks_covered!=null && k.weeks_covered<k.weeks;
+    const from=some&&k.daily&&k.daily.length?k.daily[0].day:k.from;
+    return `${some?k.weeks_covered+' of '+k.weeks+' weeks':k.weeks===1?'last full week':'last '+k.weeks+' full weeks'}`
+      +` · ${shortDay(from)} – ${shortDay(k.to)}`;
+  }
+  if(k.partial) return 'days with 5+ users only · full weekly figures arrive on Fridays';
+  if(k.days_covered!=null && k.days_covered<win) return `${k.days_covered} of ${win} days · data starts ${shortDay(since)}`;
+  return '';
+}
+
+function appleTile(k,win,since){
   const unit=k.unit||(k.key==='proceeds'?'$':'');
+  const weekly=k.period==='weeks';
+  const span=weekly?(k.weeks===1?'week':k.weeks+' weeks'):win+' days';
   let delta='';
   if(k.change_pct!=null){
     const up=k.change_pct>0, flat=k.change_pct===0;
     const good=flat?null:(up===k.up_is_good);
     const sign=up?'+':'';
     delta=`<div class="delta ${good==null?'':good?'good':'bad'}">${sign}${k.change_pct}${k.change_is_points?' pts':'%'}
-      <span>vs previous ${win} days</span></div>`;
+      <span>vs previous ${span}</span></div>`;
   }else if(k.value!=null){
     delta=`<div class="delta"><span>no earlier data to compare</span></div>`;
   }
   const daily=k.daily||[];
   const max=Math.max(0,...daily.map(d=>d.value));
-  const bars=daily.length&&max>0?`<div class="spark" role="img" aria-label="${esc(k.label)} per day">${
+  const bars=daily.length&&max>0?`<div class="spark" role="img" aria-label="${esc(k.label)} per ${weekly?'week':'day'}">${
     daily.map((d,i)=>`<i style="height:${Math.max(2,d.value/max*100)}%"
-      class="${i===daily.length-1?'now':''}" title="${esc(d.day)}: ${esc(compact(d.value,unit))}"></i>`).join('')}</div>`:'';
+      class="${i===daily.length-1?'now':''}" title="${esc(weekly?'Week of '+d.day:d.day)}: ${esc(compact(d.value,unit))}"></i>`).join('')}</div>`:'';
+  const per=applePeriod(k,win,since);
   return `<div class="atile"><div class="al">${esc(k.label)}</div>
-    <div class="av">${esc(compact(k.value,unit))}</div>${delta}${bars}</div>`;
+    <div class="av">${esc(compact(k.value,unit))}</div>${per?`<div class="muted small">${esc(per)}</div>`:''}${delta}${bars}</div>`;
 }
 
 async function loadApple(){
@@ -2915,7 +2941,7 @@ async function loadApple(){
         <span class="muted">${esc(d.app?.bundle_id||'')}</span></div>
       <div class="aseg">${[7,30,90].map(w=>`<button data-win="${w}" class="${w===win?'on':''}">${w} days</button>`).join('')}</div>
       <div class="muted small">${d.syncing?'Importing from Apple…':'Synced '+esc(agoShort(d.last_sync_at))}
-        ${d.through?` · data through ${esc(d.through)}`:''}</div>
+        ${d.through?` · data ${d.since?esc(shortDay(d.since))+' – ':'through '}${esc(shortDay(d.through))}`:''}</div>
       <div class="row" style="margin:0">
         <button id="apSync" ${d.syncing?'disabled':''}>${d.syncing?'Importing…':'Sync now'}</button>
         ${d.source==='saved'?'<button class="del" id="apDisconnect">Disconnect</button>':''}
@@ -2925,8 +2951,8 @@ async function loadApple(){
   const has=d.kpis&&d.kpis.some(k=>k.value!=null);
   const wait=!has?`<div class="banner">${d.syncing?'Importing from Apple — this can take a minute.'
       :'No numbers yet. After you first connect, Apple takes about 1–2 days to produce the '
-      +'first reports. This tab imports them automatically whenever you open it.'}</div>`:'';
-  const tiles=has?`<div class="agrid">${d.kpis.map(k=>appleTile(k,win)).join('')}</div>`:'';
+      +'first reports. They\'re imported automatically twice a day, and whenever you open this tab.'}</div>`:'';
+  const tiles=has?`<div class="agrid">${d.kpis.map(k=>appleTile(k,win,d.since)).join('')}</div>`:'';
   const tables=(d.reports||[]).map(r=>`<div class="zbar"><span class="name">${esc(r.report.toUpperCase())}</span></div>
     <div class="zone"><div class="sheetwrap"><table class="sheet"><thead><tr>
       <th>WHAT</th><th>MEASURE</th><th>LAST 7 DAYS</th><th>LAST ${win} DAYS</th><th>PREVIOUS ${win} DAYS</th><th>CHANGE</th>
