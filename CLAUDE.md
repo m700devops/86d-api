@@ -249,7 +249,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py -q` (737 tests; test_timezones.py needs a dummy
+  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py -q` (753 tests; test_timezones.py needs a dummy
   `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
@@ -262,6 +262,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   code in both directions, UPC-E round trips both ways, the merged-away fallback, registering
   (409 names the LIVE product, codes stored as digits) and the merge moving the code. Every
   rule was mutation-checked; the lookup was also run on a real Postgres (index scan, ~0.04ms)
+- test_duplicates.py — the Bottle Book's duplicate finder (`helpers.duplicate_groups`, the
+  `/locations/{id}/duplicates` route): what counts as one bottle, what is never suggested, which copy
+  is kept. Every rule was mutation-checked; find → merge → find was run on a real Postgres
 - test_crawl_quiet.py — the crawl's dead hour (`main._in_crawl_window`, checked in winter and
   summer), `activity.py` on a fake clock, and that every background crawl waits (and nothing
   someone clicked does). Every rule was mutation-checked
@@ -522,6 +525,18 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   keep using `par_quantity > 0` as the "this bar set a par" signal. Adding that column in
   `init_db()` is also the one-shot gate for the backfill that cleared the placeholder pars
   of 1 this endpoint used to create (see database.py)
+- GET /locations/{id}/duplicates — this bar's products that are the same bottle twice, as
+  `{"groups": [{"keep", "fold": [...]}]}` (`helpers.duplicate_groups`). The Bottle Book (86d-mobile
+  PricingScreen, "Same bottle twice?") offers each as a one-tap merge through
+  `POST /products/{id}/merge`. Copies come from the scanner reading one label two ways before the
+  matcher learned both, and cost the bar a count split over two rows — and a scan that fits both of a
+  bar's rows can't use its own book at all (`bar_book` takes exactly one). One bottle = the same
+  `match_key`, or two readings `answers_agree` calls the same ("Red" / "Red Label"), never two known
+  sizes that differ. Anything that would be a guess is left out: a row that fits two groups (a
+  sizeless copy beside the 750ml and the 1L), a group whose copies disagree on size, and folding a
+  verified product (the merge route refuses). Keeper: verified, then what the bar set (price, par,
+  distributor), then most scanned, then oldest. No two seeded products agree (checked). Read-only;
+  every merge is the bartender's tap
 - GET/POST /locations/{id}/product-distributors — the other half of that memory: which
   distributor a bottle is ordered from at this bar, set once and applied to every future scan
 - POST /inventory/start, GET /inventory/{session_id}, POST /inventory/{session_id}/scan

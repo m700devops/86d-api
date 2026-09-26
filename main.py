@@ -26,6 +26,7 @@ from helpers import (
     classify_level, smooth_level, calculate_variance, generate_order_items,
     normalize_match_text, NORM_SQL, product_match_key, seed_display_name,
     size_ml, sizes_compatible, label_supports, answers_agree, barcode_variants, clean_barcode,
+    duplicate_groups,
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -1181,6 +1182,39 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
             par_levels.append(pl)
 
         return {"par_levels": par_levels}
+
+@v1_router.get("/locations/{location_id}/duplicates", response_model=dict)
+def get_duplicates(location_id: str, user_id: str = Depends(get_current_user)):
+    """This bar's products that are the same bottle twice (helpers.duplicate_groups),
+    for the Bottle Book to offer as one-tap merges through POST /products/{id}/merge.
+    Read-only; suggestions only — the bartender confirms each merge."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=403, detail={
+                "error": "forbidden", "message": "Access denied to this location"
+            })
+        cursor.execute("""
+            SELECT p.id, p.name, p.brand, p.size, p.match_key, p.verified, p.scan_count,
+                   p.created_at, pl.price, pl.par_quantity,
+                   EXISTS (SELECT 1 FROM location_product_distributors d
+                           WHERE d.location_id = pl.location_id AND d.product_id = p.id) AS has_distributor
+            FROM par_levels pl
+            JOIN products p ON p.id = pl.product_id
+            WHERE pl.location_id = %s AND p.deleted_at IS NULL
+        """, (location_id,))
+        rows = cursor.fetchall()
+
+    def public(row):
+        return {"product_id": row["id"], "name": row["name"], "brand": row["brand"],
+                "size": row["size"], "verified": bool(row["verified"])}
+    return {"groups": [{"keep": public(g["keep"]), "fold": [public(r) for r in g["fold"]]}
+                       for g in duplicate_groups([dict(r) for r in rows])]}
+
 
 @v1_router.post("/locations/{location_id}/par-levels", response_model=dict)
 def set_par_level(location_id: str, par_data: ParLevelCreate, user_id: str = Depends(get_current_user)):

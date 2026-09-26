@@ -300,6 +300,62 @@ def barcode_variants(code: Optional[str]) -> list:
     return sorted(out)
 
 
+def _row_ml(row: dict) -> Optional[float]:
+    return size_ml(row.get("size")) or size_ml(row.get("name"))
+
+
+def _keeper_rank(row: dict) -> tuple:
+    """Which of two copies of one bottle to keep: the catalog's own (a verified
+    product can't be merged away), then the one this bar has set more on —
+    price, par, distributor — then the most scanned, then the oldest."""
+    set_here = sum((float(row.get("price") or 0) > 0,
+                    float(row.get("par_quantity") or 0) > 0,
+                    bool(row.get("has_distributor"))))
+    return (-int(bool(row.get("verified"))), -set_here, -int(row.get("scan_count") or 0),
+            str(row.get("created_at") or ""), str(row["id"]))
+
+
+def same_bottle(a: dict, b: dict) -> bool:
+    """Two catalog products that are one bottle: the same match key, or two
+    readings answers_agree() would call the same ("Red" / "Red Label") — never
+    two known sizes that differ (a bar may keep the 750ml and the 1L apart)."""
+    if not sizes_compatible(_row_ml(a), _row_ml(b)):
+        return False
+    if a.get("match_key") and a.get("match_key") == b.get("match_key"):
+        return True
+    return answers_agree(a.get("name"), a.get("brand"), b.get("name"), b.get("brand"))
+
+
+def duplicate_groups(rows: list) -> list:
+    """One bar's products that are the same bottle twice, as
+    [{"keep": row, "fold": [rows]}] — what to merge into what.
+
+    The copies usually come from the scanner reading one label two ways before
+    the matcher learned both. They cost the bar: a count split over two rows,
+    and a scan that fits both of them can't use the bar's own book at all.
+
+    A row joins a group only when it is the same bottle as the keeper. A
+    suggestion has to be right to be worth a tap — a merge moves pars and
+    prices — so anything that would be a guess is left out: a row that could
+    belong to two groups (a sizeless "Original" beside the 750ml and the 1L),
+    and a whole group whose copies disagree on size (a sizeless keeper with a
+    750ml and a 1L copy: which one is it?). A verified product is never folded —
+    the merge route refuses to retire one."""
+    groups: list = []
+    for row in sorted(rows, key=_keeper_rank):
+        homes = [] if row.get("verified") else [g for g in groups if same_bottle(g["keep"], row)]
+        if len(homes) == 1:
+            home = homes[0]
+            if all(sizes_compatible(_row_ml(m), _row_ml(row)) for m in home["fold"]):
+                home["fold"].append(row)
+            else:
+                home["contested"] = True
+        elif not homes:
+            groups.append({"keep": row, "fold": [], "contested": False})
+    return [{"keep": g["keep"], "fold": g["fold"]} for g in groups
+            if g["fold"] and not g["contested"]]
+
+
 def seed_display_name(name: str, brand: Optional[str]) -> str:
     """A seeded product's name the way the model is asked to write it — no
     brand in front, no size at the end: "Johnnie Walker Red Label 750ml" /
