@@ -25,7 +25,7 @@ from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
     classify_level, smooth_level, calculate_variance, generate_order_items,
     normalize_match_text, NORM_SQL, product_match_key, seed_display_name,
-    size_ml, sizes_compatible, label_supports, answers_agree,
+    size_ml, sizes_compatible, label_supports, answers_agree, barcode_variants, clean_barcode,
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -703,15 +703,42 @@ def search_products(
             "total": len(products)
         }
 
+def _find_by_barcode(cursor, upc: str):
+    """The live product a scanned barcode belongs to, or None.
+
+    Matched in every form the same code can take (helpers.barcode_variants: the
+    13-digit read of a 12-digit UPC-A, a UPC-E, GTIN padding), so a code
+    registered from one phone is found from another. A code that only a merged-
+    away product still holds resolves the way that product's name does — to the
+    product it was merged into (merges record the name as an alias) — so a bar's
+    barcode never stops working because someone tidied a duplicate."""
+    variants = barcode_variants(upc)
+    if not variants:
+        return None
+    cursor.execute("""
+        SELECT * FROM products WHERE upc = ANY(%s) AND deleted_at IS NULL
+        ORDER BY verified DESC, scan_count DESC LIMIT 1
+    """, (variants,))
+    row = cursor.fetchone()
+    if row:
+        return row
+    cursor.execute(f"""
+        SELECT p.* FROM products d
+        JOIN product_aliases a ON a.norm_name = {NORM_SQL.format(col="d.name")}
+                              AND a.norm_brand = {NORM_SQL.format(col="d.brand")}
+        JOIN products p ON p.id = a.product_id AND p.deleted_at IS NULL
+        WHERE d.upc = ANY(%s) AND d.deleted_at IS NOT NULL
+        LIMIT 1
+    """, (variants,))
+    return cursor.fetchone()
+
+
 @v1_router.get("/products/barcode/{upc}", response_model=dict)
 def get_product_by_barcode(upc: str):
-    """Lookup product by UPC barcode"""
+    """Lookup product by UPC barcode (_find_by_barcode)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        cursor.execute("SELECT * FROM products WHERE upc = %s AND deleted_at IS NULL", (upc,))
-        row = cursor.fetchone()
-        
+        row = _find_by_barcode(cursor, upc)
         if not row:
             raise HTTPException(status_code=404, detail={
                 "error": "product_not_found",
@@ -726,17 +753,22 @@ def get_product_by_barcode(upc: str):
 @v1_router.post("/products", response_model=dict, status_code=201)
 def create_product(product_data: ProductCreate, user_id: str = Depends(get_current_user)):
     """Add new product"""
+    upc = clean_barcode(product_data.upc)
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Check UPC if provided
-        if product_data.upc:
-            cursor.execute("SELECT * FROM products WHERE upc = %s", (product_data.upc,))
+        # Check UPC if provided — in every form it can be written, merged-away
+        # products included (the column is UNIQUE even for them). The conflict
+        # names the LIVE product the barcode belongs to, so the app can count
+        # the bottle against it instead of adding it with no catalog link.
+        if upc:
+            cursor.execute("SELECT * FROM products WHERE upc = ANY(%s)", (barcode_variants(upc),))
             existing = cursor.fetchone()
             if existing:
+                live = _find_by_barcode(cursor, upc) or existing
                 raise HTTPException(status_code=409, detail={
                     "error": "upc_exists",
-                    "existing_product": dict(existing)
+                    "existing_product": dict(live)
                 })
         
         # Create product
@@ -753,7 +785,7 @@ def create_product(product_data: ProductCreate, user_id: str = Depends(get_curre
             product_data.brand,
             product_data.category,
             product_data.size,
-            product_data.upc,
+            upc,
             None,  # image_url
             0,  # scan_count
             0,  # verified
@@ -771,7 +803,7 @@ def create_product(product_data: ProductCreate, user_id: str = Depends(get_curre
                 "category": product_data.category,
                 "product_type": None,
                 "size": product_data.size,
-                "upc": product_data.upc,
+                "upc": upc,
                 "image_url": None,
                 "scan_count": 0,
                 "verified": False,
@@ -830,13 +862,13 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT id, name, brand, verified, created_by_user_id FROM products "
+            "SELECT id, name, brand, verified, created_by_user_id, upc FROM products "
             "WHERE id = %s AND deleted_at IS NULL",
             (source_id,)
         )
         source = cursor.fetchone()
         cursor.execute(
-            "SELECT id FROM products WHERE id = %s AND deleted_at IS NULL",
+            "SELECT id, upc FROM products WHERE id = %s AND deleted_at IS NULL",
             (target_id,)
         )
         target = cursor.fetchone()
@@ -971,6 +1003,19 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
             now,
         ))
 
+        # The barcode goes with the product that's kept. It used to stay on the
+        # retired duplicate, so the bar's barcode stopped finding anything, and
+        # registering it again failed: the column is UNIQUE, deleted rows
+        # included. Cleared first for that same reason. When the keeper already
+        # has a barcode of its own, the duplicate keeps its code and a scan of it
+        # still resolves here through the alias above (_find_by_barcode).
+        moved_barcode = False
+        if source["upc"] and not target["upc"]:
+            cursor.execute("UPDATE products SET upc = NULL WHERE id = %s", (source_id,))
+            cursor.execute("UPDATE products SET upc = %s, updated_at = %s WHERE id = %s",
+                           (source["upc"], now, target_id))
+            moved_barcode = True
+
         cursor.execute(
             "UPDATE products SET deleted_at = %s, updated_at = %s WHERE id = %s",
             (now, now, source_id)
@@ -983,6 +1028,7 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
             "target_product_id": target_id,
             "par_levels_moved": moved_par_levels,
             "assignments_moved": moved_assignments,
+            "barcode_moved": moved_barcode,
         }
 
 
@@ -5106,11 +5152,19 @@ async def crm_asset(asset: str):
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Handle HTTP exceptions with consistent format"""
+    """Handle HTTP exceptions with consistent format.
+
+    A dict detail is sent flat ({"error": ..., "message": ...}) AND under
+    "detail". The app reads `response.data.detail` in most places (the 409's
+    existing_product when registering a barcode, "invalid_password",
+    "email_not_configured", ...) and found nothing there, so every one of those
+    fell back to its generic path — a registered barcode added the bottle with
+    no catalog link. Readers of the flat keys (the CRM page, RegisterScreen)
+    keep working."""
     if isinstance(exc.detail, dict):
         return JSONResponse(
             status_code=exc.status_code,
-            content=exc.detail
+            content={**exc.detail, "detail": exc.detail}
         )
     return JSONResponse(
         status_code=exc.status_code,

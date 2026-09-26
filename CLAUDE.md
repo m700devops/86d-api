@@ -249,7 +249,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py test_scanstats.py test_crawl_quiet.py -q` (705 tests; test_timezones.py needs a dummy
+  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py -q` (732 tests; test_timezones.py needs a dummy
   `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
@@ -258,6 +258,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_second_opinion.py — the second opinion: `helpers.answers_agree`, the pure `_decide`, and
   `_run_providers` with fake providers on REAL delays (fast path, wait window, failures, a rejected
   key, the total cap cancelling both calls, the one-bar inference). Every rule was mutation-checked
+- test_barcode.py — barcode lookups (see "Barcodes" under AI Vision Rules): every form of one
+  code in both directions, UPC-E round trips both ways, the merged-away fallback, registering
+  (409 names the LIVE product, codes stored as digits) and the merge moving the code. Every
+  rule was mutation-checked; the lookup was also run on a real Postgres (index scan, ~0.04ms)
 - test_crawl_quiet.py — the crawl's dead hour (`main._in_crawl_window`, checked in winter and
   summer), `activity.py` on a fake clock, and that every background crawl waits (and nothing
   someone clicked does). Every rule was mutation-checked
@@ -316,6 +320,23 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
     serves): the fast path replied in ~0.2s via Gemini and OpenAI's answer, landing ~1s later, was
     logged `agree`/`disagree`. NOTE a `TestClient` used without `with` runs each request on its
     own loop and cancels leftovers, which makes background work look broken when it isn't
+- **Barcodes** (`GET /products/barcode/{upc}` → `_find_by_barcode`, one indexed query). A phone
+  reads one printed code differently by format and platform — iOS reports a 12-digit UPC-A as a
+  13-digit EAN-13 with a leading 0, a GTIN can be padded to 14, small cans carry an 8-digit UPC-E
+  standing for a 12-digit UPC-A — and the lookup used to be an exact string match, so a code
+  registered from one phone missed from another. `helpers.barcode_variants()` lists every form
+  (zero-padding widths 8/12/13/14, UPC-E expanded, and UPC-A compressed back to UPC-E —
+  `_upca_to_upces`, each candidate kept only if it expands back exactly) and the query matches
+  any. Non-numeric codes (a Code 128 shelf tag) are only ever themselves. Registration
+  (`POST /products`) stores a typed code as digits (`clean_barcode`) and checks every form. **A
+  merge takes the barcode to the keeper** when the keeper has none (cleared off the duplicate
+  first: `products.upc` is UNIQUE, deleted rows included — it used to stay on the retired row,
+  so the bar's barcode found nothing and couldn't be registered again). When the keeper has a
+  code of its own, a scan of the old one resolves through the merge's name alias. The 409 on a
+  known code names the LIVE product (under `detail`, see Key API Routes), so the app counts the
+  bottle against it. The app checks the bar's own product book first (86d-mobile
+  `productForBarcode`), so a bottle the bar already stocks is found instantly, offline. Covered
+  by test_barcode.py
 - **An app build that sends no `location_id` gets the account's location when there is exactly
   one** (`_scan_context`, in the same thread hop as the entitlement check) — most accounts are one
   bar, and without it older builds could never use the bar's own book or the fast path
@@ -470,8 +491,15 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   events worth having happen before an account exists; kept safe by a fixed event list, a
   capped batch and no free-form properties column. Always answers 202 — a lost metric must
   never surface as an error in the app
-- GET/POST /products, GET /products/search, GET /products/barcode/{upc}
-- POST /products/{product_id}/merge — merges a duplicate product into a target (aliases, par_levels, distributors)
+- GET/POST /products, GET /products/search, GET /products/barcode/{upc} (every form of the code —
+  see Barcodes under AI Vision Rules)
+- POST /products/{product_id}/merge — merges a duplicate product into a target (aliases, par_levels,
+  distributors, and its barcode when the keeper has none: `barcode_moved`)
+- **Errors with a dict detail are sent flat AND under `detail`** (`http_exception_handler`):
+  `{"error", "message", "detail": {same}}`. The app reads `response.data.detail` almost
+  everywhere (the 409's `existing_product`, `invalid_password`, `email_not_configured`, the
+  message on paywall/billing/reset/Apple sign-in) and used to find nothing there, so every one of
+  those fell back to its generic path. The CRM page and RegisterScreen read the flat keys
 - GET/POST /locations, GET/POST /locations/{id}/par-levels
 - PATCH /locations/{location_id}/products/{product_id} — upserts the `par_levels` row for
   one bottle at one bar (full / current_stock / par / price), preserving whatever the body

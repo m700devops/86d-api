@@ -231,6 +231,75 @@ def answers_agree(name_a: Optional[str], brand_a: Optional[str],
     return False
 
 
+def _upce_to_upca(code: str) -> Optional[str]:
+    """An 8-digit UPC-E (number system 0 or 1) written out as its 12-digit UPC-A."""
+    if len(code) != 8 or code[0] not in "01":
+        return None
+    ns, x, check = code[0], code[1:7], code[7]
+    last = x[5]
+    if last in "012":
+        body = x[0:2] + last + "0000" + x[2:5]
+    elif last == "3":
+        body = x[0:3] + "00000" + x[3:5]
+    elif last == "4":
+        body = x[0:4] + "00000" + x[4]
+    else:
+        body = x[0:5] + "0000" + last
+    return ns + body + check
+
+
+def _upca_to_upces(upca: str) -> set:
+    """The 8-digit UPC-E codes that write out as this 12-digit UPC-A — so a can
+    registered by its UPC-E is found when its UPC-A is read, and not only the
+    other way round. Each candidate is kept only if it expands back exactly."""
+    if len(upca) != 12 or upca[0] not in "01":
+        return set()
+    ns, m, p, check = upca[0], upca[1:6], upca[6:11], upca[11]
+    candidates = [
+        ns + m[0:2] + p[2:5] + m[2] + check,     # manufacturer ends x00, x in 0-2
+        ns + m[0:3] + p[3:5] + "3" + check,       # manufacturer ends 00
+        ns + m[0:4] + p[4] + "4" + check,         # manufacturer ends 0
+        ns + m[0:5] + p[4] + check,               # product 5-9
+    ]
+    return {c for c in candidates if _upce_to_upca(c) == upca}
+
+
+def clean_barcode(code: Optional[str]) -> Optional[str]:
+    """How a barcode is stored: digits only for a numeric code typed with spaces
+    or dashes ("0 12345 67890 5"), anything else as given, None when empty. The
+    lookup matches every form of the digits, not stray punctuation."""
+    raw = (code or "").strip()
+    if not raw:
+        return None
+    compact = raw.replace(" ", "").replace("-", "")
+    return compact if compact.isdigit() else raw
+
+
+def barcode_variants(code: Optional[str]) -> list:
+    """Every way the same product barcode can be written, so a lookup meets it
+    however it was stored. A phone reads one printed code differently by format
+    and platform: iOS reports a 12-digit UPC-A as a 13-digit EAN-13 with a
+    leading 0, a GTIN can be padded to 14, and small cans carry an 8-digit UPC-E
+    that stands for a 12-digit UPC-A. Anything that isn't 6-14 digits (a Code
+    128 shelf tag) is only ever itself."""
+    raw = (code or "").strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not raw or digits != raw.replace(" ", "").replace("-", "") or not 6 <= len(digits) <= 14:
+        return [raw] if raw else []
+    cores = {digits.lstrip("0") or "0"}
+    expanded = _upce_to_upca(digits)
+    if expanded:
+        cores.add(expanded.lstrip("0") or "0")
+    out = {raw, digits}
+    for core in cores:
+        for width in (8, 12, 13, 14):
+            if len(core) <= width:
+                out.add(core.zfill(width))
+    for form in list(out):
+        out |= _upca_to_upces(form)
+    return sorted(out)
+
+
 def seed_display_name(name: str, brand: Optional[str]) -> str:
     """A seeded product's name the way the model is asked to write it — no
     brand in front, no size at the end: "Johnnie Walker Red Label 750ml" /
