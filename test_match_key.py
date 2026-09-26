@@ -137,3 +137,88 @@ def test_sizes_compatible():
     assert sizes_compatible(size_ml("12oz"), size_ml("355ml"))       # same can, two units
     assert sizes_compatible(None, size_ml("750ml"))                  # the scan read no size: key decides
     assert sizes_compatible(size_ml("750 ML"), None)
+
+
+# ─── seeded names the prompt can't produce ───────────────────────────────────
+
+def test_no_seeded_name_is_a_descriptor_the_prompt_turns_into_original(main_module):
+    """The prompt answers a base product's descriptor ("classic", "original
+    taste"…) with "Original". A seed named one of them is never reached: the
+    Coca-Cola seed was "Classic", and every Coke scan minted a duplicate."""
+    import re
+    rule = re.search(r"Descriptor phrases like (.+?) mean base product", main_module.BOTTLE_PROMPT)
+    phrases = re.findall(r'"([^"]+)"', rule.group(1))
+    assert "classic" in phrases
+    for p in SEED_PRODUCTS:
+        assert seed_display_name(p["name"], p.get("brand")).lower() not in phrases, p["name"]
+    assert "Coca-Cola: Original | Diet Coke" in main_module.PRODUCT_CATALOG
+
+
+def _real_database_module():
+    """database.py itself, even where another test file has stubbed
+    sys.modules["database"]. Its pool is lazy: nothing connects."""
+    import importlib.util
+    os.environ.setdefault("DATABASE_URL", "postgresql://dummy/dummy")
+    spec = importlib.util.spec_from_file_location("database_for_rename_test", "database.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class RenameCursor:
+    def __init__(self, seeded):
+        self.seeded, self.sql, self.rows = seeded, [], []
+
+    def execute(self, sql, params=()):
+        sql = " ".join(sql.split())
+        self.sql.append((sql, params))
+        if sql.startswith("UPDATE products SET name"):
+            new, _key, _now, brand, old = params
+            self.rows = [r for r in self.seeded if (r["brand"], r["name"]) == (brand, old)]
+            for r in self.rows:
+                r["name"] = new
+        else:
+            self.rows = []
+
+    def fetchall(self):
+        return [{"id": r["id"]} for r in self.rows]
+
+
+class RenameConn:
+    def __init__(self, cur):
+        self.cur = cur
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        pass
+
+
+def test_a_database_seeded_as_classic_is_renamed_once_keeping_the_row():
+    db = _real_database_module()
+    cur = RenameCursor([{"id": "coke-row", "brand": "Coca-Cola", "name": "Classic"}])
+    assert db.rename_seed_products(RenameConn(cur)) == 1
+    update, alias = cur.sql[0], cur.sql[1]
+    assert "source = 'seed'" in update[0] and "deleted_at IS NULL" in update[0]
+    assert update[1][:2] == ("Original", key("Original", "Coca-Cola"))    # key moves with it
+    assert alias[0].startswith("INSERT INTO product_aliases") and "DO NOTHING" in alias[0]
+    assert alias[1][1:4] == ("coke-row", "classic", "cocacola")         # "Classic" still lands here
+    cur.sql.clear()
+    assert db.rename_seed_products(RenameConn(cur)) == 0                # the next boot writes nothing
+    assert not any(s.startswith("INSERT") for s, _ in cur.sql)
+
+
+def test_every_rename_matches_the_seed_list():
+    db = _real_database_module()
+    seeded = {(p.get("brand"), p["name"]) for p in SEED_PRODUCTS}
+    for brand, old, new in db.SEED_RENAMES:
+        assert (brand, new) in seeded and (brand, old) not in seeded
+
+
+def test_boot_renames_before_it_seeds():
+    """Seeding skips a product whose UPC exists, so the rename has to run
+    first, on every boot, for an already-seeded database to change at all."""
+    import inspect
+    src = inspect.getsource(_real_database_module().init_db)
+    assert src.index("rename_seed_products(conn)") < src.index("seed_products(conn)\n")

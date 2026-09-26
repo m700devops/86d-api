@@ -444,7 +444,11 @@ SEED_PRODUCTS = [
     # Soda / soft drinks — names are variant-only (no brand, no size) so AI scan
     # results can exact-match: _match_or_create_product compares LOWER(name)+brand.
     {"name": 'Original', "brand": 'Sprite', "category": 'soda', "size": '2L', "upc": '04000000001'},
-    {"name": 'Classic', "brand": 'Coca-Cola', "category": 'soda', "size": '2L', "upc": '04000000002'},
+    # "Original", not "Classic": the scan prompt answers a base product with no
+    # printed variant as "Original" ("classic" included), so a seed called
+    # "Classic" was never reached and every Coke scan minted a duplicate.
+    # Databases seeded under the old name are renamed by database.SEED_RENAMES.
+    {"name": 'Original', "brand": 'Coca-Cola', "category": 'soda', "size": '2L', "upc": '04000000002'},
     {"name": 'Diet Coke', "brand": 'Coca-Cola', "category": 'soda', "size": '2L', "upc": '04000000003'},
     {"name": 'Original', "brand": 'Pepsi', "category": 'soda', "size": '2L', "upc": '04000000004'},
     {"name": 'Orange', "brand": 'Fanta', "category": 'soda', "size": '2L', "upc": '04000000005'},

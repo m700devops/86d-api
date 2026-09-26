@@ -249,7 +249,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py -q` (733 tests; test_timezones.py needs a dummy
+  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py -q` (737 tests; test_timezones.py needs a dummy
   `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
@@ -452,6 +452,14 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   exact spelling, plus junk ("Putaendo" twice). Add a product to `seed_data.py` and it's in the
   prompt. test_match_key.py checks no two seeded products share a key and every seeded product is
   reachable from its listed name
+- **A seed's name must be one the prompt can produce.** Coca-Cola was seeded "Classic" while the prompt
+  answers a base product's descriptor ("classic", "original taste"…) with "Original" — so the seed
+  was never reached and every Coke scan minted a duplicate. It's "Original" now, like Sprite and Pepsi,
+  and test_match_key.py fails any seed named one of the prompt's descriptor phrases. **Renaming a seed
+  needs a `database.SEED_RENAMES` entry**: seeding skips a product whose UPC exists, so an edit to
+  seed_data.py alone never reaches a database seeded under the old name. `rename_seed_products()` runs
+  every boot before seeding, renames only `source='seed'` rows (same id, so every bar's par, price and
+  distributor stay put), and keeps the old name as an alias. Log: `SEED_RENAMED`
 - The route's database work (entitlement check, lookups, the one write) and the synchronous Gemini
   call run on the scan path's OWN thread pool (`_SCAN_POOL`, `SCAN_THREADS`, default 16) —
   psycopg2 blocks, the route shares one event loop with every other request, and the default

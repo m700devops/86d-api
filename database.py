@@ -7,7 +7,7 @@ import threading
 from contextlib import contextmanager
 from typing import Optional
 from seed_data import SEED_PRODUCTS
-from helpers import generate_id, now_iso, product_match_key
+from helpers import generate_id, now_iso, product_match_key, normalize_match_text
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -736,6 +736,7 @@ def init_db():
         conn.commit()
 
         # Seed products — always runs but is idempotent (checks name+brand before insert)
+        rename_seed_products(conn)
         seed_products(conn)
         reconcile_product_match_keys(conn)
 
@@ -763,6 +764,45 @@ def reconcile_product_match_keys(conn) -> int:
         conn.commit()
         print(f"[db] PRODUCT_MATCH_KEYS updated {len(stale)} product(s)", flush=True)
     return len(stale)
+
+
+# Seeded products whose name changed, as (brand, old name, new name). Seeding
+# skips a product whose UPC already exists, so a rename in seed_data.py alone
+# never reaches a database seeded under the old name.
+SEED_RENAMES = [
+    # The scan prompt answers a base product with no printed variant "Original"
+    # ("classic" included), so "Classic" was never matched and every Coke scan
+    # minted a second Coca-Cola.
+    ("Coca-Cola", "Classic", "Original"),
+]
+
+
+def rename_seed_products(conn) -> int:
+    """Apply SEED_RENAMES to seeded rows, keeping each row's id so every bar's
+    par, price and distributor for it stay put. The old name is kept as an
+    alias, so a label that really does print it still lands here. Runs every
+    boot; once renamed nothing matches the old name, so it writes nothing.
+    Only rows the seed created (source='seed'): a product someone added under
+    that name is theirs."""
+    cursor = conn.cursor()
+    now = now_iso()
+    renamed = 0
+    for brand, old, new in SEED_RENAMES:
+        cursor.execute("""
+            UPDATE products SET name = %s, match_key = %s, updated_at = %s
+            WHERE brand = %s AND name = %s AND source = 'seed' AND deleted_at IS NULL
+            RETURNING id
+        """, (new, product_match_key(new, brand), now, brand, old))
+        for row in cursor.fetchall():
+            cursor.execute("""
+                INSERT INTO product_aliases (id, product_id, norm_name, norm_brand, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (norm_name, norm_brand) DO NOTHING
+            """, (generate_id(), row["id"], normalize_match_text(old), normalize_match_text(brand), now))
+            renamed += 1
+            print(f"[db] SEED_RENAMED {brand} {old!r} -> {new!r} id={row['id']}", flush=True)
+    conn.commit()
+    return renamed
 
 
 def seed_products(conn):
