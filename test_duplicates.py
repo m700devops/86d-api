@@ -148,3 +148,70 @@ def test_the_route_serves_what_to_merge_into_what(client):
 def test_someone_elses_bar_is_refused(client):
     r = client(False, []).get("/v1/locations/L1/duplicates")
     assert r.status_code == 403 and r.json()["detail"]["error"] == "forbidden"
+
+
+# ─── fast, and exactly what comparing everything with everything gives ───────
+
+def _brute(rows):
+    """The finder without its index: every row against every group."""
+    from helpers import _keeper_rank, _row_ml, same_bottle, sizes_compatible
+    groups = []
+    for row in sorted(rows, key=_keeper_rank):
+        homes = [] if row.get("verified") else [g for g in groups if same_bottle(g["keep"], row)]
+        if len(homes) == 1:
+            if all(sizes_compatible(_row_ml(m), _row_ml(row)) for m in homes[0]["fold"]):
+                homes[0]["fold"].append(row)
+            else:
+                homes[0]["contested"] = True
+        elif not homes:
+            groups.append({"keep": row, "fold": [], "contested": False})
+    return {(g["keep"]["id"], tuple(r["id"] for r in g["fold"])) for g in groups
+            if g["fold"] and not g["contested"]}
+
+
+def _seeded_book():
+    from seed_data import SEED_PRODUCTS
+    from helpers import seed_display_name
+    rows = [P(f"s{i}", p["name"], p["brand"], p.get("size"), verified=True) for i, p in enumerate(SEED_PRODUCTS)]
+    rows += [P(f"c{i}", seed_display_name(p["name"], p["brand"]), p["brand"], price=10, scans=1)
+             for i, p in enumerate(SEED_PRODUCTS)]
+    return rows
+
+
+def test_the_index_changes_nothing_on_the_whole_catalog():
+    rows = _seeded_book()
+    assert pairs(rows) == _brute(rows) and len(pairs(rows)) > 400
+
+
+def test_the_index_changes_nothing_on_messy_books():
+    import random
+    rng = random.Random(7)
+    brands = ["Johnnie Walker", "Jack Daniel's", "Jack Daniels", "Tito's", "Titos", "Smirnoff", "Smirnof",
+              "Grey Goose", "Patrón", "Patron", "J&B", "JB", "Bulleit", "", None]
+    names = ["Red", "Red Label", "Black Label", "Original", "Handmade", "Old No. 7", "Old No 7 Tennessee Whiskey",
+             "Silver", "Sliver", "Rye", "Bourbon", "12", "12 Year Old", "Light", "Light Lime", "Citron", "Citroen",
+             "Handmade 750ml", "Handmade 1L", "Red Label 1.75L", "Jack Daniel's Old No. 7"]
+    for trial in range(60):
+        rows = [P(f"r{trial}-{i}", rng.choice(names), rng.choice(brands),
+                  rng.choice([None, None, "750ml", "1L"]), verified=rng.random() < 0.15,
+                  price=rng.choice([None, 20]), par=rng.choice([None, 2]), scans=rng.randint(0, 5),
+                  created=f"2026-0{rng.randint(1, 9)}-01") for i in range(rng.randint(2, 40))]
+        assert pairs(rows) == _brute(rows), trial
+
+
+@pytest.mark.parametrize("keeper_is_short", [True, False])
+def test_found_whichever_reading_starts_with_the_shared_word(keeper_is_short):
+    # "The Glenlivet 12" starts with a word the other reading doesn't have, so
+    # only one of the two index lookups can find the pair: each direction once.
+    short = P("short", "12", "Glenlivet", price=30 if keeper_is_short else None)
+    long = P("long", "The Glenlivet 12", None, price=None if keeper_is_short else 30)
+    keep, fold = ("short", "long") if keeper_is_short else ("long", "short")
+    assert pairs([short, long]) == {(keep, (fold,))}
+
+
+def test_a_big_book_is_quick():
+    import time
+    rows = _seeded_book()                     # 914 products: every seed, and a copy of each
+    started = time.perf_counter()
+    duplicate_groups(rows)
+    assert time.perf_counter() - started < 1.0

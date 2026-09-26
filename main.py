@@ -1970,10 +1970,11 @@ def save_inventory_draft(request: InventoryDraftRequest, user_id: str = Depends(
         conn.commit()
 
         # Each scanned row carries the scan_id its identification was logged
-        # under; record the product the row holds NOW. Where that differs from
-        # what the AI matched, a person corrected it — the accuracy number, per
-        # model and prompt, with no extra call from the app. After the draft's
-        # own commit and in its own try: this must never cost anyone their draft.
+        # under; record the product the row holds now. NOT an accuracy measure
+        # (the app can't change a row's product, and this runs seconds after the
+        # scan): accuracy is what staff do with the row, POST /scans/{id}/outcome.
+        # After the draft's own commit and in its own try: this must never cost
+        # anyone their draft.
         finals = _scan_finals(request.bottles)
         if finals:
             try:
@@ -3058,7 +3059,7 @@ async def _trial_reminder_loop():
 # defaults to UTC — 2pm New York, when bars count before opening); that name is
 # no longer read. activity.py makes the crawl wait out any count regardless.
 LEADGEN_CRAWL_HOUR = int(os.getenv("LEADGEN_CRAWL_HOUR", "5"))
-LEADGEN_CRAWL_WINDOW_HOURS = max(1, int(os.getenv("LEADGEN_CRAWL_WINDOW_HOURS", "3")))
+LEADGEN_CRAWL_WINDOW_HOURS = min(24, max(1, int(os.getenv("LEADGEN_CRAWL_WINDOW_HOURS", "3"))))
 LEADGEN_CRAWL_TZ = os.getenv("LEADGEN_CRAWL_TZ", "America/Los_Angeles")
 
 
@@ -3071,33 +3072,41 @@ def _crawl_tz():
         return ZoneInfo("America/Los_Angeles")
 
 
+def _crawl_window_start(local_now: datetime) -> Optional[datetime]:
+    """When the crawl window `local_now` is in opened, or None outside it. Counted
+    round the clock, so a window set to cross midnight (hour 23, 3 hours) works."""
+    into = (local_now.hour - LEADGEN_CRAWL_HOUR) % 24
+    if into >= LEADGEN_CRAWL_WINDOW_HOURS:
+        return None
+    return (local_now - timedelta(hours=into)).replace(minute=0, second=0, microsecond=0)
+
+
 def _in_crawl_window(local_now: datetime) -> bool:
     """Is `local_now` (in the crawl's clock) inside the daily crawl window?"""
-    return LEADGEN_CRAWL_HOUR <= local_now.hour < LEADGEN_CRAWL_HOUR + LEADGEN_CRAWL_WINDOW_HOURS
+    return _crawl_window_start(local_now) is not None
 LEADGEN_CHECK_INTERVAL_SECONDS = 900                          # 15 min
 
 
 def _leadgen_should_run_now() -> bool:
-    """True once per day, inside the crawl window (_in_crawl_window).
+    """True once per crawl window: inside it (_crawl_window_start), with no
+    successful run since it opened.
 
-    Checks the run log rather than keeping state in memory, so a restart — which
-    on Render's free tier happens whenever the service spins down — can't cause
-    a second run or skip the day entirely.
+    Checks the run log rather than keeping state in memory, so a restart (a
+    deploy) can't cause a second run or skip the day entirely.
     """
     from database import get_db as _get_db
 
-    local_now = datetime.now(_crawl_tz())
-    if not _in_crawl_window(local_now):
+    window_start = _crawl_window_start(datetime.now(_crawl_tz()))
+    if window_start is None:
         return False
 
     # Compared as an instant, not as a date string. started_at is written by
     # now_iso() in UTC, so slicing its first ten characters gives the UTC date —
-    # and west of UTC the local evening run hour falls on the NEXT UTC date. A
-    # 6pm Pacific run on local day D is stored as D+1, so on day D+1 a date
-    # comparison finds it and suppresses that day's run: the generator would
-    # fire every other day, quietly, and only in the zones this tool is for.
-    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    since = local_midnight.astimezone(timezone.utc).isoformat()
+    # and west of UTC a local evening falls on the NEXT UTC date, so a date
+    # comparison once made the generator fire every other day. Counted from the
+    # window's opening rather than local midnight, so a window crossing
+    # midnight still runs once.
+    since = window_start.astimezone(timezone.utc).isoformat()
 
     with _get_db() as conn:
         cursor = conn.cursor()

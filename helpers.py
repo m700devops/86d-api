@@ -304,6 +304,15 @@ def _row_ml(row: dict) -> Optional[float]:
     return size_ml(row.get("size")) or size_ml(row.get("name"))
 
 
+def _edit_variants(word: str) -> set:
+    """The word and, from 4 letters, each way of deleting one letter: two words
+    one insert, delete or change apart always share one of these."""
+    out = {word}
+    if len(word) >= 4:
+        out |= {word[:i] + word[i + 1:] for i in range(len(word))}
+    return out
+
+
 def _keeper_rank(row: dict) -> tuple:
     """Which of two copies of one bottle to keep: the catalog's own (a verified
     product can't be merged away), then the one this bar has set more on —
@@ -342,8 +351,39 @@ def duplicate_groups(rows: list) -> list:
     750ml and a 1L copy: which one is it?). A verified product is never folded —
     the merge route refuses to retire one."""
     groups: list = []
+    # Candidates, so each row is compared with the few keepers it could possibly
+    # be (same_bottle stays the judge): comparing every row with every group
+    # took seconds on a big bar's book, on a request thread. Two readings can
+    # only agree when the smaller one's FIRST word is in the other — exactly, or
+    # one letter off (_covered) — so keepers are indexed by each word and each
+    # first word, with one-letter-deleted variants (two words one edit apart
+    # always share one), and by match key.
+    by_word: dict = {}
+    by_first: dict = {}
+    by_key: dict = {}
+
+    def candidates(row) -> list:
+        words = _reading_words(row.get("name"), row.get("brand"))
+        found = set(by_key.get(row.get("match_key"), ()))
+        for v in _edit_variants(words[0]):
+            found |= by_word.get(v, set())
+        for w in words:
+            for v in _edit_variants(w):
+                found |= by_first.get(v, set())
+        return [groups[i] for i in sorted(found)]
+
+    def index(i, row) -> None:
+        words = _reading_words(row.get("name"), row.get("brand"))
+        for w in words:
+            for v in _edit_variants(w):
+                by_word.setdefault(v, set()).add(i)
+        for v in _edit_variants(words[0]):
+            by_first.setdefault(v, set()).add(i)
+        if row.get("match_key"):
+            by_key.setdefault(row["match_key"], set()).add(i)
+
     for row in sorted(rows, key=_keeper_rank):
-        homes = [] if row.get("verified") else [g for g in groups if same_bottle(g["keep"], row)]
+        homes = [] if row.get("verified") else [g for g in candidates(row) if same_bottle(g["keep"], row)]
         if len(homes) == 1:
             home = homes[0]
             if all(sizes_compatible(_row_ml(m), _row_ml(row)) for m in home["fold"]):
@@ -352,6 +392,7 @@ def duplicate_groups(rows: list) -> list:
                 home["contested"] = True
         elif not homes:
             groups.append({"keep": row, "fold": [], "contested": False})
+            index(len(groups) - 1, row)
     return [{"keep": g["keep"], "fold": g["fold"]} for g in groups
             if g["fold"] and not g["contested"]]
 

@@ -249,7 +249,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q` (764 tests; test_timezones.py needs a dummy
+  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q` (775 tests; test_timezones.py needs a dummy
   `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
@@ -555,7 +555,11 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   sizeless copy beside the 750ml and the 1L), a group whose copies disagree on size, and folding a
   verified product (the merge route refuses). Keeper: verified, then what the bar set (price, par,
   distributor), then most scanned, then oldest. No two seeded products agree (checked). Read-only;
-  every merge is the bartender's tap
+  every merge is the bartender's tap. **Indexed, not all-against-all**: comparing every row with every
+  group took 4.4s on a 914-product book, on a request thread holding the GIL; each row is now compared
+  only with keepers sharing its match key or a first word (with one-letter-deleted variants, so
+  `answers_agree`'s one-typo tolerance is kept) — 51ms, and test_duplicates.py checks the result is
+  identical to the brute force on the whole seeded catalog and 60 random messy books
 - GET/POST /locations/{id}/product-distributors — the other half of that memory: which
   distributor a bottle is ordered from at this bar, set once and applied to every future scan
 - POST /inventory/start, GET /inventory/{session_id}, POST /inventory/{session_id}/scan
@@ -608,7 +612,8 @@ capture. Don't reintroduce them or describe them as current.)
   holds the GIL; it has taken the whole server down before. Two things keep them apart, at no
   cost (a separate CRM service was built and reverted: the owner chose not to pay for one):
   - **A dead hour.** The daily run fires once, inside `LEADGEN_CRAWL_HOUR` (5) +
-    `LEADGEN_CRAWL_WINDOW_HOURS` (3) in `LEADGEN_CRAWL_TZ` (America/Los_Angeles): 5-8am in LA is
+    `LEADGEN_CRAWL_WINDOW_HOURS` (3, at most 24; a window may cross midnight, and "once a day" counts
+    from when the window opened, `_crawl_window_start`) in `LEADGEN_CRAWL_TZ` (America/Los_Angeles): 5-8am in LA is
     8-11am in New York — western bars long closed, eastern ones not yet open — and 8-9pm in
     Manila, so the list is fresh before the caller's shift. Its own clock, NOT `CRM_TIMEZONE`,
     which defaults to UTC and put the old 6pm run at 2pm New York, when bars count before

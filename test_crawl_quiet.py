@@ -101,9 +101,28 @@ def test_5am_los_angeles_is_8am_new_york_and_evening_in_manila(day):
     assert start.astimezone(ZoneInfo("Asia/Manila")).hour in (20, 21)
 
 
+@pytest.mark.parametrize("hour, inside", [(22, False), (23, True), (0, True), (1, True), (2, False)])
+def test_a_window_set_across_midnight(monkeypatch, hour, inside):
+    monkeypatch.setattr(main, "LEADGEN_CRAWL_HOUR", 23)
+    day = 26 if hour == 23 or hour == 22 else 27
+    assert main._in_crawl_window(datetime(2026, 9, day, hour, 30, tzinfo=LA)) is inside
+
+
+def test_once_per_window_counts_from_when_it_opened(monkeypatch):
+    """Not from local midnight: a window crossing it would run twice."""
+    monkeypatch.setattr(main, "LEADGEN_CRAWL_HOUR", 23)
+    assert main._crawl_window_start(datetime(2026, 9, 27, 1, 40, tzinfo=LA)) == \
+        datetime(2026, 9, 26, 23, 0, tzinfo=LA)
+    monkeypatch.setattr(main, "LEADGEN_CRAWL_HOUR", 5)
+    assert main._crawl_window_start(datetime(2026, 9, 27, 7, 59, tzinfo=LA)) == \
+        datetime(2026, 9, 27, 5, 0, tzinfo=LA)
+    src = inspect.getsource(main._leadgen_should_run_now)
+    assert "window_start.astimezone(timezone.utc)" in src and "local_midnight" not in src
+
+
 def test_the_run_no_longer_follows_the_counters_timezone():
     src = inspect.getsource(main._leadgen_should_run_now)
-    assert "_reset_tz" not in src and "_crawl_tz()" in src and "_in_crawl_window" in src
+    assert "_reset_tz" not in src and "_crawl_tz()" in src and "_crawl_window_start" in src
 
 
 # ─── every background crawl waits; what someone clicked doesn't ──────────────

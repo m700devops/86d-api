@@ -694,8 +694,10 @@ def init_db():
 
         # One row per /scans/analyze call: which provider answered, how fast,
         # what it said, what it matched. final_product_id is filled in later by
-        # the draft sync with the product the bartender's row actually ended up
-        # as — matched_product_id vs final_product_id is scan accuracy. No image
+        # the draft sync with the product the row holds — NOT an accuracy
+        # measure: the app can't change a row's product and the sync runs
+        # seconds after the scan, so it matches ~100% whatever the scanner does.
+        # Accuracy is what staff do with the row (scan_outcomes, below). No image
         # is stored. Written in the background (main._record_scan_event), so a
         # failure here never fails a scan.
         cursor.execute("""
