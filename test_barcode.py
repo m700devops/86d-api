@@ -230,12 +230,13 @@ def test_a_new_code_is_stored_as_digits(monkeypatch):
     assert "012345678905" in insert
 
 
-def _merge(monkeypatch, target_upc):
+def _merge(monkeypatch, target_upc, other_bars_count_it=False):
     cur = ScriptCursor([
         ("SELECT id, name, brand, verified, created_by_user_id, upc", [
             {"id": "dup", "name": "Red", "brand": "Johnnie Walker", "verified": 0,
              "created_by_user_id": "u1", "upc": "012345678905"}]),
         ("SELECT id, upc FROM products", [{"id": "keeper", "upc": target_upc}]),
+        ("WHERE pl.product_id = %s AND l.user_id <> %s", [{"?column?": 1}] if other_bars_count_it else []),
     ])
     r = _client(monkeypatch, cur).post("/v1/products/dup/merge",
                                        json={"target_product_id": "keeper"})
@@ -269,3 +270,34 @@ def test_a_seeded_made_up_code_never_answers_a_real_scan():
         for width in (8, 12, 13, 14):
             if len(fake.lstrip("0")) <= width:
                 assert not finds(fake, fake.lstrip("0").zfill(width)), fake
+
+
+
+# ─── a merge never breaks another bar ────────────────────────────────────────
+
+def test_a_merge_is_remembered_for_the_account_that_made_it(monkeypatch):
+    out, _, cur = _merge(monkeypatch, None)
+    (params,) = [p for s_, p in cur.sql if s_.startswith("INSERT INTO product_merges")]
+    assert params[1:4] == ("u1", "dup", "keeper")
+    assert out["retired"] is True
+    assert any(s_.startswith("UPDATE products SET deleted_at") for s_, _ in cur.sql)
+
+
+def test_a_duplicate_other_bars_count_stays_alive_for_them(monkeypatch):
+    """Products are shared: a bottle one bar's scan created is matched by every
+    bar. Retiring it under another bar stranded that bar's price and par on a
+    product its scans could no longer reach."""
+    out, updates, cur = _merge(monkeypatch, None, other_bars_count_it=True)
+    assert out["merged"] is True and out["retired"] is False
+    assert not any("deleted_at" in u for u in updates)
+    assert out["barcode_moved"] is False and not any("SET upc" in u for u in updates)   # theirs too
+    shared_check = next(p for s_, p in cur.sql if "l.user_id <> %s" in s_)
+    assert shared_check == ("dup", "u1", "dup", "u1")
+
+
+def test_the_merging_bar_follows_its_own_merge():
+    """Its scans must reach the keeper even while the product it merged away is
+    alive for other bars — through ITS merges, not the one-per-phrasing alias."""
+    import inspect
+    step0 = inspect.getsource(main._find_product).split("# Step A")[0]
+    assert "FROM product_merges m" in step0 and "m.user_id = %s" in step0

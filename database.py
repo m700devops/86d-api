@@ -464,6 +464,24 @@ def init_db():
             ON product_aliases(product_id)
         """)
 
+        # Every merge, per account (POST /products/{id}/merge). Aliases are one
+        # per phrasing for everyone, first merge wins; this is what THIS account
+        # decided, so its scans follow its own merges (main._find_product, Step
+        # 0) even when the product it merged away stays alive for other bars.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS product_merges (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                source_product_id TEXT NOT NULL,
+                target_product_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_product_merges_user
+            ON product_merges(user_id)
+        """)
+
         # Supports the normalized/swapped lookups in _match_or_create_product.
         # The expressions must match helpers.NORM_SQL exactly to be usable.
         cursor.execute("""

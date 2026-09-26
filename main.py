@@ -1004,23 +1004,48 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
             now,
         ))
 
+        cursor.execute("""
+            INSERT INTO product_merges (id, user_id, source_product_id, target_product_id, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (generate_id(), user_id, source_id, target_id, now))
+
+        # Retire the duplicate only when no OTHER account counts it. Products are
+        # a shared catalog — a bottle one bar's scan created is matched by every
+        # bar's scans — and only the caller's own rows were moved above. Retiring
+        # it under another bar left that bar's price and par on a product its
+        # scans could no longer reach: its next count landed on the keeper with
+        # neither, and the old row read as empty and was re-ordered. Kept alive,
+        # the other bars carry on as before; this account's scans still reach the
+        # keeper through the merge just recorded (_find_product's Step 0).
+        cursor.execute("""
+            SELECT 1 FROM par_levels pl JOIN locations l ON l.id = pl.location_id
+            WHERE pl.product_id = %s AND l.user_id <> %s AND l.deleted_at IS NULL
+            UNION ALL
+            SELECT 1 FROM location_product_distributors d JOIN locations l ON l.id = d.location_id
+            WHERE d.product_id = %s AND l.user_id <> %s AND l.deleted_at IS NULL
+            LIMIT 1
+        """, (source_id, user_id, source_id, user_id))
+        retired = cursor.fetchone() is None
+
         # The barcode goes with the product that's kept. It used to stay on the
         # retired duplicate, so the bar's barcode stopped finding anything, and
         # registering it again failed: the column is UNIQUE, deleted rows
         # included. Cleared first for that same reason. When the keeper already
         # has a barcode of its own, the duplicate keeps its code and a scan of it
-        # still resolves here through the alias above (_find_by_barcode).
+        # still resolves here through the alias above (_find_by_barcode). A
+        # duplicate other bars still count keeps its code: it's theirs too.
         moved_barcode = False
-        if source["upc"] and not target["upc"]:
+        if retired and source["upc"] and not target["upc"]:
             cursor.execute("UPDATE products SET upc = NULL WHERE id = %s", (source_id,))
             cursor.execute("UPDATE products SET upc = %s, updated_at = %s WHERE id = %s",
                            (source["upc"], now, target_id))
             moved_barcode = True
 
-        cursor.execute(
-            "UPDATE products SET deleted_at = %s, updated_at = %s WHERE id = %s",
-            (now, now, source_id)
-        )
+        if retired:
+            cursor.execute(
+                "UPDATE products SET deleted_at = %s, updated_at = %s WHERE id = %s",
+                (now, now, source_id)
+            )
         conn.commit()
 
         return {
@@ -1030,6 +1055,8 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
             "par_levels_moved": moved_par_levels,
             "assignments_moved": moved_assignments,
             "barcode_moved": moved_barcode,
+            # False: other bars still count the duplicate, so it stays for them.
+            "retired": retired,
         }
 
 
@@ -4355,8 +4382,13 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
         with get_db() as conn:
             cursor = conn.cursor()
 
-            # Step 0 — this bar's own bottles, by match key. Only when exactly one
-            # of them fits: two means the bar keeps the same bottle as two products
+            # Step 0 — this bar's own bottles: by match key, or the product this
+            # account MERGED a product with that key into (it merged "Red" into
+            # "Red Label": the product it merged away can still be alive for other
+            # bars that count it, and the global steps below would find it first),
+            # or through a merge's alias (merges from before product_merges
+            # existed; aliases are one per phrasing for everyone). Only when exactly
+            # one fits: two means the bar keeps the same bottle as two products
             # (a 750ml and a 1L, say), and guessing between them would put one
             # size's count on the other; the global steps below decide as before.
             # The location must be the caller's own, so a forged location_id can
@@ -4368,9 +4400,15 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
                     JOIN locations l ON l.id = pl.location_id
                     WHERE pl.location_id = %s AND l.user_id = %s
                       AND p.deleted_at IS NULL
-                      AND p.match_key IN (%s, %s)
+                      AND (p.match_key IN (%s, %s)
+                           OR p.id IN (SELECT m.target_product_id FROM product_merges m
+                                       JOIN products s ON s.id = m.source_product_id
+                                       WHERE m.user_id = %s AND s.match_key IN (%s, %s))
+                           OR p.id IN (SELECT product_id FROM product_aliases
+                                       WHERE norm_name = %s AND norm_brand = %s))
                     LIMIT 10
-                """, (location_id, user_id, match_key, swapped_key or match_key))
+                """, (location_id, user_id, match_key, swapped_key or match_key,
+                      user_id, match_key, swapped_key or match_key, norm_name, norm_brand))
                 rows = _size_ok(cursor.fetchall())
                 if len(rows) == 1:
                     return (rows[0]["id"], "bar_book")

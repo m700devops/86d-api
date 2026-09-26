@@ -524,7 +524,18 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - GET/POST /products, GET /products/search, GET /products/barcode/{upc} (every form of the code —
   see Barcodes under AI Vision Rules)
 - POST /products/{product_id}/merge — merges a duplicate product into a target (aliases, par_levels,
-  distributors, and its barcode when the keeper has none: `barcode_moved`)
+  distributors, and its barcode when the keeper has none: `barcode_moved`). **Products are a shared
+  catalog — a bottle one bar's scan created is matched by every bar's scans — and a merge moves only the
+  caller's own rows, so the duplicate is RETIRED only when no other account's bar counts it
+  (`retired`).** Retiring it under another bar stranded that bar's price and par on a product its
+  scans could no longer reach: its next count landed on the keeper with neither, and the old row read
+  as empty and got re-ordered (reproduced on a real Postgres before the fix; the duplicate finder makes
+  merges one tap). A shared duplicate stays alive for the others and keeps its barcode. Every merge is
+  recorded per account in `product_merges`, and `_find_product`'s Step 0 (the bar's own bottles) follows
+  THIS account's merges — needed because aliases are one per phrasing for everyone, first merge wins,
+  and the global steps would find the still-alive duplicate first. Checked on a real Postgres with three
+  bars: the merging bar lands on the keeper, the bar that shares the duplicate keeps its own priced
+  product, a bar with neither is unchanged
 - **Errors with a dict detail are sent flat AND under `detail`** (`http_exception_handler`):
   `{"error", "message", "detail": {same}}`. The app reads `response.data.detail` almost
   everywhere (the 409's `existing_product`, `invalid_password`, `email_not_configured`, the
