@@ -7,7 +7,7 @@ import threading
 from contextlib import contextmanager
 from typing import Optional
 from seed_data import SEED_PRODUCTS
-from helpers import generate_id, now_iso
+from helpers import generate_id, now_iso, product_match_key, normalize_match_text
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -466,6 +466,24 @@ def init_db():
             ON product_aliases(product_id)
         """)
 
+        # Every merge, per account (POST /products/{id}/merge). Aliases are one
+        # per phrasing for everyone, first merge wins; this is what THIS account
+        # decided, so its scans follow its own merges (main._find_product, Step
+        # 0) even when the product it merged away stays alive for other bars.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS product_merges (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                source_product_id TEXT NOT NULL,
+                target_product_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_product_merges_user
+            ON product_merges(user_id)
+        """)
+
         # Supports the normalized/swapped lookups in _match_or_create_product.
         # The expressions must match helpers.NORM_SQL exactly to be usable.
         cursor.execute("""
@@ -643,6 +661,9 @@ def init_db():
             ("created_by_user_id", "TEXT"),
             ("deleted_at", "TEXT"),
             ("product_type", "TEXT"),
+            # helpers.product_match_key(name, brand) — see there. Filled for
+            # every row by reconcile_product_match_keys() below.
+            ("match_key", "TEXT"),
         ]
         for col, col_def in products_migrations:
             cursor.execute("""
@@ -652,6 +673,12 @@ def init_db():
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE products ADD COLUMN {col} {col_def}")
                 print(f"[db] migrated products: added {col} {col_def}", flush=True)
+        conn.commit()
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_products_match_key
+            ON products(match_key) WHERE deleted_at IS NULL
+        """)
         conn.commit()
 
         # Backfill source: seed rows (verified=1) → 'seed', others keep 'manual'
@@ -736,10 +763,155 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_app_events_anon
             ON app_events(anon_id)
         """)
+
+        # One row per /scans/analyze call: which provider answered, how fast,
+        # what it said, what it matched. final_product_id is filled in later by
+        # the draft sync with the product the row holds — NOT an accuracy
+        # measure: the app can't change a row's product and the sync runs
+        # seconds after the scan, so it matches ~100% whatever the scanner does.
+        # Accuracy is what staff do with the row (scan_outcomes, below). No image
+        # is stored. Written in the background (main._record_scan_event), so a
+        # failure here never fails a scan.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scan_events (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                location_id TEXT,
+                status TEXT,
+                provider TEXT,
+                model TEXT,
+                fallback_from TEXT,
+                name TEXT,
+                brand TEXT,
+                category TEXT,
+                product_type TEXT,
+                confidence REAL,
+                match_method TEXT,
+                matched_product_id TEXT,
+                needs_rescan BOOLEAN,
+                provider_ms INTEGER,
+                total_ms INTEGER,
+                input_tokens INTEGER,
+                cached_tokens INTEGER,
+                output_tokens INTEGER,
+                image_kb INTEGER,
+                label_text TEXT,
+                label_supported BOOLEAN,
+                path TEXT,
+                second_opinion TEXT,
+                second_provider TEXT,
+                second_answer TEXT,
+                final_product_id TEXT,
+                final_at TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        # Added after the table first shipped: what the model read off the label
+        # before naming the product, and whether that name was in it
+        # (helpers.label_supports). ADD COLUMN IF NOT EXISTS is idempotent.
+        cursor.execute("ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS label_text TEXT")
+        cursor.execute("ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS label_supported BOOLEAN")
+        # The second opinion (main._run_providers): how the answer was reached
+        # (fast / both / window / single), whether the other provider agreed, and
+        # what it said (JSON).
+        for col in ("path", "second_opinion", "second_provider", "second_answer"):
+            cursor.execute(f"ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS {col} TEXT")
+        # How much of output_tokens (what the provider bills) was thinking:
+        # Gemini's thoughtsTokenCount, an OpenAI reasoning model's reasoning_tokens.
+        cursor.execute("ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS thinking_tokens INTEGER")
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scan_events_created
+            ON scan_events(created_at)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scan_events_user_created
+            ON scan_events(user_id, created_at)
+        """)
+        # What the bartender did with a scanned row (POST /scans/{id}/outcome):
+        # removed it, or confirmed a row the two AIs read differently. Its own
+        # table keyed by the scan id, because a removal can arrive before the
+        # scan's scan_events row exists: that row is written once the second
+        # opinion is in, which can be seconds after the reply. scanstats.py
+        # reads the two together.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scan_outcomes (
+                scan_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
         conn.commit()
 
         # Seed products — always runs but is idempotent (checks name+brand before insert)
+        rename_seed_products(conn)
         seed_products(conn)
+        reconcile_product_match_keys(conn)
+
+
+def reconcile_product_match_keys(conn) -> int:
+    """Make every product's stored match_key equal what product_match_key()
+    computes today. Runs every boot, like the CRM's _reconcile_* passes, rather
+    than once: the first run backfills the column, and any later change to the
+    key rule re-keys the catalog on the next deploy instead of leaving old rows
+    unmatchable. Only rows whose key differs are written, so a normal boot
+    writes nothing. Returns the number of rows updated."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, brand, match_key FROM products")
+    stale = []
+    for row in cursor.fetchall():
+        key = product_match_key(row["name"], row["brand"])
+        if row["match_key"] != key:
+            stale.append((row["id"], key))
+    if stale:
+        cursor.execute("""
+            UPDATE products AS p SET match_key = v.key
+            FROM unnest(%s::text[], %s::text[]) AS v(id, key)
+            WHERE p.id = v.id
+        """, ([s[0] for s in stale], [s[1] for s in stale]))
+        conn.commit()
+        print(f"[db] PRODUCT_MATCH_KEYS updated {len(stale)} product(s)", flush=True)
+    return len(stale)
+
+
+# Seeded products whose name changed, as (brand, old name, new name). Seeding
+# skips a product whose UPC already exists, so a rename in seed_data.py alone
+# never reaches a database seeded under the old name.
+SEED_RENAMES = [
+    # The scan prompt answers a base product with no printed variant "Original"
+    # ("classic" included), so "Classic" was never matched and every Coke scan
+    # minted a second Coca-Cola.
+    ("Coca-Cola", "Classic", "Original"),
+]
+
+
+def rename_seed_products(conn) -> int:
+    """Apply SEED_RENAMES to seeded rows, keeping each row's id so every bar's
+    par, price and distributor for it stay put. The old name is kept as an
+    alias, so a label that really does print it still lands here. Runs every
+    boot; once renamed nothing matches the old name, so it writes nothing.
+    Only rows the seed created (source='seed'): a product someone added under
+    that name is theirs."""
+    cursor = conn.cursor()
+    now = now_iso()
+    renamed = 0
+    for brand, old, new in SEED_RENAMES:
+        cursor.execute("""
+            UPDATE products SET name = %s, match_key = %s, updated_at = %s
+            WHERE brand = %s AND name = %s AND source = 'seed' AND deleted_at IS NULL
+            RETURNING id
+        """, (new, product_match_key(new, brand), now, brand, old))
+        for row in cursor.fetchall():
+            cursor.execute("""
+                INSERT INTO product_aliases (id, product_id, norm_name, norm_brand, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (norm_name, norm_brand) DO NOTHING
+            """, (generate_id(), row["id"], normalize_match_text(old), normalize_match_text(brand), now))
+            renamed += 1
+            print(f"[db] SEED_RENAMED {brand} {old!r} -> {new!r} id={row['id']}", flush=True)
+    conn.commit()
+    return renamed
 
 
 def seed_products(conn):
@@ -771,11 +943,13 @@ def seed_products(conn):
                 continue
 
         cursor.execute("""
-            INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, source, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, source,
+                                  match_key, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             generate_id(), name, brand, product["category"],
-            product.get("size"), upc, None, 0, 1, 'seed', now, now
+            product.get("size"), upc, None, 0, 1, 'seed',
+            product_match_key(name, brand), now, now
         ))
         inserted += 1
 

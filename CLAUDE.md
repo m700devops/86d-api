@@ -11,8 +11,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - Python / FastAPI (single-file monolith: main.py)
 - PostgreSQL via psycopg2 (requires DATABASE_URL — app crashes without it)
 - Deployed on Render at https://eight6d-api.onrender.com
-- OpenAI GPT-4o for AI bottle vision (primary)
-- Google Gemini 2.0 Flash as fallback if OpenAI is down/rate-limited/times out
+- AI bottle vision: OpenAI (`OPENAI_MODEL`, default gpt-4o, primary) and Google Gemini (`GEMINI_MODEL`)
+  asked SIDE BY SIDE, each a second opinion on the other — see AI Vision Rules
 
 ## Key Files
 - main.py — all routes and app logic (~3690 lines, single-file monolith)
@@ -41,11 +41,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   now gets a one-line status instead of a table, not a wall of leads that aren't callable yet.
   Undo still works — the 10-second Undo on the toast after every logged call — it just isn't
   a permanent banner anymore
-- **The burger holds School, Yet to Contact, Apple Analytics and Customers.** Numbers (funnel, connect rate by
+- **The burger holds School, Yet to Contact, Apple Analytics, Customers, Scanner and AI Brain.**
+  Scanner is the bottle scanner's report card (see "The Scanner page" under AI Vision Rules).
+  Numbers (funnel, connect rate by
   hour, attribution re-match) and Lead engine (run now, bank health, restaurant recheck) were
   removed from the PAGE at the operator's request; every endpoint behind them is still live
   (`/funnel`, `/dialstats`, `/attribution/rematch`, `/leadgen/health`, `/leadgen/run`,
-  `/leadgen/recheck-restaurants`), and the daily 6pm run and the Call list's empty-list
+  `/leadgen/recheck-restaurants`), and the early-morning daily run and the Call list's empty-list
   auto-fill still keep leads coming without anyone opening a panel
 - apple.py — **Apple Analytics**: App Store Connect's App Analytics (impressions, product
   page views, conversion, downloads, proceeds, sessions, installs, deletions, crashes) via
@@ -346,7 +348,16 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   (or the page's built-in library) stays. Grep Render logs for `SCHOOL_REFRESH`.
   On a free-tier service that's spun down at 10am, the refresh runs when it next wakes.
   See test_school.py
+- activity.py — scans and background crawls TAKE TURNS. Every AI scan and every `/scans/warm`
+  (the app opening its scan screen) calls `scan_seen()`; background crawls call
+  `wait_for_quiet()` before each site and wait until nothing has been scanned for
+  `CRAWL_QUIET_SECONDS` (180). See "The crawl stays out of the scanner's way" under LEAD
+  GENERATOR. Covered by test_crawl_quiet.py
 - seed_data.py — default product catalog
+- scanstats.py — the scanner's report card, pure: `summarize(rows, days)` over scan_events +
+  scan_outcomes, per AI model — replies, couldn't-read, flagged disagreements settled right or
+  wrong, rows removed by staff, reply time. Feeds `GET /v1/crm/scanner` (crm.py) and the CRM
+  page's Scanner tab. See "The Scanner page" under AI Vision Rules. Covered by test_scanstats.py
 - test_level_classifier.py — unit tests for helpers.py level logic
 - test_phones.py, test_callwindow.py, test_timezones.py, test_contacts.py — the phone
   validator, call-window/service-band logic, timezone assignment, and manager/email
@@ -358,10 +369,42 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_order_numbers.py test_film.py test_failure_points.py
-  test_owner_rules.py test_lookup_check.py test_data_quality.py test_drafter.py -q` (701
-  tests; test_timezones.py (37 more) needs a dummy `DATABASE_URL` and runs on its own; run them
+  test_owner_rules.py test_lookup_check.py test_data_quality.py test_drafter.py
+  test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
+  test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q`
+  (1004 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
+- test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
+  real Gemini REST call against local fake servers, so it checks the requests actually sent:
+  instructions first and image last, temperature 0 (OpenAI), strict schema / JSON mode, Gemini's
+  thinking level, the key in a header, no retries, the time limit cancelling a slow reply, one shared
+  client, the plain-request fallback, billed tokens including thinking, warm-ups that spend nothing.
+  Product matching and the scan log are stubbed; no network, no database
+- test_second_opinion.py — the second opinion: `helpers.answers_agree`, the pure `_decide`, and
+  `_run_providers` with fake providers on REAL delays (fast path, wait window, failures, a rejected
+  key, the total cap cancelling both calls, the one-bar inference). Every rule was mutation-checked
+- test_barcode.py — barcode lookups (see "Barcodes" under AI Vision Rules): every form of one
+  code in both directions, UPC-E round trips both ways, the merged-away fallback, registering
+  (409 names the LIVE product, codes stored as digits) and the merge moving the code. Every
+  rule was mutation-checked; the lookup was also run on a real Postgres (index scan, ~0.04ms)
+- test_duplicates.py — the Bottle Book's duplicate finder (`helpers.duplicate_groups`, the
+  `/locations/{id}/duplicates` route): what counts as one bottle, what is never suggested, which copy
+  is kept. Every rule was mutation-checked; find → merge → find was run on a real Postgres
+- test_db_pool.py — `database.get_db` under load (the audit's semaphore, see FAILURE POINTS FIXED):
+  the next caller waits for a free connection, gives up after `POOL_WAIT_SECONDS` with
+  `DB_POOL_WAIT_TIMEOUT`, a failed request gives its slot back, a connection returned to a drained
+  pool is closed; and no `async` function calls `get_db()` directly (a wait there would stall the
+  event loop). Real threads and semaphore, fake pool; every rule was mutation-checked
+- test_crawl_quiet.py — the crawl's dead hour (`main._in_crawl_window`, checked in winter and
+  summer), `activity.py` on a fake clock, and that every background crawl waits (and nothing
+  someone clicked does). Every rule was mutation-checked
+- test_scanstats.py — the scanner report (`scanstats.summarize`, row by row: which evidence counts
+  as right, wrong or nothing), the outcome route and the CRM report route with a faked database.
+  Every rule was mutation-checked; the whole path was also run against a real Postgres upgraded
+  from the previous schema, through uvicorn, with the page opened in Chromium
+- test_match_key.py — `helpers.product_match_key`, sizes, and the generated prompt product list;
+  pure (no database). The matcher's SQL was checked against a real Postgres, not in this suite
 - test_apple_auth.py — the Apple SIGN-IN token verifier (Sign in with Apple, the login
   path), including the forgeries it must reject: another app's audience, a wrong issuer,
   an expired token, a signature from a different key, an unknown kid, `alg=none`, and an
@@ -383,8 +426,220 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   dict so assertions can check what actually got saved, not just that nothing raised
 
 ## AI Vision Rules
-- `POST /v1/scans/analyze` (main.py:3590) tries OpenAI first, falls through to Gemini on timeout/error —
-  see `_run_providers()` at main.py:3528
+- **`POST /v1/scans/analyze` asks OpenAI and Gemini AT THE SAME TIME — the second opinion**
+  (`_run_providers`; `SECOND_OPINION=off` restores the old order, Gemini only when OpenAI fails).
+  Each reply becomes an `_Answer`: parsed, label-checked and looked up by `_find_product`, which is
+  READ-ONLY — only the chosen answer counts a scan or creates a product (`_record_match`, called
+  once from `_respond`). Then:
+  - **fast path**: the first answer that is `strong` — a bottle in THIS bar's own book (`bar_book`)
+    named from words the model itself read off the label — is returned at once. The other
+    provider's answer is still logged when it lands (after the reply, `_finish_second_opinion`), so
+    `scan_events.second_opinion` measures how often the fast path is contradicted
+  - otherwise both are compared by the pure `_decide()`: agree (same product, or
+    `helpers.answers_agree` — the same words give or take descriptor words like "Label",
+    "Tennessee Whiskey", "12 Year Old", one wrong letter) → the better-supported answer, and a new
+    product may be created; DISAGREE → the better-supported answer (label evidence, then the bar's
+    own bottle, then any catalog product, then confidence, then OpenAI) is counted but flagged:
+    `needs_confirmation=true` and `alternative` = what the other read, and the app marks the row
+    for a check. **A disagreement never creates a product**, and neither does a single reading the
+    other model looked at and couldn't make out (`other_unreadable`)
+  - once one READABLE answer is in, the other gets `SECOND_OPINION_WAIT_SEC` (2.0) more, then the
+    first is used alone (`path=window`); an unreadable first answer waits for the other in full
+  - a provider that fails (timeout, error, unparseable reply, a REJECTED KEY) just isn't there —
+    the other answers alone (`path=single`) with the old single-provider rules. A rejected OpenAI
+    key used to fail every scan with a 503 even with Gemini configured
+  - the 20s total cap cancels both provider calls (test_second_opinion.py checks nothing is left
+    running). Costs a Gemini call on every scan; `SECOND_OPINION=off` if that ever matters
+  - verified against a real Postgres through the ASGI stack on one persistent loop (as uvicorn
+    serves): the fast path replied in ~0.2s via Gemini and OpenAI's answer, landing ~1s later, was
+    logged `agree`/`disagree`. NOTE a `TestClient` used without `with` runs each request on its
+    own loop and cancels leftovers, which makes background work look broken when it isn't
+- **Barcodes** (`GET /products/barcode/{upc}` → `_find_by_barcode`, one indexed query). A phone
+  reads one printed code differently by format and platform — iOS reports a 12-digit UPC-A as a
+  13-digit EAN-13 with a leading 0, a GTIN can be padded to 14, small cans carry an 8-digit UPC-E
+  standing for a 12-digit UPC-A — and the lookup used to be an exact string match, so a code
+  registered from one phone missed from another. `helpers.barcode_variants()` lists every form
+  (zero-padding widths 8/12/13/14, UPC-E expanded, and UPC-A compressed back to UPC-E —
+  `_upca_to_upces`, each candidate kept only if it expands back exactly) and the query matches
+  any. Non-numeric codes (a Code 128 shelf tag) are only ever themselves. Registration
+  (`POST /products`) stores a typed code as digits (`clean_barcode`) and checks every form. **A
+  merge takes the barcode to the keeper** when the keeper has none (cleared off the duplicate
+  first: `products.upc` is UNIQUE, deleted rows included — it used to stay on the retired row,
+  so the bar's barcode found nothing and couldn't be registered again). When the keeper has a
+  code of its own, a scan of the old one resolves through the merge's name alias. The 409 on a
+  known code names the LIVE product (under `detail`, see Key API Routes), so the app counts the
+  bottle against it. The app checks the bar's own product book first (86d-mobile
+  `productForBarcode`), so a bottle the bar already stocks is found instantly, offline. Covered
+  by test_barcode.py
+- **An app build that sends no `location_id` gets the account's location when there is exactly
+  one** (`_scan_context`, in the same thread hop as the entitlement check) — most accounts are one
+  bar, and without it older builds could never use the bar's own book or the fast path
+- **One client per provider for the life of the process** (`_openai_client()`, `_gemini_client()`).
+  Every scan used to build a new client, so every scan paid a fresh TCP + TLS handshake, and
+  `/scans/warm` warmed a client that was immediately thrown away. Idle connections are kept
+  `AI_KEEPALIVE_SECONDS` (120) — the HTTP library's default of 5s is shorter than the gap between two
+  bottles. The OpenAI client has `max_retries=0`: the SDK's own retries (twice, honouring retry-after)
+  ran inside the 9-second provider window, so a rate-limited OpenAI used it all up before Gemini
+  started. Both are warmed with a model lookup (no tokens, and a 404 when the configured model has
+  been retired)
+- **Gemini is called over its REST API directly with the app's httpx** (`_call_gemini`,
+  `generateContent`), like the CRM calls Claude — there is NO Google SDK. The one that runs on the
+  pinned httpx 0.26 (`google-generativeai==0.8.3`, removed) could not set Gemini 3's thinking level,
+  and its call was synchronous, on a scan-pool thread `asyncio.wait_for` could stop waiting for but
+  not stop (with its defaults — a 600s deadline, 503s retried for 600s — a Gemini outage would have
+  emptied the pool and stopped scanning for everyone). Now: one async request, cancelled outright by
+  the `PROVIDER_TIMEOUT` gate, never retried (the other provider is the retry), the key in an
+  `x-goog-api-key` header (never a URL), one pool per event loop (`_gemini_clients`). **Gemini 3
+  always thinks before answering, billed as output and waited for** — 3.6 Flash defaults to medium;
+  `GEMINI_THINKING` (default `low`: every current Flash model takes it, 3.7/3.8 dropped `minimal`;
+  `default` sends nothing) sets `generationConfig.thinkingConfig.thinkingLevel`, the field and
+  uppercase values Google's own current SDK sends. `GEMINI_API_BASE` overrides the host (the tests'
+  fake server). A 400 on the full request retries once as the bare request (no JSON mode, no thinking
+  level) and remembers the model as plain only if that succeeds (`SCAN_GEMINI_PLAIN`). Errors are
+  logged as `http_<status>` in `fallback_from`
+- **The request** (`_openai_request()`): BOTTLE_PROMPT as the system message FIRST, then the image,
+  then `SCAN_USER_TEXT`. OpenAI caches a repeated prompt PREFIX automatically; with the image first
+  (as it was) the ~2,600 identical instruction tokens were re-read in full on every scan. Strict
+  structured output (`SCAN_SCHEMA`, category is an enum) and **temperature 0** — the prompt demands
+  the same name for every scan of the same bottle, and the default temperature of 1.0 worked
+  against it ("Red" vs "Red Label" is how one bottle becomes two products). Reasoning models
+  (o-series, GPT-5 family) get `max_completion_tokens` and `reasoning_effort="low"` and no
+  temperature — they reject `max_tokens` and non-default temperature, which used to make every
+  OpenAI call 400 and fall silently through to Gemini. If a model rejects the full request, the
+  old plain request is tried; the model is remembered as plain (`_openai_plain_models`,
+  `SCAN_OPENAI_PLAIN` in the log) ONLY if the plain one succeeds, so a 400 caused by one bad photo
+  can't switch structured output off for everyone. Gemini gets JSON mode the same way
+  (`_gemini_plain_models`; see the REST bullet above). Gemini's temperature is left alone: Google's
+  guidance for Gemini 3 models is to keep the default
+- **The model writes down what it read before it answers, and the server checks the answer
+  against it.** `label_text` is the FIRST field of `SCAN_SCHEMA` (strict output writes keys in
+  schema order, so the reading is committed before the name), and `helpers.label_supports()`
+  checks every word of the returned name is in it — tolerant of accents, case, punctuation,
+  sizes, a repeated brand, a word split differently ("Old No.7"), one wrong letter in a longer word,
+  and "Original". A confident name missing from the model's own reading is a name from memory
+  (the Gatorade read as "Glacier Freeze" when the label said "Blue Bolt"): with `LABEL_CHECK=enforce`
+  (default) it's treated as unreadable — no product, `match_method="unreadable"`, the app asks for a
+  retake — and logged `status=label_unsupported`; `log` records `label_supported=false` and matches as
+  before; `off` skips it. No label text = no verdict (`None`). It can also refuse a good read the
+  model under-transcribed, so read the retake rate after a deploy: `SELECT status, count(*) FROM
+  scan_events WHERE created_at > '<deploy>' GROUP BY status`. The reading itself is stored in
+  `scan_events.label_text` — the evidence for any disputed scan. Costs ~20-40 more output tokens
+  (a few tenths of a second). Covered by test_label_check.py
+- **"WHICH CONTAINER" in BOTTLE_PROMPT**: identify only the container nearest the centre of the
+  photo. A back-bar photo has neighbours in it, and nothing used to say which one to read
+- **A database that doesn't answer is not "no such bottle".** `_find_product` returns
+  `(None, "lookup_failed")` on a DB error (it used to return "none"), `_record_match` never creates a
+  product from one (the bottle is most likely in the catalog; a pool that was only busy can answer the
+  write a moment later) and keeps a product the lookup DID find if only counting it fails, and `_respond`
+  answers **503 `catalog_unavailable`**, which the app's retry sweep re-sends. "No match" used to tell
+  the bartender "Couldn't recognize — add it manually": a hand-made duplicate. Log: `status=lookup_failed`.
+  The usual cause was the pool: psycopg2's `ThreadedConnectionPool` raises at once when all 10
+  connections are out, and a scan now runs two lookups at once — **`get_db` now waits for a free
+  connection** (the audit's semaphore, `DB_POOL_WAIT_SECONDS`, 15s — see FAILURE POINTS FIXED); a
+  lookup that still can't get one is `lookup_failed` → 503, never a hand-made duplicate
+- **An unreadable label is never matched** (`UNREADABLE_CONFIDENCE`, default 0.5 — keep it in
+  lockstep with the prompt's "cap confidence at 0.5" line). The prompt answers an illegible label
+  with the generic descriptor at ≤0.5, but only <0.35 was flagged and the app never read
+  `needs_rescan`, so a blurry Gatorade matched the generic "Gatorade / Sports Drink" product and
+  was counted with a green check. Such a read now comes back with no product
+  (`match_method="unreadable"`, `needs_rescan=true`), which is what makes the app ask for a retake
+- **The 20s total cap is a 504, not an empty 200.** The empty 200 is "no bottle in frame"; the app
+  said exactly that and parked the saved row for a manual retry. A 5xx is what the app's automatic
+  retry sweep picks up. `null` still means no bottle
+- **Every scan is measured.** One `[scan] SCAN status= provider= model= provider_ms= total_ms=
+  input_tokens= cached_tokens= output_tokens= thinking_tokens= confidence= match_method= image_kb=
+  fallback_from= id=` line (`output_tokens` is what the provider BILLS — for Gemini the answer plus
+  its thinking, `thoughtsTokenCount`, which the old SDK didn't report so the log understated Gemini;
+  `thinking_tokens` is how much of it was thinking, also OpenAI reasoning models' `reasoning_tokens`,
+  and is stored in `scan_events.thinking_tokens`) (grep Render logs for `SCAN `; it also carries `path` = fast | both | window | single and
+  `second_opinion`), and a `scan_events` row written in the background (plus `second_provider` and
+  `second_answer`, the other provider's reading as JSON — with its input, cached, output and thinking
+  tokens, so BOTH calls of every scan can be priced). **The real cost per scan** comes from these rows,
+  never from estimates (cached input bills at a fraction of the rest; Gemini's thinking and caching
+  can't be known in advance): tokens per call by provider since a date —
+  `WITH calls AS (SELECT provider, input_tokens, cached_tokens, output_tokens, thinking_tokens FROM
+  scan_events WHERE created_at > '<date>' UNION ALL SELECT second_answer::json->>'provider',
+  (second_answer::json->>'input_tokens')::int, (second_answer::json->>'cached_tokens')::int,
+  (second_answer::json->>'output_tokens')::int, (second_answer::json->>'thinking_tokens')::int FROM
+  scan_events WHERE created_at > '<date>' AND second_answer IS NOT NULL) SELECT provider, count(*),
+  avg(input_tokens), avg(cached_tokens), avg(output_tokens), avg(thinking_tokens) FROM calls GROUP BY
+  provider` — times the providers' current prices; the provider billing pages are the check
+  (`_record_scan_event`, never fails a scan; `SCAN_EVENT_FAILED` if it does). The response carries
+  `scan_id`; the app keeps it on the bottle row and `PUT /inventory/draft` records the product that
+  row holds now in `final_product_id` (`_scan_finals`, after the draft's own commit, in its own
+  try — `SCAN_FINALS_FAILED`). **`final_product_id` is NOT an accuracy measure**: the app can't
+  change a row's product (only a Pricing merge re-points it), the draft sync writes it seconds after
+  the scan — before anyone has looked — and a row removed later keeps it. Comparing it with
+  `matched_product_id` reads ~100% whatever the scanner does. Accuracy comes from what staff DO
+  with the row: see the next two bullets. The request takes an optional `location_id` (older app
+  builds don't send it). No image is stored
+- **`POST /v1/scans/{scan_id}/outcome` — what the bartender did with a scanned row** (`removed`:
+  deleted it, the only way the app offers to fix a wrong bottle; `confirmed`: tapped "this row is
+  right" on a row the two AIs read differently). The app sends it from `removeBottle` and the check
+  chip (86d-mobile). Stored in its own table, `scan_outcomes` (scan_id, user_id, outcome), because a
+  removal can land before the scan's scan_events row exists (that row is written once the second
+  opinion is in). Latest outcome wins, only for the user who first reported one (the upsert's
+  `WHERE`). Fire-and-forget: 202 always, `SCAN_OUTCOME_FAILED` in the log
+- **The Scanner page** (CRM burger → Scanner; `GET /v1/crm/scanner?days=7|30|90`, `scanstats.py`):
+  both AIs read every photo, so they're compared on the SAME photos — one row per measure, one
+  column per AI: replies, couldn't read the label, WHEN THEY DISAGREED (a flag staff settled:
+  "this row is right" = right for the reading shown and wrong for the other; removing the row =
+  wrong for the reading shown, nothing for the other), removed by staff, typical and slowest-1-in-10
+  reply time; plus scans, retake rate, the wait staff actually had, and failures per provider. Only
+  path `both` shows staff a flag: a disagreement on `fast`/`window` (the reply went out before the
+  other AI finished) is reported separately and judged only by removals. Rows nobody touched are
+  no evidence either way. Until 20 disagreements are settled (`SETTLED_ENOUGH`) the page says it's
+  too early to name the more accurate AI. Test and App Store review accounts are left out
+  (`TEST_EMAIL_PATTERN`, as on Customers). Removals include duplicates and mis-taps, so "removed by
+  staff" over-counts mistakes a little, equally for both AIs. Only scans from app builds that report
+  outcomes can count as wrong — older builds' removals were never recorded
+- **Matching the answer to a product** (`_match_or_create_product`). Order: (0) `bar_book` — the
+  scanning bar's own products (`par_levels` of `location_id`, which must be the caller's own), by
+  match key, taken ONLY when exactly one fits: a bar's pars, prices and distributor hang off the
+  product id it has been counting, so landing on another bar's copy of the same bottle loses them;
+  two fits (a 750ml and a 1L kept as separate products) fall through rather than guess. Then
+  exact, normalized, alias, **match key** (`match_key`), swapped (also by key), combined (also by
+  flattened key; a bare brand with no brand field is that brand's "Original"), auto-create
+- **`products.match_key` = `helpers.product_match_key(name, brand)`**: accents folded, the brand
+  dropped from the front of the name (repeatedly — seeded beers carry it twice, "Coors Coors Light
+  12oz"), sizes and pack counts dropped; class words ("Bourbon", "Rye") and variant words kept, so
+  Bulleit Bourbon ≠ Bulleit Rye and Citron ≠ Mandrin. It exists because of three measured misses:
+  `normalize_match_text` DELETES accented letters ("Patrón" → `patrn`, never meeting "Patron");
+  a name repeating the brand never met the prompt-compliant one; and 442 of 457 seeded products are
+  stored "Grey Goose Original 750ml" while the model answers "Original" / "Grey Goose" — the seed
+  catalog was unreachable and every first scan of those bottles minted a duplicate. Stored, computed
+  in Python only (no SQL twin to drift), set at every insert (seed, `POST /products`, auto-create),
+  and re-derived for every row on each boot by `database.reconcile_product_match_keys()`
+  (`PRODUCT_MATCH_KEYS updated N` in the log; a normal boot writes nothing), so a change to the key
+  re-keys the catalog on the next deploy. `normalize_match_text`/`NORM_SQL` are unchanged on
+  purpose: the alias table and the expression index are built on them
+- **Sizes**: the key ignores them, so a size the scan DID read is checked separately
+  (`helpers.size_ml`/`sizes_compatible`, against `products.size` or a size in the stored name) — a
+  "1L" read never lands on the 750ml product. No size read = the key decides
+- **The prompt's product list is GENERATED from `seed_data.py`** (`_build_product_catalog`, lines of
+  `Brand: Name | Name`, in exactly the split the matcher looks up — `helpers.seed_display_name`),
+  plus `EXTRA_BRAND_SPELLINGS` (brands bars stock that the seed lacks; spelling only). It was a
+  hand-typed list that disagreed with the catalog on half its entries ("Johnnie Walker Red" vs the
+  product "Red Label", "Grey Goose" vs "Grey Goose Original") while telling the model to use its
+  exact spelling, plus junk ("Putaendo" twice). Add a product to `seed_data.py` and it's in the
+  prompt. test_match_key.py checks no two seeded products share a key and every seeded product is
+  reachable from its listed name
+- **A seed's name must be one the prompt can produce.** Coca-Cola was seeded "Classic" while the prompt
+  answers a base product's descriptor ("classic", "original taste"…) with "Original" — so the seed
+  was never reached and every Coke scan minted a duplicate. It's "Original" now, like Sprite and Pepsi,
+  and test_match_key.py fails any seed named one of the prompt's descriptor phrases. **Renaming a seed
+  needs a `database.SEED_RENAMES` entry**: seeding skips a product whose UPC exists, so an edit to
+  seed_data.py alone never reaches a database seeded under the old name. `rename_seed_products()` runs
+  every boot before seeding, renames only `source='seed'` rows (same id, so every bar's par, price and
+  distributor stay put), and keeps the old name as an alias. Log: `SEED_RENAMED`
+- The route's database work (entitlement check, lookups, the one write) runs on the scan path's
+  OWN thread pool (`_SCAN_POOL`, `SCAN_THREADS`, default 16; the Gemini call used to as well, before
+  it became an async HTTP request) —
+  psycopg2 blocks, the route shares one event loop with every other request, and the default
+  pool `asyncio.to_thread` uses is shared with the CRM's background jobs (the daily lead run, the
+  inbox reader, phone checks, School), some of which hold a thread for minutes
+- `openai` is PINNED (`openai==3.19.2`, which runs on `httpx2`, not the app's `httpx`). It used to
+  be `>=1.0.0`, so each fresh build could pick up a new major version
 - Model constants are ENV-OVERRIDABLE: `OPENAI_MODEL` (default `gpt-4o`), `GEMINI_MODEL`
   (default `gemini-3.6-flash`). They are env vars because a provider can retire a model out from
   under the app and it fails SILENTLY — `gemini-2.0-flash` was retired and every scan ran with no
@@ -417,8 +672,26 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   events worth having happen before an account exists; kept safe by a fixed event list, a
   capped batch and no free-form properties column. Always answers 202 — a lost metric must
   never surface as an error in the app
-- GET/POST /products, GET /products/search, GET /products/barcode/{upc}
-- POST /products/{product_id}/merge — merges a duplicate product into a target (aliases, par_levels, distributors)
+- GET/POST /products, GET /products/search, GET /products/barcode/{upc} (every form of the code —
+  see Barcodes under AI Vision Rules)
+- POST /products/{product_id}/merge — merges a duplicate product into a target (aliases, par_levels,
+  distributors, and its barcode when the keeper has none: `barcode_moved`). **Products are a shared
+  catalog — a bottle one bar's scan created is matched by every bar's scans — and a merge moves only the
+  caller's own rows, so the duplicate is RETIRED only when no other account's bar counts it
+  (`retired`).** Retiring it under another bar stranded that bar's price and par on a product its
+  scans could no longer reach: its next count landed on the keeper with neither, and the old row read
+  as empty and got re-ordered (reproduced on a real Postgres before the fix; the duplicate finder makes
+  merges one tap). A shared duplicate stays alive for the others and keeps its barcode. Every merge is
+  recorded per account in `product_merges`, and `_find_product`'s Step 0 (the bar's own bottles) follows
+  THIS account's merges — needed because aliases are one per phrasing for everyone, first merge wins,
+  and the global steps would find the still-alive duplicate first. Checked on a real Postgres with three
+  bars: the merging bar lands on the keeper, the bar that shares the duplicate keeps its own priced
+  product, a bar with neither is unchanged
+- **Errors with a dict detail are sent flat AND under `detail`** (`http_exception_handler`):
+  `{"error", "message", "detail": {same}}`. The app reads `response.data.detail` almost
+  everywhere (the 409's `existing_product`, `invalid_password`, `email_not_configured`, the
+  message on paywall/billing/reset/Apple sign-in) and used to find nothing there, so every one of
+  those fell back to its generic path. The CRM page and RegisterScreen read the flat keys
 - GET/POST /locations, GET/POST /locations/{id}/par-levels
 - PATCH /locations/{location_id}/products/{product_id} — upserts the `par_levels` row for
   one bottle at one bar (full / current_stock / par / price), preserving whatever the body
@@ -433,12 +706,30 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   keep using `par_quantity > 0` as the "this bar set a par" signal. Adding that column in
   `init_db()` is also the one-shot gate for the backfill that cleared the placeholder pars
   of 1 this endpoint used to create (see database.py)
+- GET /locations/{id}/duplicates — this bar's products that are the same bottle twice, as
+  `{"groups": [{"keep", "fold": [...]}]}` (`helpers.duplicate_groups`). The Bottle Book (86d-mobile
+  PricingScreen, "Same bottle twice?") offers each as a one-tap merge through
+  `POST /products/{id}/merge`. Copies come from the scanner reading one label two ways before the
+  matcher learned both, and cost the bar a count split over two rows — and a scan that fits both of a
+  bar's rows can't use its own book at all (`bar_book` takes exactly one). One bottle = the same
+  `match_key`, or two readings `answers_agree` calls the same ("Red" / "Red Label"), never two known
+  sizes that differ. Anything that would be a guess is left out: a row that fits two groups (a
+  sizeless copy beside the 750ml and the 1L), a group whose copies disagree on size, and folding a
+  verified product (the merge route refuses). Keeper: verified, then what the bar set (price, par,
+  distributor), then most scanned, then oldest. No two seeded products agree (checked). Read-only;
+  every merge is the bartender's tap. **Indexed, not all-against-all**: comparing every row with every
+  group took 4.4s on a 914-product book, on a request thread holding the GIL; each row is now compared
+  only with keepers sharing its match key or a first word (with one-letter-deleted variants, so
+  `answers_agree`'s one-typo tolerance is kept) — 51ms, and test_duplicates.py checks the result is
+  identical to the brute force on the whole seeded catalog and 60 random messy books
 - GET/POST /locations/{id}/product-distributors — the other half of that memory: which
   distributor a bottle is ordered from at this bar, set once and applied to every future scan
 - POST /inventory/start, GET /inventory/{session_id}, POST /inventory/{session_id}/scan
 - POST /inventory/{session_id}/scan/bulk
-- POST /scans/analyze — the live AI vision route (OpenAI → Gemini fallback), see AI Vision Rules above
+- POST /scans/analyze — the live AI vision route (OpenAI and Gemini side by side), see AI Vision Rules above
 - POST /scans/warm — best-effort provider warm-up, fire-and-forget, never raises
+- POST /scans/{scan_id}/outcome — the bartender removed a scanned row or confirmed a flagged one;
+  feeds the Scanner page (see AI Vision Rules)
 - POST /inventory/{session_id}/voice — voice notes
 - POST /inventory/{session_id}/complete
 - GET/POST /distributors — distributor management
@@ -493,6 +784,29 @@ capture. Don't reintroduce them or describe them as current.)
   calling this API cross-origin would fail on both counts
 
 ## LEAD GENERATOR (leadgen.py)
+- **The crawl stays out of the scanner's way — without a second server.** Crawling bar websites
+  runs in the same process as the bottle scanner, on half a CPU, and reading pages strangers wrote
+  holds the GIL; it has taken the whole server down before. Two things keep them apart, at no
+  cost (a separate CRM service was built and reverted: the owner chose not to pay for one):
+  - **A dead hour.** The daily run fires once, inside `LEADGEN_CRAWL_HOUR` (5) +
+    `LEADGEN_CRAWL_WINDOW_HOURS` (3, at most 24; a window may cross midnight, and "once a day" counts
+    from when the window opened, `_crawl_window_start`) in `LEADGEN_CRAWL_TZ` (America/Los_Angeles): 5-8am in LA is
+    8-11am in New York — western bars long closed, eastern ones not yet open — and 8-9pm in
+    Manila, so the list is fresh before the caller's shift. Its own clock, NOT `CRM_TIMEZONE`,
+    which defaults to UTC and put the old 6pm run at 2pm New York, when bars count before
+    opening. Outside the window it never starts, so a restart at 11pm can't crawl mid-service; a
+    missed day is skipped (the list holds weeks of leads, and an empty one refills on demand).
+    `LEADGEN_RUN_HOUR` is no longer read
+  - **Taking turns** (activity.py): every background crawl — each site the daily run enriches,
+    each city it harvests, each phone check, each owner's-rules fit check (`verify_fit`), the
+    looked-up-site recheck, each restaurant recheck — waits while anyone has scanned in the last
+    `CRAWL_QUIET_SECONDS` (180), or opened the app's scan screen. **A new background crawler must
+    call `activity.wait_for_quiet()` before each site and get a test in test_crawl_quiet.py**:
+    the fit check and the lookup recheck arrived without one (built alongside activity.py) and
+    were caught at the merge. A phone
+    check batch keeps its 90s budget: rows it can't reach wait for the next batch. What the
+    operator clicked and is waiting on (quick-add's email lookup, wrong number) never waits.
+    Log: `CRAWL_PAUSED` / `CRAWL_RESUMED`, once per pause however many threads wait
 - **The cap is PER TAB, not global: `LEADGEN_BUCKET_TARGET` (50) unworked leads in each of
   the 8 (service × timezone) cells.** It used to be a single `LEADGEN_MAX_ACTIVE` of 100, and
   that number cannot survive the tabs: 100 spread over 8 cells averages 12, so opening
@@ -1240,7 +1554,7 @@ capture. Don't reintroduce them or describe them as current.)
   it. `max_tokens` has a floor of `AI_MIN_TOKENS` (8000) and the timeout of 90s, because a
   thinking model cut off at Haiku's 400 tokens answers nothing. Slower than Haiku — a notes
   read takes seconds, not one. `ANTHROPIC_BASE_URL` overrides the host. The product's bottle
-  scanner (main.py, OpenAI → Gemini) is a separate system and unchanged. **Every call goes
+  scanner (main.py, OpenAI and Gemini side by side) is a separate system. **Every call goes
   through `crm._claude()`** (`_ask_claude` and `_claude_json` are thin wrappers):
   `fallbacks: "default"` + beta `server-side-fallback-2026-07-01` on every Opus 5 call (a
   classifier decline re-runs on Anthropic's recommended model), PROMPT CACHING (the system
@@ -1326,8 +1640,8 @@ capture. Don't reintroduce them or describe them as current.)
   the same restaurant on a later run and it reappears — the exact duplicate call that
   deleting it was meant to prevent
 - **AI is Claude only, via the raw REST API through httpx** (`ANTHROPIC_API_KEY`, model per
-  ONE MODEL above). It used to share the scan path's OpenAI→Gemini pair. No SDK, matching how main.py
-  talks to Resend. **The scan path in main.py is unchanged and still OpenAI→Gemini** — that
+  ONE MODEL above). It used to share the scan path's OpenAI/Gemini pair. No SDK, matching how main.py
+  talks to Resend. **The scan path in main.py is separate and stays on OpenAI and Gemini** — that
   is the product's core feature, not the CRM's
 - The drawer's quick-outcome buttons (Voicemail / Manager out / Not interested) go straight
   to `/touch` with a known outcome. They used to post a canned sentence through the model —
@@ -1439,6 +1753,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - OPENAI_API_KEY — primary bottle-scan provider; without it, scanning falls straight to Gemini
 - GEMINI_API_KEY or GOOGLE_API_KEY — fallback bottle-scan provider; without it, no fallback if OpenAI fails
 - OPENAI_MODEL / GEMINI_MODEL — optional, override the scan models when a provider retires one
+- GEMINI_THINKING — optional, how much Gemini thinks per scan: minimal | low (default) | medium | high |
+  default (the model's own: medium on 3.6 Flash). Billed as output and waited for; see AI Vision Rules
 - RESEND_API_KEY — order emails and password resets cannot send without it
 - STRIPE_SECRET_KEY — checkout/billing endpoints 503 without it
 - STRIPE_PRICE_ID — checkout endpoint 503s without it, nobody can subscribe
@@ -1471,12 +1787,14 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - CRM_OPERATOR_TZ — where the person making the calls is (default `Asia/Manila`). Decides the
   "your time" clock and every upcoming-window time on the call screen
 - CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).
-  Also decides when the daily lead run fires
+  It no longer decides when the daily lead run fires (LEADGEN_CRAWL_*)
 - LEADGEN_BUCKET_TARGET (default 50 — leads per service×timezone tab; total capacity is
   8× this), LEADGEN_DAILY_TARGET (25, a pace not a ceiling), LEADGEN_POOL_FLOOR (50),
   LEADGEN_ENRICH_WORKERS (8),
-  LEADGEN_RUN_HOUR (18 = 6pm, local) — optional lead generator tuning. No API key needed: the
-  generator uses OpenStreetMap, which has neither keys nor billing
+  LEADGEN_CRAWL_HOUR (5), LEADGEN_CRAWL_WINDOW_HOURS (3), LEADGEN_CRAWL_TZ
+  (America/Los_Angeles), CRAWL_QUIET_SECONDS (180) — optional lead generator tuning, see "The
+  crawl stays out of the scanner's way". LEADGEN_RUN_HOUR is no longer read. No API key needed:
+  the generator uses OpenStreetMap, which has neither keys nor billing
 - APPLE_BUNDLE_ID — optional, the audience Apple identity tokens must carry (default
   `com.my86d.app`). There is no Apple secret to set: leaving this unset uses the real bundle
   id, never a weaker check
@@ -1484,7 +1802,9 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   Apple Analytics tab's App Store Connect team key. Unset is fine: the tab's Connect form
   saves the key instead (encrypted). `\n` in APPLE_PRIVATE_KEY is accepted
 - SENTRY_DSN — optional, error visibility only
-- CONFIDENCE_THRESHOLD, LEVEL_DEADBAND — optional tuning, see AI Vision Rules above
+- CONFIDENCE_THRESHOLD, LEVEL_DEADBAND, UNREADABLE_CONFIDENCE (0.5), AI_KEEPALIVE_SECONDS (120),
+  LABEL_CHECK (enforce | log | off), SECOND_OPINION (on | off), SECOND_OPINION_WAIT_SEC (2.0),
+  SCAN_THREADS (16) — optional tuning, see AI Vision Rules above
 
 ## FAILURE POINTS FIXED (audit, 2026-09-25) — don't reintroduce these
 Each is covered by test_failure_points.py unless noted.
@@ -1502,13 +1822,18 @@ Each is covered by test_failure_points.py unless noted.
   raises `PoolError` the instant all ten are out, and the threadpool runs up to forty requests,
   so a burst turned straight into 500s on scans and logins. `DB_POOL_WAIT_TIMEOUT` is logged when
   a wait gives up. A connection given back to a pool drained meanwhile is closed, not a 500
-- **Nothing blocking runs on the event loop.** One process, one loop: the scan route's
-  entitlement read (`_scan_subscription`) and parse + product matching (`_process_ai_result`,
-  up to seven queries), the webhook and the admin route all run in `asyncio.to_thread`. Before,
-  every scan stalled every other request while it matched
-- **The scan falls back to Gemini when OpenAI rejects the key or answers in something that
-  isn't JSON** — it used to 503/500 on the spot, the two moments the fallback exists for.
-  `SCAN_PROVIDER_AUTH_FAILED` is logged
+- **Nothing blocking runs on the event loop.** One process, one loop: the webhook and the admin
+  route run in `asyncio.to_thread`, and the scan route's database work — the entitlement read
+  (`_scan_context`), parsing + product matching (`_evaluate_answer`, up to seven queries) and the
+  one write (`_respond`) — runs on the scan path's own thread pool (`_on_scan_thread`, see AI Vision
+  Rules). Before, every scan stalled every other request while it matched. test_db_pool.py fails
+  any `async` function that calls `get_db()` itself
+- **A broken OpenAI never fails a scan Gemini can answer**: a rejected key or a reply that isn't
+  JSON used to 503/500 on the spot, the two moments the fallback exists for. Both providers are now
+  asked at once (the second opinion), and a provider that fails just isn't there; with
+  `SECOND_OPINION=off` Gemini is asked when OpenAI fails. `SCAN_PROVIDER_AUTH_FAILED` is logged; a
+  rejected key with no Gemini key is a 503, and every provider answering something that isn't a
+  reading is a 500 `parse_failed`. Pinned in both modes
 - **Sending an order can't double-send on a retry** (`/orders/email` + table `order_sends`).
   The app tags each order with `client_ref` (the count's draft, or one reorder); per distributor
   the server CLAIMS (ref, distributor, exact items) before emailing and records sent/failed
@@ -1597,7 +1922,7 @@ trusting a change to enrichment.
 - **The venue's own name read as a person**: `email_kind(email, venue_name)` — sweedeedee@gmail.com
   is "unknown", not "personal", so it no longer sorts up as a named human.
 - **The list sat thin after a clean-up**: `fit_check_step` promotes into the emptied cells as
-  soon as a bank batch passes (`LEADGEN_REFILL`), not at the 6pm run.
+  soon as a bank batch passes (`LEADGEN_REFILL`), not at the next daily run.
 
 ## Deploy Rules
 - Deployed via Render (see Procfile) — do NOT change without approval

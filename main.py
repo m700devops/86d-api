@@ -3,11 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from contextlib import asynccontextmanager
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 import asyncio
+import functools
+import weakref
 import time
+from concurrent.futures import ThreadPoolExecutor
 import uuid
 import json
+import re
 import traceback
 
 from database import init_db, get_db
@@ -19,7 +25,9 @@ from auth import (
 from helpers import (
     generate_id, now_iso, level_to_decimal, decimal_to_level,
     classify_level, smooth_level, calculate_variance, generate_order_items,
-    normalize_match_text, NORM_SQL, FIRST_ORDER_NUMBER, format_order_number, order_email
+    normalize_match_text, NORM_SQL, product_match_key, seed_display_name,
+    size_ml, sizes_compatible, label_supports, answers_agree, barcode_variants, clean_barcode,
+    duplicate_groups, FIRST_ORDER_NUMBER, format_order_number, order_email,
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -28,8 +36,8 @@ from apple_auth import (
     DEFAULT_BUNDLE_ID as APPLE_DEFAULT_BUNDLE_ID,
 )
 from crm import crm_router, init_crm_tables
+import activity
 from leadgen import init_leadgen_tables
-import google.generativeai as genai
 import openai
 import os
 import httpx
@@ -722,15 +730,42 @@ def search_products(
             "total": len(products)
         }
 
+def _find_by_barcode(cursor, upc: str):
+    """The live product a scanned barcode belongs to, or None.
+
+    Matched in every form the same code can take (helpers.barcode_variants: the
+    13-digit read of a 12-digit UPC-A, a UPC-E, GTIN padding), so a code
+    registered from one phone is found from another. A code that only a merged-
+    away product still holds resolves the way that product's name does — to the
+    product it was merged into (merges record the name as an alias) — so a bar's
+    barcode never stops working because someone tidied a duplicate."""
+    variants = barcode_variants(upc)
+    if not variants:
+        return None
+    cursor.execute("""
+        SELECT * FROM products WHERE upc = ANY(%s) AND deleted_at IS NULL
+        ORDER BY verified DESC, scan_count DESC LIMIT 1
+    """, (variants,))
+    row = cursor.fetchone()
+    if row:
+        return row
+    cursor.execute(f"""
+        SELECT p.* FROM products d
+        JOIN product_aliases a ON a.norm_name = {NORM_SQL.format(col="d.name")}
+                              AND a.norm_brand = {NORM_SQL.format(col="d.brand")}
+        JOIN products p ON p.id = a.product_id AND p.deleted_at IS NULL
+        WHERE d.upc = ANY(%s) AND d.deleted_at IS NOT NULL
+        LIMIT 1
+    """, (variants,))
+    return cursor.fetchone()
+
+
 @v1_router.get("/products/barcode/{upc}", response_model=dict)
 def get_product_by_barcode(upc: str):
-    """Lookup product by UPC barcode"""
+    """Lookup product by UPC barcode (_find_by_barcode)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        cursor.execute("SELECT * FROM products WHERE upc = %s AND deleted_at IS NULL", (upc,))
-        row = cursor.fetchone()
-        
+        row = _find_by_barcode(cursor, upc)
         if not row:
             raise HTTPException(status_code=404, detail={
                 "error": "product_not_found",
@@ -745,17 +780,22 @@ def get_product_by_barcode(upc: str):
 @v1_router.post("/products", response_model=dict, status_code=201)
 def create_product(product_data: ProductCreate, user_id: str = Depends(get_current_user)):
     """Add new product"""
+    upc = clean_barcode(product_data.upc)
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Check UPC if provided
-        if product_data.upc:
-            cursor.execute("SELECT * FROM products WHERE upc = %s", (product_data.upc,))
+        # Check UPC if provided — in every form it can be written, merged-away
+        # products included (the column is UNIQUE even for them). The conflict
+        # names the LIVE product the barcode belongs to, so the app can count
+        # the bottle against it instead of adding it with no catalog link.
+        if upc:
+            cursor.execute("SELECT * FROM products WHERE upc = ANY(%s)", (barcode_variants(upc),))
             existing = cursor.fetchone()
             if existing:
+                live = _find_by_barcode(cursor, upc) or existing
                 raise HTTPException(status_code=409, detail={
                     "error": "upc_exists",
-                    "existing_product": dict(existing)
+                    "existing_product": dict(live)
                 })
         
         # Create product
@@ -763,18 +803,20 @@ def create_product(product_data: ProductCreate, user_id: str = Depends(get_curre
         now = now_iso()
         
         cursor.execute("""
-            INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO products (id, name, brand, category, size, upc, image_url, scan_count, verified,
+                                  match_key, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             product_id,
             product_data.name,
             product_data.brand,
             product_data.category,
             product_data.size,
-            product_data.upc,
+            upc,
             None,  # image_url
             0,  # scan_count
             0,  # verified
+            product_match_key(product_data.name, product_data.brand),
             now,
             now
         ))
@@ -788,7 +830,7 @@ def create_product(product_data: ProductCreate, user_id: str = Depends(get_curre
                 "category": product_data.category,
                 "product_type": None,
                 "size": product_data.size,
-                "upc": product_data.upc,
+                "upc": upc,
                 "image_url": None,
                 "scan_count": 0,
                 "verified": False,
@@ -847,13 +889,13 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT id, name, brand, verified, created_by_user_id FROM products "
+            "SELECT id, name, brand, verified, created_by_user_id, upc FROM products "
             "WHERE id = %s AND deleted_at IS NULL",
             (source_id,)
         )
         source = cursor.fetchone()
         cursor.execute(
-            "SELECT id FROM products WHERE id = %s AND deleted_at IS NULL",
+            "SELECT id, upc FROM products WHERE id = %s AND deleted_at IS NULL",
             (target_id,)
         )
         target = cursor.fetchone()
@@ -988,10 +1030,48 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
             now,
         ))
 
-        cursor.execute(
-            "UPDATE products SET deleted_at = %s, updated_at = %s WHERE id = %s",
-            (now, now, source_id)
-        )
+        cursor.execute("""
+            INSERT INTO product_merges (id, user_id, source_product_id, target_product_id, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (generate_id(), user_id, source_id, target_id, now))
+
+        # Retire the duplicate only when no OTHER account counts it. Products are
+        # a shared catalog — a bottle one bar's scan created is matched by every
+        # bar's scans — and only the caller's own rows were moved above. Retiring
+        # it under another bar left that bar's price and par on a product its
+        # scans could no longer reach: its next count landed on the keeper with
+        # neither, and the old row read as empty and was re-ordered. Kept alive,
+        # the other bars carry on as before; this account's scans still reach the
+        # keeper through the merge just recorded (_find_product's Step 0).
+        cursor.execute("""
+            SELECT 1 FROM par_levels pl JOIN locations l ON l.id = pl.location_id
+            WHERE pl.product_id = %s AND l.user_id <> %s AND l.deleted_at IS NULL
+            UNION ALL
+            SELECT 1 FROM location_product_distributors d JOIN locations l ON l.id = d.location_id
+            WHERE d.product_id = %s AND l.user_id <> %s AND l.deleted_at IS NULL
+            LIMIT 1
+        """, (source_id, user_id, source_id, user_id))
+        retired = cursor.fetchone() is None
+
+        # The barcode goes with the product that's kept. It used to stay on the
+        # retired duplicate, so the bar's barcode stopped finding anything, and
+        # registering it again failed: the column is UNIQUE, deleted rows
+        # included. Cleared first for that same reason. When the keeper already
+        # has a barcode of its own, the duplicate keeps its code and a scan of it
+        # still resolves here through the alias above (_find_by_barcode). A
+        # duplicate other bars still count keeps its code: it's theirs too.
+        moved_barcode = False
+        if retired and source["upc"] and not target["upc"]:
+            cursor.execute("UPDATE products SET upc = NULL WHERE id = %s", (source_id,))
+            cursor.execute("UPDATE products SET upc = %s, updated_at = %s WHERE id = %s",
+                           (source["upc"], now, target_id))
+            moved_barcode = True
+
+        if retired:
+            cursor.execute(
+                "UPDATE products SET deleted_at = %s, updated_at = %s WHERE id = %s",
+                (now, now, source_id)
+            )
         conn.commit()
 
         return {
@@ -1000,6 +1080,9 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
             "target_product_id": target_id,
             "par_levels_moved": moved_par_levels,
             "assignments_moved": moved_assignments,
+            "barcode_moved": moved_barcode,
+            # False: other bars still count the duplicate, so it stays for them.
+            "retired": retired,
         }
 
 
@@ -1152,6 +1235,39 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
             par_levels.append(pl)
 
         return {"par_levels": par_levels}
+
+@v1_router.get("/locations/{location_id}/duplicates", response_model=dict)
+def get_duplicates(location_id: str, user_id: str = Depends(get_current_user)):
+    """This bar's products that are the same bottle twice (helpers.duplicate_groups),
+    for the Bottle Book to offer as one-tap merges through POST /products/{id}/merge.
+    Read-only; suggestions only — the bartender confirms each merge."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=403, detail={
+                "error": "forbidden", "message": "Access denied to this location"
+            })
+        cursor.execute("""
+            SELECT p.id, p.name, p.brand, p.size, p.match_key, p.verified, p.scan_count,
+                   p.created_at, pl.price, pl.par_quantity,
+                   EXISTS (SELECT 1 FROM location_product_distributors d
+                           WHERE d.location_id = pl.location_id AND d.product_id = p.id) AS has_distributor
+            FROM par_levels pl
+            JOIN products p ON p.id = pl.product_id
+            WHERE pl.location_id = %s AND p.deleted_at IS NULL
+        """, (location_id,))
+        rows = cursor.fetchall()
+
+    def public(row):
+        return {"product_id": row["id"], "name": row["name"], "brand": row["brand"],
+                "size": row["size"], "verified": bool(row["verified"])}
+    return {"groups": [{"keep": public(g["keep"]), "fold": [public(r) for r in g["fold"]]}
+                       for g in duplicate_groups([dict(r) for r in rows])]}
+
 
 @v1_router.post("/locations/{location_id}/par-levels", response_model=dict)
 def set_par_level(location_id: str, par_data: ParLevelCreate, user_id: str = Depends(get_current_user)):
@@ -1905,7 +2021,42 @@ def save_inventory_draft(request: InventoryDraftRequest, user_id: str = Depends(
             SET bottles_data = EXCLUDED.bottles_data, updated_at = EXCLUDED.updated_at
         """, (user_id, request.location_id, json.dumps(request.bottles), now))
         conn.commit()
+
+        # Each scanned row carries the scan_id its identification was logged
+        # under; record the product the row holds now. NOT an accuracy measure
+        # (the app can't change a row's product, and this runs seconds after the
+        # scan): accuracy is what staff do with the row, POST /scans/{id}/outcome.
+        # After the draft's own commit and in its own try: this must never cost
+        # anyone their draft.
+        finals = _scan_finals(request.bottles)
+        if finals:
+            try:
+                cursor.execute("""
+                    UPDATE scan_events AS s
+                    SET final_product_id = v.product_id, final_at = %s
+                    FROM unnest(%s::text[], %s::text[]) AS v(id, product_id)
+                    WHERE s.id = v.id AND s.user_id = %s
+                      AND s.final_product_id IS DISTINCT FROM v.product_id
+                """, (now, list(finals), list(finals.values()), user_id))
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"[scan] SCAN_FINALS_FAILED user={user_id} {e}", flush=True)
         return {"success": True}
+
+
+def _scan_finals(bottles: list) -> dict:
+    """{scan_id: product_id} for draft rows that came from a logged scan and now
+    hold a product. Draft rows are the app's own JSON, so every field is checked."""
+    finals = {}
+    for bottle in bottles or []:
+        if not isinstance(bottle, dict):
+            continue
+        scan_id, product_id = bottle.get("scanId"), bottle.get("productId")
+        if (isinstance(scan_id, str) and 0 < len(scan_id) <= 64
+                and isinstance(product_id, str) and product_id):
+            finals[scan_id] = product_id
+    return finals
 
 @v1_router.get("/inventory/draft", response_model=InventoryDraftResponse)
 def get_inventory_draft(location_id: str, user_id: str = Depends(get_current_user)):
@@ -3120,7 +3271,44 @@ async def _trial_reminder_loop():
 
 # ============== LEAD GENERATOR SCHEDULER ==============
 
-LEADGEN_RUN_HOUR = int(os.getenv("LEADGEN_RUN_HOUR", "18"))  # 6pm local, CRM_TIMEZONE
+# The daily lead run crawls bar websites in this process, next to the scanner,
+# so it runs at a dead hour for bars: 5am in Los Angeles is 8am in New York —
+# western bars long closed, eastern ones not open — and 8-9pm in Manila, so the
+# list is fresh before the caller's shift. Its own clock, not CRM_TIMEZONE
+# (which also rolls the daily counters over), and only inside the window: a
+# restart at 11pm must not start a crawl in the middle of service. A day the
+# window is missed is skipped; the list holds weeks of leads, and an empty one
+# refills on demand. It used to be LEADGEN_RUN_HOUR (6pm in CRM_TIMEZONE, which
+# defaults to UTC — 2pm New York, when bars count before opening); that name is
+# no longer read. activity.py makes the crawl wait out any count regardless.
+LEADGEN_CRAWL_HOUR = int(os.getenv("LEADGEN_CRAWL_HOUR", "5"))
+LEADGEN_CRAWL_WINDOW_HOURS = min(24, max(1, int(os.getenv("LEADGEN_CRAWL_WINDOW_HOURS", "3"))))
+LEADGEN_CRAWL_TZ = os.getenv("LEADGEN_CRAWL_TZ", "America/Los_Angeles")
+
+
+def _crawl_tz():
+    try:
+        return ZoneInfo(LEADGEN_CRAWL_TZ)
+    except (ZoneInfoNotFoundError, ValueError):
+        print(f"[leadgen] LEADGEN_CRAWL_TZ={LEADGEN_CRAWL_TZ!r} is not a known zone — "
+              f"using America/Los_Angeles", flush=True)
+        return ZoneInfo("America/Los_Angeles")
+
+
+def _crawl_window_start(local_now: datetime) -> Optional[datetime]:
+    """When the crawl window `local_now` is in opened, or None outside it. Counted
+    round the clock, so a window set to cross midnight (hour 23, 3 hours) works."""
+    into = (local_now.hour - LEADGEN_CRAWL_HOUR) % 24
+    if into >= LEADGEN_CRAWL_WINDOW_HOURS:
+        return None
+    return (local_now - timedelta(hours=into)).replace(minute=0, second=0, microsecond=0)
+
+
+def _in_crawl_window(local_now: datetime) -> bool:
+    """Is `local_now` (in the crawl's clock) inside the daily crawl window?"""
+    return _crawl_window_start(local_now) is not None
+
+
 LEADGEN_CHECK_INTERVAL_SECONDS = 900                          # 15 min
 
 
@@ -3128,27 +3316,25 @@ LEADGEN_RETRY_HOURS = 2
 
 
 def _leadgen_should_run_now() -> bool:
-    """True once per day, at or after the configured local hour.
+    """True once per crawl window: inside it (_crawl_window_start), with no
+    successful run since it opened.
 
-    Checks the run log rather than keeping state in memory, so a restart — which
-    on Render's free tier happens whenever the service spins down — can't cause
-    a second run or skip the day entirely.
+    Checks the run log rather than keeping state in memory, so a restart (a
+    deploy) can't cause a second run or skip the day entirely.
     """
-    from crm import _reset_tz
     from database import get_db as _get_db
 
-    local_now = datetime.now(_reset_tz())
-    if local_now.hour < LEADGEN_RUN_HOUR:
+    window_start = _crawl_window_start(datetime.now(_crawl_tz()))
+    if window_start is None:
         return False
 
     # Compared as an instant, not as a date string. started_at is written by
     # now_iso() in UTC, so slicing its first ten characters gives the UTC date —
-    # and west of UTC the local evening run hour falls on the NEXT UTC date. A
-    # 6pm Pacific run on local day D is stored as D+1, so on day D+1 a date
-    # comparison finds it and suppresses that day's run: the generator would
-    # fire every other day, quietly, and only in the zones this tool is for.
-    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    since = local_midnight.astimezone(timezone.utc).isoformat()
+    # and west of UTC a local evening falls on the NEXT UTC date, so a date
+    # comparison once made the generator fire every other day. Counted from the
+    # window's opening rather than local midnight, so a window crossing
+    # midnight still runs once.
+    since = window_start.astimezone(timezone.utc).isoformat()
 
     # A run that failed isn't "ok", so the day stayed due and the next tick
     # (every 15 minutes) ran again — hammering the free map mirrors until
@@ -3878,6 +4064,9 @@ def change_password(request: ChangePasswordRequest, user_id: str = Depends(get_c
 class ScanAnalyzeRequest(BaseModel):
     image: str                          # base64 encoded JPEG
     previous_readings: list[float] = [] # last N raw liquidLevel floats for smoothing (optional)
+    # The bar being counted. Recorded with the scan (scan_events) so accuracy can
+    # be read per bar; optional because app builds before it existed don't send it.
+    location_id: Optional[str] = Field(default=None, max_length=64)
 
 class ScanAnalyzeResponse(BaseModel):
     name: str
@@ -3890,49 +4079,81 @@ class ScanAnalyzeResponse(BaseModel):
     needs_rescan: bool = False  # True when confidence is too low for reliable classification
     matched_product_id: Optional[str] = None
     is_new_product: bool = False
-    match_method: str = "none"  # "exact", "auto_created", "none"
+    match_method: str = "none"  # "exact", "normalized", "alias", "swapped", "combined", "auto_created", "unreadable", "none"
+    # The scan_events row this answer was logged under. The app keeps it on the
+    # bottle row, and the draft sync reports which product the row ended up as —
+    # that pair is how "the AI said X, the count kept Y" gets measured.
+    scan_id: Optional[str] = None
+    # The two providers read DIFFERENT bottles. The answer here is the better-
+    # supported of the two, counted but flagged: the app marks the row for a
+    # check and `alternative` is what the other provider read ("Johnnie Walker
+    # Black Label"). A disputed answer never creates a new product.
+    needs_confirmation: bool = False
+    alternative: Optional[str] = None
 
-PRODUCT_CATALOG = """KNOWN PRODUCTS — spelling normalization ONLY. If the product you READ OFF THE LABEL appears below, use this exact spelling. NEVER use this list to substitute a different variant than the one printed on the label; products not listed are fine as transcribed.
+# Brands bars commonly stock that the seed catalog doesn't carry. Listed for
+# SPELLING only: no product rows back them, so there are no names to teach.
+EXTRA_BRAND_SPELLINGS = [
+    "Iceberg", "Żubrówka", "UV", "Weller", "W.L. Weller", "Bardstown Bourbon Company",
+    "Henry McKenna", "Writers' Tears", "Kilbeggan", "J&B", "Clan MacGregor", "Grant's",
+    "Auchentoshan", "Springbank", "Bunnahabhain", "Redemption", "Lot 40", "Roku",
+    "Clase Azul", "Lunazul", "Hayman's", "Zaya", "Christian Brothers", "Torres", "Cynar",
+    "Montenegro", "Mancino", "Shock Top",
+]
 
-Vodka: Tito's Handmade, Grey Goose, Absolut, Ketel One, Belvedere, Stolichnaya, Svedka, New Amsterdam, Skyy, Pinnacle, Cîroc, Deep Eddy, Wheatley, Three Olives, Smirnoff, Burnett's, Luksusowa, Reyka, Iceberg, Prairie Organic, Finlandia, Russian Standard, Żubrówka, UV Blue, Seagram's Extra Smooth
-Bourbon: Buffalo Trace, Maker's Mark, Woodford Reserve, Knob Creek, Four Roses Small Batch, Bulleit Bourbon, Wild Turkey 101, Eagle Rare 10, Blanton's Original, Weller Special Reserve, Elijah Craig Small Batch, Heaven Hill, Jim Beam White, Old Forester 86, Larceny Small Batch, Basil Hayden's, Angel's Envy, Russell's Reserve 10, Evan Williams Black, Very Old Barton, 1792 Small Batch, Bardstown Bourbon Discovery, Henry McKenna, W.L. Weller 12, Pappy Van Winkle 15
-Tennessee Whiskey: Jack Daniel's Old No. 7, Jack Daniel's Gentleman Jack, Jack Daniel's Single Barrel Select, Jack Daniel's Tennessee Honey, George Dickel No. 12, George Dickel Rye
-Irish Whiskey: Jameson, Jameson Black Barrel, Bushmills Original, Tullamore D.E.W., Redbreast 12, Powers Gold Label, The Irishman Founder's Reserve, Connemara Peated, Writers' Tears Copper Pot, Slane Irish Whiskey, Proper No. Twelve, Kilbeggan Traditional
-Scotch Blended: Johnnie Walker Red, Johnnie Walker Black, Johnnie Walker Double Black, Johnnie Walker Gold Reserve, Dewar's White Label, Dewar's 12, Chivas Regal 12, Famous Grouse, Monkey Shoulder, Cutty Sark, J&B Rare, Clan MacGregor, Scoresby, Bell's Original, Grant's Family Reserve
-Scotch Single Malt: Glenfiddich 12, Glenfiddich 15, Macallan 12 Sherry Oak, Macallan 12 Double Cask, Glenlivet 12, Glenlivet 15, Oban 14, Laphroaig 10, Balvenie 12 DoubleWood, Highland Park 12, Dalmore 12, Auchentoshan Three Wood, Bruichladdich The Classic Laddie, Talisker 10, Springbank 10, Ardbeg 10, Bunnahabhain 12
-Rye Whiskey: Bulleit Rye, WhistlePig 10, Sazerac Rye, High West Rendezvous Rye, Redemption Rye, Rittenhouse Rye 100, George Dickel Rye, Templeton Rye, Knob Creek Rye, Old Overholt Rye, Pikesville Rye, Lot 40 Rye
-Canadian Whisky: Crown Royal Deluxe, Crown Royal Apple, Crown Royal Peach, Crown Royal Black, Canadian Club, Pendleton Original, Forty Creek Barrel Select, Seagram's VO
-Japanese Whisky: Suntory Toki, Nikka Coffey Grain, Hibiki Japanese Harmony, Yamazaki 12, Hakushu 12, Roku Gin (Japanese gin)
-Tequila Blanco: Patrón Silver, Don Julio Blanco, Casamigos Blanco, Herradura Silver, Espolòn Blanco, Olmeca Altos Plata, El Jimador Silver, Jose Cuervo Silver, 1800 Silver, Milagro Silver, Clase Azul Plata, Hornitos Plata, Lunazul Blanco, Cazadores Blanco, Teremana Blanco
-Tequila Reposado: Patrón Reposado, Don Julio Reposado, Casamigos Reposado, Herradura Reposado, Olmeca Altos Reposado, Espolòn Reposado, 1800 Reposado, Cazadores Reposado
-Tequila Añejo: Don Julio Añejo, Patrón Añejo, Casamigos Añejo, 1800 Añejo, Herradura Añejo, Gran Centenario Añejo
-Mezcal: Del Maguey Vida, Ilegal Joven, Montelobos, Banhez Ensemble,Putaendo, Wahaka Madre Cuishe,Putaendo, Alipús San Andres
-Gin: Tanqueray London Dry, Tanqueray No. Ten, Hendrick's, Bombay Sapphire, Beefeater London Dry, Sipsmith London Dry, Aviation American Gin, The Botanist, Monkey 47, Plymouth Gin, New Amsterdam Gin, Malfy Con Limone, Empress 1908, Fords Gin, Nolet's Silver, Hayman's Old Tom, Drumshanbo Gunpowder Irish Gin
-Rum White/Silver: Bacardi Superior, Bacardi Gold, Plantation 3 Stars, Mount Gay Eclipse, Cruzan Light, Flor de Caña Extra Dry 4, Don Q Cristal, Brugal Extra Dry
-Rum Dark/Spiced: Captain Morgan Original Spiced, Kraken Black Spiced, Sailor Jerry Spiced, Myers's Original Dark, Gosling's Black Seal, Diplomatico Reserva Exclusiva, Appleton Estate Signature, El Dorado 12, Zaya Gran Reserva, Angostura 1919, Pusser's Blue Label, Plantation Original Dark, Ron Zacapa 23
-Brandy/Cognac: Hennessy VS, Hennessy VSOP, Rémy Martin VSOP, Rémy Martin 1738, Courvoisier VS, Martell VS, E&J VSOP, Paul Masson Grande Amber VSOP, Korbel California Brandy, Christian Brothers VS, Torres 10 Imperial Brandy
-Liqueurs/Triple Sec: Cointreau, Grand Marnier Cordon Rouge, DeKuyper Triple Sec, Patron Citrónge, Blue Curaçao, Luxardo Maraschino
-Amaretto/Nut: Disaronno Originale, Amaretto di Saronno, Frangelico Hazelnut, Nocello Walnut, Kahlúa Original, Kahlúa Especial, Tia Maria Coffee
-Cream/Sweet: Baileys Original Irish Cream, RumChata, Carolans Irish Cream, St. Brendan's Irish Cream, Mozart Dark Chocolate
-Herbal/Bitter: Jägermeister, Campari, Aperol, Fernet-Branca, Cynar, Aperol, Amaro Averna, Montenegro Amaro, Bénédictine, Chartreuse Green, Chartreuse Yellow, Lillet Blanc, Lillet Rosé
-Fruit/Berry: Chambord Black Raspberry, Midori Melon, Peach Schnapps DeKuyper, St-Germain Elderflower, Crème de Cassis, Limoncello Pallini, Aperol, Pama Pomegranate
-Peppermint/Cinnamon: Fireball Cinnamon Whisky, Rumple Minze Peppermint, DeKuyper Peppermint Schnapps, Templeton Rye Cinnamon
-Coconut/Tropical: Malibu Coconut Rum, DKNY Coconut, Malibu Mango, Blue Chair Bay Coconut
-Vermouth/Fortified: Martini & Rossi Sweet Vermouth, Martini & Rossi Dry Vermouth, Noilly Prat Dry, Dolin Dry, Carpano Antica Formula, Mancino Secco
-Beer (common): Bud Light, Budweiser, Coors Light, Miller Lite, Miller High Life, Corona Extra, Modelo Especial, Dos Equis Lager, Heineken, Stella Artois, Blue Moon Belgian White, Shock Top, Sam Adams Boston Lager, Guinness Draught, Sierra Nevada Pale Ale, Lagunitas IPA, Bell's Two Hearted
-Wine (common): Kim Crawford Sauvignon Blanc, Kendall-Jackson Vintner's Reserve Chardonnay, Josh Cellars Cabernet Sauvignon, La Marca Prosecco, Meiomi Pinot Noir, Whispering Angel Rosé, Barefoot Pinot Grigio, Bogle Essential Red, Chateau Ste. Michelle Riesling
-Soda (common): Sprite Original, Coca-Cola Classic, Coca-Cola Diet Coke, Pepsi Original, Fanta Orange, Canada Dry Ginger Ale
-Mixers/Juice (common): Schweppes Tonic Water, Fever-Tree Tonic Water, Schweppes Club Soda, Red Bull Energy Drink, Ocean Spray Cranberry Juice, Tropicana Orange Juice, Dole Pineapple Juice, Rose's Lime Juice, Rose's Grenadine"""
+
+def _build_product_catalog() -> str:
+    """The prompt's product list, GENERATED from the seed catalog in the exact
+    brand / name split the matcher looks up (helpers.seed_display_name).
+
+    It used to be a hand-typed list that disagreed with the catalog on half its
+    entries — "Johnnie Walker Red" where the product is "Red Label", "Grey Goose"
+    where it is "Grey Goose Original" — while telling the model to "use this exact
+    spelling", so following the list was exactly how a correct read missed the
+    catalog and minted a new product. It also carried junk ("Putaendo" twice in
+    the mezcal line) and duplicates. Generated, it can't drift: add a product to
+    seed_data.py and it's in the prompt."""
+    grouped: dict = {}
+    for p in SEED_PRODUCTS:
+        names = grouped.setdefault(p["category"], {}).setdefault(p["brand"], [])
+        name = seed_display_name(p["name"], p["brand"])
+        if name not in names:
+            names.append(name)
+    lines = [
+        "KNOWN PRODUCTS — spelling ONLY. Each line is a brand, a colon, then that brand's "
+        "product names separated by \" | \", written exactly as the `brand` and `name` fields "
+        "should read: the brand is never repeated in the name, and there is no bottle size. "
+        "If the product you READ OFF THE LABEL is listed, use that exact brand and name. "
+        "NEVER use this list to pick a different variant than the one printed on the label; "
+        "products not listed are fine as transcribed.",
+    ]
+    for category in ("spirits", "beer", "wine", "soda", "mixer", "water", "juice", "other"):
+        if category in grouped:
+            lines.append("")
+            lines.append(category.upper())
+            lines.extend(f"{brand}: {' | '.join(names)}" for brand, names in grouped[category].items())
+    lines.append("")
+    seeded = {product_match_key(None, p["brand"]) for p in SEED_PRODUCTS}
+    extras = [b for b in EXTRA_BRAND_SPELLINGS if product_match_key(None, b) not in seeded]
+    lines.append("Other brands (spelling only): " + ", ".join(extras))
+    return "\n".join(lines)
+
+
+PRODUCT_CATALOG = _build_product_catalog()
 
 BOTTLE_PROMPT = """You are identifying a beverage container (liquor, beer, wine, soda, mixers, water — glass, plastic, or can) from a photo for bar inventory.
 
 Your ONLY job is to identify the exact product. Nothing else matters.
 
+WHICH CONTAINER — photos are taken at a bar, so there are often several bottles or cans in frame (a back-bar shelf, a speed rail, a cooler):
+- Identify ONLY the container nearest the centre of the photo — the one the camera is aimed at.
+- Ignore every other container, even one whose label is larger or easier to read. Never mix text from two different containers.
+
 CRITICAL — identification is a READING task, not a recall task:
 - The name and brand MUST come from text printed on the label. TRANSCRIBE the label exactly as printed.
 - Do NOT infer the flavor or variant from the liquid color, cap color, bottle shape, or from which variants are most popular for that brand. Example: if a Gatorade label prints "BLUE BOLT", the name is "Blue Bolt" — NOT "Glacier Freeze", "Cool Blue", or any other blue variant you associate with the brand.
 - If the variant name is not clearly legible in the photo, use the generic descriptor printed on the label (e.g. "Sports Drink") as the name and cap confidence at 0.5. A generic name is always better than a guessed variant.
-- Before returning, self-check: "Can I point to the exact pixels where the name I'm returning is printed?" If not, you are guessing — fall back to the generic descriptor.
+- Write label_text FIRST: the words you can actually read on this one container. Then take brand and name ONLY from those words. Every word of the name you return must appear in label_text (the one exception is "Original" for a base product). If a word you want to use isn't there, you are recalling, not reading — fall back to the generic descriptor.
 
 BASE PRODUCTS — descriptors are not variant names:
 - Many flagship products print NO variant name — only the brand plus a flavor/class descriptor. Example: a standard Sprite bottle prints "Sprite" and "Carbonated Lemon-Lime Flavored Drink". "Lemon-Lime" there is a DESCRIPTOR of the base product, not a variant.
@@ -3940,6 +4161,7 @@ BASE PRODUCTS — descriptors are not variant names:
 - Return a distinct variant name ONLY when the label prints an explicit variant (e.g. "Zero Sugar", "Cherry", "Blue Bolt", "Tropical Mix"). Descriptor phrases like "flavored drink", "original taste", "classic", "carbonated beverage" mean base product → "Original".
 
 How to read the label:
+0. Transcribe the readable words into label_text, in reading order, exactly as printed.
 1. Find the largest brand wordmark (e.g. GATORADE, JACK DANIEL'S) — that is the brand.
 2. Find the variant/expression/flavor text, usually smaller and near the brand (e.g. BLUE BOLT, OLD NO. 7, RED LABEL) — that is the name. If there is no variant text — only a flavor/class descriptor — the name is "Original".
 3. Use any printed class designation for product_type (e.g. SPORTS DRINK, TENNESSEE WHISKEY, LONDON DRY GIN).
@@ -3947,6 +4169,7 @@ How to read the label:
 
 Return ONLY a JSON object — no markdown, no explanation:
 {
+  "label_text": "The words printed on this container that you can actually read, in reading order, exactly as printed (e.g. JOHNNIE WALKER RED LABEL BLENDED SCOTCH WHISKY 750 ML)",
   "name": "Variant/expression name only (e.g. Old No. 7, Red Label, Blue Bolt, Original)",
   "brand": "Brand/distillery name only (e.g. Jack Daniel's, Johnnie Walker, Gatorade)",
   "category": "one of: spirits | beer | wine | soda | mixer | water | juice | other",
@@ -3955,15 +4178,46 @@ Return ONLY a JSON object — no markdown, no explanation:
 }
 
 Rules:
+- label_text: written FIRST. Only words you can actually see on the ONE container you are identifying — never words you expect a label like this to carry. Up to about 30 words; include every word you used for brand and name.
 - name: variant/expression only — do NOT include the brand name in this field. Use "Original" for a brand's base product with no printed variant name.
 - brand: brand/distillery name only — do NOT include the variant or product type
 - product_type: the specific regulatory or descriptive class (e.g. Tennessee Whiskey, Bourbon Whiskey, Blended Scotch Whisky, London Dry Gin, Silver Tequila, Aged Rum, Vodka, Lemon-Lime Soda, Cola, Tonic Water, Sports Drink, Energy Drink). Use the label's own designation when visible.
 - category must be one of: spirits, beer, wine, soda, mixer, water, juice, other
 - confidence is 0.0-1.0 and reflects how certain you are of the EXACT product (brand + variant)
-- If no bottle or can is present at all, return: {"name":"","brand":"","category":"other","product_type":"","confidence":0}
+- If no bottle or can is present at all, return: {"label_text":"","name":"","brand":"","category":"other","product_type":"","confidence":0}
 - Return ONLY valid JSON.
 
 """ + PRODUCT_CATALOG
+
+# Sent with the image, after it. The instructions above go FIRST (as the system
+# message) so they are an identical prefix on every scan — OpenAI caches a
+# repeated prefix automatically, but only a prefix: with the image first, as it
+# used to be, ~2,600 identical tokens were re-read in full on every scan.
+SCAN_USER_TEXT = ("Identify the container nearest the centre of this photo. "
+                  "Return only the JSON object.")
+
+SCAN_CATEGORIES = ["spirits", "beer", "wine", "soda", "mixer", "water", "juice", "other"]
+
+# The answer's shape, enforced by the provider rather than hoped for: OpenAI's
+# strict structured output can't return anything else, so there is no prose to
+# fail to parse and no category outside the list. Strict mode needs every field
+# required and no extras; the numeric range is checked in _parse_ai_result.
+SCAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        # FIRST on purpose: strict structured output writes keys in schema
+        # order, so the model commits to what it can read before it names the
+        # product — and the server can check the name against it (label_supports).
+        "label_text": {"type": "string"},
+        "name": {"type": "string"},
+        "brand": {"type": "string"},
+        "category": {"type": "string", "enum": SCAN_CATEGORIES},
+        "product_type": {"type": "string"},
+        "confidence": {"type": "number"},
+    },
+    "required": ["label_text", "name", "brand", "category", "product_type", "confidence"],
+    "additionalProperties": False,
+}
 
 
 # ─── AI provider helpers ───────────────────────────────────────────────────
@@ -3976,6 +4230,20 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 # evidence was `[warm] Gemini warm-up failed ... no longer available`. An env
 # var means the next retirement is a dashboard edit, not a deploy.
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
+# How much Gemini thinks before it answers: minimal | low | medium | high, or
+# "default" for whatever the model does unasked (medium, on 3.6 Flash). Gemini 3
+# models always think, it's billed as output, and it's time the bartender waits;
+# reading a label needs little of it. "low" because every current Flash model
+# takes it (3.7 and 3.8 dropped "minimal"). A dashboard edit, like the model.
+_GEMINI_LEVELS = ("MINIMAL", "LOW", "MEDIUM", "HIGH", "DEFAULT")
+GEMINI_THINKING = (os.getenv("GEMINI_THINKING", "low").strip().upper() or "LOW")
+if GEMINI_THINKING not in _GEMINI_LEVELS:
+    print(f"[startup] GEMINI_THINKING={GEMINI_THINKING!r} is not one of "
+          f"{', '.join(v.lower() for v in _GEMINI_LEVELS)} — using low", flush=True)
+    GEMINI_THINKING = "LOW"
+# Gemini's REST API. Overridable so the tests can point it at a local fake.
+GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
 
 # Scan accuracy config — override via environment variables if needed.
 # CONFIDENCE_THRESHOLD:     AI confidence below this triggers needs_rescan=True.
@@ -3997,6 +4265,37 @@ TOTAL_SCAN_TIMEOUT_SEC: float = float(os.getenv("TOTAL_SCAN_TIMEOUT_SEC", "20.0"
 # Blue Bolt"). This only gates creating NEW products — matching an existing one
 # runs before the check, so a legible scan of a known bottle is unaffected.
 AUTO_CREATE_CONFIDENCE: float = float(os.getenv("AUTO_CREATE_CONFIDENCE", "0.6"))
+# BOTTLE_PROMPT tells the model to answer an illegible label with the generic
+# descriptor ("Sports Drink") and a confidence of AT MOST 0.5, so a read at or
+# under that line is, by the prompt's own definition, not a reading. It used to be
+# matched anyway: CONFIDENCE_THRESHOLD (0.35) sits below the ceiling, the app
+# never looked at needs_rescan, and a blurry Gatorade matched the generic
+# "Gatorade / Sports Drink" product and was counted with a green check. Now such
+# a read is never matched — the app sees no product and asks for a retake.
+# Keep this in lockstep with the "cap confidence at 0.5" line in BOTTLE_PROMPT.
+UNREADABLE_CONFIDENCE: float = float(os.getenv("UNREADABLE_CONFIDENCE", "0.5"))
+# How long an idle connection to a provider is kept open. The HTTP library's
+# default is 5 seconds, shorter than the gap between two bottles, so without this
+# a shared client still reconnected (TCP + TLS) on most scans.
+AI_KEEPALIVE_SECONDS: float = float(os.getenv("AI_KEEPALIVE_SECONDS", "120"))
+# What to do when the product name the model returned isn't in the label text
+# it transcribed first (helpers.label_supports): "enforce" treats the read as
+# unreadable — no product, the app asks for a retake; "log" only records it in
+# scan_events.label_supported; "off" skips the check. A name missing from the
+# model's own reading of the label is a name from memory, the failure the prompt
+# spends a whole section forbidding — but the check can also refuse a good read
+# the model under-transcribed, so watch the retake rate after deploying:
+# SELECT count(*) FILTER (WHERE status = 'label_unsupported') * 1.0 / count(*)
+# FROM scan_events WHERE created_at > <deploy time>.
+LABEL_CHECK: str = os.getenv("LABEL_CHECK", "enforce").strip().lower()
+# The second opinion: ask OpenAI and Gemini AT THE SAME TIME and compare them,
+# instead of asking Gemini only after OpenAI fails. "off" restores the old order
+# (OpenAI, then Gemini on failure). See _run_providers for the whole rule.
+SECOND_OPINION: str = os.getenv("SECOND_OPINION", "on").strip().lower()
+# Once one READABLE answer is in, how long to wait for the other before deciding
+# on the first alone. Bounds what the comparison can cost a bartender; the other
+# answer is still logged when it lands (scan_events.second_opinion).
+SECOND_OPINION_WAIT_SEC: float = float(os.getenv("SECOND_OPINION_WAIT_SEC", "2.0"))
 
 
 def _strip_code_fences(text: str) -> str:
@@ -4009,16 +4308,31 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _parse_ai_result(text: str) -> dict:
+    """Model text -> result dict with every field present and well-typed.
+
+    Raises json.JSONDecodeError (or ValueError) when the text isn't a JSON
+    object; _run_providers treats that as this provider failing and moves on.
+    Types are forced here because a null name or a "high" confidence used to
+    get as far as ScanAnalyzeResponse — AFTER product matching had run.
+    """
     text = _strip_code_fences(text)
     result = json.loads(text)
-    if "category" in result:
-        result["category"] = result["category"].lower()
+    if not isinstance(result, dict):
+        raise ValueError(f"AI returned {type(result).__name__}, not a JSON object")
+    for key in ("name", "brand", "product_type", "label_text"):
+        value = result.get(key)
+        result[key] = value.strip() if isinstance(value, str) else ""
+    result["label_text"] = result["label_text"][:600]
+    category = str(result.get("category") or "").strip().lower()
+    result["category"] = category if category in SCAN_CATEGORIES else "other"
+    try:
+        confidence = float(result.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence != confidence:  # NaN
+        confidence = 0.0
+    result["confidence"] = min(max(confidence, 0.0), 1.0)
     result.setdefault("levelReadable", True)
-    result.setdefault("confidence", 0.5)
-    result.setdefault("name", "")
-    result.setdefault("brand", "")
-    result.setdefault("category", "other")
-    result.setdefault("product_type", "")
     result.setdefault("liquidLevel", 0.0)
     return result
 
@@ -4053,84 +4367,319 @@ def _apply_stabilization(result: dict, previous_readings: list[float]) -> dict:
     return result
 
 
-async def _call_openai(api_key: str, prompt: str, image_data: str) -> str:
-    client = openai.AsyncOpenAI(api_key=api_key)
-    response = await asyncio.wait_for(
-        client.chat.completions.create(
-            model=OPENAI_MODEL,
-            max_tokens=300,
+# The OpenAI SDK's HTTP library. openai 3.x ships on httpx2 (not the httpx this
+# app pins for everything else); older majors used httpx. The connection limits
+# below must be built from whichever one the SDK actually uses.
+try:
+    import httpx2 as _openai_http
+except ImportError:  # openai < 3
+    _openai_http = httpx
+
+# One client per provider for the life of the process. Every scan used to build
+# a new client — a new connection pool, so a fresh TCP + TLS handshake to the
+# provider on every scan — and /scans/warm warmed a client that was then thrown
+# away, so the warm-up the app fires when the scan screen opens warmed nothing a
+# scan used. Keyed by API key so a changed key gets a new client.
+_openai_clients: dict = {}
+# Gemini's: {event loop: {api key: httpx.AsyncClient}}. An async client's
+# connections belong to the loop that opened them; the server has one loop,
+# anything else (a test, a script) gets its own client instead of a dead one.
+_gemini_clients: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+# The scan path's own worker threads. asyncio.to_thread uses the default pool,
+# which this process shares with the CRM's background jobs — the daily lead run,
+# the inbox reader, phone checks, the playbook and School refreshes — some of
+# which hold a thread for minutes. A scan puts up to two pieces of work on
+# threads at once (both answers' lookups), and must never queue behind a lead
+# run. (The Gemini call used to take a thread too, for its synchronous SDK; it's
+# a plain async HTTP call now — see _call_gemini.)
+_SCAN_POOL = ThreadPoolExecutor(max_workers=max(4, int(os.getenv("SCAN_THREADS", "16"))),
+                                thread_name_prefix="scan")
+
+
+async def _on_scan_thread(fn, *args):
+    """asyncio.to_thread, but on the scan path's own pool."""
+    return await asyncio.get_running_loop().run_in_executor(_SCAN_POOL, functools.partial(fn, *args))
+
+# Models that turned down the full request (structured output, temperature 0,
+# system message) and were then served by the plain one. Remembered so each
+# later scan doesn't pay a rejected round trip first. Only recorded when the
+# plain request SUCCEEDS — a 400 caused by a bad photo must not switch the
+# structured output off for everyone.
+_openai_plain_models: set = set()
+_gemini_plain_models: set = set()
+
+
+def _openai_client(api_key: str) -> "openai.AsyncOpenAI":
+    client = _openai_clients.get(api_key)
+    if client is None:
+        client = openai.AsyncOpenAI(
+            api_key=api_key,
+            # The SDK retries 429s and 5xx errors itself — twice, waiting as long
+            # as retry-after says — and all of it inside PROVIDER_TIMEOUT, so a
+            # rate-limited OpenAI could use up the whole 9s before Gemini started.
+            # Falling through to the other provider is this path's retry.
+            max_retries=0,
+            http_client=openai.DefaultAsyncHttpxClient(
+                limits=_openai_http.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=20,
+                    keepalive_expiry=AI_KEEPALIVE_SECONDS,
+                ),
+            ),
+        )
+        _openai_clients[api_key] = client
+    return client
+
+
+def _gemini_client(api_key: str) -> httpx.AsyncClient:
+    """The shared Gemini connection pool (see _gemini_clients). The key goes in
+    a header, never the URL, so it can't end up in a log line. No retries: httpx
+    makes none, and the other provider is this path's retry."""
+    per_loop = _gemini_clients.setdefault(asyncio.get_running_loop(), {})
+    client = per_loop.get(api_key)
+    if client is None:
+        client = httpx.AsyncClient(
+            base_url=GEMINI_API_BASE,
+            headers={"x-goog-api-key": api_key},
+            timeout=PROVIDER_TIMEOUT,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20,
+                                keepalive_expiry=AI_KEEPALIVE_SECONDS),
+        )
+        per_loop[api_key] = client
+    return client
+
+
+def _openai_is_reasoning(model: str) -> bool:
+    """o-series and GPT-5-family models reject `max_tokens` and any non-default
+    temperature. Swapping OPENAI_MODEL to one of them used to make every scan's
+    OpenAI call fail with a 400 and fall silently through to Gemini."""
+    return model.lower().startswith(("o1", "o3", "o4", "gpt-5"))
+
+
+def _openai_request(model: str, prompt: str, image_data: str, plain: bool = False) -> dict:
+    """Keyword arguments for chat.completions.create.
+
+    The full request puts the fixed instructions first as the system message (so
+    they're cacheable), the image last, and asks for strict schema-shaped JSON at
+    temperature 0 — the prompt demands that every scan of the same bottle gives
+    the same name, and sampling at the default temperature of 1.0 worked against
+    it. `plain` is the request as it was before any of that, used only when a
+    model turns the full one down.
+    """
+    image_part = {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/jpeg;base64,{image_data}", "detail": "high"},
+    }
+    reasoning = _openai_is_reasoning(model)
+    # Reasoning models spend completion tokens thinking, so 300 would cut them off.
+    token_param = "max_completion_tokens" if reasoning else "max_tokens"
+    token_budget = 4000 if reasoning else 300
+    if plain:
+        return {
+            "model": model,
+            token_param: token_budget,
+            "messages": [{"role": "user", "content": [image_part, {"type": "text", "text": prompt}]}],
+        }
+    kwargs = {
+        "model": model,
+        "max_completion_tokens": token_budget,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": [image_part, {"type": "text", "text": SCAN_USER_TEXT}]},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "bottle_scan", "strict": True, "schema": SCAN_SCHEMA},
+        },
+    }
+    if reasoning:
+        kwargs["reasoning_effort"] = "low"  # reading a label needs little deliberation
+    else:
+        kwargs["temperature"] = 0
+    return kwargs
+
+
+def _openai_usage(response) -> dict:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+    details = getattr(usage, "prompt_tokens_details", None)
+    out_details = getattr(usage, "completion_tokens_details", None)
+    return {
+        "input_tokens": getattr(usage, "prompt_tokens", None),
+        "cached_tokens": getattr(details, "cached_tokens", None) if details else None,
+        # Billed output; a reasoning model's thinking is already inside it.
+        "output_tokens": getattr(usage, "completion_tokens", None),
+        "thinking_tokens": getattr(out_details, "reasoning_tokens", None) if out_details else None,
+    }
+
+
+async def _call_openai(api_key: str, prompt: str, image_data: str, stats: Optional[dict] = None) -> str:
+    """One OpenAI scan call; returns the model's text. `stats` (if given) gets
+    the token counts for the scan log. Raises on failure, like every provider."""
+    client = _openai_client(api_key)
+
+    async def _create(plain: bool):
+        return await client.chat.completions.create(
             timeout=60.0,  # SDK fallback; asyncio.wait_for is the real gate
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_data}",
-                                "detail": "high",
-                            },
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-        ),
-        timeout=PROVIDER_TIMEOUT,
-    )
-    return response.choices[0].message.content.strip()
+            **_openai_request(OPENAI_MODEL, prompt, image_data, plain=plain),
+        )
+
+    async def _attempt():
+        if OPENAI_MODEL in _openai_plain_models:
+            return await _create(plain=True)
+        try:
+            return await _create(plain=False)
+        except openai.BadRequestError as e:
+            print(f"[analyze_bottle] OpenAI rejected the structured request "
+                  f"(model={OPENAI_MODEL}): {e} — retrying as a plain request", flush=True)
+            response = await _create(plain=True)
+            _openai_plain_models.add(OPENAI_MODEL)
+            print(f"[analyze_bottle] SCAN_OPENAI_PLAIN model={OPENAI_MODEL} — plain request "
+                  f"worked; structured output stays off for this model until restart", flush=True)
+            return response
+
+    response = await asyncio.wait_for(_attempt(), timeout=PROVIDER_TIMEOUT)
+    if stats is not None:
+        stats.update(_openai_usage(response))
+    message = response.choices[0].message
+    if not message.content:
+        # A refusal comes back as `refusal` with no content. Raising makes the
+        # scan fall through to Gemini instead of dying on None.strip().
+        raise ValueError(f"OpenAI returned no content (refusal: {getattr(message, 'refusal', None)!r})")
+    return message.content.strip()
 
 
-async def _call_gemini(api_key: str, prompt: str, image_data: str) -> str:
-    import base64
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(GEMINI_MODEL)
-    image_bytes = base64.b64decode(image_data)
-    response = await asyncio.wait_for(
-        asyncio.to_thread(
-            model.generate_content,
-            [prompt, {"mime_type": "image/jpeg", "data": image_bytes}]
-        ),
-        timeout=PROVIDER_TIMEOUT,
-    )
-    return response.text.strip()
+class GeminiError(Exception):
+    """Gemini answered with an HTTP error (a bad request, a rejected key, a rate
+    limit, an outage)."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(f"Gemini HTTP {status}: {detail}")
+        self.status = status
+
+
+def _gemini_request(prompt: str, image_data: str, plain: bool = False) -> dict:
+    """The generateContent body: the instructions first — the same text on every
+    scan, so Google can reuse it from its cache — then the photo. JSON mode and
+    the thinking level (GEMINI_THINKING) unless `plain`, which is the bare
+    request, for a model that turns those down."""
+    body: dict = {"contents": [{"role": "user", "parts": [
+        {"text": prompt},
+        {"inlineData": {"mimeType": "image/jpeg", "data": image_data}},
+    ]}]}
+    if not plain:
+        config: dict = {"responseMimeType": "application/json"}   # a JSON object, never prose around one
+        if GEMINI_THINKING != "DEFAULT":
+            config["thinkingConfig"] = {"thinkingLevel": GEMINI_THINKING}
+        body["generationConfig"] = config
+    return body
+
+
+def _gemini_text(data: dict) -> str:
+    """The answer's text. Raises ValueError when there is none (blocked, cut
+    off), so the scan falls through to the other provider."""
+    candidates = data.get("candidates") or []
+    if not candidates:
+        reason = (data.get("promptFeedback") or {}).get("blockReason")
+        raise ValueError(f"Gemini returned no answer (blocked: {reason})")
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and not p.get("thought"))
+    if not text.strip():
+        raise ValueError(f"Gemini returned no text (finishReason: {candidates[0].get('finishReason')})")
+    return text.strip()
+
+
+def _gemini_usage(data: dict) -> dict:
+    """Token counts for the scan log. Output is what Google BILLS: the answer
+    plus the thinking, which it counts separately (thoughtsTokenCount) — the SDK
+    this replaced reported the answer alone, so the log understated Gemini."""
+    u = data.get("usageMetadata") or {}
+    reply, thinking = u.get("candidatesTokenCount"), u.get("thoughtsTokenCount")
+    return {
+        "input_tokens": u.get("promptTokenCount"),
+        "cached_tokens": u.get("cachedContentTokenCount"),
+        "output_tokens": None if reply is None and thinking is None else (reply or 0) + (thinking or 0),
+        "thinking_tokens": thinking,
+    }
+
+
+async def _call_gemini(api_key: str, prompt: str, image_data: str, stats: Optional[dict] = None) -> str:
+    """One Gemini scan call, over its REST API; returns the model's text.
+
+    Direct HTTP, like the CRM's calls to Claude, because the only Google SDK that
+    runs on this app's pinned httpx (google-generativeai 0.8.3) can't set Gemini
+    3's thinking level — and its call was synchronous, on a thread asyncio could
+    stop waiting for but not stop. This one is a plain async request: the
+    PROVIDER_TIMEOUT gate cancels it outright, and httpx never retries."""
+    client = _gemini_client(api_key)
+    path = f"/models/{GEMINI_MODEL}:generateContent"
+
+    async def _post(plain: bool) -> dict:
+        response = await client.post(path, json=_gemini_request(prompt, image_data, plain=plain))
+        if response.status_code != 200:
+            raise GeminiError(response.status_code, response.text[:300])
+        return response.json()
+
+    async def _attempt() -> dict:
+        if GEMINI_MODEL in _gemini_plain_models:
+            return await _post(plain=True)
+        try:
+            return await _post(plain=False)
+        except GeminiError as e:
+            if e.status != 400:
+                raise
+            print(f"[analyze_bottle] Gemini rejected the full request (model={GEMINI_MODEL}): {e} "
+                  f"— retrying as a plain request", flush=True)
+            data = await _post(plain=True)
+            _gemini_plain_models.add(GEMINI_MODEL)
+            print(f"[analyze_bottle] SCAN_GEMINI_PLAIN model={GEMINI_MODEL} — plain request worked; "
+                  f"JSON mode and the thinking level stay off for this model until restart", flush=True)
+            return data
+
+    data = await asyncio.wait_for(_attempt(), timeout=PROVIDER_TIMEOUT)
+    if stats is not None:
+        stats.update(_gemini_usage(data))
+    return _gemini_text(data)
 
 
 async def _warm_providers() -> dict:
-    """Open TLS connections / init the AI clients so the first real scan doesn't
-    pay the cold-path setup (observed ~8s extra on the first scan). Best-effort,
-    never raises. Costs ~1 token per provider per call."""
+    """Open the shared clients' connections so the first real scan doesn't pay
+    the cold-path setup (observed ~8s extra on the first scan). Best-effort,
+    never raises.
+
+    Both are warmed with a model lookup, not a completion: it opens a
+    connection in the same pool the scans use, costs no tokens, and fails
+    loudly (404) when the configured model has been retired. A 1-token
+    completion also broke on reasoning models, which reject `max_tokens`."""
     openai_key = os.getenv("OPENAI_API_KEY")
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     warmed = {"openai": False, "gemini": False}
 
     if openai_key:
         try:
-            client = openai.AsyncOpenAI(api_key=openai_key)
             await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=OPENAI_MODEL,
-                    max_tokens=1,
-                    messages=[{"role": "user", "content": "ping"}],
-                ),
+                _openai_client(openai_key).models.retrieve(OPENAI_MODEL),
                 timeout=8,
             )
             warmed["openai"] = True
+        except openai.PermissionDeniedError as e:
+            # A project key restricted from reading models: the connection is
+            # open (the point of warming) — it just can't confirm the model.
+            warmed["openai"] = True
+            print(f"[warm] OpenAI key can't look up models ({e}); connection warmed anyway", flush=True)
         except Exception as e:
             print(f"[warm] OpenAI warm-up failed (non-fatal): {e}", flush=True)
 
     if gemini_key:
         try:
-            genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel(GEMINI_MODEL)
-            await asyncio.wait_for(
-                asyncio.to_thread(
-                    model.generate_content,
-                    "ping",
-                    generation_config={"max_output_tokens": 1},
-                ),
-                timeout=8,
-            )
+            # A model lookup, like OpenAI's: opens a connection in the pool the
+            # scans use, costs nothing, and 404s when GEMINI_MODEL is retired.
+            response = await asyncio.wait_for(
+                _gemini_client(gemini_key).get(f"/models/{GEMINI_MODEL}", timeout=8), timeout=8)
+            if response.status_code != 200:
+                raise GeminiError(response.status_code, response.text[:200])
             warmed["gemini"] = True
         except Exception as e:
             print(f"[warm] Gemini warm-up failed (non-fatal): {e}", flush=True)
@@ -4149,51 +4698,89 @@ async def _warm_providers() -> dict:
     return warmed
 
 
-def _match_or_create_product(result: dict, user_id: str) -> tuple:
-    """Match AI result against products table; auto-create if confidence high enough.
+def _find_product(result: dict, user_id: str, location_id: Optional[str] = None) -> tuple:
+    """Which existing product an AI answer is — WITHOUT changing anything.
 
-    Matching widens in stages, cheapest and most certain first: exact strings, then
-    punctuation-insensitive, then an explicit alias recorded by a merge, then the
-    name/brand fields swapped, then the two fields concatenated. Every stage after
-    the first exists because the AI re-reads the label on each scan and can phrase
-    the same bottle differently — "Gatorade"/"Blue Bolt" one time, "Blue Bolt"/
-    "Gatorade" or a single "Gatorade Blue Bolt" the next. Without them each variant
-    becomes its own product, which splits counts (and so over-orders), splits the
-    price book, and drops the distributor assignment.
+    Read-only on purpose: with a second opinion both providers' answers are
+    looked up, and only the one chosen may count a scan or create a product
+    (_record_match does that).
 
-    Returns (matched_product_id, is_new_product, match_method).
-    Never raises — on any DB error returns (None, False, "none").
+    First, when the scan says which bar it's for, THAT BAR'S OWN BOTTLES
+    ("bar_book"): a bar's pars, prices and distributors hang off the product id it
+    has been counting, so landing on some other bar's copy of the same bottle —
+    even the "right" one — loses them. Then matching widens in stages, cheapest and
+    most certain first: exact strings, then punctuation-insensitive, then an
+    explicit alias recorded by a merge, then the match key (accents folded, brand
+    repeated in the name dropped, sizes dropped — helpers.product_match_key), then
+    the name/brand fields swapped, then the two fields concatenated. Every stage
+    after the first exists because the AI re-reads the label on each scan and can
+    phrase the same bottle differently — "Gatorade"/"Blue Bolt" one time, "Blue
+    Bolt"/"Gatorade" or a single "Gatorade Blue Bolt" the next, "Patrón" or
+    "Patron". Without them each variant becomes its own product, which splits
+    counts (and so over-orders), splits the price book, and drops the distributor
+    assignment.
+
+    Returns (product_id, match_method), or (None, "none") when nothing fits.
+    Never raises — on a DB error returns (None, "lookup_failed"), which is NOT
+    "no such bottle": nothing may be created from it (_record_match), and the
+    scan answers 503 so the app retries it (_respond).
     """
     name = result.get("name", "").strip()
     brand = result.get("brand", "").strip() or None
-    confidence = result.get("confidence", 0.0)
-    product_type = result.get("product_type", "").strip() or None
 
     if not name:
-        return (None, False, "none")
+        return (None, "none")
 
     norm_name = normalize_match_text(name)
     norm_brand = normalize_match_text(brand)
     norm_col_name = NORM_SQL.format(col="name")
     norm_col_brand = NORM_SQL.format(col="brand")
+    match_key = product_match_key(name, brand)
+    # The fields the other way round, for a model that put the brand in `name`.
+    swapped_key = product_match_key(brand, name) if brand else None
+    # The key ignores sizes (it's how "Grey Goose Original 750ml" is reachable at
+    # all), so a size the scan DID read is checked separately: a "1L" read must
+    # not land on the 750ml product and put a litre's count on it.
+    wanted_ml = size_ml(name) or size_ml(brand)
+
+    def _size_ok(rows):
+        return [r for r in rows
+                if sizes_compatible(wanted_ml, size_ml(r["size"]) or size_ml(r["name"]))]
 
     try:
         with get_db() as conn:
             cursor = conn.cursor()
 
-            def _claim(product_id: str, method: str) -> tuple:
-                cursor.execute(
-                    "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
-                    (now_iso(), product_id)
-                )
-                if product_type:
-                    cursor.execute(
-                        "UPDATE products SET product_type = %s, updated_at = %s "
-                        "WHERE id = %s AND (product_type IS NULL OR product_type = '')",
-                        (product_type, now_iso(), product_id)
-                    )
-                conn.commit()
-                return (product_id, False, method)
+            # Step 0 — this bar's own bottles: by match key, or the product this
+            # account MERGED a product with that key into (it merged "Red" into
+            # "Red Label": the product it merged away can still be alive for other
+            # bars that count it, and the global steps below would find it first),
+            # or through a merge's alias (merges from before product_merges
+            # existed; aliases are one per phrasing for everyone). Only when exactly
+            # one fits: two means the bar keeps the same bottle as two products
+            # (a 750ml and a 1L, say), and guessing between them would put one
+            # size's count on the other; the global steps below decide as before.
+            # The location must be the caller's own, so a forged location_id can
+            # only ever change the order of this user's own matches.
+            if location_id:
+                cursor.execute("""
+                    SELECT DISTINCT p.id, p.size, p.name FROM products p
+                    JOIN par_levels pl ON pl.product_id = p.id
+                    JOIN locations l ON l.id = pl.location_id
+                    WHERE pl.location_id = %s AND l.user_id = %s
+                      AND p.deleted_at IS NULL
+                      AND (p.match_key IN (%s, %s)
+                           OR p.id IN (SELECT m.target_product_id FROM product_merges m
+                                       JOIN products s ON s.id = m.source_product_id
+                                       WHERE m.user_id = %s AND s.match_key IN (%s, %s))
+                           OR p.id IN (SELECT product_id FROM product_aliases
+                                       WHERE norm_name = %s AND norm_brand = %s))
+                    LIMIT 10
+                """, (location_id, user_id, match_key, swapped_key or match_key,
+                      user_id, match_key, swapped_key or match_key, norm_name, norm_brand))
+                rows = _size_ok(cursor.fetchall())
+                if len(rows) == 1:
+                    return (rows[0]["id"], "bar_book")
 
             # Step A — exact match on name + brand (case-insensitive)
             cursor.execute("""
@@ -4209,7 +4796,7 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
             """, (name, brand, brand))
             row = cursor.fetchone()
             if row:
-                return _claim(row["id"], "exact")
+                return (row["id"], "exact")
 
             # Step B — same, ignoring punctuation and spacing
             cursor.execute(f"""
@@ -4221,7 +4808,7 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
             """, (norm_name, norm_brand))
             row = cursor.fetchone()
             if row:
-                return _claim(row["id"], "normalized")
+                return (row["id"], "normalized")
 
             # Step C — an alias a merge recorded, so a phrasing someone already
             # resolved by hand never splits back off into a new product.
@@ -4234,7 +4821,21 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
             """, (norm_name, norm_brand))
             row = cursor.fetchone()
             if row:
-                return _claim(row["product_id"], "alias")
+                return (row["product_id"], "alias")
+
+            # Step K — the match key: accents, a repeated brand and sizes ignored.
+            # This is what finally reaches the seeded catalog ("Grey Goose
+            # Original 750ml" / "Grey Goose" for a scan of "Original" / "Grey
+            # Goose") and joins "Patrón" to "Patron".
+            cursor.execute("""
+                SELECT id, size, name FROM products
+                WHERE match_key = %s AND deleted_at IS NULL
+                ORDER BY verified DESC, scan_count DESC
+                LIMIT 10
+            """, (match_key,))
+            rows = _size_ok(cursor.fetchall())
+            if rows:
+                return (rows[0]["id"], "match_key")
 
             # Step D — the two fields swapped
             if norm_name and norm_brand:
@@ -4247,7 +4848,18 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
                 """, (norm_brand, norm_name))
                 row = cursor.fetchone()
                 if row:
-                    return _claim(row["id"], "swapped")
+                    return (row["id"], "swapped")
+
+                # ...and the swapped fields by match key.
+                cursor.execute("""
+                    SELECT id, size, name FROM products
+                    WHERE match_key = %s AND deleted_at IS NULL
+                    ORDER BY verified DESC, scan_count DESC
+                    LIMIT 10
+                """, (swapped_key,))
+                rows = _size_ok(cursor.fetchall())
+                if rows:
+                    return (rows[0]["id"], "swapped")
 
             # Step E — brand and name run together, catching the case where the AI
             # returns the whole label as one field ("Gatorade Blue Bolt" / "").
@@ -4267,149 +4879,629 @@ def _match_or_create_product(result: dict, user_id: str) -> tuple:
                 """, (combined, combined))
                 row = cursor.fetchone()
                 if row:
-                    return _claim(row["id"], "combined")
+                    return (row["id"], "combined")
 
-            # Step F — auto-create if confidence is sufficient
-            if confidence >= AUTO_CREATE_CONFIDENCE:
+                # ...and run together by match key, which also reaches the seeded
+                # rows ("Jack Daniel's Old No. 7" / "" meets the stored
+                # "Jack Daniel's Old No. 7 750ml" / "Jack Daniel's"). With no
+                # brand given, a bare brand ("Grey Goose" / "") is that brand's
+                # base product, which the catalog calls "Original".
+                flat_key = match_key.replace("|", "")
+                flat_keys = [flat_key] if brand else [flat_key, flat_key + "original"]
+                cursor.execute("""
+                    SELECT id, size, name FROM products
+                    WHERE replace(match_key, '|', '') = ANY(%s) AND deleted_at IS NULL
+                    ORDER BY verified DESC, scan_count DESC
+                    LIMIT 10
+                """, (flat_keys,))
+                rows = _size_ok(cursor.fetchall())
+                if rows:
+                    return (rows[0]["id"], "combined")
+
+            return (None, "none")
+
+    except Exception as e:
+        print(f"[match_product] lookup error: {e}", flush=True)
+        return (None, "lookup_failed")
+
+
+def _record_match(result: dict, user_id: str, product_id: Optional[str], method: str,
+                  allow_create: bool = True) -> tuple:
+    """Count a scan against the product _find_product chose, or create the
+    product when there is none and creating is allowed. The only writes on the
+    matching path.
+
+    `allow_create` is False when a second opinion was available and didn't back
+    this answer: a product created from one model's reading becomes every bar's
+    match target, so a new catalog entry needs both models to agree.
+
+    Returns (matched_product_id, is_new_product, match_method). Never raises.
+    A product the lookup already found is kept even if counting it fails (the
+    count is bookkeeping); with no product, a failed lookup or a failed write is
+    (None, False, "lookup_failed") — never a new product on the strength of a
+    lookup that didn't happen: the bottle is most likely in the catalog already.
+    """
+    if not product_id and method == "lookup_failed":
+        return (None, False, "lookup_failed")
+    name = result.get("name", "").strip()
+    brand = result.get("brand", "").strip() or None
+    confidence = result.get("confidence", 0.0)
+    product_type = result.get("product_type", "").strip() or None
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            if product_id:
+                cursor.execute(
+                    "UPDATE products SET scan_count = scan_count + 1, updated_at = %s WHERE id = %s",
+                    (now_iso(), product_id)
+                )
+                if product_type:
+                    cursor.execute(
+                        "UPDATE products SET product_type = %s, updated_at = %s "
+                        "WHERE id = %s AND (product_type IS NULL OR product_type = '')",
+                        (product_type, now_iso(), product_id)
+                    )
+                conn.commit()
+                return (product_id, False, method)
+
+            # Auto-create if confidence is sufficient (and nothing contradicted it)
+            if name and allow_create and confidence >= AUTO_CREATE_CONFIDENCE:
                 category = result.get("category", "other") or "other"
                 new_id = generate_id()
                 now = now_iso()
                 cursor.execute("""
                     INSERT INTO products
                         (id, name, brand, category, size, upc, image_url, product_type,
-                         scan_count, verified, source, created_by_user_id, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, NULL, NULL, NULL, %s, 1, 0, 'scan_auto', %s, %s, %s)
-                """, (new_id, name, brand, category, product_type, user_id, now, now))
+                         scan_count, verified, source, created_by_user_id, match_key, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, NULL, NULL, NULL, %s, 1, 0, 'scan_auto', %s, %s, %s, %s)
+                """, (new_id, name, brand, category, product_type, user_id,
+                      product_match_key(name, brand), now, now))
                 conn.commit()
                 print(f"[match_product] auto-created product id={new_id} name={name!r} brand={brand!r}", flush=True)
                 return (new_id, True, "auto_created")
 
-            # Step C — confidence too low, no match
             return (None, False, "none")
-
     except Exception as e:
-        print(f"[match_product] error (returning none): {e}", flush=True)
-        return (None, False, "none")
+        print(f"[match_product] error: {e}", flush=True)
+        return (product_id, False, method) if product_id else (None, False, "lookup_failed")
 
 
-def _process_ai_result(text: str, request: ScanAnalyzeRequest, user_id: str):
-    """Parse AI text, apply stabilization, do product matching.
+def _match_or_create_product(result: dict, user_id: str, location_id: Optional[str] = None) -> tuple:
+    """Look up, then count or create — the single-answer path in one call.
+    Returns (matched_product_id, is_new_product, match_method)."""
+    product_id, method = _find_product(result, user_id, location_id)
+    return _record_match(result, user_id, product_id, method, allow_create=True)
 
-    Returns ScanAnalyzeResponse, or JSONResponse(200, None) when no bottle detected.
-    Raises json.JSONDecodeError on unparseable text.
-    """
+
+@dataclass
+class _Answer:
+    """One provider's reading of the photo — parsed, checked against its own label
+    text and looked up in the catalog, but NOT acted on: nothing is counted or
+    created until an answer has been chosen (_decide, then _respond)."""
+    provider: str
+    model: str
+    result: dict
+    provider_ms: Optional[int] = None
+    stats: dict = field(default_factory=dict)
+    status: str = "ok"                    # ok | unreadable | label_unsupported | no_bottle
+    label_supported: Optional[bool] = None
+    product_id: Optional[str] = None      # the existing product it resolves to, if any
+    method: str = "none"
+
+    @property
+    def readable(self) -> bool:
+        return self.status == "ok"
+
+    @property
+    def strong(self) -> bool:
+        """Good enough to answer on without waiting for the other provider: a
+        bottle this bar already counts, named from words the model itself read
+        off the label."""
+        return self.readable and self.method == "bar_book" and self.label_supported is True
+
+    def label(self) -> str:
+        """How the app should show this reading: "Johnnie Walker Black Label"."""
+        name, brand = self.result.get("name", ""), self.result.get("brand", "")
+        if name.lower() == "original":
+            name = ""
+        return " ".join(x for x in (brand, name) if x) or self.result.get("name", "")
+
+    def summary(self) -> dict:
+        """What scan_events.second_answer keeps of the answer that wasn't used."""
+        return {
+            "provider": self.provider, "model": self.model, "status": self.status,
+            "name": self.result.get("name"), "brand": self.result.get("brand"),
+            "confidence": self.result.get("confidence"),
+            "label_text": self.result.get("label_text") or None,
+            "label_supported": self.label_supported,
+            "product_id": self.product_id, "method": self.method,
+            "provider_ms": self.provider_ms,
+            # Everything it takes to price this call: cached input bills at a
+            # fraction of the rest, and output includes any thinking.
+            "input_tokens": self.stats.get("input_tokens"),
+            "cached_tokens": self.stats.get("cached_tokens"),
+            "output_tokens": self.stats.get("output_tokens"),
+            "thinking_tokens": self.stats.get("thinking_tokens"),
+        }
+
+
+def _evaluate_answer(text: str, request: ScanAnalyzeRequest, user_id: str,
+                     location_id: Optional[str], provider: str, model: str,
+                     provider_ms: Optional[int] = None, stats: Optional[dict] = None) -> _Answer:
+    """Parse one provider's reply, check it against its own label text, look it
+    up. Read-only — it runs for BOTH providers' replies, and only the chosen one
+    may count a scan or create a product. Runs in a worker thread (the lookup
+    queries the database). Raises json.JSONDecodeError / ValueError when the
+    reply isn't a JSON object."""
     result = _parse_ai_result(text)
-    if not result.get("name") and result.get("confidence", 1) == 0:
+    answer = _Answer(provider, model, result, provider_ms, dict(stats or {}))
+    if not result["name"] and result["confidence"] == 0:
+        answer.status = "no_bottle"
+        return answer
+    answer.result = result = _apply_stabilization(result, request.previous_readings)
+    answer.label_supported = label_supports(result["name"], result["brand"], result["label_text"])
+    if result["confidence"] <= UNREADABLE_CONFIDENCE:
+        answer.status = "unreadable"          # see UNREADABLE_CONFIDENCE
+    elif answer.label_supported is False and LABEL_CHECK == "enforce":
+        answer.status = "label_unsupported"   # a confident name its own reading doesn't contain
+    if answer.readable:
+        answer.product_id, answer.method = _find_product(result, user_id, location_id)
+    else:
+        answer.method = "unreadable"
+    return answer
+
+
+def _same_bottle(a: _Answer, b: _Answer) -> bool:
+    if a.product_id and a.product_id == b.product_id:
+        return True
+    return answers_agree(a.result["name"], a.result["brand"], b.result["name"], b.result["brand"])
+
+
+def _better(a: _Answer, b: _Answer) -> _Answer:
+    """The better-supported of two readable answers; a tie goes to `a`, the
+    primary provider. Label evidence first, then a bottle this bar already
+    counts, then any catalog product, then the model's own confidence."""
+    def rank(x: _Answer):
+        return (x.label_supported is True, x.method == "bar_book", x.product_id is not None,
+                x.result["confidence"])
+    return b if rank(b) > rank(a) else a
+
+
+def _decide(answers: list) -> dict:
+    """What to answer with, from every provider that answered (primary first).
+    Pure — no database, no network — so each case is tested directly
+    (test_second_opinion.py).
+
+    - One answer (the other failed, was too slow, isn't configured, or the second
+      opinion is off): that answer, exactly as before the second opinion existed.
+    - Two readable answers that agree: the better-supported one; a new product may
+      be created, because two different models read the same thing.
+    - Two readable answers that DISAGREE: the better-supported one, flagged for a
+      check (`confirm`) — and never a new product.
+    - One readable, one not: the readable one, but no new product: the other model
+      looked at the same photo and couldn't make it out, a poor moment to add a
+      permanent catalog entry.
+    - Neither readable: unreadable (a retake) if either saw a bottle, else none.
+    """
+    if not answers:
+        return {"chosen": None, "other": None, "opinion": "none", "allow_create": False, "confirm": False}
+    if len(answers) == 1:
+        return {"chosen": answers[0], "other": None, "opinion": "none", "allow_create": True, "confirm": False}
+    a, b = answers[0], answers[1]
+    if a.readable and b.readable:
+        chosen = _better(a, b)
+        other = b if chosen is a else a
+        if _same_bottle(a, b):
+            return {"chosen": chosen, "other": other, "opinion": "agree", "allow_create": True, "confirm": False}
+        return {"chosen": chosen, "other": other, "opinion": "disagree", "allow_create": False, "confirm": True}
+    if a.readable or b.readable:
+        chosen, other = (a, b) if a.readable else (b, a)
+    elif a.status == "no_bottle" and b.status != "no_bottle":
+        chosen, other = b, a
+    else:
+        chosen, other = a, b
+    return {"chosen": chosen, "other": other, "opinion": f"other_{other.status}",
+            "allow_create": False, "confirm": False}
+
+
+def _respond(decision: dict, request: ScanAnalyzeRequest, user_id: str, event: dict):
+    """Act on a decision: count the scan against the chosen answer's product (or
+    create one where _decide allows it), fill in the scan_events row, and build
+    the response. The only writes on the scan path. Runs in a worker thread."""
+    chosen, other = decision["chosen"], decision["other"]
+    result = dict(chosen.result)
+    event.update(chosen.stats)
+    event.update(
+        provider=chosen.provider, model=chosen.model, provider_ms=chosen.provider_ms,
+        name=result.get("name"), brand=result.get("brand"), category=result.get("category"),
+        product_type=result.get("product_type"), confidence=result.get("confidence"),
+        label_text=result.get("label_text") or None, label_supported=chosen.label_supported,
+        second_opinion=decision["opinion"],
+    )
+    if other is not None:
+        event["second_provider"] = other.provider
+        event["second_answer"] = json.dumps(other.summary())
+    if chosen.status == "no_bottle":
+        event.update(status="no_bottle", match_method="none")
         return JSONResponse(status_code=200, content=None)
-    result = _apply_stabilization(result, request.previous_readings)
+    if chosen.readable:
+        matched_id, is_new, method = _record_match(
+            result, user_id, chosen.product_id, chosen.method, allow_create=decision["allow_create"])
+        if method == "lookup_failed":
+            # The database didn't answer. "No match" would tell the bartender to
+            # add the bottle by hand (a duplicate in the making); a 5xx is what
+            # the app's retry sweep picks up.
+            event.update(status="lookup_failed", match_method=method)
+            raise HTTPException(status_code=503, detail={
+                "error": "catalog_unavailable",
+                "message": "Couldn't reach the product catalog — the scan will retry"
+            })
+    else:
+        # Not matched, on purpose: see UNREADABLE_CONFIDENCE and LABEL_CHECK. No
+        # product in the response is what makes the app ask for a retake. Both
+        # reasons show the app "unreadable"; scan_events keeps them apart.
+        matched_id, is_new, method = None, False, "unreadable"
     result["needs_rescan"] = (
         not result.get("levelReadable", True)
-        or result.get("confidence", 0) < CONFIDENCE_THRESHOLD
+        or result["confidence"] < CONFIDENCE_THRESHOLD
+        or not chosen.readable
     )
-    matched_id, is_new, method = _match_or_create_product(result, user_id)
     result["matched_product_id"] = matched_id
     result["is_new_product"] = is_new
     result["match_method"] = method
+    result["scan_id"] = event.get("id")
+    result["needs_confirmation"] = bool(decision["confirm"])
+    result["alternative"] = other.label() if decision["confirm"] and other is not None else None
+    event.update(status=chosen.status, match_method=method, matched_product_id=matched_id,
+                 needs_rescan=result["needs_rescan"])
     return ScanAnalyzeResponse(**result)
 
 
-async def _run_providers(openai_key, gemini_key, prompt, request, user_id):
-    """Try OpenAI then Gemini. Falls through on per-provider timeout, error,
-    rejected key or unreadable answer — Gemini is the fallback for exactly
-    the moments OpenAI is broken. Returns ScanAnalyzeResponse or JSONResponse.
-    Raises HTTPException when every configured provider failed.
+def _process_ai_result(text: str, request: ScanAnalyzeRequest, user_id: str,
+                       event: Optional[dict] = None):
+    """One reply, start to finish, as if it were the only provider: evaluate,
+    decide, respond. Returns ScanAnalyzeResponse, or JSONResponse(200, None) when
+    no bottle was detected. Raises json.JSONDecodeError / ValueError on a reply
+    that isn't a JSON object."""
+    event = event if event is not None else {}
+    answer = _evaluate_answer(text, request, user_id, event.get("location_id", request.location_id),
+                              event.get("provider", "openai"), event.get("model", OPENAI_MODEL))
+    return _respond(_decide([answer]), request, user_id, event)
 
-    The parse + product-matching step runs in a worker thread: it does up to
-    seven database queries, and on this single event loop a blocking query
-    stalls every request the server is handling, not just this scan."""
-    last_error = None
-    auth_failed = parse_failed = False
 
+_TIMEOUTS = (asyncio.TimeoutError, openai.APITimeoutError, httpx.TimeoutException)
+
+
+def _failure_label(error: BaseException) -> str:
+    if isinstance(error, _TIMEOUTS):
+        return "timeout"
+    if isinstance(error, GeminiError):
+        return f"http_{error.status}"
+    if isinstance(error, (json.JSONDecodeError, ValueError)):
+        return "unparseable"
+    return type(error).__name__
+
+
+async def _run_providers(openai_key, gemini_key, prompt, request, user_id,
+                         event: Optional[dict] = None):
+    """Ask the providers and decide what to answer with.
+
+    SECOND OPINION (SECOND_OPINION=on, the default) — OpenAI and Gemini are asked
+    AT THE SAME TIME:
+    - The first answer that is `strong` (a bottle this bar already counts, named
+      from words the model itself read off the label) is returned at once. The
+      other provider's answer is still logged when it lands — whether it agreed
+      is how the fast path's safety gets measured (scan_events.second_opinion).
+    - Otherwise both answers are compared (_decide). Once one READABLE answer is
+      in, the other gets SECOND_OPINION_WAIT_SEC more; still out, the first is
+      used alone and the late one is logged. An unreadable first answer waits for
+      the other in full — the other may read it, and a retake costs more.
+    - A provider that fails (timeout, error, unparseable reply, a rejected key)
+      just isn't there; the other answers alone. (A rejected OpenAI key used to
+      fail the scan even with Gemini configured.)
+    SECOND_OPINION=off — OpenAI first, Gemini only when OpenAI fails: the old order.
+
+    Returns ScanAnalyzeResponse or JSONResponse. Raises HTTPException when no
+    provider answered.
+    """
+    event = event if event is not None else {}
+    location_id = event.get("location_id", request.location_id)
+    providers = []
     if openai_key:
-        try:
-            print(f"[analyze_bottle] trying OpenAI model={OPENAI_MODEL} timeout={PROVIDER_TIMEOUT}s", flush=True)
-            text = await _call_openai(openai_key, prompt, request.image)
-            return await asyncio.to_thread(_process_ai_result, text, request, user_id)
-        except openai.AuthenticationError as e:
-            # A revoked or wrong key. Loud, because every scan is now riding on
-            # the fallback — but not fatal while Gemini can answer.
-            print("[analyze_bottle] SCAN_PROVIDER_AUTH_FAILED OpenAI rejected OPENAI_API_KEY — "
-                  "falling back to Gemini", flush=True)
-            auth_failed, last_error = True, e
-        except (asyncio.TimeoutError, openai.APITimeoutError) as e:
-            print(f"[analyze_bottle] OpenAI timed out after {PROVIDER_TIMEOUT}s, trying fallback", flush=True)
-            last_error = e
-        except json.JSONDecodeError as e:
-            print(f"[analyze_bottle] OpenAI answer wasn't JSON ({e}), trying fallback", flush=True)
-            parse_failed, last_error = True, e
-        except Exception as e:
-            print(f"[analyze_bottle] OpenAI unexpected error: {traceback.format_exc()}", flush=True)
-            last_error = e
-
+        providers.append(("openai", OPENAI_MODEL, _call_openai, openai_key))
     if gemini_key:
-        try:
-            print(f"[analyze_bottle] trying Gemini model={GEMINI_MODEL} timeout={PROVIDER_TIMEOUT}s", flush=True)
-            text = await _call_gemini(gemini_key, prompt, request.image)
-            return await asyncio.to_thread(_process_ai_result, text, request, user_id)
-        except asyncio.TimeoutError as e:
-            print(f"[analyze_bottle] Gemini timed out after {PROVIDER_TIMEOUT}s", flush=True)
-            last_error = e
-        except json.JSONDecodeError as e:
-            print(f"[analyze_bottle] Gemini answer wasn't JSON ({e})", flush=True)
-            parse_failed, last_error = True, e
-        except Exception as e:
-            print(f"[analyze_bottle] Gemini error: {traceback.format_exc()}", flush=True)
-            last_error = e
+        providers.append(("gemini", GEMINI_MODEL, _call_gemini, gemini_key))
+    parallel = SECOND_OPINION != "off" and len(providers) > 1
+    order = [p[0] for p in providers]
 
-    if isinstance(last_error, (asyncio.TimeoutError, openai.APITimeoutError)):
-        raise HTTPException(status_code=504, detail={
-            "error": "ai_timeout",
-            "message": "AI service timed out — image may be too large or service is slow"
-        })
-    if isinstance(last_error, json.JSONDecodeError) and parse_failed:
-        raise HTTPException(status_code=500, detail={
-            "error": "parse_failed",
-            "message": f"Could not parse AI response: {last_error}"
-        })
-    if auth_failed and not gemini_key:
-        raise HTTPException(status_code=503, detail={
-            "error": "service_unavailable",
-            "message": "AI service authentication failed — check OPENAI_API_KEY"
-        })
-    raise HTTPException(status_code=502, detail={
-        "error": "ai_api_error",
-        "message": f"All AI providers failed: {last_error}"
-    })
+    async def _ask(name, model, call, key) -> _Answer:
+        stats: dict = {}
+        started = time.monotonic()
+        print(f"[analyze_bottle] asking {name} model={model} timeout={PROVIDER_TIMEOUT}s", flush=True)
+        text = await call(key, prompt, request.image, stats)
+        provider_ms = int((time.monotonic() - started) * 1000)
+        return await _on_scan_thread(_evaluate_answer, text, request, user_id, location_id,
+                                       name, model, provider_ms, stats)
+
+    tasks: dict = {}
+    waiting = list(providers)
+
+    def _start_next():
+        provider = waiting.pop(0)
+        tasks[asyncio.create_task(_ask(*provider))] = provider[0]
+
+    _start_next()
+    while parallel and waiting:
+        _start_next()
+
+    answers: dict = {}
+    failures: dict = {}
+    loop = asyncio.get_running_loop()
+    deadline = None
+    fast = None
+    handed_off = False
+    try:
+        while tasks:
+            timeout = None if deadline is None else max(0.0, deadline - loop.time())
+            done, _ = await asyncio.wait(list(tasks), timeout=timeout,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                break  # the wait window ran out; the late answer is logged when it lands
+            for task in done:
+                name = tasks.pop(task)
+                try:
+                    answers[name] = task.result()
+                except Exception as e:
+                    failures[name] = e
+                    if isinstance(e, _TIMEOUTS):
+                        print(f"[analyze_bottle] {name} timed out after {PROVIDER_TIMEOUT}s", flush=True)
+                    elif isinstance(e, openai.AuthenticationError):
+                        # A revoked or wrong key. Loud: every scan now rides on
+                        # Gemini alone, or fails outright with no Gemini key.
+                        print("[analyze_bottle] SCAN_PROVIDER_AUTH_FAILED OpenAI rejected OPENAI_API_KEY"
+                              + (" — Gemini answers alone" if gemini_key else ""), flush=True)
+                    elif isinstance(e, GeminiError):
+                        print(f"[analyze_bottle] {name} error: {e}", flush=True)
+                    elif isinstance(e, (json.JSONDecodeError, ValueError)):
+                        print(f"[analyze_bottle] {name} answer unusable ({e})", flush=True)
+                    else:
+                        print(f"[analyze_bottle] {name} error: {traceback.format_exc()}", flush=True)
+            if parallel and tasks:
+                strong = [answers[n] for n in order if n in answers and answers[n].strong]
+                if strong:
+                    fast = strong[0]
+                    break
+                if deadline is None and any(a.readable for a in answers.values()):
+                    deadline = loop.time() + SECOND_OPINION_WAIT_SEC
+            if not parallel and not tasks and waiting and not answers:
+                _start_next()  # the old order: the next provider only when this one failed
+
+        event["fallback_from"] = ",".join(f"{n}:{_failure_label(e)}" for n, e in failures.items()) or None
+        got = [answers[n] for n in order if n in answers]
+        if not got:
+            if failures and all(_failure_label(e) == "timeout" for e in failures.values()):
+                event["status"] = "timeout"
+                raise HTTPException(status_code=504, detail={
+                    "error": "ai_timeout",
+                    "message": "AI service timed out — image may be too large or service is slow"
+                })
+            if failures and all(_failure_label(e) == "unparseable" for e in failures.values()):
+                # Every provider answered, in something that isn't a reading.
+                event["status"] = "parse_failed"
+                raise HTTPException(status_code=500, detail={
+                    "error": "parse_failed",
+                    "message": f"Could not parse AI response: {list(failures.values())[-1]}"
+                })
+            if any(isinstance(e, openai.AuthenticationError) for e in failures.values()) and len(failures) == 1:
+                raise HTTPException(status_code=503, detail={
+                    "error": "service_unavailable",
+                    "message": "AI service authentication failed — check OPENAI_API_KEY"
+                })
+            raise HTTPException(status_code=502, detail={
+                "error": "ai_api_error",
+                "message": f"All AI providers failed: {list(failures.values())[-1] if failures else 'no provider'}"
+            })
+
+        if fast is not None:
+            event["path"] = "fast"
+            decision = _decide([fast])
+        else:
+            event["path"] = "window" if tasks else ("both" if len(got) > 1 else "single")
+            decision = _decide(got)
+        if tasks:
+            # The other provider is still working. Its answer can't change this
+            # response any more, but whether it agrees is the measure of the fast
+            # path and the wait window, so _log_scan waits for it after we reply.
+            decision["opinion"] = "pending"
+            event["_pending"] = next(iter(tasks))
+            event["_chosen"] = decision["chosen"]
+            handed_off = True
+        return await _on_scan_thread(_respond, decision, request, user_id, event)
+    finally:
+        if not handed_off:
+            for task in tasks:
+                task.cancel()
 
 
-@v1_router.post("/scans/warm")
-async def warm_scan(user_id: str = Depends(get_current_user)):
-    """Pre-warm the AI vision path — the app calls this when the scan screen
-    opens so the first bottle scan is as fast as the rest."""
-    return {"warmed": await _warm_providers()}
+_background_tasks: set = set()
 
 
-def _scan_subscription(user_id: str):
-    """Who may scan — read in a worker thread, off the event loop."""
+def _spawn(coro) -> None:
+    """Run a coroutine without awaiting it, holding a reference so it isn't
+    garbage-collected mid-flight (asyncio only keeps weak references to tasks)."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _record_scan_event(event: dict) -> None:
+    """Write one scan_events row. Never raises: the scan has already been
+    answered, and a lost log row must not become a failed scan."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO scan_events
+                    (id, user_id, location_id, status, provider, model, fallback_from,
+                     name, brand, category, product_type, confidence,
+                     match_method, matched_product_id, needs_rescan,
+                     provider_ms, total_ms, input_tokens, cached_tokens, output_tokens,
+                     thinking_tokens, image_kb, label_text, label_supported,
+                     path, second_opinion, second_provider, second_answer, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+            """, (
+                event["id"], event["user_id"], event.get("location_id"), event.get("status"),
+                event.get("provider"), event.get("model"), event.get("fallback_from"),
+                event.get("name"), event.get("brand"), event.get("category"),
+                event.get("product_type"), event.get("confidence"),
+                event.get("match_method"), event.get("matched_product_id"), event.get("needs_rescan"),
+                event.get("provider_ms"), event.get("total_ms"), event.get("input_tokens"),
+                event.get("cached_tokens"), event.get("output_tokens"), event.get("thinking_tokens"),
+                event.get("image_kb"), event.get("label_text"), event.get("label_supported"),
+                event.get("path"), event.get("second_opinion"), event.get("second_provider"),
+                event.get("second_answer"), now_iso(),
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scan] SCAN_EVENT_FAILED id={event.get('id')} {e}", flush=True)
+
+
+def _write_scan_log(event: dict) -> None:
+    fields = ("status", "path", "provider", "model", "provider_ms", "total_ms", "input_tokens",
+              "cached_tokens", "output_tokens", "thinking_tokens", "confidence", "match_method",
+              "label_supported", "second_opinion", "image_kb", "fallback_from", "id")
+    print("[scan] SCAN " + " ".join(f"{k}={event.get(k) if event.get(k) is not None else '-'}"
+                                    for k in fields), flush=True)
+    try:
+        _spawn(_on_scan_thread(_record_scan_event, dict(event)))
+    except RuntimeError:  # no running loop (only outside the server)
+        _record_scan_event(dict(event))
+
+
+async def _finish_second_opinion(event: dict, pending, chosen: Optional[_Answer]) -> None:
+    """The response went out before the other provider answered; wait for it
+    here and record whether it agreed with what the bartender was told."""
+    try:
+        other = await asyncio.wait_for(pending, timeout=PROVIDER_TIMEOUT + 5)
+        event["second_provider"] = other.provider
+        event["second_answer"] = json.dumps(other.summary())
+        if chosen is not None and chosen.readable and other.readable:
+            event["second_opinion"] = "agree" if _same_bottle(chosen, other) else "disagree"
+        else:
+            event["second_opinion"] = f"other_{other.status}"
+    except (Exception, asyncio.CancelledError) as e:
+        event["second_opinion"] = f"other_failed:{_failure_label(e)}"
+    _write_scan_log(event)
+
+
+def _log_scan(event: dict) -> None:
+    """One greppable line per scan (grep Render logs for `SCAN `), then the
+    scan_events row in the background. Speed and accuracy were invisible before
+    this: the phone kept its timings to itself and the server logged none. When
+    the other provider was still working at reply time, both wait for it."""
+    pending, chosen = event.pop("_pending", None), event.pop("_chosen", None)
+    if pending is None:
+        _write_scan_log(event)
+        return
+    try:
+        _spawn(_finish_second_opinion(event, pending, chosen))
+    except RuntimeError:  # no running loop (only outside the server)
+        _write_scan_log(event)
+
+
+def _scan_context(user_id: str) -> tuple:
+    """(the entitlement row, the account's location if it has exactly ONE).
+
+    The one location stands in for the bar being counted when the app didn't
+    say — builds from before location_id existed, still on most phones. Most
+    accounts are one bar, and without it those scans could never use the bar's
+    own bottles (Step 0 of _find_product) or the second opinion's fast path."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT subscription_status, trial_ends_at FROM users WHERE id = %s AND deleted_at IS NULL",
             (user_id,)
         )
-        return cursor.fetchone()
+        sub_row = cursor.fetchone()
+        cursor.execute(
+            "SELECT id FROM locations WHERE user_id = %s AND deleted_at IS NULL LIMIT 2",
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+    return sub_row, (rows[0]["id"] if len(rows) == 1 else None)
+
+
+@v1_router.post("/scans/warm")
+async def warm_scan(user_id: str = Depends(get_current_user)):
+    """Pre-warm the AI vision path — the app calls this when the scan screen
+    opens so the first bottle scan is as fast as the rest. A count is starting,
+    so background crawling steps aside from now (activity.py)."""
+    activity.scan_seen()
+    return {"warmed": await _warm_providers()}
+
+
+class ScanOutcomeRequest(BaseModel):
+    # "removed": the bartender deleted the scanned row, which is the only way the
+    # app offers to fix a wrong bottle. "confirmed": they tapped "this row is
+    # right" on a row the two AIs read differently.
+    outcome: str = Field(pattern="^(removed|confirmed)$")
+
+
+_SCAN_ID_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
+
+
+@v1_router.post("/scans/{scan_id}/outcome", status_code=202)
+def record_scan_outcome(scan_id: str, request: ScanOutcomeRequest,
+                        user_id: str = Depends(get_current_user)):
+    """What the bartender did with a scanned row: the only ground truth the scan
+    log gets. A row's product can't be changed in the app, so a wrong bottle is
+    fixed by removing the row, and before this a removed row still counted as
+    right (the draft sync writes final_product_id seconds after the scan, before
+    anyone has looked at it). The scanner report (scanstats.py) reads these.
+
+    Fire-and-forget: the app never waits on it, and a lost outcome only costs a
+    data point, so it never raises. The latest outcome wins, and only for the
+    user who first reported one — scan ids are not secrets."""
+    if not _SCAN_ID_RE.fullmatch(scan_id):
+        return {"accepted": False}
+    now = now_iso()
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO scan_outcomes (scan_id, user_id, outcome, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (scan_id) DO UPDATE
+                SET outcome = EXCLUDED.outcome, updated_at = EXCLUDED.updated_at
+                WHERE scan_outcomes.user_id = EXCLUDED.user_id
+            """, (scan_id, user_id, request.outcome, now, now))
+            conn.commit()
+    except Exception as e:
+        print(f"[scan] SCAN_OUTCOME_FAILED id={scan_id} {e}", flush=True)
+        return {"accepted": False}
+    return {"accepted": True}
 
 
 @v1_router.post("/scans/analyze", response_model=ScanAnalyzeResponse)
 async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get_current_user)):
-    """Analyze bottle image using OpenAI GPT-4o with Gemini 2.0 Flash fallback.
+    """Identify a bottle: OpenAI (OPENAI_MODEL) and Gemini (GEMINI_MODEL) side by
+    side, one checking the other — see _run_providers.
 
-    Per-provider cap: PROVIDER_TIMEOUT (default 9s) — on timeout falls through to next provider.
-    Total wall-clock cap: TOTAL_SCAN_TIMEOUT_SEC (default 20s) — returns empty 200 on expiry.
+    Per-provider cap: PROVIDER_TIMEOUT (default 9s). Total wall-clock cap:
+    TOTAL_SCAN_TIMEOUT_SEC (default 20s) — a 504 on expiry. It used to be an empty
+    200, the same answer as an empty frame, so the app said "No bottle detected"
+    and parked the saved row for a manual retry; a 5xx is what the app's
+    automatic retry sweep picks up.
     """
     print("[analyze_bottle] function started", flush=True)
+    started = time.monotonic()
+    activity.scan_seen()   # background crawling waits while a count is in progress
 
-    sub_row = await asyncio.to_thread(_scan_subscription, user_id)
+    # In a worker thread: psycopg2 blocks, and this route shares one event loop
+    # with every other request the process serves.
+    sub_row, only_location = await _on_scan_thread(_scan_context, user_id)
     if not sub_row or not is_entitled(sub_row["subscription_status"], sub_row["trial_ends_at"]):
         raise HTTPException(status_code=402, detail={
             "error": "trial_expired",
@@ -4427,14 +5519,28 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
             "message": "No AI provider API keys configured on the server"
         })
 
+    event = {
+        "id": generate_id(),
+        "user_id": user_id,
+        "location_id": request.location_id or only_location,
+        "image_kb": round(len(request.image) * 3 / 4 / 1024),
+        "status": "error",
+    }
     try:
         return await asyncio.wait_for(
-            _run_providers(openai_key, gemini_key, BOTTLE_PROMPT, request, user_id),
+            _run_providers(openai_key, gemini_key, BOTTLE_PROMPT, request, user_id, event),
             timeout=TOTAL_SCAN_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
         print(f"[analyze_bottle] total timeout exceeded ({TOTAL_SCAN_TIMEOUT_SEC}s)", flush=True)
-        return JSONResponse(status_code=200, content=None)
+        event["status"] = "timeout"
+        raise HTTPException(status_code=504, detail={
+            "error": "ai_timeout",
+            "message": "AI service took too long — the scan will retry"
+        })
+    finally:
+        event["total_ms"] = int((time.monotonic() - started) * 1000)
+        _log_scan(event)
 
 # ============== APP FUNNEL EVENTS ==============
 
@@ -4549,11 +5655,19 @@ async def crm_asset(asset: str):
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Handle HTTP exceptions with consistent format"""
+    """Handle HTTP exceptions with consistent format.
+
+    A dict detail is sent flat ({"error": ..., "message": ...}) AND under
+    "detail". The app reads `response.data.detail` in most places (the 409's
+    existing_product when registering a barcode, "invalid_password",
+    "email_not_configured", ...) and found nothing there, so every one of those
+    fell back to its generic path — a registered barcode added the bottle with
+    no catalog link. Readers of the flat keys (the CRM page, RegisterScreen)
+    keep working."""
     if isinstance(exc.detail, dict):
         return JSONResponse(
             status_code=exc.status_code,
-            content=exc.detail
+            content={**exc.detail, "detail": exc.detail}
         )
     return JSONResponse(
         status_code=exc.status_code,

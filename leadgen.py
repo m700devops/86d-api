@@ -41,6 +41,7 @@ from typing import Optional
 
 from database import get_db
 from helpers import generate_id, now_iso
+import activity
 from callwindow import ZONE_OFFSETS, SERVICES, bucket_of, all_buckets
 import venue as venue_facts
 from contacts import (email_kind, email_fits_venue, find_manager, strip_non_content,
@@ -2344,7 +2345,9 @@ def verify_phones(lead_limit: int = VERIFY_BATCH, bank_limit: int = VERIFY_BATCH
         deadline = time.monotonic() + budget_s
 
         def check(row):
-            if time.monotonic() > deadline:
+            # A count in progress goes first; a row not reached by the deadline
+            # waits for the next batch, as any unreached row does.
+            if not activity.wait_for_quiet(until=deadline) or time.monotonic() > deadline:
                 return row, None
             map_phone = normalize_us_phone(row.get("phone"))
             try:
@@ -2582,7 +2585,9 @@ def verify_fit(lead_limit: int = VERIFY_BATCH, bank_limit: int = VERIFY_BATCH,
         deadline = time.monotonic() + budget_s
 
         def check(row):
-            if time.monotonic() > deadline:
+            # A count in progress goes first; a row not reached by the deadline
+            # waits for the next batch, as any unreached row does.
+            if not activity.wait_for_quiet(until=deadline) or time.monotonic() > deadline:
                 return row, None
             try:
                 return row, check_fit(row, corporate)
@@ -2732,6 +2737,7 @@ def recheck_looked_up_sites() -> int:
 
     wrong = []
     for row, site, found_on in suspects:
+        activity.wait_for_quiet()        # a count in progress goes first
         home, status = _http(site, timeout=PAGE_TIMEOUT, verify_public=True)
         if not _ok(status, home):
             continue                     # can't tell — leave it alone
@@ -3117,7 +3123,10 @@ def _record_retry(cand: dict, reason: str) -> None:
 
 
 def _enrich_safe(cand: dict) -> Optional[dict]:
-    """enrich_candidate for use in a thread pool — returns None on failure."""
+    """enrich_candidate for use in a thread pool — returns None on failure.
+    Waits first while a bottle count is in progress (activity.py): this is the
+    background crawl, and the scanner shares the process."""
+    activity.wait_for_quiet()
     try:
         return enrich_candidate(cand)
     except Exception as exc:
@@ -3383,6 +3392,7 @@ def recheck_restaurant_leads(limit: int = 200) -> dict:
         return result
 
     def _fetch(row: dict) -> str:
+        activity.wait_for_quiet()             # a count in progress goes first
         home, status = _http(row["website"], timeout=PAGE_TIMEOUT, verify_public=True)
         return home[:200000] if status == 200 and home else ""
 
@@ -3705,6 +3715,7 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
             detail["harvest_order"] = [c["name"] for c in cities]
 
             for city in cities:
+                activity.wait_for_quiet()     # a count in progress goes first
                 try:
                     seen, added = harvest_city(city)
                     candidates += added

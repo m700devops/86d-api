@@ -134,12 +134,25 @@ def test_a_forged_webhook_is_refused(monkeypatch):
 
 
 # ── the scan's fallback ──────────────────────────────────────────────────────
+# Both providers are now asked at once (the second opinion, main._run_providers);
+# these pin that a broken OpenAI still leaves Gemini's answer standing, in either
+# mode. The catalog lookup and the one write are stubbed.
+
+TITOS = json.dumps({"label_text": "TITO'S HANDMADE VODKA", "name": "Tito's", "brand": "Tito's",
+                    "category": "spirits", "product_type": "", "confidence": 0.92})
+
+
+@pytest.fixture(params=["on", "off"])
+def second_opinion(request, monkeypatch):
+    monkeypatch.setattr(main, "SECOND_OPINION", request.param)
+    return request.param
+
 
 def _scan(monkeypatch, openai_behaviour, gemini_text=None, gemini_key="g"):
     import httpx
     calls = []
 
-    async def fake_openai(key, prompt, image):
+    async def fake_openai(key, prompt, image, stats):
         calls.append("openai")
         if openai_behaviour == "auth":
             raise main.openai.AuthenticationError(
@@ -147,36 +160,38 @@ def _scan(monkeypatch, openai_behaviour, gemini_text=None, gemini_key="g"):
                 body=None)
         return openai_behaviour
 
-    async def fake_gemini(key, prompt, image):
+    async def fake_gemini(key, prompt, image, stats):
         calls.append("gemini")
         return gemini_text
 
     monkeypatch.setattr(main, "_call_openai", fake_openai)
     monkeypatch.setattr(main, "_call_gemini", fake_gemini)
-    monkeypatch.setattr(main, "_process_ai_result",
-                        lambda text, req, uid: {"parsed": json.loads(text)})
-    req = types.SimpleNamespace(image="aGk=")
+    monkeypatch.setattr(main, "_find_product", lambda result, user, location=None: (None, "none"))
+    monkeypatch.setattr(main, "_record_match",
+                        lambda result, user, product_id, method, allow_create=True: (None, False, "none"))
+    req = main.ScanAnalyzeRequest(image="aGk=")
     result = asyncio.run(main._run_providers("o", gemini_key, "p", req, "u"))
     return calls, result
 
 
-def test_a_rejected_openai_key_falls_back_to_gemini(monkeypatch):
-    calls, result = _scan(monkeypatch, "auth", '{"name": "Tito\'s"}')
-    assert calls == ["openai", "gemini"] and result["parsed"]["name"] == "Tito's"
+def test_a_rejected_openai_key_falls_back_to_gemini(monkeypatch, second_opinion, capsys):
+    calls, result = _scan(monkeypatch, "auth", TITOS)
+    assert calls == ["openai", "gemini"] and result.name == "Tito's"
+    assert "SCAN_PROVIDER_AUTH_FAILED" in capsys.readouterr().out
 
 
-def test_an_unreadable_openai_answer_falls_back_to_gemini(monkeypatch):
-    calls, result = _scan(monkeypatch, "I think this is vodka.", '{"name": "Tito\'s"}')
-    assert calls == ["openai", "gemini"] and result["parsed"]["name"] == "Tito's"
+def test_an_unreadable_openai_answer_falls_back_to_gemini(monkeypatch, second_opinion):
+    calls, result = _scan(monkeypatch, "I think this is vodka.", TITOS)
+    assert calls == ["openai", "gemini"] and result.name == "Tito's"
 
 
-def test_both_unreadable_is_still_parse_failed(monkeypatch):
+def test_both_unreadable_is_still_parse_failed(monkeypatch, second_opinion):
     with pytest.raises(HTTPException) as e:
         _scan(monkeypatch, "vodka?", "also vodka?")
     assert e.value.status_code == 500 and e.value.detail["error"] == "parse_failed"
 
 
-def test_a_rejected_key_with_no_fallback_says_so(monkeypatch):
+def test_a_rejected_key_with_no_fallback_says_so(monkeypatch, second_opinion):
     with pytest.raises(HTTPException) as e:
         _scan(monkeypatch, "auth", gemini_key=None)
     assert e.value.status_code == 503

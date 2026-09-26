@@ -10,7 +10,6 @@ pydantic-settings==2.1.0
 aiofiles==23.2.1
 httpx==0.26.0
 email-validator==2.1.0
-google-generativeai==0.8.3
 openai==3.19.2
 stripe==15.6.1
 sentry-sdk[fastapi]==2.70.0
