@@ -4188,27 +4188,40 @@ async def _call_openai(api_key: str, prompt: str, image_data: str, stats: Option
     return message.content.strip()
 
 
+def _gemini_options(timeout: float) -> dict:
+    """One attempt, over in `timeout` seconds. The SDK's own defaults are a 600s
+    deadline and retrying a 503 for up to 600s — and its call is synchronous, on
+    a thread that asyncio.wait_for can stop waiting for but cannot stop. With
+    Gemini down, every scan left a scan-pool thread busy for up to ten minutes;
+    the pool also runs every scan's database work, so after a few dozen scans
+    scanning stopped for everyone, OpenAI healthy or not. The other provider is
+    this path's retry, as with OpenAI's max_retries=0."""
+    return {"timeout": timeout, "retry": None}
+
+
 async def _call_gemini(api_key: str, prompt: str, image_data: str, stats: Optional[dict] = None) -> str:
     import base64
     model = _gemini_model(api_key)
     image_bytes = base64.b64decode(image_data)
     contents = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}]
+    options = _gemini_options(PROVIDER_TIMEOUT)
 
     def _generate():
         # JSON mode: the reply is a JSON object, never prose around one.
         if GEMINI_MODEL not in _gemini_plain_models:
             try:
                 return model.generate_content(
-                    contents, generation_config={"response_mime_type": "application/json"})
+                    contents, generation_config={"response_mime_type": "application/json"},
+                    request_options=options)
             except Exception as e:
                 if "invalid" not in type(e).__name__.lower() and "400" not in str(e):
                     raise
                 print(f"[analyze_bottle] Gemini rejected JSON mode (model={GEMINI_MODEL}): {e} "
                       f"— retrying as a plain request", flush=True)
-                response = model.generate_content(contents)
+                response = model.generate_content(contents, request_options=options)
                 _gemini_plain_models.add(GEMINI_MODEL)
                 return response
-        return model.generate_content(contents)
+        return model.generate_content(contents, request_options=options)
 
     response = await asyncio.wait_for(_on_scan_thread(_generate), timeout=PROVIDER_TIMEOUT)
     if stats is not None:
@@ -4258,6 +4271,7 @@ async def _warm_providers() -> dict:
                     model.generate_content,
                     "ping",
                     generation_config={"max_output_tokens": 1},
+                    request_options=_gemini_options(8),
                 ),
                 timeout=8,
             )
@@ -4302,7 +4316,9 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
     assignment.
 
     Returns (product_id, match_method), or (None, "none") when nothing fits.
-    Never raises — on any DB error returns (None, "none").
+    Never raises — on a DB error returns (None, "lookup_failed"), which is NOT
+    "no such bottle": nothing may be created from it (_record_match), and the
+    scan answers 503 so the app retries it (_respond).
     """
     name = result.get("name", "").strip()
     brand = result.get("brand", "").strip() or None
@@ -4469,8 +4485,8 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
             return (None, "none")
 
     except Exception as e:
-        print(f"[match_product] lookup error (returning none): {e}", flush=True)
-        return (None, "none")
+        print(f"[match_product] lookup error: {e}", flush=True)
+        return (None, "lookup_failed")
 
 
 def _record_match(result: dict, user_id: str, product_id: Optional[str], method: str,
@@ -4483,9 +4499,14 @@ def _record_match(result: dict, user_id: str, product_id: Optional[str], method:
     this answer: a product created from one model's reading becomes every bar's
     match target, so a new catalog entry needs both models to agree.
 
-    Returns (matched_product_id, is_new_product, match_method). Never raises —
-    on any DB error returns (None, False, "none").
+    Returns (matched_product_id, is_new_product, match_method). Never raises.
+    A product the lookup already found is kept even if counting it fails (the
+    count is bookkeeping); with no product, a failed lookup or a failed write is
+    (None, False, "lookup_failed") — never a new product on the strength of a
+    lookup that didn't happen: the bottle is most likely in the catalog already.
     """
+    if not product_id and method == "lookup_failed":
+        return (None, False, "lookup_failed")
     name = result.get("name", "").strip()
     brand = result.get("brand", "").strip() or None
     confidence = result.get("confidence", 0.0)
@@ -4525,8 +4546,8 @@ def _record_match(result: dict, user_id: str, product_id: Optional[str], method:
 
             return (None, False, "none")
     except Exception as e:
-        print(f"[match_product] error (returning none): {e}", flush=True)
-        return (None, False, "none")
+        print(f"[match_product] error: {e}", flush=True)
+        return (product_id, False, method) if product_id else (None, False, "lookup_failed")
 
 
 def _match_or_create_product(result: dict, user_id: str, location_id: Optional[str] = None) -> tuple:
@@ -4686,6 +4707,15 @@ def _respond(decision: dict, request: ScanAnalyzeRequest, user_id: str, event: d
     if chosen.readable:
         matched_id, is_new, method = _record_match(
             result, user_id, chosen.product_id, chosen.method, allow_create=decision["allow_create"])
+        if method == "lookup_failed":
+            # The database didn't answer. "No match" would tell the bartender to
+            # add the bottle by hand (a duplicate in the making); a 5xx is what
+            # the app's retry sweep picks up.
+            event.update(status="lookup_failed", match_method=method)
+            raise HTTPException(status_code=503, detail={
+                "error": "catalog_unavailable",
+                "message": "Couldn't reach the product catalog — the scan will retry"
+            })
     else:
         # Not matched, on purpose: see UNREADABLE_CONFIDENCE and LABEL_CHECK. No
         # product in the response is what makes the app ask for a retake. Both

@@ -1,3 +1,4 @@
+import asyncio
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
@@ -23,6 +24,38 @@ _pool_lock = threading.Lock()
 
 _CONN_ERRORS = (psycopg2.OperationalError, psycopg2.InterfaceError)
 _BACKOFF = (0.3, 0.6)   # seconds between attempts 1→2 and 2→3
+
+# How long a caller waits for a connection when all of them are checked out.
+POOL_WAIT_SEC = float(os.getenv("DB_POOL_WAIT_SEC", "5"))
+
+
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
+def _getconn(pool: psycopg2.pool.ThreadedConnectionPool):
+    """pool.getconn(), but WAITING up to POOL_WAIT_SEC when every connection is
+    checked out. psycopg2's pool raises PoolError at once instead, so a burst —
+    a few bars scanning while the CRM works, each scan looking up two answers at
+    once — failed whoever came eleventh, and the scan path's lookups read that
+    failure as "no such bottle". Never waits on the event loop (two older async
+    routes call get_db there): sleeping would stall every request, so those fail
+    at once as before. A closed pool (drained after dead connections) is not
+    waited on either."""
+    deadline = time.monotonic() + POOL_WAIT_SEC
+    delay = 0.02
+    while True:
+        try:
+            return pool.getconn()
+        except psycopg2.pool.PoolError:
+            if pool.closed or _on_event_loop() or time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.25)
 
 
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
@@ -84,11 +117,10 @@ def get_db():
     pool = None
     last_error: Exception = Exception("unreachable")
 
-    # TODO: handle psycopg2.pool.PoolError (all 10 conns checked out) at scale
     for attempt in range(3):
         try:
             pool = _get_pool()
-            conn = pool.getconn()
+            conn = _getconn(pool)  # waits for a free connection (see _getconn)
             conn.cursor_factory = psycopg2.extras.RealDictCursor
             # Validate — catches silently-dead idle connections
             with conn.cursor() as cur:

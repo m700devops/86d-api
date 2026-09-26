@@ -249,7 +249,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_hostile_pages.py test_sent_email.py test_pitch.py test_routes.py test_ai_core.py
   test_call_notes.py test_playbook.py test_inbox_replies.py test_prep_sheet.py
   test_lead_finding.py test_scan_path.py test_match_key.py test_label_check.py
-  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py -q` (753 tests; test_timezones.py needs a dummy
+  test_second_opinion.py test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q` (764 tests; test_timezones.py needs a dummy
   `DATABASE_URL`)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK
   against a local fake server, so it checks the request actually sent: instructions first and
@@ -265,6 +265,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - test_duplicates.py — the Bottle Book's duplicate finder (`helpers.duplicate_groups`, the
   `/locations/{id}/duplicates` route): what counts as one bottle, what is never suggested, which copy
   is kept. Every rule was mutation-checked; find → merge → find was run on a real Postgres
+- test_db_pool.py — `database._getconn`: waiting for a free connection, and never on the event loop
+  or on a closed pool (also checked on a real Postgres with a pool of 2)
 - test_crawl_quiet.py — the crawl's dead hour (`main._in_crawl_window`, checked in winter and
   summer), `activity.py` on a fake clock, and that every background crawl waits (and nothing
   someone clicked does). Every rule was mutation-checked
@@ -349,7 +351,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   emptied the Gemini SDK's client cache. Idle connections are kept `AI_KEEPALIVE_SECONDS` (120) —
   the HTTP library's default of 5s is shorter than the gap between two bottles. The OpenAI client
   has `max_retries=0`: the SDK's own retries (twice, honouring retry-after) ran inside the 9-second
-  provider window, so a rate-limited OpenAI used it all up before Gemini started. OpenAI is warmed
+  provider window, so a rate-limited OpenAI used it all up before Gemini started. **Every Gemini call
+  passes `request_options` of one attempt within `PROVIDER_TIMEOUT` (`_gemini_options`)**: the SDK's
+  defaults are a 600s deadline and retrying a 503 for 600s, on a synchronous call running on a scan-pool
+  thread that `asyncio.wait_for` stops waiting for but cannot stop. With Gemini down (and it is asked on
+  every scan now), each scan left a thread busy for up to ten minutes; the pool also runs every scan's
+  database work, so scanning would have stopped for everyone within a few dozen scans, OpenAI healthy
+  or not. test_scan_path.py checks all four call paths through a real `GenerativeModel` OpenAI is warmed
   with `models.retrieve` (no tokens, and a 404 when `OPENAI_MODEL` has been retired)
 - **The request** (`_openai_request()`): BOTTLE_PROMPT as the system message FIRST, then the image,
   then `SCAN_USER_TEXT`. OpenAI caches a repeated prompt PREFIX automatically; with the image first
@@ -381,6 +389,17 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   (a few tenths of a second). Covered by test_label_check.py
 - **"WHICH CONTAINER" in BOTTLE_PROMPT**: identify only the container nearest the centre of the
   photo. A back-bar photo has neighbours in it, and nothing used to say which one to read
+- **A database that doesn't answer is not "no such bottle".** `_find_product` returns
+  `(None, "lookup_failed")` on a DB error (it used to return "none"), `_record_match` never creates a
+  product from one (the bottle is most likely in the catalog; a pool that was only busy can answer the
+  write a moment later) and keeps a product the lookup DID find if only counting it fails, and `_respond`
+  answers **503 `catalog_unavailable`**, which the app's retry sweep re-sends. "No match" used to tell
+  the bartender "Couldn't recognize — add it manually": a hand-made duplicate. Log: `status=lookup_failed`.
+  The usual cause was the pool: psycopg2's `ThreadedConnectionPool` raises at once when all 10
+  connections are out, and a scan now runs two lookups at once — **`get_db` now waits up to
+  `DB_POOL_WAIT_SEC` (5) for a free connection** (`database._getconn`), except on the event loop (two
+  older async routes, the Stripe webhook and admin activation, call it there; waiting would stall every
+  request) and on a closed pool
 - **An unreadable label is never matched** (`UNREADABLE_CONFIDENCE`, default 0.5 — keep it in
   lockstep with the prompt's "cap confidence at 0.5" line). The prompt answers an illegible label
   with the generic descriptor at ≤0.5, but only <0.35 was flagged and the app never read

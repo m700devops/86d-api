@@ -230,7 +230,7 @@ class FakeGeminiModel:
         self.calls = []
         self.reject_json = reject_json
 
-    def generate_content(self, contents, generation_config=None):
+    def generate_content(self, contents, generation_config=None, request_options=None):
         self.calls.append(generation_config)
         if generation_config and self.reject_json:
             raise type("InvalidArgument", (Exception,), {})("400 response_mime_type not supported")
@@ -252,6 +252,40 @@ def test_gemini_asks_for_json_and_falls_back_when_refused(monkeypatch):
     assert json.loads(text) == GOOD
     assert model.calls == [{"response_mime_type": "application/json"}, None]
     assert main.GEMINI_MODEL in main._gemini_plain_models
+
+
+class RecordingGeminiClient:
+    """Stands in for the Gemini SDK's own client, under a REAL GenerativeModel,
+    so what the SDK hands its RPC layer is what gets checked."""
+    def __init__(self, reject_json=False):
+        self.reject_json, self.kwargs = reject_json, []
+
+    def generate_content(self, request, **kwargs):
+        from google.generativeai import protos
+        self.kwargs.append(kwargs)
+        if self.reject_json and request.generation_config.response_mime_type:
+            raise type("InvalidArgument", (Exception,), {})("400 response_mime_type not supported")
+        return protos.GenerateContentResponse(candidates=[protos.Candidate(
+            content=protos.Content(parts=[protos.Part(text=json.dumps(GOOD))]))])
+
+
+@pytest.mark.parametrize("reject_json", [False, True])
+def test_every_gemini_call_is_one_short_attempt(monkeypatch, reject_json):
+    """The SDK's defaults are a 600s deadline and retrying a 503 for 600s, on a
+    thread the scan can't stop: with Gemini down that emptied the scan pool."""
+    real = main.genai.GenerativeModel(main.GEMINI_MODEL)
+    real._client = RecordingGeminiClient(reject_json=reject_json)
+    monkeypatch.setattr(main, "_gemini_model", lambda key: real)
+    monkeypatch.setattr(main, "_gemini_plain_models", set())
+    asyncio.run(main._call_gemini("g-key", main.BOTTLE_PROMPT, IMAGE))   # JSON mode (and its fallback)
+    asyncio.run(main._call_gemini("g-key", main.BOTTLE_PROMPT, IMAGE))   # remembered plain, if refused
+    monkeypatch.setenv("GEMINI_API_KEY", "g-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    asyncio.run(main._warm_providers())
+    calls = real._client.kwargs
+    assert len(calls) == (4 if reject_json else 3)   # refused JSON mode costs one more
+    for kw in calls:
+        assert kw["retry"] is None and kw["timeout"] <= main.PROVIDER_TIMEOUT
 
 
 # ─── what happens to the answer ───────────────────────────────────────────────
@@ -468,3 +502,63 @@ def test_sdk_request_asks_for_label_text_first(fake_openai):
     asyncio.run(main._call_openai("sk-test", main.BOTTLE_PROMPT, IMAGE))
     [body] = server.posts()
     assert list(body["response_format"]["json_schema"]["schema"]["properties"])[0] == "label_text"
+
+
+# ─── a database that doesn't answer is not "no such bottle" ──────────────────
+
+def _db_down(monkeypatch, writes=None):
+    """get_db that fails every lookup; with `writes`, the connection works but
+    records statements, for the write half."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def down():
+        raise RuntimeError("connection pool exhausted")
+        yield
+
+    monkeypatch.setattr(main, "get_db", down)
+
+
+def test_a_failed_lookup_says_so(monkeypatch):
+    _db_down(monkeypatch)
+    assert main._find_product(dict(GOOD), "user-1", "loc-1") == (None, "lookup_failed")
+
+
+def test_a_failed_lookup_never_creates_a_product(monkeypatch):
+    """Even when the database is answering again by the time the scan is counted
+    (a pool that was only busy): the bottle is most likely in the catalog."""
+    import contextlib
+    written = []
+
+    class Cur:
+        def execute(self, sql, params=()):
+            written.append(sql)
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+        def commit(self):
+            pass
+    monkeypatch.setattr(main, "get_db", lambda: contextlib.nullcontext(Conn()))
+    assert main._record_match(dict(GOOD, confidence=0.99), "user-1", None, "lookup_failed",
+                              allow_create=True) == (None, False, "lookup_failed")
+    assert written == []
+
+
+def test_a_found_product_survives_a_failed_count(monkeypatch):
+    _db_down(monkeypatch)
+    assert main._record_match(dict(GOOD), "user-1", "prod-7", "bar_book") == ("prod-7", False, "bar_book")
+    assert main._record_match(dict(GOOD), "user-1", None, "none") == (None, False, "lookup_failed")
+
+
+def test_the_scan_is_retried_not_answered_no_match(monkeypatch):
+    """"No match" tells the bartender to add the bottle by hand — a duplicate in
+    the making. A 503 is what the app's retry sweep picks up."""
+    monkeypatch.setattr(main, "_find_product", lambda result, user, location=None: (None, "lookup_failed"))
+    _db_down(monkeypatch)
+    event = {"id": "scan-9"}
+    with pytest.raises(HTTPException) as err:
+        main._process_ai_result(json.dumps(GOOD), _request(), "user-1", event)
+    assert err.value.status_code == 503 and err.value.detail["error"] == "catalog_unavailable"
+    assert event["status"] == "lookup_failed"
