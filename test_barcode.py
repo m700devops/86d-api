@@ -256,3 +256,16 @@ def test_a_keeper_with_its_own_code_keeps_it(monkeypatch):
     out, updates, _ = _merge(monkeypatch, "5000267024004")
     assert out["barcode_moved"] is False
     assert not any("SET upc" in s for s in updates)       # the alias resolves the old code
+
+
+def test_a_seeded_made_up_code_never_answers_a_real_scan():
+    """Every seeded product carries an invented 11-digit "upc" (01000000001…).
+    A scanner only ever reads 8, 12, 13 or 14 digits, so none of them may be
+    found by a real read — several zero-pad to a code with a valid check digit,
+    and matching one would count a real bottle as a seeded one."""
+    from seed_data import SEED_PRODUCTS
+    for p in SEED_PRODUCTS:
+        fake = p["upc"]
+        for width in (8, 12, 13, 14):
+            if len(fake.lstrip("0")) <= width:
+                assert not finds(fake, fake.lstrip("0").zfill(width)), fake
