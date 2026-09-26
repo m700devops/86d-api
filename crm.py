@@ -5728,6 +5728,15 @@ def ask_crm(data: AskCRM, _: bool = Depends(require_crm_key)):
 import apple as _apple
 
 APPLE_STALE_HOURS = 6        # opening the tab re-syncs when data is older than this
+# main.py's loop imports on its own when the last import is older than this,
+# whether or not anyone opens the tab: new numbers keep arriving, and Apple
+# never sees the report request go unread long enough to stop it.
+APPLE_BACKGROUND_HOURS = 12
+# Bumped whenever the way a file is READ changes. A file read by an older
+# parser counts as not imported, so the next sync reads it again (Apple keeps
+# serving recent files) and its dates are replaced with the new reading.
+# 2: page views split by page, weekly usage files, dates replaced whole.
+APPLE_PARSER = 2
 _apple_lock = threading.Lock()
 _apple_state: dict = {"running": False}
 
@@ -5757,6 +5766,24 @@ def init_apple_tables():
                 PRIMARY KEY (report, day, dim, metric)
             )
         """)
+        # Apple's WEEKLY files for the usage reports (sessions, installs and
+        # deletions, crashes), keyed by the Monday the week starts on. Kept
+        # apart from the daily rows: a week's total sitting beside its days
+        # would be counted twice by anything that sums a table.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_apple_weekly (
+                report TEXT NOT NULL, week TEXT NOT NULL, dim TEXT NOT NULL,
+                metric TEXT NOT NULL, value DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (report, week, dim, metric)
+            )
+        """)
+        # Which version of the parser read each file (see APPLE_PARSER).
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'crm_apple_instances' AND column_name = 'parser'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE crm_apple_instances ADD COLUMN parser INTEGER")
         conn.commit()
 
 
@@ -5817,6 +5844,49 @@ def _apple_client(cfg: dict) -> "_apple.ASC":
     return _apple.ASC(cfg["key_id"], cfg["issuer_id"], cfg["private_key"])
 
 
+def _apple_already(inst_id: str) -> bool:
+    """Imported before, by the parser in use now (an older reading is read again)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM crm_apple_instances WHERE id = %s AND parser >= %s",
+                       (inst_id, APPLE_PARSER))
+        return cursor.fetchone() is not None
+
+
+def _apple_save_instance(inst_id: str, report: str, pdate: str, totals: dict,
+                         grain: str = "DAILY") -> None:
+    """Store one of Apple's files: its totals REPLACE every date it carries.
+
+    A newer file restates each date it carries in full ("instances from a
+    more recent processingDate overwrite instances with an earlier
+    processingDate … don't merge records", Apple's own rule; apple.sync()
+    saves oldest first). So a date's rows are deleted and written again as a
+    set: never merged with an earlier file's, never left beside a row the
+    earlier file had and this one doesn't."""
+    table, col = (("crm_apple_weekly", "week") if grain == "WEEKLY"
+                  else ("crm_apple_metrics", "day"))
+    report = report[:200]
+    days = sorted({day for day, _, _ in totals})
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if days:
+            cursor.execute(f"DELETE FROM {table} WHERE report = %s AND {col} = ANY(%s)",
+                           (report, days))
+        for (day, dim, metric), value in totals.items():
+            cursor.execute(f"""
+                INSERT INTO {table} (report, {col}, dim, metric, value)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (report, {col}, dim, metric) DO UPDATE SET value = EXCLUDED.value
+            """, (report, day, dim[:200], metric[:120], value))
+        cursor.execute("""
+            INSERT INTO crm_apple_instances (id, report, processing_date, imported_at, parser)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET imported_at = EXCLUDED.imported_at,
+                                           parser = EXCLUDED.parser
+        """, (inst_id, report, pdate, now_iso(), APPLE_PARSER))
+        conn.commit()
+
+
 def _apple_sync_job():
     """One background import. Errors are stored for the page, never raised."""
     try:
@@ -5833,28 +5903,7 @@ def _apple_sync_job():
         if request_id != cfg.get("request_id"):
             _apple_save(request_id=request_id)
 
-        def already(inst_id):
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1 FROM crm_apple_instances WHERE id = %s", (inst_id,))
-                return cursor.fetchone() is not None
-
-        def save(inst_id, report, pdate, totals):
-            with get_db() as conn:
-                cursor = conn.cursor()
-                for (day, dim, metric), value in totals.items():
-                    cursor.execute("""
-                        INSERT INTO crm_apple_metrics (report, day, dim, metric, value)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (report, day, dim, metric) DO UPDATE SET value = EXCLUDED.value
-                    """, (report[:200], day, dim[:200], metric[:120], value))
-                cursor.execute("""
-                    INSERT INTO crm_apple_instances (id, report, processing_date, imported_at)
-                    VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING
-                """, (inst_id, report[:200], pdate, now_iso()))
-                conn.commit()
-
-        result = _apple.sync(asc, request_id, already, save)
+        result = _apple.sync(asc, request_id, _apple_already, _apple_save_instance)
         _apple_save(last_sync_at=now_iso(), last_sync_ok=True, last_error=None)
         print(f"[crm] APPLE_SYNC ok reports={result['reports']} imported={result['imported']} "
               f"partial={result['partial']}", flush=True)
@@ -5878,6 +5927,28 @@ def _apple_start_sync() -> bool:
     return True
 
 
+def _apple_stale(last_sync_at: Optional[str], hours: float) -> bool:
+    if not last_sync_at:
+        return True
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(
+            last_sync_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return age > timedelta(hours=hours)
+
+
+def apple_sync_if_due(hours: float = APPLE_BACKGROUND_HOURS) -> bool:
+    """Start an import when the last one is older than `hours` (main.py's
+    loop). The tab used to be the only thing that imported: with nobody
+    opening it, nothing was fetched, and Apple stops a report request whose
+    reports go unread for long enough."""
+    cfg = _apple_config()
+    if not cfg["connected"] or not _apple_stale(cfg.get("last_sync_at"), hours):
+        return False
+    return _apple_start_sync()
+
+
 def _apple_status(cfg: dict) -> dict:
     return {
         "connected": cfg["connected"], "source": cfg.get("source"),
@@ -5897,24 +5968,28 @@ def apple_analytics(window: int = 30, _: bool = Depends(require_crm_key)):
     """Status + everything imported so far. Kicks off a sync when stale."""
     window = 7 if window <= 7 else 90 if window >= 90 else 30
     cfg = _apple_config()
-    if cfg["connected"]:
-        last = cfg.get("last_sync_at")
-        stale = True
-        if last:
-            try:
-                age = datetime.now(timezone.utc) - datetime.fromisoformat(last.replace("Z", "+00:00"))
-                stale = age > timedelta(hours=APPLE_STALE_HOURS)
-            except ValueError:
-                pass
-        if stale:
-            _apple_start_sync()
+    if cfg["connected"] and _apple_stale(cfg.get("last_sync_at"), APPLE_STALE_HOURS):
+        _apple_start_sync()
+    now = datetime.now(timezone.utc)
+    weeks = _apple.WEEKS_FOR.get(window, 4)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT report, day, dim, metric, value FROM crm_apple_metrics "
                        "WHERE day >= %s",
-                       ((datetime.now(timezone.utc) - timedelta(days=2 * window + 10)).strftime("%Y-%m-%d"),))
+                       ((now - timedelta(days=2 * window + 10)).strftime("%Y-%m-%d"),))
         rows = [dict(r) for r in cursor.fetchall()]
-    return {**_apple_status(_apple_config()), **_apple.summarize(rows, window)}
+        cursor.execute("SELECT report, week, dim, metric, value FROM crm_apple_weekly "
+                       "WHERE week >= %s",
+                       ((now - timedelta(weeks=2 * weeks + 3)).strftime("%Y-%m-%d"),))
+        weekly = [dict(r) for r in cursor.fetchall()]
+        # Where the data starts (Apple sends nothing from before the reports
+        # were first requested): no tile compares against days before it.
+        cursor.execute("SELECT MIN(day) AS d FROM crm_apple_metrics")
+        since = (cursor.fetchone() or {}).get("d")
+        cursor.execute("SELECT MIN(week) AS w FROM crm_apple_weekly")
+        since_week = (cursor.fetchone() or {}).get("w")
+    return {**_apple_status(_apple_config()),
+            **_apple.summarize(rows, window, weekly=weekly, since=since, since_week=since_week)}
 
 
 class AppleConnect(BaseModel):

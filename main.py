@@ -103,6 +103,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_inbox_loop())
     asyncio.create_task(_phone_check_loop())
     asyncio.create_task(_playbook_loop())
+    asyncio.create_task(_apple_sync_loop())
     # Cold-call school refresh: every few days at 10am Asia/Manila. Own try,
     # own loop — nothing here may affect the product API or the CRM.
     try:
@@ -3258,6 +3259,24 @@ async def _playbook_loop():
         except Exception as e:
             print(f"[crm] PLAYBOOK_LOOP_ERROR {e}", flush=True)
         await asyncio.sleep(3 * 3600)
+
+
+async def _apple_sync_loop():
+    """Import App Store Connect analytics in the background, twice a day
+    (crm.apple_sync_if_due decides; the import runs in its own thread).
+
+    The Apple Analytics tab used to be the only thing that imported, so with
+    nobody opening it nothing was fetched — and Apple stops a report request
+    whose reports go unread for long enough, after which no new numbers come
+    at all. An hourly look costs one database read when nothing is due."""
+    await asyncio.sleep(600)
+    while True:
+        try:
+            from crm import apple_sync_if_due
+            await asyncio.to_thread(apple_sync_if_due)
+        except Exception as e:
+            print(f"[crm] APPLE_SYNC_LOOP_ERROR {e}", flush=True)
+        await asyncio.sleep(3600)
 
 
 async def _school_refresh_loop():
