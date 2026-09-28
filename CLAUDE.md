@@ -41,7 +41,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   now gets a one-line status instead of a table, not a wall of leads that aren't callable yet.
   Undo still works — the 10-second Undo on the toast after every logged call — it just isn't
   a permanent banner anymore
-- **The burger holds School, Yet to Contact, Apple Analytics, Customers, Scanner and AI Brain.**
+- **The burger holds Call Coach, School, Yet to Contact, Apple Analytics, Customers, Scanner and AI Brain.**
   Scanner is the bottle scanner's report card (see "The Scanner page" under AI Vision Rules).
   Numbers (funnel, connect rate by
   hour, attribution re-match) and Lead engine (run now, bank health, restaurant recheck) were
@@ -373,7 +373,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
-  test_cloudtalk.py -q` (1090 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_cloudtalk.py test_callcoach.py -q` (1104 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -1509,6 +1509,40 @@ capture. Don't reintroduce them or describe them as current.)
   `POST /cloudtalk/sync` runs a pass now. Tested end to end on a real Postgres against a fake
   CloudTalk serving the documented shapes. Logs `[cloudtalk] PASS`, `CALL_READ`. Covered by
   test_cloudtalk.py
+- **THE CALL COACH HUB** (callcoach.py, burger → **Call Coach**, `GET /v1/crm/coach/hub?days=`).
+  The score says how a call went; the hub says what to do about it. Every scored CloudTalk call
+  gets a line-by-line REVIEW (`_review_call`, `crm_calls.review`): up to 6 of his lines that cost
+  something (the exact quote, the part of the call, the problem, why it matters to a bar owner,
+  what to say instead and 2-4 other ways to play it through named METHODS), up to 3 lines that
+  worked, every objection they gave with his answer and 3-4 better ones, openings he didn't take
+  (their words, what it signalled, the question to ask), a drill and one focus for the next call.
+  `callcoach.TECHNIQUES` is the fixed list of methods (permission-based opener, problem-first,
+  Sandler's up-front contract and pain funnel, SPIN, Gap selling, Challenger, NEPQ, Voss's labels
+  and no-oriented questions, LAER, one small ask); the model must pick from its keys and the page
+  explains each (Methods tab, and on hover). **Nothing is shown unchecked** (`clean_review`): every
+  quote must be in the transcript, as whole words, said by the RIGHT person (his lines for his
+  mistakes, theirs for an objection); an unknown method is dropped; and every suggested line
+  passes `line_ok` — no percentages, customer numbers, "bars like yours", "most bars I talk to" or
+  founder backstory, the drafter's rule (pitch.UNBACKED_CLAIMS). HABITS are COUNTED, never the
+  model's (`metrics`: his share of the words, questions asked, longest stretch, filler words per
+  100; `TARGETS` are shown as rules of thumb). Reviews are written after each CloudTalk pass
+  (`review_pending_calls`, `CLOUDTALK_REVIEW_BATCH` (5), newest first; a failure rests
+  `COACH_RETRY_HOURS` (6)) or on demand (`POST /coach/calls/{id}/review`); a call with nothing
+  that checks out is stored `{"empty": true}` so it isn't re-read every pass. Tabs: Overview
+  (score, part bars, weekly trend, habits, PATTERNS, missed openings), Calls (click one for the
+  breakdown, with the whole transcript and the reviewed lines marked), Phrasebook (better lines by
+  part + his own best lines), Objections (grouped by `OBJECTION_KINDS`, what they said, what he
+  said, better answers), Methods, Ask the coach. **Patterns** (`POST /coach/hub/patterns`, stored
+  in `crm_coach_hub`): the latest `COACH_PATTERN_CALLS` (20) calls read together — up to 4 habits
+  costing the most, each with his own lines as evidence (checked against his transcripts), what
+  to keep doing, a TALK TRACK from his own calls (opener, discovery questions, one answer per
+  objection kind, the ask, a voicemail) and a goal with a number. **Ask the coach**
+  (`POST /coach/hub/ask`) answers with his objections and habits in view, plus lines to say.
+  Every "Practise…" button files lines into the School's Replay misses (`addCard`, due today), so
+  coaching turns into reps. Amber marks a line to change, green what to say instead — no red.
+  Checked end to end on a real Postgres through uvicorn with a stand-in AI server, and in Chromium
+  at desktop and phone width. Logs `[coach] CALL_REVIEWED`, `CALL_REVIEW_FAILED`, `PATTERNS`,
+  `AI_USAGE call-review|call-patterns|coach-ask`. Covered by test_callcoach.py
 - **A bounced address comes off the lead** (`inbox.bounce_of`, `crm._record_bounce`). The reader
   skipped every mailer-daemon message, so a dead address stayed on the lead and was emailed again.
   A standard delivery report (RFC 3464 fields) or a plain-words notice with a PERMANENT failure
@@ -1893,8 +1927,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - CLOUDTALK_KEY_ID / CLOUDTALK_KEY_SECRET — CloudTalk API key pair (CloudTalk → Account →
   Settings → API Keys, admin only). Unset, the CloudTalk reader does nothing. Transcripts and the
   score need CloudTalk's Conversation Intelligence. CLOUDTALK_POLL_MINUTES (10),
-  CLOUDTALK_LOG_AFTER_MINUTES (45), CLOUDTALK_BATCH (15), CLOUDTALK_LOOKBACK_DAYS (14) and
-  CLOUDTALK_AUTOLOG_HOURS (24) are optional
+  CLOUDTALK_LOG_AFTER_MINUTES (45), CLOUDTALK_BATCH (15), CLOUDTALK_LOOKBACK_DAYS (14),
+  CLOUDTALK_AUTOLOG_HOURS (24) and CLOUDTALK_REVIEW_BATCH (5, Call Coach reviews a pass) are optional
 - SPACEMAIL_IMAP_HOST / SPACEMAIL_IMAP_PORT — optional (default the SMTP host, 993): where
   sent copies are filed and replies are read. CRM_INBOX_POLL_MINUTES (5) and CRM_INBOX_BATCH
   (20) tune the inbox reader; it needs the mailbox AND `ANTHROPIC_API_KEY`, else it skips
