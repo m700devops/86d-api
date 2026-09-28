@@ -239,9 +239,8 @@ def test_after_a_clean_up_the_list_refills_from_checked_venues(monkeypatch):
     monkeypatch.setattr(leadgen, "verify_fit", lambda lead_limit=20, bank_limit=20, **k:
                         {"leads_checked": 0} if bank_limit == 0 else
                         {"bank_checked": 5, "bank_ok": 3})
-    monkeypatch.setattr(leadgen, "bucket_deficits", lambda *a: {("dinner", -5): 4})
-    monkeypatch.setattr(leadgen, "promote_leads", lambda n: calls.append(n) or n)
-    assert leadgen.fit_check_step() == 5 and calls == [4]
+    monkeypatch.setattr(leadgen, "top_up", lambda *a, **k: calls.append(1) or 3)
+    assert leadgen.fit_check_step() == 5 and calls == [1]
 
 
 def test_attribution_never_matches_on_a_provider_domain():

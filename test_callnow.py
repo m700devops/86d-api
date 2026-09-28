@@ -82,11 +82,15 @@ WINDOWS = {
 }
 
 
+TOP_UPS: list = []
+
+
 def _run(rows, states, limit=60):
     """call_now over `rows`, with each row's window forced by name via `states`."""
     by_name = dict(zip([r["name"] for r in rows], states))
-    orig_db, orig_win = crm.get_db, crm._call_window
+    orig_db, orig_win, orig_top = crm.get_db, crm._call_window, crm._top_up_call_list
     crm.get_db = lambda: _Conn(rows)
+    crm._top_up_call_list = lambda: TOP_UPS.append(1) or 0
     crm._call_window = lambda *a, **k: None  # replaced below per-row
     # _call_window is called positionally with (tz_offset, opening_hours, tz_name);
     # the row's name is smuggled through opening_hours so the stub can key on it.
@@ -95,6 +99,7 @@ def _run(rows, states, limit=60):
         return crm.call_now(limit=limit)
     finally:
         crm.get_db, crm._call_window = orig_db, orig_win
+        crm._top_up_call_list = orig_top
 
 
 def _rows(*specs):
@@ -233,3 +238,140 @@ def test_no_timezone_is_no_window_so_never_ready():
         WINDOWS.pop("unknown")
     assert [l["name"] for l in d["ready"]] == ["open"]
     assert [l["name"] for l in d["rest"]] == ["zoneless"]
+
+
+def test_the_generator_counts_exactly_the_leads_the_call_list_shows():
+    # The list counts as full at LEADGEN_CALL_LIST_SIZE. Counting leads /now
+    # hides (number not vouched for by the venue's site, owner's rules not
+    # checked) would call it full while it showed two — and nothing refilled
+    # it.
+    import itertools
+    import leadgen
+    rows = []
+    for source, phone, ps, fs in itertools.product(
+            ("leadgen", "manual"), ("+1-615-742-9095", "555-0100", ""),
+            (None, "confirmed", "from_site", "conflict", "unconfirmed", "wrong"),
+            (None, "ok", "blocked")):
+        name = f"{source}|{phone}|{ps}|{fs}"
+        rows.append(_lead(name, phone=phone, source=source, phone_status=ps,
+                          fit_status=fs, opening_hours=name))
+    shown = {l["name"] for l in _run(rows, ["good"] * len(rows), limit=200)["ready"]}
+    counted = {r["name"] for r in rows if leadgen.on_call_list(r)}
+    assert counted == shown
+    assert "leadgen|+1-615-742-9095|confirmed|ok" in shown
+    assert "leadgen|+1-615-742-9095|confirmed|None" not in counted
+
+
+# ── One list of up to 50, refilled one for one ──────────────────────────────
+
+def test_opening_the_list_tops_it_up_first():
+    # The page reloads /now after every logged call and delete, so this is
+    # what puts the next bar in the slot the last one left.
+    TOP_UPS.clear()
+    rows, states = _rows(("A", "good"))
+    _run(rows, states)
+    assert TOP_UPS == [1]
+
+
+def test_the_list_holds_at_most_the_call_list_size():
+    import leadgen
+    rows, states = _rows(*[(f"bar{i}", "good") for i in range(leadgen.CALL_LIST_SIZE + 10)])
+    got = _run(rows, states, limit=None)
+    assert len(got["ready"]) == leadgen.CALL_LIST_SIZE == 50
+    assert got["ready_count"] == leadgen.CALL_LIST_SIZE + 10
+
+
+class _BankCursor:
+    """Hands promote_leads its bank, best score first as the SQL orders it,
+    and one full row when it asks for a candidate by id."""
+
+    def __init__(self, bank):
+        self.bank, self.sql, self._one = bank, [], None
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        if "WHERE id = %s" in sql:
+            self._one = next((c for c in self.bank if c["id"] == params[0]), None)
+
+    def fetchall(self):
+        return self.bank
+
+    def fetchone(self):
+        return self._one
+
+
+class _BankConn:
+    def __init__(self, cur):
+        self.cur, self.committed = cur, False
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        self.committed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _bank(monkeypatch, bank, in_window, refuse=()):
+    import leadgen
+    cur = _BankCursor(bank)
+    conn = _BankConn(cur)
+    promoted = []
+    monkeypatch.setattr(leadgen, "get_db", lambda: conn)
+    monkeypatch.setattr(leadgen, "corporate_index", lambda c: {})
+    monkeypatch.setattr(leadgen, "_in_window_now", lambda c: c["id"] in in_window)
+    monkeypatch.setattr(leadgen, "_promote_one", lambda c, cand, now, corp=None:
+                        None if cand["id"] in refuse else promoted.append(cand["id"]) or "L")
+    return promoted, conn
+
+
+def test_only_bars_in_their_window_now_are_promoted_best_first(monkeypatch):
+    import leadgen
+    bank = [{"id": i} for i in ("best-shut", "best-open", "next-open", "third-open", "later")]
+    promoted, conn = _bank(monkeypatch, bank, {"best-open", "next-open", "third-open"})
+    assert leadgen.promote_leads(2) == 2
+    assert promoted == ["best-open", "next-open"] and conn.committed
+
+
+def test_a_refused_candidate_is_walked_past_not_counted(monkeypatch):
+    import leadgen
+    bank = [{"id": i} for i in ("dupe", "a", "b")]
+    promoted, _ = _bank(monkeypatch, bank, {"dupe", "a", "b"}, refuse={"dupe"})
+    assert leadgen.promote_leads(2) == 2 and promoted == ["a", "b"]
+
+
+def test_top_up_fills_to_the_size_and_one_out_is_one_in(monkeypatch):
+    import leadgen
+    asked = []
+    monkeypatch.setattr(leadgen, "promote_leads", lambda n: asked.append(n) or n)
+    monkeypatch.setattr(leadgen, "ready_count", lambda *a: 12)
+    assert leadgen.top_up() == leadgen.CALL_LIST_SIZE - 12
+    monkeypatch.setattr(leadgen, "ready_count", lambda *a: leadgen.CALL_LIST_SIZE - 1)
+    assert leadgen.top_up() == 1                  # a call logged: one replaced
+    monkeypatch.setattr(leadgen, "ready_count", lambda *a: leadgen.CALL_LIST_SIZE)
+    assert leadgen.top_up() == 0                  # full: nothing promoted
+    assert asked == [leadgen.CALL_LIST_SIZE - 12, 1]
+
+
+def test_ready_count_is_what_the_list_shows_in_a_window_now(monkeypatch):
+    import leadgen
+    rows = [_lead("open", source="leadgen", phone_status="confirmed", fit_status="ok"),
+            _lead("shut", source="leadgen", phone_status="confirmed", fit_status="ok"),
+            _lead("unchecked", source="leadgen", phone_status=None, fit_status="ok"),
+            _lead("mine")]
+    monkeypatch.setattr(leadgen, "_in_window_now", lambda r: r["name"] != "shut")
+    cur = _BankCursor(rows)
+    assert leadgen.ready_count(cur) == 2          # "open" and the operator's own
+
+
+def test_no_timezone_is_never_in_a_window():
+    # /now never lists a row with no zone as ready, so the top-up must never
+    # promote one to fill a slot: it would count as filling it and not show.
+    import leadgen
+    assert leadgen._in_window_now({"opening_hours": "24/7", "tz_name": None,
+                                   "tz_offset_hours": None}) is False

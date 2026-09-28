@@ -316,6 +316,24 @@ UNBACKED_CLAIMS = (
     "i used to bartend", "i've been there", "i have been there", "been in your shoes",
     "i ran a bar", "i owned a bar", "my own bar",
 )
+# Lines that claim a conversation with the reader. Wrong — and the fastest way
+# to lose them — when they never spoke with us: "Thanks for taking my call" to
+# a manager who was out when we rang and only the bartender picked up. Checked
+# only when the log says so (who_we_talked_to), never on a reply to someone
+# who wrote to us.
+FAMILIAR_PHRASES = (
+    "thanks for taking my call", "thank you for taking my call", "thanks for the call",
+    "thank you for the call", "thanks for your time on the phone", "thanks for chatting",
+    "thanks for the chat", "thanks for talking", "thank you for talking",
+    "thanks for speaking", "thank you for speaking", "as i mentioned", "as mentioned on",
+    "as we discussed", "as discussed", "like i said", "like we talked", "the app i mentioned",
+    "what i mentioned", "good talking", "great talking", "nice talking", "good chatting",
+    "great chatting", "nice chatting", "good speaking", "great speaking", "nice speaking",
+    "good to speak", "great to speak", "nice to speak", "good to talk", "great to talk",
+    "nice to talk", "enjoyed our", "enjoyed talking", "enjoyed speaking", "from our call",
+    "after our call", "on our call", "our conversation", "our chat", "you mentioned",
+    "you said", "you told me", "per our",
+)
 SUBJECT_SPAM = re.compile(r"\b(free|trial|offer|deal|discount|save|urgent|guarantee)\b|[!$%]",
                           re.I)
 LIMITS = {"first": 170, "followup": 100, "reply": 180}
@@ -339,7 +357,7 @@ def _plain(text: str) -> str:
 
 
 def lint(subject: str, body: str, kind: str = "first", brief: str = "",
-         known: str = "") -> list:
+         known: str = "", never_spoke: Optional[str] = None) -> list:
     """What a reader (or a spam filter) would trip on in this draft, as
     instructions to fix. `body` is the model's body, before the signature.
     Empty when it's clean. Pure.
@@ -350,10 +368,26 @@ def lint(subject: str, body: str, kind: str = "first", brief: str = "",
     and a REPLY to someone who wrote to us keeps their subject and may carry
     whatever links they asked for. `known` is what the drafter was told (WHAT
     WE KNOW and the ask): a figure or a name in capitals that came from there
-    is theirs, not an invention."""
+    is theirs, not an invention. `never_spoke` (from who_we_talked_to) is
+    set when the reader has never spoken with us — who they are, or "" for
+    nobody at the bar — and then any line claiming a conversation with them
+    is a problem."""
     problems: list = []
     asked = _plain(brief)
     low = _plain(body)
+    # The salesperson knows things the log may not ("thank him for the call"):
+    # their word wins, as it does for length and links.
+    vouched = re.search(r"thank|we spoke|we talked|spoke (?:to|with) (?:him|her|them)|"
+                        r"talked (?:to|with) (?:him|her|them)|our (?:call|chat|conversation)|"
+                        r"mentioned", asked)
+    if never_spoke is not None and kind != "reply" and not vouched:
+        whole = f"{_plain(subject)}\n{low}"
+        who = never_spoke or "anyone at the bar"
+        for phrase in FAMILIAR_PHRASES:
+            if phrase in whole:
+                problems.append(f'"{phrase}" — {who} has never spoken with Stephan; it claims a '
+                                "conversation that didn't happen. Say what really happened "
+                                "(who was called, who picked up) or leave it out")
     told = _plain(known)
     subj = (subject or "").strip()
     for phrase in ROBOT_PHRASES:
@@ -442,7 +476,7 @@ def honest_re(subject: str, sent_subjects: list) -> str:
 
 def lead_context(lead: dict, fact_lines: Optional[list] = None,
                  points: Optional[list] = None, log: str = "",
-                 sent: Optional[list] = None) -> str:
+                 sent: Optional[list] = None, talked: str = "") -> str:
     """WHAT WE KNOW about the recipient: only what's on file, each fact with
     where it came from, so the model can personalise without inventing."""
     out = [f"Venue: {lead.get('name') or 'the bar'}"
@@ -450,9 +484,12 @@ def lead_context(lead: dict, fact_lines: Optional[list] = None,
     dm, dm_note = decision_maker(lead)
     if dm:
         out.append(f"Decision maker — write to them: {dm}{dm_note}")
-    spoke = spoke_to(lead)
-    if spoke and first_name(spoke) != first_name(dm or ""):
-        out.append(f"Spoke to on the phone (not the decision maker): {spoke}")
+    if talked:
+        out.append(talked)
+    else:
+        spoke = spoke_to(lead)
+        if spoke and first_name(spoke) != first_name(dm or ""):
+            out.append(f"Spoke to on the phone (not the decision maker): {spoke}")
     angle = state_angle(lead.get("loc"))
     if angle:
         out.append(f"Angle for this state: {angle}")
@@ -475,7 +512,7 @@ def lead_context(lead: dict, fact_lines: Optional[list] = None,
                          f"{(e.get('body') or '').strip()[:1500]}")
         out.append(f"EMAILS WE ALREADY SENT THEM ({len(sent)}, oldest first — never repeat "
                    "them; build on them):\n" + "\n\n".join(shown))
-    if len(out) == 1:
+    if len(out) == 1 + bool(talked):
         out.append("Nothing else is known about them. Don't pretend otherwise.")
     return "\n".join(out)
 
@@ -551,6 +588,59 @@ def spoke_to(lead: dict) -> Optional[str]:
     """Who actually picked up on the most recent call that recorded it."""
     found = _SPOKE_RE.findall(lead.get("notes") or "")
     return found[-1].strip(" .;")[:80] if found else None
+
+
+# Call outcomes where a person at the bar picked up.
+PERSON_OUTCOMES = {"answered", "callback", "not_interested", "gatekeeper"}
+
+
+def spoken_to_all(lead: dict) -> list:
+    """Everyone the log says was spoken to on a call, oldest first, once each."""
+    out: list = []
+    for name in _SPOKE_RE.findall(lead.get("notes") or ""):
+        name = name.strip(" .;")[:80]
+        if name and name.lower() not in {n.lower() for n in out}:
+            out.append(name)
+    return out
+
+
+def who_we_talked_to(lead: dict, call_outcomes: Optional[list] = None) -> tuple:
+    """(a WHAT WE KNOW line, never_spoke) from the log, in code — not left
+    for the model to work out from a paragraph of notes.
+
+    `call_outcomes`: the outcome of every call logged on this lead. The model
+    was told "if someone was spoken to, name them", read "Mike, the manager"
+    and "spoke with Jen" in The Hideaway's log, and wrote "Hi Mike, thanks
+    for taking my call" — to a manager who was out when we rang. So the line
+    says plainly who was and wasn't reached, and `never_spoke` (the decision
+    maker's name, or "" when nobody at the bar was reached; None when the
+    decision maker WAS reached or it can't be told) turns on lint's check.
+    """
+    outcomes = [o for o in (call_outcomes or []) if o]
+    spoken = spoken_to_all(lead)
+    dm, _ = decision_maker(lead)
+    dm_first = first_name(dm)
+    reached_dm = bool(dm_first) and any(first_name(n) == dm_first for n in spoken)
+    anyone = bool(spoken) or any(o in PERSON_OUTCOMES for o in outcomes)
+    cold = ('never thank them for a call or a chat, never "as I mentioned", "as we '
+            'discussed", "you said" or "the app I mentioned"')
+    if reached_dm:
+        return (f"WHO WE'VE TALKED TO: {dm} — the decision maker — on the phone.", None)
+    if not anyone:
+        tried = (" We've called and nobody picked up." if outcomes else "")
+        return (f"WHO WE'VE TALKED TO: nobody at the bar yet.{tried} This is a cold email: "
+                f"{cold}.", dm or "")
+    if not spoken and "answered" in outcomes:
+        # Someone answered, the log doesn't say who: can't tell, don't guard.
+        return ("WHO WE'VE TALKED TO: someone at the bar, on the phone (the log doesn't say "
+                "who).", None)
+    others = ", ".join(spoken) or "a staff member"
+    if dm_first:
+        return (f"WHO WE'VE TALKED TO: {others} — NOT {dm}. {dm_first} has never spoken with "
+                f"Stephan: {cold}. Mention {others} only as how you got {dm_first}'s name, "
+                "and say what really happened (you called, they weren't in).", dm)
+    return (f"WHO WE'VE TALKED TO: {others}, on the phone — not the owner or whoever orders. "
+            f"The reader hasn't spoken with Stephan: {cold}.", "")
 
 
 def first_name(name: Optional[str]) -> Optional[str]:

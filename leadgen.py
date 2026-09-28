@@ -42,7 +42,7 @@ from typing import Optional
 from database import get_db
 from helpers import generate_id, now_iso
 import activity
-from callwindow import ZONE_OFFSETS, SERVICES, bucket_of, all_buckets
+from callwindow import ZONE_OFFSETS, call_window
 import venue as venue_facts
 from contacts import (email_kind, email_fits_venue, find_manager, strip_non_content,
                       visible_text)
@@ -52,30 +52,19 @@ from phones import normalize_us_phone, is_toll_free, format_us_phone_dashed
 
 DAILY_TARGET = int(os.getenv("LEADGEN_DAILY_TARGET", "25"))
 
-# The call list is divided into cells: one per (service × timezone), i.e.
-# lunch/dinner crossed with Eastern/Central/Mountain/Pacific. Eight of them.
-#
-# This number is the ceiling on unworked leads IN EACH CELL, not across the
-# list. That distinction is the whole design: a single global cap of 100 spread
-# over eight cells averages twelve per tab, so clicking "lunch → Eastern" shows
-# a nearly empty screen and there is nothing to call. The cap exists so no ONE
-# screen is overwhelming, and the per-screen number is what actually controls
-# that.
-#
-# 50 a cell means about two days of calling visible in whichever tab is open,
-# and up to 400 banked across all eight — of which the operator ever sees one
-# cell at a time.
-BUCKET_TARGET = int(os.getenv("LEADGEN_BUCKET_TARGET", "50"))
+# The call list is ONE list: up to CALL_LIST_SIZE unworked leads that are in
+# their calling window this minute. It used to be eight cells (lunch/dinner x
+# four timezones, 50 each) filled by the morning run, so a 10am session saw
+# whichever few of one cell happened to be in a window — two bars, on a list
+# holding hundreds. Now the list is topped up from the bank with bars that are
+# callable NOW, whenever it's opened and after every call or delete: one out,
+# one in (top_up).
+CALL_LIST_SIZE = int(os.getenv("LEADGEN_CALL_LIST_SIZE", "50"))
 
-# Derived, for reporting and for the "is the whole thing full?" shortcut.
-# Deliberately not an independent knob: a global number that disagreed with the
-# per-cell one would starve some tabs to fill others.
-MAX_ACTIVE = BUCKET_TARGET * len(SERVICES) * len(ZONE_OFFSETS)
-
-# Qualified candidates kept banked behind the call list. Much smaller than the
-# list itself: with eight capped cells holding days of work, the list is its own
-# buffer and a deep second bank would just be crawling nobody asked for.
-POOL_FLOOR = int(os.getenv("LEADGEN_POOL_FLOOR", "50"))
+# Qualified candidates kept banked behind the call list. The list is filled
+# from here on demand, by whoever is in a window at that minute, so the bank
+# has to cover every zone and every opening time — deeper than a day's calls.
+POOL_FLOOR = int(os.getenv("LEADGEN_POOL_FLOOR", "200"))
 USER_AGENT = "86d-leadgen/1.0 (+https://my86d.com; bar inventory software)"
 
 # Several mirrors because one of them is always having a bad day. Tried in
@@ -532,7 +521,7 @@ def init_leadgen_tables():
         # again. main.py's _phone_check_loop trickles through them instead.
 
         print(f"[leadgen] LEADGEN_TABLES_READY cities={city_count} "
-              f"bucket_target={BUCKET_TARGET} max_active={MAX_ACTIVE} "
+              f"call_list_size={CALL_LIST_SIZE} "
               f"daily_target={DAILY_TARGET} pool_floor={POOL_FLOOR}"
               + (f" retimezoned={moved}" if moved else ""), flush=True)
 
@@ -1836,14 +1825,11 @@ def map_result_is_venue(result: dict, name: str, loc: Optional[str]) -> bool:
     return any(_place(address.get(k) or "") == city for k in _PLACE_KEYS)
 
 
-def find_venue_website(name: str, loc: Optional[str] = None) -> Optional[str]:
-    """A venue's own website from OpenStreetMap, looked up by name + town.
-
-    For a bar the operator found themselves: the notes say "their email is on
-    the website" without the URL, and OSM usually has the `website` tag. Only
-    a hit that is the same venue in the same town counts (map_result_is_venue);
-    with no town there is no lookup — a same-named bar anywhere in the country
-    is exactly the wrong answer this used to give."""
+def lookup_venue(name: str, loc: Optional[str] = None) -> Optional[dict]:
+    """The map's entry for a venue, looked up by name + town: the Nominatim
+    hit that IS this bar in this town (map_result_is_venue), as
+    {website, lat, lon, opening_hours, phone}, or None. With no town there is
+    no lookup — a same-named bar anywhere in the country is the wrong answer."""
     if not _loc_parts(loc)[0]:
         return None
     query = ", ".join(x for x in [name, loc] if x)
@@ -1861,9 +1847,28 @@ def find_venue_website(name: str, loc: Optional[str] = None) -> Optional[str]:
             continue
         tags = r.get("extratags") or {}
         site = (tags.get("website") or tags.get("contact:website") or "").strip()
-        if site:
-            return site if site.lower().startswith("http") else "http://" + site
+        if site and not site.lower().startswith("http"):
+            site = "http://" + site
+        try:
+            lat, lon = float(r.get("lat")), float(r.get("lon"))
+        except (TypeError, ValueError):
+            lat = lon = None
+        address = r.get("address") or {}
+        return {"website": site or None, "lat": lat, "lon": lon,
+                "opening_hours": (tags.get("opening_hours") or "").strip() or None,
+                "phone": first_phone(tags.get("phone") or tags.get("contact:phone")),
+                "street": address.get("road"), "housenumber": address.get("house_number"),
+                "amenity": r.get("type") if r.get("class") == "amenity" else None}
     return None
+
+
+def find_venue_website(name: str, loc: Optional[str] = None) -> Optional[str]:
+    """A venue's own website from OpenStreetMap, looked up by name + town.
+
+    For a bar the operator found themselves: the notes say "their email is on
+    the website" without the URL, and OSM usually has the `website` tag."""
+    hit = lookup_venue(name, loc)
+    return hit["website"] if hit else None
 
 
 def site_names_venue(html: str, name: str) -> bool:
@@ -2527,13 +2532,15 @@ def check_fit(row: dict, corporate: Optional[dict] = None) -> dict:
 
 
 def _in_window_now(row: dict) -> bool:
-    """Whether the call list would show this lead this minute — those are the
-    ones someone is waiting on, so they're checked first."""
+    """Whether this venue is in its calling window this minute — the same test
+    as crm's /now: its own opening hours on its own clock. A row with no
+    timezone has no window, so it's never "now"."""
     from zoneinfo import ZoneInfo
-    from callwindow import call_window
+    if not row.get("tz_name") and row.get("tz_offset_hours") is None:
+        return False
     try:
         local = (datetime.now(ZoneInfo(row["tz_name"])) if row.get("tz_name") else
-                 datetime.now(timezone.utc) + timedelta(hours=row.get("tz_offset_hours") or 0))
+                 datetime.now(timezone.utc) + timedelta(hours=row["tz_offset_hours"]))
         return bool(call_window(row.get("opening_hours"), local)["good_now"])
     except Exception:
         return False
@@ -2661,20 +2668,155 @@ def _apply_fit_to_lead(cursor, row: dict, v: dict, retry_at: str) -> None:
 
 def fit_check_step() -> int:
     """One background batch of verify_fit; how many rows it checked. When a
-    bank batch passes venues, the cells the removals emptied are refilled
-    from them now rather than at the evening run — the call list used to sit
-    thin all afternoon after a clean-up."""
+    bank batch passes venues, the call list is topped up from them now rather
+    than when it's next opened — it used to sit thin all afternoon after a
+    clean-up."""
     try:
         out = verify_fit(bank_limit=0)
         if not out.get("leads_checked") and not out.get("skipped"):
             out = verify_fit(lead_limit=0)
-            room = sum(bucket_deficits().values()) if out.get("bank_ok") else 0
-            if room:
-                print(f"[leadgen] LEADGEN_REFILL promoted={promote_leads(room)}", flush=True)
+            if out.get("bank_ok"):
+                print(f"[leadgen] LEADGEN_REFILL promoted={top_up()}", flush=True)
     except Exception as exc:
         print(f"[leadgen] LEADGEN_FIT_CHECK_FAILED {exc}", flush=True)
         return 0
     return out.get("leads_checked", 0) + out.get("bank_checked", 0)
+
+
+# ── Bars added by hand (or found by the AI): timed and checked ─────────────
+#
+# A generated lead arrives with a timezone, opening hours and a phone its own
+# website vouches for. A bar the operator added — pasted notes, the AI bar —
+# arrived with none of it: no timezone meant no calling window, so it never
+# showed as ready on the call list; and nothing checked the number. The
+# Hideaway-style mismatch (a number the bar's own site doesn't list) went
+# straight into the book. check_hand_added fills the gaps from the map and the
+# venue's own site, and NEVER overwrites what the operator typed: a number
+# their site disagrees with is flagged, not replaced.
+
+HAND_CHECK_BATCH = 5
+
+
+def check_hand_added(row: dict) -> dict:
+    """What to write onto a hand-added lead: tz, hours, phone_status/note and
+    a note line when the site disagrees. Network (the map, their site)."""
+    out: dict = {}
+    name, loc = row.get("name") or "", row.get("loc") or ""
+    city, state = _loc_parts(loc)
+    hit = lookup_venue(name, loc) if city else None
+    lat, lon = (hit or {}).get("lat"), (hit or {}).get("lon")
+    if row.get("tz_offset_hours") is None and not row.get("tz_name"):
+        offset = us_tz_offset(lon, state.upper() if state else None, lat)
+        if offset is not None:
+            out["tz_offset_hours"] = offset
+            out["tz_name"] = us_tz_name(lon, state.upper() if state else None, lat)
+    if not row.get("opening_hours") and hit and hit.get("opening_hours"):
+        out["opening_hours"] = hit["opening_hours"]
+
+    website = None
+    for line in (row.get("notes") or "").splitlines():
+        m = re.search(r"Website: (https?://[^\s|,;·]+)", line)
+        if m:
+            website = m.group(1)
+    if not website and hit and hit.get("website") and site_is_venue(hit["website"], name):
+        website = hit["website"]
+    typed = normalize_us_phone(row.get("phone")) if row.get("phone") else None
+    if website and typed and _is_public_http_url(website):
+        home, answered, status = _fetch_site(website)
+        if _ok(status, home):
+            pages = home
+            for url in _contact_urls(answered, home)[:2]:
+                more, st = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
+                if _ok(st, more):
+                    pages += " " + more
+            judged = judge_phone(typed, site_phones(pages), {typed[:3]})
+            if judged["status"] == "confirmed":
+                out["phone_status"], out["phone_note"] = "confirmed", None
+            elif judged["status"] == "from_site":
+                listed = format_us_phone_dashed(judged["phone"])
+                out["phone_status"] = "mismatch"
+                out["phone_note"] = (f"Their website lists {listed}, not the "
+                                     f"{format_us_phone_dashed(typed)} logged here")
+                out["note"] = f"Phone check: {out['phone_note']} ({answered})"
+            elif judged["status"] == "conflict":
+                out["phone_status"], out["phone_note"] = "conflict", judged["note"]
+            else:
+                out["phone_status"], out["phone_note"] = "unconfirmed", judged["note"]
+    if website and not re.search(r"Website: ", row.get("notes") or ""):
+        out["website"] = website
+    return out
+
+
+def save_hand_check(lead_id: str, found: dict) -> None:
+    """Write check_hand_added's result. Only fills blanks for tz and hours —
+    a value set since is never replaced — and always stamps hand_checked_at so
+    one lead is never re-checked in a loop."""
+    now = now_iso()
+    today = now[:10]
+    sets = ["hand_checked_at = %s"]
+    params: list = [now]
+    for col in ("tz_offset_hours", "tz_name", "opening_hours"):
+        if col in found:
+            sets.append(f"{col} = COALESCE({col}, %s)")
+            params.append(found[col])
+    for col in ("phone_status", "phone_note"):
+        if col in found:
+            sets.append(f"{col} = %s")
+            params.append(found[col])
+    lines = []
+    if found.get("website"):
+        lines.append(f"Website: {found['website']}")
+    if found.get("note"):
+        lines.append(f"[{today}] {found['note']}")
+    if lines:
+        sets.append("notes = COALESCE(notes || E'\\n', '') || %s")
+        params.append("\n".join(lines))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s",
+                       params + [lead_id])
+        conn.commit()
+
+
+def check_and_save_hand_added(lead_id: str) -> Optional[dict]:
+    """One lead, now — right after the operator added it. Never raises."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        found = check_hand_added(dict(row))
+        save_hand_check(lead_id, found)
+        print(f"[leadgen] HAND_CHECKED {row['name']!r} {sorted(found)}", flush=True)
+        return found
+    except Exception as exc:
+        print(f"[leadgen] HAND_CHECK_FAILED {lead_id}: {exc}", flush=True)
+        return None
+
+
+def hand_check_step(budget_s: int = 60) -> int:
+    """One background batch over hand-added leads never checked (the ones in
+    the book before this existed): the operator's own entries, the AI's
+    finds. Each waits for a quiet scanner first, like every background crawl."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id FROM crm_leads
+             WHERE COALESCE(source, 'manual') <> 'leadgen' AND hand_checked_at IS NULL
+               AND status NOT IN ('won', 'dead')
+             ORDER BY created_at DESC LIMIT %s
+        """, (HAND_CHECK_BATCH,))
+        ids = [r["id"] for r in cursor.fetchall()]
+    deadline = time.monotonic() + budget_s
+    done = 0
+    for lead_id in ids:
+        if not activity.wait_for_quiet(until=deadline) or time.monotonic() > deadline:
+            break
+        check_and_save_hand_added(lead_id)
+        done += 1
+    return done
 
 
 # ── ONE-TIME: websites (and emails) a bad lookup put on the operator's leads ──
@@ -3317,33 +3459,35 @@ def _promote_one(cursor, cand: dict, now: str, corporate: Optional[dict] = None)
     return lead_id
 
 
-def bucket_counts(cursor=None) -> dict:
-    """Unworked leads per (service, zone), every cell present even at zero.
+def on_call_list(row) -> bool:
+    """Whether the call list will actually SHOW this unworked lead: a number
+    phones.py passes and, for a generated lead, one its own website vouches
+    for and a pass on the owner's rules. The same tests as crm's `/now`
+    (`phone_ok`, `_dial_ok`, `_fit_ok`) — test_callnow.py checks they agree."""
+    if not normalize_us_phone(row.get("phone")):
+        return False
+    if row.get("source") != "leadgen":
+        return True
+    return row.get("phone_status") in PHONE_OK and row.get("fit_status") == "ok"
 
-    Same filter the call list uses, so what this counts is exactly what the
-    operator would see under that tab.
-    """
-    def _count(cur) -> dict:
+
+def ready_count(cursor=None) -> int:
+    """How many leads the call list shows this minute: unworked, on the list
+    (on_call_list) and in their calling window now. Exactly /now's `ready`."""
+    def _count(cur) -> int:
         cur.execute("""
-            SELECT tz_offset_hours, opening_hours FROM crm_leads
+            SELECT source, phone, phone_status, fit_status, opening_hours,
+                   tz_offset_hours, tz_name
+              FROM crm_leads
              WHERE status = 'new' AND last_touch_at IS NULL
+               AND phone IS NOT NULL AND phone <> ''
         """)
-        counts = {b: 0 for b in all_buckets()}
-        for row in cur.fetchall():
-            bucket = bucket_of(row["tz_offset_hours"], row["opening_hours"])
-            if bucket in counts:
-                counts[bucket] += 1
-        return counts
+        return sum(1 for r in cur.fetchall() if on_call_list(r) and _in_window_now(r))
 
     if cursor is not None:
         return _count(cursor)
     with get_db() as conn:
         return _count(conn.cursor())
-
-
-def bucket_deficits(cursor=None) -> dict:
-    """How many more leads each cell needs to reach BUCKET_TARGET."""
-    return {b: max(0, BUCKET_TARGET - n) for b, n in bucket_counts(cursor).items()}
 
 
 def recheck_restaurant_leads(limit: int = 200) -> dict:
@@ -3432,68 +3576,69 @@ def recheck_restaurant_leads(limit: int = 200) -> dict:
 
 
 def promote_leads(limit: int = DAILY_TARGET) -> int:
-    """Move the best qualified candidates into crm_leads. Returns how many.
+    """Move up to `limit` of the best banked candidates that are in their
+    calling window THIS MINUTE into crm_leads. Returns how many.
 
-    Promotion is per-cell, not first-come. Sorting the whole bank by score and
-    taking the top N fills whichever cells the harvest happened to favour and
-    starves the rest — the measured Pacific/Eastern split was 131 to 12, so a
-    score-ordered promote would have handed the operator a full Pacific tab and
-    an empty Eastern one. Instead the emptiest cell is always served first, so
-    the cells converge rather than diverge.
-
-    Score still decides WHO gets promoted within a cell; it just no longer
-    decides which cells get filled.
+    Only in-window ones: the call list is "who can I ring right now", and a
+    bar promoted at 10am that doesn't open until four would sit invisible and
+    take a slot's worth of bank with it. Score decides who, best first.
     """
+    if limit <= 0:
+        return 0
     promoted = 0
     now = now_iso()
     with get_db() as conn:
         cursor = conn.cursor()
-        deficits = bucket_deficits(cursor)
-        if not any(deficits.values()):
-            return 0
-
         # Only numbers the venue's own site vouches for, and only venues that
         # passed the owner's rules (liquor shown on their site). The rest stay
         # banked until the background check gets to them.
+        # Only what the window needs, for the whole bank: this runs every
+        # minute the list is open and not full. The full row is read only for
+        # a candidate actually being promoted.
         cursor.execute("""
-            SELECT * FROM crm_lead_candidates
+            SELECT id, opening_hours, tz_offset_hours, tz_name FROM crm_lead_candidates
              WHERE status = 'qualified' AND phone_status IN %s AND fit_status = 'ok'
              ORDER BY score DESC, discovered_at ASC
         """, (PHONE_OK,))
-        corporate = corporate_index(cursor)
-        # Bank the candidates by the cell they would land in. Best-first within
-        # each cell, preserved from the query order.
-        by_bucket: dict = {b: [] for b in all_buckets()}
-        zoneless: list = []
-        for cand in cursor.fetchall():
-            bucket = bucket_of(cand["tz_offset_hours"], cand.get("opening_hours"))
-            if bucket in by_bucket:
-                by_bucket[bucket].append(dict(cand))
-            else:
-                # No longitude, so no zone, so no sub-tab to file it under.
-                # Held back rather than dropped: it still gets promoted once
-                # every real cell is full, and shows under "Unknown".
-                zoneless.append(dict(cand))
-
-        while promoted < limit:
-            # Emptiest cell with something left in the bank.
-            candidates_left = [b for b in by_bucket if deficits[b] > 0 and by_bucket[b]]
-            if not candidates_left:
+        ready = [c["id"] for c in cursor.fetchall() if _in_window_now(c)]
+        corporate = corporate_index(cursor) if ready else {}
+        for cand_id in ready:
+            if promoted >= limit:
                 break
-            bucket = max(candidates_left, key=lambda b: deficits[b])
-            cand = by_bucket[bucket].pop(0)
-            if _promote_one(cursor, cand, now, corporate):
+            cursor.execute("SELECT * FROM crm_lead_candidates WHERE id = %s", (cand_id,))
+            cand = cursor.fetchone()
+            if cand and _promote_one(cursor, dict(cand), now, corporate):
                 promoted += 1
-                deficits[bucket] -= 1
-
-        # Only once the real cells are served: leads with no timezone can't be
-        # worked zone by zone, so they must never displace one that can.
-        while promoted < limit and zoneless:
-            if _promote_one(cursor, zoneless.pop(0), now, corporate):
-                promoted += 1
-
         conn.commit()
     return promoted
+
+
+# One top-up at a time: two at once would both pick the same best candidate.
+# The service runs one worker (render-start.sh), so a process lock is enough.
+_top_up_lock = threading.Lock()
+
+
+def top_up(max_new: Optional[int] = None) -> int:
+    """Fill the call list back up to CALL_LIST_SIZE leads in their window now.
+
+    Called when the list is opened (crm /now — so it's refreshed every minute
+    it's on screen), which is also what refills it one for one after a logged
+    call or a delete: the page reloads the list after each. Promotes nothing
+    when the list is full or nobody banked is in a window. Never crawls — the
+    bank is already checked — so it's a few queries, safe on a request.
+    """
+    if not _top_up_lock.acquire(blocking=False):
+        return 0
+    try:
+        room = CALL_LIST_SIZE - ready_count()
+        if max_new is not None:
+            room = min(room, max_new)
+        n = promote_leads(room) if room > 0 else 0
+        if n:
+            print(f"[leadgen] LEADGEN_TOP_UP promoted={n}", flush=True)
+        return n
+    finally:
+        _top_up_lock.release()
 
 
 # ── The daily job ───────────────────────────────────────────────────────────
@@ -3535,47 +3680,52 @@ def pool_depth() -> dict:
                AND (fit_status IS NULL OR fit_status = 'ok')
         """, (PHONE_OK,))
         qualified = cursor.fetchone()["n"]
-    counts = bucket_counts()
-    deficits = {b: max(0, BUCKET_TARGET - n) for b, n in counts.items()}
-    headroom = sum(deficits.values())
-    # A global "leads: 312" says nothing about whether the tab the operator is
-    # about to open has anything in it. The thin cells are the number that
-    # matters, so they get named.
-    thin = sorted((b for b in counts if counts[b] < BUCKET_TARGET),
-                  key=lambda b: counts[b])
+    ready = ready_count()
     return {
         "by_status": by_status,
         "qualified": qualified,
         "active_leads": active,
-        "bucket_target": BUCKET_TARGET,
-        "buckets": [{"service": b[0], "zone": b[1], "count": counts[b],
-                     "short_by": deficits[b]} for b in all_buckets()],
-        "thinnest": [{"service": b[0], "zone": b[1], "count": counts[b]}
-                     for b in thin[:3]],
-        "max_active": MAX_ACTIVE,
-        "headroom": headroom,
-        "at_capacity": headroom == 0,
+        "call_list_size": CALL_LIST_SIZE,
+        "ready_now": ready,
+        "room_now": max(0, CALL_LIST_SIZE - ready),
+        "banked_by_zone": _bank_by_zone(),
+        "pool_floor": POOL_FLOOR,
         "days_of_runway": round((active + qualified) / DAILY_TARGET, 1) if DAILY_TARGET else 0,
         "unharvested_cities": fresh_cities,
     }
+
+
+def _bank_by_zone() -> dict:
+    """Promotable banked candidates per timezone offset. The call list is
+    filled from whoever's in a window at the minute it's opened, so every
+    zone needs stock: an empty Eastern bank is an empty list at 10am."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT tz_offset_hours AS zone, COUNT(*) AS n FROM crm_lead_candidates
+             WHERE status = 'qualified'
+               AND (phone_status IS NULL OR phone_status IN %s)
+               AND (fit_status IS NULL OR fit_status = 'ok')
+             GROUP BY tz_offset_hours
+        """, (PHONE_OK,))
+        got = {r["zone"]: r["n"] for r in cursor.fetchall()}
+    return {z: got.get(z, 0) for z in ZONE_OFFSETS}
 
 
 CITY_RETRY_HOURS = 20
 
 
 def _next_cities(limit: int) -> list[dict]:
-    """Which cities to harvest next — the ones feeding the emptiest tabs.
+    """Which cities to harvest next — the ones in the zone with the thinnest
+    bank.
 
-    Round-robin by longitude was never the rule, and plain oldest-first isn't
-    either: the seed list is ordered roughly by population, which put most of
-    the Eastern metros at the back. One measured run had Pacific sitting on 131
-    qualified leads while Eastern had 12, because 15 of 16 Eastern cities had
-    never been touched. Sorting by the zone's shortfall first fixes that
-    without anyone having to notice it happened.
+    The seed list is ordered roughly by population, which put most of the
+    Eastern metros at the back; one measured run had Pacific on 131 qualified
+    leads while Eastern had 12. Harvesting the thinnest zone first keeps
+    every zone stocked, because the list is filled from whoever's in a window
+    at that minute and that's a different zone as the day goes on.
     """
-    per_zone: dict = {}
-    for (_service, zone), short in bucket_deficits().items():
-        per_zone[zone] = per_zone.get(zone, 0) + short
+    banked = _bank_by_zone()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -3590,10 +3740,10 @@ def _next_cities(limit: int) -> list[dict]:
     def rank(city: dict):
         zone = us_tz_offset(city.get("lon"), city.get("state"),
                             city.get("lat"))
-        # Negated: biggest shortfall first. Never-harvested breaks the tie,
-        # then oldest — so a short zone still rotates through its own cities
-        # instead of re-harvesting one of them forever.
-        return (-per_zone.get(zone, 0),
+        # Thinnest bank first. Never-harvested breaks the tie, then oldest —
+        # so a thin zone still rotates through its own cities instead of
+        # re-harvesting one of them forever.
+        return (banked.get(zone, 0),
                 city.get("last_harvested_at") is not None,
                 city.get("last_harvested_at") or "")
 
@@ -3638,59 +3788,43 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
         conn.commit()
 
     try:
-        # 0. How much room is there, cell by cell? Everything below is sized
-        #    by this. Summed only for the "is it all full?" test — the shape
-        #    matters more than the total, because a run that promotes 25 leads
-        #    into an already-full Pacific tab has delivered nothing.
-        deficits = bucket_deficits()
-        headroom = sum(deficits.values())
-        detail["headroom_at_start"] = headroom
-        detail["short_cells"] = {f"{s_}/{z}": d for (s_, z), d in deficits.items() if d}
-
-        # Nothing to add and nothing worth banking: stop before touching the
-        # network at all. This is the whole point of the cap — when the list is
-        # full, the generator does no work rather than quietly piling up leads
-        # that will never be called.
-        if headroom == 0 and pool_depth()["qualified"] >= POOL_FLOOR:
-            detail["skipped"] = (
-                f"every tab is full ({BUCKET_TARGET} in each of "
-                f"{len(all_buckets())} cells) and the bank is stocked — "
-                "no harvesting, no crawling, nothing promoted"
-            )
+        # 0. The call list fills itself from the bank whenever it's opened
+        #    (top_up), so this run's job is the BANK: every zone stocked with
+        #    checked venues, whatever hour the operator sits down. With the
+        #    bank deep and nothing waiting to be crawled, it stops before
+        #    touching the network at all.
+        depth = pool_depth()
+        detail["bank_at_start"] = depth["qualified"]
+        detail["bank_by_zone"] = depth["banked_by_zone"]
+        thin_zone = min(depth["banked_by_zone"].values() or [0]) < POOL_FLOOR // 8
+        if depth["qualified"] >= POOL_FLOOR and not thin_zone:
+            detail["skipped"] = (f"the bank is stocked ({depth['qualified']} checked venues, "
+                                 f"every zone covered) — no harvesting, no crawling")
+            promoted = top_up()
             with get_db() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE crm_leadgen_runs
-                       SET phase='done', ok=TRUE, finished_at=%s, detail=%s
+                       SET phase='done', ok=TRUE, finished_at=%s, promoted=%s, detail=%s
                      WHERE id=%s
-                """, (now_iso(), json.dumps({**detail, "pool": pool_depth()})[:8000], run_id))
+                """, (now_iso(), promoted, json.dumps({**detail, "pool": depth})[:8000], run_id))
                 conn.commit()
-            print(f"[leadgen] LEADGEN_RUN ok=True skipped=all_tabs_full "
-                  f"active={MAX_ACTIVE}/{MAX_ACTIVE} "
-                  f"per_cell={BUCKET_TARGET}", flush=True)
-            return {"run_id": run_id, "ok": True, "promoted": 0, "enriched": 0,
+            print(f"[leadgen] LEADGEN_RUN ok=True skipped=bank_stocked "
+                  f"bank={depth['qualified']} promoted={promoted}", flush=True)
+            return {"run_id": run_id, "ok": True, "promoted": promoted, "enriched": 0,
                     "qualified": 0, "candidates_found": 0, "cities_harvested": 0,
                     "errors": 0, "detail": detail}
 
-        # 1. Promote first, from what's already banked.
-        #
-        #    Sized by the holes, not by the daily target. `target` is a pace,
-        #    not a ceiling: on a cold start eight empty cells need 400 leads
-        #    and metering that out 25 a day would leave the tabs unusable for a
-        #    fortnight. In steady state the two coincide anyway — the cap means
-        #    only as many leads can land as were called off the list.
-        # Banked candidates enriched before the website check can't be promoted
-        # until their number is checked; check enough of the best to fill the
-        # holes. A no-op once the bank is all checked.
-        verify_phones(lead_limit=0, bank_limit=max(60, headroom * 2))
-        verify_fit(lead_limit=0, bank_limit=max(60, headroom * 2))
-        promoted = promote_leads(headroom)
+        # 1. Banked candidates enriched before the website check can't be
+        #    promoted until their number and the owner's rules are checked.
+        #    A no-op once the bank is all checked. Then top the list up from
+        #    what's banked, before any slow crawl.
+        verify_phones(lead_limit=0, bank_limit=60)
+        verify_fit(lead_limit=0, bank_limit=60)
+        promoted = top_up()
 
-        # 2. Top the bank back up if it's getting shallow, or if what's banked
-        #    can't reach the cells that are actually short. A bank of 200
-        #    Pacific candidates is a deep bank and an empty Eastern tab.
+        # 2. Top the bank back up if it's getting shallow, or one zone is.
         depth = pool_depth()
-        remaining_deficit = sum(bucket_deficits().values())
         # Candidates that have been harvested but never crawled. These are the
         # stock that matters here: turning one into a callable lead needs a
         # crawl, not another trip to Overpass.
@@ -3700,17 +3834,12 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
         # banked — a cold start has 0 qualified by definition, so every run
         # opened with a dozen Overpass sweeps before crawling a single site.
         # That is minutes of network in front of the one stage that produces
-        # leads, and on a small instance it is where the run gets killed: the
-        # observed result was a candidate pile that kept growing, enriched
-        # stuck at 0, and runs that never reached their own final write.
+        # leads, and on a small instance it is where the run gets killed.
         stock_thin = unenriched < max(max_enrich, POOL_FLOOR)
-        if stock_thin and (depth["qualified"] < POOL_FLOOR
-                           or remaining_deficit > depth["qualified"]):
-            # A metro yields roughly 15-20 qualified leads. Filling eight
-            # empty cells needs several of them, so a cold start harvests wide
-            # and a topped-up list harvests one or two. Capped so a single run
-            # can't sit on Overpass all evening.
-            wanted = max(max_cities, -(-remaining_deficit // 17))
+        if stock_thin and (depth["qualified"] < POOL_FLOOR or thin_zone):
+            # A metro yields roughly 15-20 qualified leads. Capped so a single
+            # run can't sit on Overpass all morning.
+            wanted = max(max_cities, -(-(POOL_FLOOR - depth["qualified"]) // 17))
             cities = _next_cities(min(wanted, 12))
             detail["harvest_order"] = [c["name"] for c in cities]
 
@@ -3826,12 +3955,8 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
                 errors += 1
                 detail["errors"].append(f"enrich {cand.get('name')}: {exc}")
 
-        # 4. If the first promote came up short and enriching just produced
-        #    fresh stock, top the list up rather than under-delivering — still
-        #    bounded by whatever room is left right now.
-        remaining_room = sum(bucket_deficits().values())
-        if remaining_room:
-            promoted += promote_leads(remaining_room)
+        # 4. Enriching may just have produced venues in a window now.
+        promoted += top_up()
 
         ok = promoted > 0 or errors == 0
     except Exception as exc:
@@ -3854,8 +3979,9 @@ def run_daily(target: int = DAILY_TARGET, max_cities: int = 4,
 
     print(f"[leadgen] LEADGEN_RUN ok={ok} promoted={promoted} enriched={enriched} "
           f"qualified={qualified} new_candidates={candidates} errors={errors} "
-          f"active={detail['pool']['active_leads']}/{MAX_ACTIVE} "
-          f"thinnest={detail['pool']['thinnest']} "
+          f"active={detail['pool']['active_leads']} "
+          f"ready_now={detail['pool']['ready_now']}/{CALL_LIST_SIZE} "
+          f"bank_by_zone={detail['pool']['banked_by_zone']} "
           f"runway_days={detail['pool']['days_of_runway']}", flush=True)
 
     return {

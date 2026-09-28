@@ -8,12 +8,12 @@ that reaches nobody costs the same as one that does.
 
 The heuristic, which is about how bars actually run rather than about clocks:
 
-  opens at or before 11:30  →  ring 2:00-4:30pm. They're doing lunch at open,
-                               and the post-lunch lull is the quiet hour when
-                               the manager is doing paperwork and ordering.
-  opens after 11:30         →  ring from open to two hours after. Staff arrive
-                               to set up, the manager is on, nobody's ordering
-                               drinks yet.
+  opens at or before 11:30  →  ring from 45 minutes before opening to 45
+                               after, then 2:00-4:00pm — the post-lunch lull,
+                               when the manager is doing paperwork and ordering.
+  opens after 11:30         →  ring from 45 minutes before opening to two hours
+                               after. Staff arrive to set up, the manager is on,
+                               nobody's ordering drinks yet.
 
 Everything here is a pure function of (hours string, now) so it can be tested
 without a database, a network or a particular time of day.
@@ -35,10 +35,12 @@ LUNCH_WINDOW = (14 * 60, 16 * 60)        # 2:00pm - 4:00pm, the post-lunch lull
 # manager is on the floor and nobody has ordered yet, reported as unreachable.
 PRE_RUSH_MINUTES = 45
 # Staff are in before the doors open — setting up, taking deliveries, and not
-# yet serving anybody. It is the quietest half hour of a venue's day and the
-# one most likely to put a manager on the phone, so the window starts before
-# opening time rather than at it.
-PRE_OPEN_MINUTES = 30
+# yet serving anybody. It is the quietest stretch of a venue's day and the one
+# most likely to put a manager on the phone, so the window starts before
+# opening time rather than at it. 45 minutes, the owner's call (2026-09-28):
+# at 30, a morning on the East Coast showed two leads — an 11am opener only
+# came into its window at 10:30.
+PRE_OPEN_MINUTES = 45
 # Venues that don't do lunch: the first couple of hours after the doors open.
 POST_OPEN_MINUTES = 120
 
@@ -280,33 +282,18 @@ def service_band(hours: Optional[str]) -> str:
     return "lunch" if min(opens) <= LUNCH_OPEN_CUTOFF else "dinner"
 
 
-# ── Buckets: the (service × timezone) cells the call list is divided into ───
-#
-# The operator picks a service tab, then a timezone sub-tab, and expects a full
-# screen of names underneath. That pair is the unit the generator has to fill,
-# so it lives here — one definition shared by the page, the API and the
-# generator, rather than three that can drift apart.
-
+# The four US mainland zones, east to west (UTC offsets, standard time). The
+# lead generator keeps a bank in each: the call list is one list of whoever's
+# in a window at that minute, which is a different zone as the day goes on.
 ZONE_OFFSETS = [-5, -6, -7, -8]          # Eastern, Central, Mountain, Pacific
-SERVICES = ["lunch", "dinner"]
 
 
 def service_of(hours: Optional[str]) -> str:
-    """Which tab a venue belongs under: 'lunch' or 'dinner'.
+    """'lunch' or 'dinner' — whether a venue opens by 11:30 somewhere in the
+    week (a lunch place, called before the rush and in the 2-4pm lull) or
+    later. Used to pick good times to land an email.
 
-    Unknown hours go to dinner. Roughly half of OSM venues list none, and the
-    dinner tab's generic afternoon window is where they'd be called anyway —
-    whereas putting them under lunch would send 11am calls to bars that don't
-    unlock until four, which is the exact mistake the tabs exist to prevent.
+    Unknown hours count as dinner: roughly half of OSM venues list none, and
+    treating them as lunch would aim at 11am bars that don't unlock until four.
     """
     return "lunch" if service_band(hours) == "lunch" else "dinner"
-
-
-def bucket_of(tz_offset: Optional[int], hours: Optional[str]) -> tuple[str, Optional[int]]:
-    """(service, zone offset) for one venue. Zone is None when longitude was missing."""
-    zone = tz_offset if tz_offset in ZONE_OFFSETS else None
-    return service_of(hours), zone
-
-
-def all_buckets() -> list[tuple[str, int]]:
-    return [(s, z) for s in SERVICES for z in ZONE_OFFSETS]

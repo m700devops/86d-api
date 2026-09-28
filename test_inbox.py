@@ -119,7 +119,7 @@ def test_a_matching_reply_is_filed_and_a_strangers_ignored(monkeypatch):
                 "skipped": []}
 
     store = _wire(monkeypatch, [RAW, stranger], read)
-    assert crm.process_inbox() == {"updated": 1, "no_change": 0, "ignored": 1, "failed": 0}
+    assert crm.process_inbox() == {"updated": 1, "no_change": 0, "ignored": 1, "failed": 0, "bounced": 0}
     assert seen["ids"] == ["CAT", "LAVACA"]
     assert {r["status"] for r in store["recorded"]} == {"updated", "ignored"}
 

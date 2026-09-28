@@ -234,13 +234,14 @@ def test_what_we_know_shows_the_emails_already_sent():
 
 # ── the draft writer: one fix round, the better version kept ───────────────
 
-ROW = {"id": "L1", "name": "Rioja", "loc": "Denver, CO", "contact": "Laura (owner)"}
+ROW = {"id": "L1", "name": "Rioja", "loc": "Denver, CO", "contact": "Laura (owner)",
+       "notes": "[2026-09-23] call · attempt 1: Laura says Sundays eat the night · Spoke to: Laura"}
 BAD = {"subject": "Rioja's Sunday Count",
        "body": "Hi Laura,\n\nI hope this finds you well. 86'd will streamline your count.\n\nBest,"}
 FIXED = {"subject": "rioja's sunday count", "body": GOOD}
 
 
-def _drafter(monkeypatch, *outs, sent=()):
+def _drafter(monkeypatch, *outs, sent=(), outcomes=("answered",)):
     calls, queue = [], list(outs)
 
     def fake(system, user, schema=None, **k):
@@ -253,8 +254,11 @@ def _drafter(monkeypatch, *outs, sent=()):
     monkeypatch.setattr(crm, "_claude_json", fake)
     monkeypatch.setattr(crm, "_draft_system", lambda: "SYSTEM")
     monkeypatch.setattr(crm, "_sent_emails_to", lambda lead_id, limit=3: list(sent))
+    monkeypatch.setattr(crm, "_call_outcomes", lambda lead_id: list(outcomes))
+    monkeypatch.setattr(crm, "_lead_row", lambda row: dict(row))
     monkeypatch.setattr(crm, "_draft_context",
-                        lambda row, include_log=True, sent=None: "Venue: Rioja (Denver, CO)")
+                        lambda row, include_log=True, sent=None, talked="":
+                        "Venue: Rioja (Denver, CO)\n" + talked)
     monkeypatch.setattr(pitch, "POSTAL_ADDRESS", "")
     return calls
 
@@ -348,6 +352,118 @@ def test_the_email_button_says_what_kind_of_email_it_is(monkeypatch):
         ("first", True), ("followup", True), ("revision", True), ("revision", False),
         ("reply", False)]
     assert got[0]["brief"] == "first email"
+
+
+# ── never thank someone for a call they weren't on ─────────────────────────
+#
+# The Hideaway: Jen picked up, said the manager Mike wasn't in, call back at
+# four. The Email button then offered "Hi Mike, Thanks for taking my call.
+# Here's the app I mentioned." — a canned body the page pre-filled whatever
+# had happened. Now the page drafts from the log, the drafter is told in code
+# who was and wasn't reached, and lint catches a claimed conversation.
+
+HIDEAWAY = {"id": "H1", "name": "The Hideaway", "loc": "Odenton, MD", "contact": "Mike (manager)",
+            "notes": ("Decision makers: Mike (manager)\n[2026-09-28] call · attempt 1: Called "
+                      "The Hideaway and spoke with Jen, who said manager Mike wasn't in and to "
+                      "call back around 4pm. · Spoke to: Jen · Best time: around 4pm · Next: "
+                      "Call back around 4pm and ask for Mike")}
+CANNED = ("Hi Mike,\n\nThanks for taking my call. Here's the app I mentioned.\n\nYou point "
+          "your iPhone at each bottle, it knows what it is, and you tap in the count.\n\n"
+          "Worth trying on your next count?\n\nBest,")
+
+
+def test_who_we_talked_to_says_mike_was_never_reached():
+    line, never = pitch.who_we_talked_to(HIDEAWAY, ["gatekeeper"])
+    assert "Jen" in line and "NOT Mike (manager)" in line and "never spoken" in line
+    assert never == "Mike (manager)"
+
+
+def test_the_hideaway_email_is_caught():
+    _, never = pitch.who_we_talked_to(HIDEAWAY, ["gatekeeper"])
+    problems = pitch.lint("86'd, the app from our call", CANNED, "followup", never_spoke=never)
+    said = " ".join(problems)
+    for phrase in ("thanks for taking my call", "the app i mentioned", "from our call"):
+        assert f'"{phrase}"' in said, phrase
+    assert "Mike (manager) has never spoken with Stephan" in said
+
+
+def test_an_honest_version_passes():
+    _, never = pitch.who_we_talked_to(HIDEAWAY, ["gatekeeper"])
+    honest = ("Hi Mike,\n\nI called The Hideaway today and Jen said you were out, so I'll try "
+              "you around four. In the meantime, here's what it is.\n\nYou point your iPhone "
+              "at each bottle and tap the count; every rep gets their order at once.\n\n"
+              "Worth a look before I call?\n\nBest,")
+    assert pitch.lint("the hideaway's count", honest, "followup", never_spoke=never) == []
+
+
+def test_the_decision_maker_on_the_phone_can_be_thanked():
+    laura = {**HIDEAWAY, "contact": "Laura (owner)",
+             "notes": "[2026-09-23] call · attempt 1: talked · Spoke to: Laura Keene"}
+    line, never = pitch.who_we_talked_to(laura, ["answered"])
+    assert never is None and "Laura (owner) — the decision maker" in line
+    assert pitch.lint("rioja's sunday count", GOOD, "first", never_spoke=never) == []
+
+
+def test_nobody_reached_is_a_cold_email():
+    line, never = pitch.who_we_talked_to({**HIDEAWAY, "notes": ""}, ["voicemail", "no_answer"])
+    assert never == "Mike (manager)" and "nobody at the bar yet" in line
+    assert "called and nobody picked up" in line
+    line, never = pitch.who_we_talked_to({"name": "X", "notes": ""}, [])
+    assert never == "" and "cold email" in line
+    assert any("anyone at the bar has never spoken" in p for p in
+               pitch.lint("x count", "Hi there,\n\nAs we discussed, it's quick.\n\nBest,",
+                          "first", never_spoke=never))
+
+
+def test_staff_only_with_no_decision_maker_named():
+    line, never = pitch.who_we_talked_to({"name": "X", "notes": "call · Spoke to: Jake"},
+                                         ["gatekeeper"])
+    assert never == "" and "Jake, on the phone" in line
+
+
+def test_someone_answered_but_the_log_doesnt_say_who_is_not_guarded():
+    line, never = pitch.who_we_talked_to({"name": "X", "contact": "Dave", "notes": ""},
+                                         ["answered"])
+    # Can't tell whether it was Dave, so no claim either way.
+    assert never is None and "doesn't say who" in line
+
+
+def test_a_reply_and_the_salespersons_word_are_never_blocked():
+    assert pitch.lint("Re: q", "Hi Mike,\n\nAs you said, two bars.\n\nThanks,", "reply",
+                      never_spoke="Mike") == []
+    assert pitch.lint("x count", "Hi Mike,\n\nThanks for the call.\n\nBest,", "first",
+                      brief="thank him for the call", never_spoke="Mike") == []
+
+
+def test_the_drafter_is_told_and_checked(monkeypatch):
+    fixed = {"subject": "the hideaway's count",
+             "body": "Hi Mike,\n\nI called today and Jen said you were out. Here's what it "
+                     "is, before I try you at four.\n\nWorth a look?\n\nBest,"}
+    calls = _drafter(monkeypatch, {"subject": "86'd, the app from our call", "body": CANNED},
+                     fixed, outcomes=("gatekeeper",))
+    out = crm._write_draft(HIDEAWAY, "Follow up.", kind="followup", to_decision_maker=True)
+    assert "NOT Mike (manager)" in calls[0]["user"]              # told, in WHAT WE KNOW
+    assert "thanks for taking my call" in calls[1]["user"]       # and sent back once
+    assert out["checks"] == [] and "taking my call" not in out["body"]
+
+
+def test_the_compose_box_default_never_claims_a_call():
+    subject, body = _page_default()
+    assert pitch.lint(subject, body, "first", never_spoke="") == []
+
+
+def test_the_email_button_drafts_by_where_the_lead_stands(monkeypatch):
+    _lead_db(monkeypatch)
+    got = []
+    monkeypatch.setattr(crm, "_write_draft", lambda row, ask, **k: got.append((ask, k)) or {})
+    monkeypatch.setattr(crm, "_lead_row", lambda row: {**dict(row), "last_touch_at": None})
+    crm.draft_lead_email("L1", crm.DraftRequest(auto=True))
+    monkeypatch.setattr(crm, "_lead_row", lambda row: {**dict(row),
+                                                       "last_touch_at": "2026-09-28T14:00"})
+    crm.draft_lead_email("L1", crm.DraftRequest(auto=True))
+    (cold_ask, cold), (fu_ask, fu) = got
+    assert cold["kind"] == "first" and "Nobody there has been called" in cold_ask
+    assert fu["kind"] == "followup" and "FOLLOW-UP" in fu_ask
 
 
 # ── sending a follow-up in our own thread ──────────────────────────────────

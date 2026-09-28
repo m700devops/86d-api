@@ -1055,7 +1055,7 @@ async function undoTouch(id){
 
 /* ── calling mode ──────────────────────────────────────────────────
    One button, one list, no decisions. Pressing it fetches whoever is in a
-   calling window THIS MINUTE — the half hour before their doors open, and
+   calling window THIS MINUTE — the 45 minutes before their doors open, and
    the 2-4pm lull — best-reachable first, and lists exactly that. Nothing
    above the table explains or decides anything; there's nothing to do but
    press the button and start dialing the first row. */
@@ -1100,7 +1100,7 @@ function composeDrawer(addr, contact, cols=8){
       <button data-draft>Draft it</button>
     </div>`:''}
     <div class="mailrow"><label>Subject</label><input data-subject value="${esc(MAIL_SUBJECT)}"></div>
-    <textarea data-body rows="9">${esc(mailBody(contact))}</textarea>
+    <textarea data-body rows="9">${MAIL.ai?'':esc(mailBody(contact))}</textarea>
     <div class="whenbox">
       <div class="whenhead">When should it land?
         <span class="muted" data-clocks></span></div>
@@ -1299,6 +1299,9 @@ async function loadCalls(){
 /* Why this row is where it is. The list reorders itself for reasons the
    screen should state, or it just looks arbitrary. */
 function whyTag(l){
+  // An agreed callback whose time has come: someone said "call back at four".
+  if(l.callback) return '<span class="qchip">CALLBACK</span>'
+    + (l.contact?`<div class="ask">Ask for ${esc(l.contact)}</div>`:'');
   if(l.queued_email_at) return '<span class="qchip">EMAIL QUEUED</span>'
     + (l.manager_name?'<span class="why">NAME</span>':'');
   if(l.manager_name) return '<span class="why">NAME</span>';
@@ -1437,13 +1440,14 @@ function renderWhereInfo(box, d, l){
       +'change where it sits on the list.</div>':'');
 }
 
-const MAIL_SUBJECT = "86'd, the app from our call";
-/* The hand-written starting point, for when nobody asks the AI. Addressed to
-   the decision maker by first name (the lead's contact is who we ask for),
-   written to the drafter's own rules (one picture, the risk taken away, the
-   App Store link as the only link, one easy ask), and signed exactly the way
-   every AI draft is: the server's signature and the opt-out line under it,
-   from /mail/status, so the two can't drift. */
+const MAIL_SUBJECT = "the end-of-night count";
+/* The fallback text, used only when the AI can't draft (no key on the server,
+   or the draft failed). It claims nothing about a call: it used to open
+   "Thanks for taking my call. Here's the app I mentioned." whatever had
+   happened, and went to The Hideaway's manager Mike — who was out when we
+   rang; only the bartender picked up. Addressed to the decision maker by
+   first name (the lead's contact is who we ask for) and signed exactly the
+   way every AI draft is, from /mail/status, so the two can't drift. */
 const SIGNATURE_DEFAULT="Stephan Khouri\nOwner of 86'd Bar inventory\nWebsite: My86d.com";
 const ROLE_WORDS=new Set(['the','owner','owners','gm','manager','bar','general','head','a','an','bartender','host','hostess','staff','team','someone','unknown']);
 const firstName=n=>{ for(const w of String(n||'').split('(')[0].match(/[A-Za-z][A-Za-z'’-]*/g)||[])
@@ -1451,7 +1455,7 @@ const firstName=n=>{ for(const w of String(n||'').split('(')[0].match(/[A-Za-z][
 const mailBody=(contact,venue)=>
 `Hi ${firstName(contact)||'there'},
 
-Thanks for taking my call. Here's the app I mentioned.
+I'm Stephan, and I own 86'd, an iPhone app for the bar count.
 
 You point your iPhone at each bottle, it knows what it is, and you tap in the count. Then every distributor gets its order at once. The count and the orders take 10 to 15 minutes.
 
@@ -1462,6 +1466,33 @@ Worth trying on your next count?
 
 Best,
 ${(MAIL&&MAIL.signature)||SIGNATURE_DEFAULT}${MAIL&&MAIL.footer?'\n\n'+MAIL.footer:''}`;
+
+/* Opening an Email box drafts the email straight away, from what's on file:
+   a follow-up from the log when the bar has been called or emailed, a first
+   cold email when not (the server decides — `auto`). The body stays empty
+   until the draft lands, so nothing canned can be sent by accident; if the
+   AI can't draft, the fallback text above goes in and the box says why. */
+async function autoDraft(d, id, contact){
+  const body=d.querySelector('[data-body]');
+  if(!MAIL.ai){ body.value=mailBody(contact); return; }
+  const box=d.querySelector('.applied'); const btn=d.querySelector('[data-draft]');
+  box.className='applied'; box.textContent='Reading what\u2019s on file and drafting…';
+  body.value=''; body.placeholder='Writing the draft…';
+  btn.disabled=true;
+  try{
+    const r=await api(`/leads/${id}/draft-email`,{method:'POST',body:JSON.stringify({auto:true})});
+    d.querySelector('[data-subject]').value=r.subject;
+    body.value=r.body;
+    d.dataset.drafted='1';
+    d.querySelector('[data-brief]').placeholder='Not right? Say what to change — "shorter", "mention the free trial", "he asked about price"';
+    btn.textContent='Redraft';
+    box.textContent=draftNote(r, 'Drafted from what\u2019s on file. Read it, edit anything, then Send.');
+  }catch(err){
+    if(!body.value) body.value=mailBody(contact);
+    box.className='applied err';
+    box.textContent='Couldn\u2019t draft it ('+err.message+') — a plain version is in the box instead.';
+  }finally{ btn.disabled=false; body.placeholder=''; }
+}
 
 /* Whether the server can send for us. Decided once, on unlock: with a mailbox
    configured the Email button opens a compose box and the send is recorded
@@ -1610,7 +1641,7 @@ $('zones').onclick=async e=>{
     d.className='drawer mailer';
     d.innerHTML=composeDrawer(addr, tr.dataset.contact);
     tr.after(d);
-    wireSlots(d); loadSlots(d, id);
+    wireSlots(d); loadSlots(d, id); autoDraft(d, id, tr.dataset.contact);
     return;
   }
   if(btn.dataset.act==='log'){
@@ -1781,6 +1812,7 @@ async function loadPipeline(){
     return;
   }
 
+  if(!yet && SCORE_WEEK===null) await loadScoreWeek();
   body.innerHTML=`
     <div class="zone"><div class="sheetwrap">
       <table class="sheet">
@@ -1790,7 +1822,8 @@ async function loadPipeline(){
                title="Click to put a stage at the top">STAGE ${PIPE.first
                ?`<span>· ${esc(STAGE_NAME[PIPE.first])} first</span>`:'<span>⇅</span>'}</button>`}</th>
           <th>PHONE</th><th>WHERE THINGS STAND</th>
-          ${yet?'':'<th class="reach" title="Every call, email and Facebook message — undone ones don\'t count">REACHED OUT<span class="hash">#</span></th>'}<th></th>
+          ${yet?'':'<th class="reach" title="Every call, email and Facebook message — undone ones don\'t count">REACHED OUT<span class="hash">#</span></th>'}
+          ${yet?'':`<th class="reach" title="Your salesman score on the latest CloudTalk call to this bar, out of 100: opener, discovery, objections and the ask, 25 each${SCORE_WEEK!=null?` · your average this week: ${SCORE_WEEK}`:''}">SCORE<span class="hash">${SCORE_WEEK!=null?'wk '+SCORE_WEEK:'/100'}</span></th>`}<th></th>
         </tr></thead>
         <tbody>${d.leads.map((l,i)=>pipeRow(l,S.offset+i+1,{yet,today:d.today})).join('')}</tbody>
       </table>
@@ -1825,6 +1858,8 @@ const outcomeLabel = o => o ? (OUTCOME_LABEL[o] || o) : '';
 function phoneCheck(l){
   if(l.phone_status==='confirmed') return '✓ on their website';
   if(l.phone_status==='from_site') return '✓ from their website';
+  // A number typed in by hand that the bar's own site doesn't list.
+  if(l.phone_status==='mismatch') return '⚠ their website lists another number';
   return '';
 }
 
@@ -1858,6 +1893,7 @@ function leadEditCell(l, cols){
         `<option value="${k}" ${k===l.status?'selected':''}>${v}</option>`).join('')}</select></div>
     ${inp('Contact','contact',l.contact)}${inp('Phone','phone',l.phone)}${inp('Email','email',l.email)}
     ${inp('Callback','followup_date',l.followup_date,'YYYY-MM-DD')}
+    ${inp('Uses now','current_system',l.current_system,'MarginEdge, spreadsheet, clipboard…')}
     <p class="hint" style="margin:10px 0 4px">Notes</p>
     <textarea data-f="notes" rows="5">${esc(l.notes||'')}</textarea>
     <div class="row"><button class="go" data-save-lead>Save</button>
@@ -1867,6 +1903,10 @@ function leadEditCell(l, cols){
 
 /* The full record: every field, every attempt, and the notes. Shared by the
    CRM tab, Yet to Contact and Follow-ups so the three can't drift apart. */
+/* "16:00" -> "4pm", "14:30" -> "2:30pm". */
+const clock12=t=>{ const [h,m]=String(t||'').split(':').map(Number);
+  if(isNaN(h)) return t||''; const ap=h<12?'am':'pm', h12=h%12||12;
+  return m?`${h12}:${String(m).padStart(2,'0')}${ap}`:`${h12}${ap}`; };
 function leadDetailsCell(l, cols){
   const f=(k,v)=>v?`<div class="mailrow"><label>${k}</label><div>${esc(String(v))}</div></div>`:'';
   const t=l.tries||{total:l.attempts||0};
@@ -1875,7 +1915,9 @@ function leadDetailsCell(l, cols){
   return `<td colspan="${cols}">
     ${f('Bar',l.name)}${f('Where',l.loc)}${f('Stage',l.status)}
     ${f('Last touch',[outcomeLabel(l.last_outcome),(l.last_touch_at||'').slice(0,10)].filter(Boolean).join(' · '))}
-    ${f('Tries',t.total?`${t.total}${why?' ('+why+')':''}`:'')}${f('Call back',l.followup_date)}
+    ${f('Tries',t.total?`${t.total}${why?' ('+why+')':''}`:'')}${f('Call back',
+      [l.followup_date, l.callback_time&&`at ${clock12(l.callback_time)} their time`].filter(Boolean).join(' '))}
+    ${f('Uses now',l.current_system)}
     ${f('Ask for',l.contact)}${f('Phone',l.phone_dial||l.phone)}
     ${f('Phone check',l.phone_note||phoneCheck(l))}${f('Email',l.email)}
     ${f('Manager',l.manager_name&&`${l.manager_name}${l.manager_role?' ('+l.manager_role+')':''}`)}
@@ -1891,9 +1933,36 @@ function leadDetailsCell(l, cols){
     <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
     <div class="row" style="margin-top:10px"><button data-edit>Edit</button>
       <button data-prep="${esc(l.id)}">Prep me for the call</button>
+      <button data-calls="${esc(l.id)}">Calls &amp; scores</button>
       <button data-cancel>Close</button></div>
-    <div class="wherebox hide" data-prepbox style="margin-top:10px"></div></td>`;
+    <div class="wherebox hide" data-prepbox style="margin-top:10px"></div>
+    <div class="wherebox hide" data-callsbox style="margin-top:10px"></div></td>`;
 }
+/* Every CloudTalk call to this bar: when, how long, the score and why, what
+   was said, and the full transcript on a click. */
+document.addEventListener('click', async e=>{
+  const t=e.target.closest('[data-transcript]');
+  if(t){ t.nextElementSibling?.classList.toggle('hide'); return; }
+  const b=e.target.closest('[data-calls]'); if(!b) return;
+  const box=b.closest('td')?.querySelector('[data-callsbox]'); if(!box) return;
+  if(!box.classList.contains('hide')){ box.classList.add('hide'); return; }
+  box.classList.remove('hide'); box.innerHTML='<div class="none">Loading…</div>';
+  try{
+    const d=await api(`/leads/${b.dataset.calls}/calls`);
+    if(!d.calls.length){ box.innerHTML='<div class="none">No CloudTalk calls to this number yet.</div>'; return; }
+    box.innerHTML=d.calls.map(c=>{
+      const p=(c.detail&&c.detail.parts)||null;
+      return `<div class="pt"><strong>${esc(c.when)}</strong> · ${esc(Math.round((c.talk_seconds||0)/60))} min
+        ${c.score!=null?` · <strong>score ${c.score}/100</strong>${p?` <span class="muted">(opener ${p.opener}, discovery ${p.discovery}, objections ${p.objections}, ask ${p.ask})</span>`:''}`
+          :` · <span class="muted">${esc(c.status==='done'?'not scored — no real conversation':c.status==='pending'?'transcript coming':c.status.replace('_',' '))}</span>`}
+        ${c.detail&&c.detail.did_well?`<div>Did well: ${esc(c.detail.did_well)}</div>`:''}
+        ${c.detail&&c.detail.fix?`<div>Next time: ${esc(c.detail.fix)}</div>`:''}
+        ${c.detail&&c.detail.moment?`<div class="muted">Turning point: “${esc(c.detail.moment)}”</div>`:''}
+        ${c.summary?`<div class="muted">${esc(c.summary)}</div>`:''}
+        ${c.transcript?`<button data-transcript>Transcript</button><div class="hide" style="white-space:pre-wrap;font-size:12.5px;margin-top:6px">${esc(c.transcript)}</div>`:''}
+      </div>`;}).join('');
+  }catch(err){ box.innerHTML=`<div class="none">${esc(err.message)}</div>`; }
+});
 /* Prep for a callback, from the details panel: the same sheet the call list
    shows, written with everything logged on this lead so far. */
 document.addEventListener('click', e=>{
@@ -2037,6 +2106,22 @@ function reachHtml(l){
   return `<div class="n">${t.total||0}</div>${mix?`<div class="mix">${mix}</div>`:''}`;
 }
 
+/* SCORE: the salesman score on the latest CloudTalk call to this bar (out of
+   100), the average over every scored call under it, and on hover what went
+   well and what to change. Plain text, no colour: a number to learn from,
+   not a verdict. */
+let SCORE_WEEK=null;
+async function loadScoreWeek(){
+  try{ SCORE_WEEK=(await api('/cloudtalk/status')).week_average; }catch{ SCORE_WEEK=null; }
+}
+function scoreHtml(l){
+  const c=l.call_score;
+  if(!c||!c.latest) return '<div class="n muted" title="No scored CloudTalk call yet">—</div>';
+  const tip=[c.latest.did_well&&'Did well: '+c.latest.did_well, c.latest.fix&&'Next time: '+c.latest.fix]
+    .filter(Boolean).join('\n');
+  return `<div class="n" title="${esc(tip)}">${c.latest.score}</div>`
+    + (c.calls>1?`<div class="mix"><span title="Average over ${c.calls} scored calls">avg ${c.average}</span></div>`:'');
+}
 function pipeRow(l,n,opt={}){
   /* Two lines per row instead of eight columns. Everything that was a column
      of its own — email, town, who to ask for — is still here, just stacked
@@ -2044,7 +2129,8 @@ function pipeRow(l,n,opt={}){
      eight separate things to track across. */
   const who=l.contact ? `ask for ${l.contact}`
           : (l.manager_name ? `ask if ${l.manager_name} is still ${l.manager_role||'there'}` : '');
-  const sub=[who, l.email, l.loc].filter(Boolean).join(' · ');
+  const sub=[who, l.email, l.loc, l.current_system&&`uses ${l.current_system}`]
+    .filter(Boolean).join(' · ');
 
   const st=standing(l, opt.today);
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}"
@@ -2059,6 +2145,7 @@ function pipeRow(l,n,opt={}){
       : '<span class="muted">no number</span>'}</td>
     <td class="stands" title="${esc(st.note)}">${standHtml(st)}</td>
     ${opt.yet?'':`<td class="reach">${reachHtml(l)}</td>`}
+    ${opt.yet?'':`<td class="reach">${scoreHtml(l)}</td>`}
     <td><div class="acts">
       <button class="go" data-act="log">Log</button>
       <button data-act="mail">Email</button>
@@ -2198,7 +2285,7 @@ $('pipeBody').onclick=async e=>{
     }
     d.className='drawer mailer'; d.dataset.mode='mail';
     d.innerHTML=composeDrawer(addr, tr.dataset.contact, cols);
-    setTimeout(()=>{ wireSlots(d); loadSlots(d, id); }, 0);
+    setTimeout(()=>{ wireSlots(d); loadSlots(d, id); autoDraft(d, id, tr.dataset.contact); }, 0);
   }
   tr.after(d);
 };
@@ -2431,8 +2518,24 @@ $('fAwayList').onclick=async e=>{
   }catch(err){ toast(err.message); sendBtn.disabled=false; sendBtn.textContent='Send reply'; }
 };
 
+/* The AI bar remembers (the server keeps every exchange for a week and reads
+   the last several back into each message). Opening Follow-ups shows the
+   last few, so the conversation visibly picks up where it left off. */
+async function showEarlier(){
+  const out=$('fAssistOut');
+  if(!out || out.dataset.live) return;
+  try{
+    const d=await api('/assist/history?limit=3');
+    if(!d.turns.length || out.dataset.live) return;
+    out.innerHTML=`<div class="muted" style="font-size:12.5px;margin-top:8px">Earlier (the AI remembers these):</div>`
+      + d.turns.slice().reverse().map(t=>`<div style="font-size:12.5px;margin-top:4px">
+          <span class="muted">${esc(t.when)} · you:</span> ${esc(t.you)}<br>
+          <span class="muted">AI:</span> ${esc(t.ai||'')}</div>`).join('');
+  }catch{}
+}
 async function loadFollowups(){
   loadAway();
+  showEarlier();
   const d=await api('/queue');
   // "(50)" when 400 are overdue would be a comforting lie, so when the list is
   // capped the header says so.
@@ -2510,6 +2613,7 @@ async function runAssist(){
   const text=box.value.trim();
   if(!text) return toast('Type what happened or what to change');
   btn.disabled=true; btn.textContent='Thinking…';
+  out.dataset.live='1';
   out.innerHTML='<p class="muted" style="margin:10px 0 0;font-size:13px">Reading your book…</p>';
   try{
     const r=await api('/assist',{method:'POST',body:JSON.stringify({
@@ -2589,22 +2693,7 @@ async function openFollowupEmail(tr){
   d.innerHTML=composeDrawer(addr, tr.dataset.contact, 6);
   tr.after(d);
   wireSlots(d); loadSlots(d, tr.dataset.id);
-  if(!MAIL.ai) return;
-  const box=d.querySelector('.applied'); const btn=d.querySelector('[data-draft]');
-  box.className='applied'; box.textContent='Reading your notes and drafting a follow-up…';
-  btn.disabled=true;
-  try{
-    const r=await api(`/leads/${tr.dataset.id}/draft-email`,
-      {method:'POST',body:JSON.stringify({followup:true})});
-    d.querySelector('[data-subject]').value=r.subject;
-    d.querySelector('[data-body]').value=r.body;
-    d.dataset.drafted='1';
-    d.querySelector('[data-brief]').placeholder='Not right? Say what to change — "shorter", "mention the free trial", "he asked about price"';
-    btn.textContent='Redraft';
-    box.textContent=draftNote(r, 'Drafted from your notes. Read it, edit anything, then Send.');
-  }catch(err){
-    box.className='applied err'; box.textContent=err.message;
-  }finally{ btn.disabled=false; }
+  await autoDraft(d, tr.dataset.id, tr.dataset.contact);
 }
 
 async function followupDrawer(dr,e){

@@ -151,6 +151,15 @@ def init_crm_tables():
             # chain): 'ok' or 'blocked', and the evidence or the reason.
             ("fit_status", "TEXT"),
             ("fit_note", "TEXT"),
+            # What they use for inventory today, one name (competitors.py):
+            # "which bars are on MarginEdge?" has an answer.
+            ("current_system", "TEXT"),
+            # "Call back around 4pm": HH:MM on the VENUE's clock, with
+            # followup_date — the call list puts it on top when it comes.
+            ("callback_time", "TEXT"),
+            # When a bar added by hand (or found by the AI) was checked
+            # against the map and its own website: timezone, hours, phone.
+            ("hand_checked_at", "TEXT"),
         ]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -321,6 +330,45 @@ def init_crm_tables():
             ON CONFLICT (id) DO NOTHING
         """, (_today(), now_iso()))
 
+        # CloudTalk: every call it reports, matched to a lead, with its
+        # transcript and the salesman score (cloudtalk.py, process_cloudtalk).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_calls (
+                call_id TEXT PRIMARY KEY,
+                lead_id TEXT,
+                number TEXT,
+                direction TEXT,
+                started_at TEXT,
+                ended_at TEXT,
+                talk_seconds INTEGER,
+                status TEXT NOT NULL,
+                tries INTEGER DEFAULT 0,
+                transcript TEXT,
+                summary TEXT,
+                score INTEGER,
+                score_json TEXT,
+                touch_id TEXT,
+                note TEXT,
+                seen_at TEXT NOT NULL,
+                processed_at TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_calls_lead ON crm_calls(lead_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_calls_status ON crm_calls(status)")
+
+        # The AI bar's memory: every exchange, so the next message — from
+        # either box, any device, days later — reads what was said before.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_ai_bar_log (
+                id TEXT PRIMARY KEY,
+                at TEXT NOT NULL,
+                you TEXT NOT NULL,
+                ai TEXT,
+                leads TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_bar_log_at ON crm_ai_bar_log(at DESC)")
+
         # The company brain (playbook.py): one row, pinned like crm_counters.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS crm_ai_brain (
@@ -368,9 +416,51 @@ def init_crm_tables():
     except Exception as e:  # a repair pass must never stop the CRM booting
         print(f"[crm] NO_ANSWER_RECONCILE_FAILED {e!r}", flush=True)
     try:
+        _reconcile_current_system()
+    except Exception as e:
+        print(f"[crm] CURRENT_SYSTEM_RECONCILE_FAILED {e!r}", flush=True)
+    try:
         init_apple_tables()
     except Exception as e:  # Apple Analytics is optional; never block the CRM
         print(f"[crm] APPLE_TABLES_FAILED {e!r}", flush=True)
+
+
+# Note lines that record what a person said — a logged call or email, an AI
+# bar note, what a sister venue's call said — never the lead generator's own
+# bookkeeping (where the email was found, the liquor evidence).
+_SAID_LINE = re.compile(r"\] (?:call|email|fb|note:|updated:)|From the call to ")
+
+
+def system_from_notes(notes: Optional[str]) -> Optional[str]:
+    """What a lead uses for inventory, read from what people SAID in its
+    notes, latest line first. Pure."""
+    import competitors
+    for line in reversed([l for l in (notes or "").splitlines() if _SAID_LINE.search(l)]):
+        found = competitors.system_of(line)
+        if found:
+            return found
+    return None
+
+
+def _reconcile_current_system() -> int:
+    """Every boot: fill `current_system` for leads logged before it existed,
+    from what their notes already say. Only fills a blank — a value set since
+    (or by hand) is never overwritten. Idempotent and cheap: no network."""
+    filled = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, notes FROM crm_leads WHERE current_system IS NULL "
+                       "AND notes IS NOT NULL")
+        for row in cursor.fetchall():
+            found = system_from_notes(row["notes"])
+            if found:
+                cursor.execute("UPDATE crm_leads SET current_system = %s WHERE id = %s "
+                               "AND current_system IS NULL", (found, row["id"]))
+                filled += 1
+        conn.commit()
+    if filled:
+        print(f"[crm] CURRENT_SYSTEM_FILLED rows={filled}", flush=True)
+    return filled
 
 
 def _reconcile_no_answer() -> int:
@@ -442,6 +532,7 @@ class LeadUpdate(BaseModel):
     email_date: Optional[str] = Field(default=None, max_length=32)
     followup_date: Optional[str] = Field(default=None, max_length=32)
     notes: Optional[str] = Field(default=None, max_length=20000)
+    current_system: Optional[str] = Field(default=None, max_length=80)
 
 
 class CountersUpdate(BaseModel):
@@ -487,6 +578,7 @@ LEAD_COLUMNS = (
     "lead_score", "email_kind", "tz_name", "queued_email_at", "venue_facts",
     "manager_name", "manager_role", "manager_source", "manager_seen_at",
     "phone_status", "phone_note", "fit_status", "fit_note",
+    "current_system", "callback_time", "hand_checked_at",
 )
 
 # How long to wait before the next dial, by attempt number. Spread across days
@@ -577,7 +669,7 @@ def _no_answer_outcome(raw_text: str) -> Optional[str]:
 # values are being interpolated into a SQL fragment.
 LEAD_WRITABLE = (
     "name", "loc", "status", "contact", "phone", "email",
-    "call_date", "email_date", "followup_date", "notes",
+    "call_date", "email_date", "followup_date", "notes", "current_system",
 )
 
 
@@ -598,29 +690,6 @@ def phone_digits(phone: Optional[str]) -> str:
 # around this: a zone entering its dinner rush is a zone to stop calling, and
 # the next one west is an hour behind and still fine.
 ZONE_LABELS = {-5: "Eastern", -6: "Central", -7: "Mountain", -8: "Pacific"}
-
-
-def zone_state(offset: Optional[int]) -> dict:
-    """What's happening in this timezone right now, and whether to call it."""
-    if offset is None:
-        return {"offset": None, "label": "Unknown", "local_time": "",
-                "state": "unknown", "headline": "No timezone on these",
-                "rank": 5, "callable": True}
-    local = datetime.now(timezone.utc) + timedelta(hours=offset)
-    hour = local.hour
-    label = ZONE_LABELS.get(offset, f"UTC{offset}")
-    if hour < 11:
-        state, headline, rank, ok = "closed", "Closed — nobody there yet", 3, False
-    elif hour < CALL_WINDOW_START:
-        state, headline, rank, ok = "opening", "Opening up — worth a try", 2, True
-    elif hour < CALL_WINDOW_END:
-        state, headline, rank, ok = "good", "CALL NOW — quiet before service", 0, True
-    elif hour < 21:
-        state, headline, rank, ok = "rush", "Dinner rush — skip for now", 4, False
-    else:
-        state, headline, rank, ok = "late", "Too late — they're slammed", 4, False
-    return {"offset": offset, "label": label, "local_time": local.strftime("%-I:%M%p").lower(),
-            "state": state, "headline": headline, "rank": rank, "callable": ok}
 
 
 TRY_KINDS = ("call", "email", "fb")
@@ -765,6 +834,7 @@ UNDO_COLUMNS = (
     # these were added simply lack them, and undo only restores what a
     # snapshot holds.
     "name", "loc",
+    "current_system", "callback_time",
 )
 
 
@@ -812,7 +882,9 @@ LEAD_VIEWS = {
 
 
 def _lead_row(row) -> dict:
-    lead = {k: row[k] for k in LEAD_COLUMNS}
+    # .get: a column added by a later migration is simply None on a row
+    # selected before it existed (or by a narrower SELECT).
+    lead = {k: row.get(k) for k in LEAD_COLUMNS}
     lead["phone_digits"] = phone_digits(lead.get("phone"))
     lead["phone_pretty"] = format_us_phone(lead["phone_digits"])
     # What the COPY button and click-to-copy actually hand the clipboard.
@@ -905,8 +977,9 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         digits = re.sub(r"\D", "", q)
         clause = ("(LOWER(name) LIKE %s OR LOWER(COALESCE(loc,'')) LIKE %s "
                   "OR LOWER(COALESCE(contact,'')) LIKE %s "
-                  "OR LOWER(COALESCE(email,'')) LIKE %s")
-        params += [term, term, term, term]
+                  "OR LOWER(COALESCE(email,'')) LIKE %s "
+                  "OR LOWER(COALESCE(current_system,'')) LIKE %s")
+        params += [term, term, term, term, term]
         if digits:
             clause += " OR REGEXP_REPLACE(COALESCE(phone,''), '[^0-9]', '', 'g') LIKE %s"
             params.append(f"%{digits}%")
@@ -930,6 +1003,8 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         leads = [_lead_row(row) for row in cursor.fetchall()]
         # Every call, email and reply behind WHERE THINGS STAND and REACHED OUT.
         stories = _touch_stories(cursor, [lead["id"] for lead in leads])
+        # The salesman score from CloudTalk calls, shown beside REACHED OUT.
+        scores = _call_scores(cursor, [lead["id"] for lead in leads])
 
         # Always the totals for the whole pipeline, not for the current filter:
         # the counts are the tab labels, and a tab that renumbers itself when
@@ -947,6 +1022,7 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         lead["window"] = _call_window(lead.get("tz_offset_hours"),
                                       lead.get("opening_hours"), lead.get("tz_name"))
         lead.update(stories.get(lead["id"]) or touch_story([]))
+        lead["call_score"] = scores.get(lead["id"])
     # The page decides "overdue" against this, the same day Follow-ups uses —
     # not the browser's UTC date, which is a day behind in Manila's morning.
     return {"leads": leads, "count": len(leads), "matching": matching,
@@ -1749,12 +1825,6 @@ def delete_user(user_id: str, _: bool = Depends(require_crm_key)):
 
 # ============== TODAY'S CALL QUEUE ==============
 
-# Bars are shut in the morning and slammed at night. Early afternoon is when
-# somebody who can make a decision is there and not busy.
-CALL_WINDOW_START = 14   # 2pm local
-CALL_WINDOW_END = 17     # 5pm local
-
-
 # Where the person doing the calling actually is. Iloilo is UTC+8, which puts
 # the whole US calling day in the middle of their night — US Eastern afternoon
 # is around 2-4am in the Philippines. That is not something to hide behind a
@@ -2074,7 +2144,26 @@ def _sent_emails_to(lead_id: str, limit: int = 3) -> list:
     return list(reversed(rows))
 
 
-def _draft_context(row: dict, include_log: bool = True, sent: Optional[list] = None) -> str:
+def _call_outcomes(lead_id: str) -> list:
+    """The outcome of every call logged on this lead, oldest first (undone
+    dials left out) — how the drafter knows who was really reached."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT outcome FROM crm_touches
+                 WHERE lead_id = %s AND kind = 'call'
+                   AND COALESCE(outcome, '') <> 'undone'
+                 ORDER BY at ASC
+            """, (lead_id,))
+            return [r["outcome"] for r in cursor.fetchall()]
+    except Exception as exc:
+        print(f"[crm] call outcomes unavailable: {exc}", flush=True)
+        return []
+
+
+def _draft_context(row: dict, include_log: bool = True, sent: Optional[list] = None,
+                   talked: str = "") -> str:
     """WHAT WE KNOW about this bar: its facts with their sources, the
     prep-sheet points, (for a first email or a reply; a follow-up's ask
     carries its own) what's been logged, and the emails we already sent them."""
@@ -2092,7 +2181,7 @@ def _draft_context(row: dict, include_log: bool = True, sent: Optional[list] = N
             log = "…" + log[-DRAFT_LOG_CHARS:]
     if sent is None:
         sent = _sent_emails_to(row["id"])
-    return pitch.lead_context(lead, lines, points, log, sent)
+    return pitch.lead_context(lead, lines, points, log, sent, talked)
 
 
 def _draft_system() -> str:
@@ -2114,7 +2203,13 @@ def _write_draft(row: dict, ask: str, include_log: bool = True,
     import pitch
     system = _draft_system()
     sent = _sent_emails_to(row["id"])
-    context = _draft_context(row, include_log, sent)
+    # Who was really reached, worked out here rather than left to the model:
+    # it wrote "thanks for taking my call" to a manager who was out when we
+    # rang. `never_spoke` arms lint's check against exactly that.
+    talked, never_spoke = pitch.who_we_talked_to(_lead_row(row), _call_outcomes(row["id"]))
+    if kind == "reply":
+        never_spoke = None          # they wrote to us
+    context = _draft_context(row, include_log, sent, talked)
     known = f"{context}\n{ask}"
 
     # Threads we can honestly answer in: emails that went to the address this
@@ -2137,7 +2232,8 @@ def _write_draft(row: dict, ask: str, include_log: bool = True,
     # a second link, shouting, a wall of text. A draft that trips it goes back
     # ONCE with the list, and the version with fewer problems is kept — a
     # person reading it, and their spam filter, are the audience.
-    problems = pitch.lint(subject, body, kind, brief, known) if subject and body else []
+    problems = (pitch.lint(subject, body, kind, brief, known, never_spoke)
+                if subject and body else [])
     if problems:
         try:
             f_subject, f_body = parsed(_claude_json(
@@ -2146,7 +2242,7 @@ def _write_draft(row: dict, ask: str, include_log: bool = True,
                                           + pitch.lint_ask(problems)),
                 pitch.SCHEMA, max_tokens=AI_MIN_TOKENS, timeout=120.0, purpose="draft-fix"))
             if f_subject and f_body:
-                still = pitch.lint(f_subject, f_body, kind, brief, known)
+                still = pitch.lint(f_subject, f_body, kind, brief, known, never_spoke)
                 if len(still) <= len(problems):
                     subject, body, problems = f_subject, f_body, still
         except Exception as exc:
@@ -2183,6 +2279,369 @@ def _reply_ask(mail: dict, brief: str = "") -> str:
     if brief:
         lines += ["", f"Also: {brief}"]
     return "\n".join(lines)
+
+
+# ============== CLOUDTALK: every call, its transcript, and a score ==============
+#
+# The AI only knew what the operator typed after a call. Now every call made
+# in CloudTalk is pulled in (cloudtalk.py), matched to its lead by number, and
+# a real conversation's transcript is read ONCE: what happened (the same
+# fields the notes reader fills), what they use today, and a salesman score —
+# opener, discovery, objections, ask, 0-25 each. It is REMEMBERED (the whole
+# transcript in crm_calls, a dated line with the score on the lead) and
+# LEARNED from (the playbook, the School's game film and every prep sheet read
+# the lead's notes). A call the operator logged gets the line; one they didn't
+# log within CLOUDTALK_LOG_AFTER_MINUTES is logged for them, at the time it
+# was made. The score shows on the CRM tab next to REACHED OUT.
+
+CLOUDTALK_LOG_AFTER_MINUTES = int(os.getenv("CLOUDTALK_LOG_AFTER_MINUTES", "45"))
+CLOUDTALK_BATCH = int(os.getenv("CLOUDTALK_BATCH", "8"))       # transcripts read a pass
+CLOUDTALK_LOOKBACK_DAYS = 2
+_cloudtalk_lock = threading.Lock()
+
+def _call_read_system() -> str:
+    """Built on use: CALL_FIELDS and CALL_RULES are defined further down."""
+    import cloudtalk
+    import coach
+    return f"""You read the transcript of a REAL cold call the founder of 86'd (Stephan, the
+"Stephan:" lines) made to a bar or restaurant, and fill in the CRM and grade the call.
+
+What he sells: {coach.PRODUCT}
+The company's asks: {coach.ASKS_TEXT}
+
+You are given TODAY, DATES, THE LEAD (the bar and what happened before), CLOUDTALK'S SUMMARY
+and the TRANSCRIPT. Fill every key; use "" for anything the call doesn't tell you.
+{CALL_FIELDS}
+
+{CALL_RULES}
+- Transcripts come from speech recognition: names and numbers can be misheard. Only use a
+  name or a time that is clearly said.
+
+{cloudtalk.SCORE_RUBRIC}"""
+
+
+def _call_read_schema() -> dict:
+    import cloudtalk
+    fields = ("status", "outcome", "spoke_to", "ask_for", "followup_date", "best_time",
+              "callback_time", "objection", "current_setup", "next_step", "summary")
+    props = {f: {"type": "string"} for f in fields}
+    props.update(cloudtalk.SCORE_SCHEMA_PROPS)
+    return {"type": "object", "properties": props, "required": list(props),
+            "additionalProperties": False}
+
+
+def _read_call(lead: dict, transcript: str, summary: Optional[str], today: str) -> dict:
+    """One model call over one transcript: the fields and the grading."""
+    import cloudtalk
+    import coach
+    system = _call_read_system()
+    about = [f"Bar: {lead.get('name')}" + (f", {lead['loc']}" if lead.get("loc") else "")]
+    if lead.get("contact"):
+        about.append(f"Asking for: {lead['contact']}")
+    history = _lead_history(lead)
+    if history:
+        about.append("Recent history (oldest first):\n" + history)
+    user = "\n\n".join([_calendar(today), "THE LEAD\n" + "\n".join(about),
+                         "CLOUDTALK'S SUMMARY\n" + (summary or "(none)"),
+                         "TRANSCRIPT\n" + transcript[:60000]])
+    return _claude_json(system, user, _call_read_schema(), purpose="call-transcript")
+
+
+def _lead_by_number(cursor, number: str) -> Optional[dict]:
+    """The lead a number belongs to: its phone, else a number written in its
+    notes (the operator often rings a cell someone gave them). A worked lead
+    wins over a never-called copy."""
+    cursor.execute("""
+        SELECT * FROM crm_leads
+         WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = %s
+         ORDER BY (last_touch_at IS NOT NULL) DESC, created_at ASC LIMIT 1
+    """, (number,))
+    row = cursor.fetchone()
+    if row:
+        return row
+    cursor.execute("""
+        SELECT * FROM crm_leads WHERE regexp_replace(COALESCE(notes, ''), '\\D', '', 'g') LIKE %s
+         ORDER BY (last_touch_at IS NOT NULL) DESC, created_at ASC LIMIT 1
+    """, (f"%{number}%",))
+    return cursor.fetchone()
+
+
+def _call_logged_by_hand(cursor, lead_id: str, started: str, ended: str) -> Optional[str]:
+    """The touch the operator logged for this call, if any: a call on this
+    lead from ten minutes before it started to an hour after it ended."""
+    try:
+        lo = (datetime.fromisoformat(started) - timedelta(minutes=10)).isoformat()
+        hi = (datetime.fromisoformat(ended or started) + timedelta(minutes=60)).isoformat()
+    except (TypeError, ValueError):
+        return None
+    cursor.execute("""
+        SELECT id FROM crm_touches WHERE lead_id = %s AND kind = 'call'
+           AND outcome IS DISTINCT FROM 'undone' AND at BETWEEN %s AND %s
+         ORDER BY at ASC LIMIT 1
+    """, (lead_id, lo, hi))
+    row = cursor.fetchone()
+    return row["id"] if row else None
+
+
+def _import_calls() -> int:
+    """Record every call CloudTalk has that we haven't seen: matched to a
+    lead, or marked no_lead. Returns how many were new."""
+    import cloudtalk
+    now = datetime.now(timezone.utc)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(started_at) AS last FROM crm_calls")
+        last = (cursor.fetchone() or {}).get("last")
+    since = now - timedelta(days=CLOUDTALK_LOOKBACK_DAYS)
+    if last:
+        try:
+            since = max(since, datetime.fromisoformat(last) - timedelta(hours=2))
+        except ValueError:
+            pass
+    calls = cloudtalk.fetch_calls(since, now)
+    new = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for c in calls:
+            cursor.execute("SELECT 1 FROM crm_calls WHERE call_id = %s", (c["call_id"],))
+            if cursor.fetchone():
+                continue
+            lead = _lead_by_number(cursor, c["number"])
+            status = ("no_lead" if not lead
+                      else "short" if c["talk_seconds"] < cloudtalk.MIN_TALK_SECONDS
+                      else "pending")
+            cursor.execute("""
+                INSERT INTO crm_calls (call_id, lead_id, number, direction, started_at, ended_at,
+                                       talk_seconds, status, seen_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+            """, (c["call_id"], lead["id"] if lead else None, c["number"], c["direction"],
+                  c["started_at"], c["ended_at"], c["talk_seconds"], status, now_iso()))
+            new += 1
+        conn.commit()
+    return new
+
+
+def _finish_call(row: dict) -> str:
+    """Read one pending call: transcript, fields, score; remember it on the
+    lead; log it if nobody did. Returns the call's new status."""
+    import cloudtalk
+    call_id = row["call_id"]
+    data, status = cloudtalk.fetch_transcript(call_id)
+    transcript = cloudtalk.transcript_text(data or {})
+    if not transcript:
+        tries = (row.get("tries") or 0) + 1
+        gone = tries >= cloudtalk.TRANSCRIPT_TRIES or status in (401, 403)
+        new_status = "no_transcript" if gone else "pending"
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE crm_calls SET tries = %s, status = %s, processed_at = %s "
+                           "WHERE call_id = %s", (tries, new_status, now_iso(), call_id))
+            conn.commit()
+        if status in (401, 403):
+            print(f"[cloudtalk] TRANSCRIPTS_UNAVAILABLE HTTP {status} — the plan may not include "
+                  "Conversation Intelligence", flush=True)
+        return new_status
+
+    summary = cloudtalk.fetch_summary(call_id)
+    today = _today()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (row["lead_id"],))
+        lead = cursor.fetchone()
+    if not lead:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE crm_calls SET status = 'no_lead', transcript = %s, "
+                           "processed_at = %s WHERE call_id = %s",
+                           (transcript[:100000], now_iso(), call_id))
+            conn.commit()
+        return "no_lead"
+
+    read = _read_call(dict(lead), transcript, summary, today)
+    score = cloudtalk.clean_score(read, transcript)
+    fields = {k: (v.strip() if isinstance(v, str) else v) for k, v in read.items()
+              if k not in cloudtalk.SCORE_SCHEMA_PROPS}
+    fields = {k: v for k, v in fields.items() if v not in ("", None)}
+    tz = _operator_tz()
+    try:
+        started = datetime.fromisoformat(row["started_at"])
+        when = started.astimezone(tz).strftime("%-I:%M%p").lower()
+    except (TypeError, ValueError):
+        started, when = None, "?"
+    heading = f"CloudTalk call ({when} your time, {cloudtalk.minutes(row.get('talk_seconds'))})"
+    said = fields.get("summary") or summary or ""
+    line = " · ".join(filter(None, [f"{heading}: {said}".strip(), cloudtalk.score_line(score)]))
+
+    now = now_iso()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (lead["id"],))
+        lead = cursor.fetchone()
+        mine = _call_logged_by_hand(cursor, lead["id"], row["started_at"], row["ended_at"])
+        touch_id = mine
+        if mine:
+            # They logged it: the call keeps their words; this adds what the
+            # recording says and the score, on its own dated line.
+            cursor.execute("UPDATE crm_leads SET notes = COALESCE(notes || E'\\n', '') || %s, "
+                           "updated_at = %s WHERE id = %s", (f"[{today}] {line}", now, lead["id"]))
+            import competitors
+            system = competitors.system_of(" ".join(filter(None, [
+                fields.get("current_setup"), fields.get("objection")])))
+            if system and system != lead.get("current_system"):
+                cursor.execute("UPDATE crm_leads SET current_system = %s WHERE id = %s",
+                               (system, lead["id"]))
+        else:
+            # Nobody logged it: log it now, as the notes reader would have,
+            # at the time it was really made.
+            if "summary" not in fields and said:
+                fields["summary"] = f"{heading}: {said}"
+            updated, applied, undo_id, _ = _apply_call_notes(
+                cursor, lead, fields, cloudtalk.score_line(score), "call",
+                today, now, words_label="From the recording")
+            cursor.execute("SELECT touch_id FROM crm_lead_undo WHERE id = %s", (undo_id,))
+            touch_id = (cursor.fetchone() or {}).get("touch_id")
+            if touch_id and started:
+                local = started + timedelta(hours=lead.get("tz_offset_hours") or 0)
+                cursor.execute("UPDATE crm_touches SET at = %s, local_hour = %s, weekday = %s "
+                               "WHERE id = %s", (started.isoformat(), local.hour,
+                                                 local.weekday(), touch_id))
+        cursor.execute("""
+            UPDATE crm_calls SET status = 'done', transcript = %s, summary = %s, score = %s,
+                   score_json = %s, touch_id = %s, note = %s, processed_at = %s
+             WHERE call_id = %s
+        """, (transcript[:100000], summary, score["score"] if score else None,
+              cloudtalk.dumps(score) if score else None, touch_id, line[:2000], now, call_id))
+        conn.commit()
+    print(f"[cloudtalk] CALL_READ {call_id} lead={lead['name']!r} "
+          f"score={score['score'] if score else '-'} logged_by={'you' if mine else 'ai'}",
+          flush=True)
+    return "done"
+
+
+def process_cloudtalk() -> dict:
+    """One pass: import new calls, then read up to CLOUDTALK_BATCH pending
+    transcripts. Skipped without CloudTalk keys or the AI key."""
+    import cloudtalk
+    if not cloudtalk.configured():
+        return {"skipped": "no CLOUDTALK_KEY_ID / CLOUDTALK_KEY_SECRET"}
+    if not _cloudtalk_lock.acquire(blocking=False):
+        return {"skipped": "a pass is already running"}
+    try:
+        new = _import_calls()
+        done: dict = {}
+        if os.getenv("ANTHROPIC_API_KEY"):
+            with get_db() as conn:
+                cursor = conn.cursor()
+                # Only once the operator has had time to log it themselves:
+                # read before that, and a call they're about to log would be
+                # logged twice.
+                ripe = (datetime.now(timezone.utc)
+                        - timedelta(minutes=CLOUDTALK_LOG_AFTER_MINUTES)).isoformat()
+                cursor.execute("""
+                    SELECT * FROM crm_calls WHERE status = 'pending'
+                       AND COALESCE(ended_at, started_at) <= %s
+                     ORDER BY started_at ASC LIMIT %s
+                """, (ripe, CLOUDTALK_BATCH))
+                rows = [dict(r) for r in cursor.fetchall()]
+            for row in rows:
+                try:
+                    status = _finish_call(row)
+                except Exception as exc:
+                    print(f"[cloudtalk] CALL_FAILED {row['call_id']}: {exc}", flush=True)
+                    status = "failed_try"
+                    with get_db() as conn:
+                        cursor = conn.cursor()
+                        tries = (row.get("tries") or 0) + 1
+                        cursor.execute("UPDATE crm_calls SET tries = %s, status = %s WHERE call_id = %s",
+                                       (tries, "failed" if tries >= 3 else "pending", row["call_id"]))
+                        conn.commit()
+                done[status] = done.get(status, 0) + 1
+        if new or done:
+            print(f"[cloudtalk] PASS new={new} {done}", flush=True)
+        return {"new": new, "read": done}
+    finally:
+        _cloudtalk_lock.release()
+
+
+def _call_scores(cursor, lead_ids) -> dict:
+    """Per lead: the latest scored call and the average, for the CRM tab."""
+    ids = [i for i in lead_ids if i]
+    if not ids:
+        return {}
+    try:
+        cursor.execute("""
+            SELECT lead_id, score, score_json, started_at FROM crm_calls
+             WHERE lead_id = ANY(%s) AND score IS NOT NULL ORDER BY started_at DESC
+        """, (ids,))
+        rows = [r for r in cursor.fetchall() if isinstance(r, dict) and "score" in r]
+    except Exception as exc:
+        print(f"[crm] call scores unavailable: {exc}", flush=True)
+        return {}
+    out: dict = {}
+    for r in rows:
+        entry = out.setdefault(r["lead_id"], {"latest": None, "scores": []})
+        if entry["latest"] is None:
+            try:
+                detail = json.loads(r["score_json"] or "{}")
+            except ValueError:
+                detail = {}
+            entry["latest"] = {"score": r["score"], "at": r["started_at"],
+                               "did_well": detail.get("did_well"), "fix": detail.get("fix"),
+                               "parts": detail.get("parts")}
+        entry["scores"].append(r["score"])
+    return {k: {"latest": v["latest"], "calls": len(v["scores"]),
+                "average": round(sum(v["scores"]) / len(v["scores"]))}
+            for k, v in out.items()}
+
+
+@crm_router.get("/cloudtalk/status", response_model=dict)
+def cloudtalk_status(_: bool = Depends(require_crm_key)):
+    """Is CloudTalk connected, what has it brought in, and the rep's recent
+    average score."""
+    import cloudtalk
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status, COUNT(*) AS n FROM crm_calls GROUP BY status")
+        counts = {r["status"]: r["n"] for r in cursor.fetchall()}
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        cursor.execute("SELECT AVG(score) AS avg, COUNT(score) AS n FROM crm_calls "
+                       "WHERE score IS NOT NULL AND started_at >= %s", (since,))
+        week = cursor.fetchone() or {}
+    return {"configured": cloudtalk.configured(), "calls": counts,
+            "week_average": round(week["avg"]) if week.get("avg") is not None else None,
+            "week_scored": week.get("n") or 0}
+
+
+@crm_router.post("/cloudtalk/sync", response_model=dict)
+def cloudtalk_sync(_: bool = Depends(require_crm_key)):
+    """Run a pass now, in the background."""
+    threading.Thread(target=process_cloudtalk, daemon=True, name="cloudtalk-sync").start()
+    return {"started": True}
+
+
+@crm_router.get("/leads/{lead_id}/calls", response_model=dict)
+def lead_calls(lead_id: str, _: bool = Depends(require_crm_key)):
+    """Every CloudTalk call to this bar, newest first: when, how long, the
+    score and why, and the transcript."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT call_id, started_at, talk_seconds, status, summary, score, score_json,
+                   transcript FROM crm_calls WHERE lead_id = %s ORDER BY started_at DESC
+        """, (lead_id,))
+        rows = cursor.fetchall()
+    tz = _operator_tz()
+    out = []
+    for r in rows:
+        try:
+            detail = json.loads(r["score_json"] or "null")
+        except ValueError:
+            detail = None
+        out.append({"call_id": r["call_id"], "when": _ask_when(r["started_at"], tz),
+                    "talk_seconds": r["talk_seconds"], "status": r["status"],
+                    "summary": r["summary"], "score": r["score"], "detail": detail,
+                    "transcript": r["transcript"]})
+    return {"calls": out}
 
 
 # ============== THE COMPANY BRAIN ==============
@@ -2300,6 +2759,36 @@ def _scoreboard(cursor, cutoff: str) -> dict:
          WHERE l.last_touch_at IS NOT NULL
     """)
     s.update(dict(cursor.fetchone() or {}))
+    # The salesman score from CloudTalk transcripts, by part, so the playbook
+    # can name the weakest part of the calls. A missing table (an older
+    # database mid-deploy) is no score, never a failed refresh.
+    try:
+        cursor.execute("SAVEPOINT call_scores")
+        cursor.execute("""
+            SELECT COUNT(score) AS scored, AVG(score) AS avg, score_json FROM crm_calls
+             WHERE score IS NOT NULL AND started_at >= %s GROUP BY score_json
+        """, (cutoff,))
+        rows = cursor.fetchall()
+        cursor.execute("RELEASE SAVEPOINT call_scores")
+        parts: dict = {}
+        total = n = 0
+        for r in rows:
+            k = int(r["scored"] or 0)
+            n += k
+            total += float(r["avg"] or 0) * k
+            try:
+                detail = json.loads(r["score_json"] or "{}")
+            except ValueError:
+                detail = {}
+            for part, v in (detail.get("parts") or {}).items():
+                parts.setdefault(part, []).extend([v] * k)
+        if n:
+            s["call_scored"] = n
+            s["call_score_avg"] = round(total / n)
+            s["call_parts"] = {p: round(sum(v) / len(v)) for p, v in parts.items() if v}
+    except Exception as exc:
+        cursor.execute("ROLLBACK TO SAVEPOINT call_scores")
+        print(f"[crm] scoreboard call scores unavailable: {exc}", flush=True)
     s["days"] = PLAYBOOK_DAYS
     return s
 
@@ -2933,6 +3422,11 @@ class DraftRequest(BaseModel):
     # The Follow-ups tab's Email button: write a follow-up from what's been
     # logged on this lead, with no brief needed.
     followup: bool = False
+    # Every other Email button: draft the right email for where this lead
+    # stands — a follow-up from the log if it's been called or emailed, a
+    # first cold email if not. Replaced a canned "Thanks for taking my call"
+    # body the page used to pre-fill whatever had happened.
+    auto: bool = False
     # Present on a revision: the draft on screen right now, which the model
     # edits rather than replacing from scratch.
     subject: Optional[str] = Field(default=None, max_length=200)
@@ -2963,9 +3457,11 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
     lead = _lead_row(row)
 
     revising = bool(data.subject or data.body)
-    followup = data.followup and not revising
     brief = data.brief.strip()
-    if not brief and not data.followup and not data.reply_to:
+    worked = bool(lead.get("last_touch_at") or lead.get("call_date") or lead.get("email_date"))
+    followup = (data.followup or (data.auto and worked)) and not revising
+    cold = data.auto and not worked and not revising
+    if not brief and not data.followup and not data.auto and not data.reply_to:
         raise HTTPException(status_code=422, detail={
             "error": "brief_required", "message": "Say what the email should cover."})
 
@@ -2981,6 +3477,11 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
         ask = _reply_ask(mail, brief)
     elif followup:
         ask = _followup_ask(lead, brief)
+    elif cold:
+        ask = ("Write a FIRST email to this bar. Nobody there has been called or emailed "
+               "yet, so it's a cold email: open with something true about THEM from WHAT WE "
+               "KNOW (or the job itself), then the one picture, the risk taken away, one easy "
+               "ask." + (f"\n\nAlso: {brief}" if brief else ""))
     else:
         ask = f"Write the email. What it needs to say: {brief}"
     import pitch
@@ -3737,7 +4238,7 @@ def leadgen_health(_: bool = Depends(require_crm_key)):
     the daily list has quietly stopped, which is exactly the failure that would
     otherwise go unnoticed until a morning with nothing to call.
     """
-    from leadgen import pool_depth, DAILY_TARGET, MAX_ACTIVE, BUCKET_TARGET
+    from leadgen import pool_depth, DAILY_TARGET, POOL_FLOOR
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM crm_leadgen_runs ORDER BY started_at DESC LIMIT 10")
@@ -3762,47 +4263,34 @@ def leadgen_health(_: bool = Depends(require_crm_key)):
 
     depth = pool_depth()
     warnings = []
-    # A full list is a normal, healthy resting state, not a fault — so it is
-    # reported as a note and never as a warning, and it suppresses the
-    # "running low" warnings that would otherwise contradict it.
-    at_cap = depth["at_capacity"]
-    if stale and not at_cap:
-        warnings.append("No successful run in the last 36 hours — the daily list has stopped.")
-    if not at_cap:
-        if depth["qualified"] < DAILY_TARGET and depth["headroom"] > DAILY_TARGET:
-            warnings.append(
-                f"Pool has {depth['qualified']} qualified leads, under one day's target "
-                f"({DAILY_TARGET}) — tomorrow's list may come up short.")
-        elif depth["days_of_runway"] < 3:
-            warnings.append(f"Only {depth['days_of_runway']} days of leads banked.")
-        if cities["unharvested"] == 0:
-            warnings.append("Every city has been harvested at least once — add more territory.")
+    if stale:
+        warnings.append("No successful run in the last 36 hours — the bank isn't being topped up.")
+    if depth["qualified"] < DAILY_TARGET:
+        warnings.append(
+            f"The bank has {depth['qualified']} checked venues, under one day's calls "
+            f"({DAILY_TARGET}) — the call list may come up short.")
+    elif depth["days_of_runway"] < 3:
+        warnings.append(f"Only {depth['days_of_runway']} days of leads banked.")
+    if cities["unharvested"] == 0:
+        warnings.append("Every city has been harvested at least once — add more territory.")
     stuck = [r for r in runs if r["phase"] == "running"]
     if len(stuck) > 1:
         warnings.append(
             f"{len(stuck)} runs are still marked in-progress — the process was probably "
             "restarted mid-run. They're reconciled automatically on the next run.")
 
-    # Thin tabs are the failure the operator actually feels — a full-looking
-    # total with an empty Eastern lunch tab is a morning with nothing to call —
-    # so they get their own warning rather than hiding inside the total.
-    thin = [b for b in depth["buckets"] if b["count"] < BUCKET_TARGET // 2]
-    if thin and not at_cap:
-        worst = ", ".join(f"{b['service']} {ZONE_LABELS.get(b['zone'], b['zone'])} "
-                          f"({b['count']})" for b in sorted(thin, key=lambda b: b["count"])[:3])
+    # The list is filled from whoever's in a window at that minute, so a zone
+    # with nothing banked is an empty list at that zone's hours.
+    thin = [z for z, n in depth["banked_by_zone"].items() if n < POOL_FLOOR // 8]
+    if thin:
         warnings.append(
-            f"Some tabs are nearly empty: {worst}. The generator fills the "
-            "emptiest first, but it needs territory in those zones.")
+            "Little banked in " + ", ".join(
+                f"{ZONE_LABELS.get(z, z)} ({depth['banked_by_zone'][z]})" for z in thin)
+            + " — the list will be thin at their hours until the next harvest.")
 
-    if at_cap:
-        note = (f"Every tab is full — {BUCKET_TARGET} leads in each of "
-                f"{len(depth['buckets'])} service/timezone combinations "
-                f"({depth['active_leads']} total). Generation is paused until "
-                "you work some off.")
-    else:
-        note = (f"{depth['headroom']} spots open across "
-                f"{len(depth['buckets'])} tabs (target {BUCKET_TARGET} each) — "
-                "the emptiest get filled first at the next run.")
+    at_cap = depth["ready_now"] >= depth["call_list_size"]
+    note = (f"{depth['ready_now']} of {depth['call_list_size']} on the call list right now; "
+            f"{depth['qualified']} checked venues banked behind it.")
 
     return {
         "healthy": (at_cap or not stale) and not warnings,
@@ -3883,7 +4371,7 @@ def leadgen_fill(max_cities: int = 2, max_enrich: int = 200,
 @crm_router.get("/leadgen/fill", response_model=dict)
 def leadgen_fill_status(_: bool = Depends(require_crm_key)):
     """Is a fill in flight, and what did the last one do?"""
-    from leadgen import bucket_deficits
+    from leadgen import CALL_LIST_SIZE, ready_count
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -3893,15 +4381,13 @@ def leadgen_fill_status(_: bool = Depends(require_crm_key)):
              ORDER BY started_at DESC LIMIT 1
         """)
         last = cursor.fetchone()
-        cursor.execute("""
-            SELECT COUNT(*) AS n FROM crm_leads
-             WHERE status = 'new' AND last_touch_at IS NULL
-        """)
-        waiting = cursor.fetchone()["n"]
+        # What the call list would show now — the page stops waiting as soon
+        # as there's someone to ring.
+        waiting = ready_count(cursor)
     return {
         "running": _fill_running(),
         "waiting_to_be_called": waiting,
-        "room_left": sum(bucket_deficits().values()),
+        "room_left": max(0, CALL_LIST_SIZE - waiting),
         "last_run": dict(last) if last else None,
     }
 
@@ -4209,182 +4695,101 @@ def export_csv(scope: str = "today", _: bool = Depends(require_crm_key)):
 
 # ============== THE CALL LIST ==============
 #
-# One screen, one job. Everything sourced and not yet worked, grouped by
-# timezone, with the zone that's callable right now first.
+# One list, one job: up to leadgen.CALL_LIST_SIZE bars you can ring right now.
+# It used to be eight tabs (lunch/dinner x four timezones, `/calllist`), with
+# the generator filling each to 50 — a morning session saw the few of one tab
+# that happened to be in a window. `/now` tops the list up from the bank each
+# time it's opened, so a logged call or a delete is replaced by the next bar
+# in its window.
 #
 # A lead leaves this list the moment it's been dealt with — a logged call, a
-# debrief, a status change, a delete. Nothing has to be tidied up by hand, and
-# the same restaurant can't be called twice because it simply isn't there any
-# more. The list shrinking IS the progress bar.
+# debrief, a status change, a delete. The same restaurant can't be called
+# twice because it simply isn't there any more.
 
-@crm_router.get("/calllist", response_model=dict)
-def call_list(_: bool = Depends(require_crm_key)):
-    """Every unworked lead, split by service then by timezone.
+CALLBACK_EARLY_MIN = 15      # on the list this long before the time they gave
+CALLBACK_LATE_MIN = 90       # and off it this long after, if nobody rang
 
-    Two levels because they answer two different questions. The service split
-    answers "it's 11am, who is even open?" — a bar that doesn't unlock until
-    four is unreachable now and belongs behind a different tab. The timezone
-    split answers "who's in their window right now?", and as the afternoon
-    rolls west it moves through Eastern, Central, Mountain, Pacific.
 
-    Venues with no hours in OpenStreetMap sit under dinner rather than lunch.
-    Filing them under lunch would send late-morning calls to bars that don't
-    open until four; under dinner they get the generic afternoon window, which
-    is where they'd have been called anyway.
-    """
-    from callwindow import service_of, ZONE_OFFSETS
-    from leadgen import BUCKET_TARGET
-    today = _today()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM crm_leads
-             WHERE status = 'new' AND last_touch_at IS NULL
-               AND phone IS NOT NULL AND phone <> ''
-             ORDER BY COALESCE(attempts, 0) ASC, created_at DESC
-        """)
-        rows = cursor.fetchall()
+def callback_due(followup_date: Optional[str], callback_time: Optional[str],
+                 venue_now: datetime) -> bool:
+    """Whether a "call back around 4pm" is due right now on the venue's own
+    clock: the agreed day there, from a quarter of an hour before the time
+    until an hour and a half after. Pure."""
+    if not followup_date or not callback_time:
+        return False
+    if followup_date[:10] != venue_now.date().isoformat():
+        return False
+    try:
+        h, m = (int(x) for x in callback_time.split(":"))
+    except ValueError:
+        return False
+    now_min = venue_now.hour * 60 + venue_now.minute
+    return h * 60 + m - CALLBACK_EARLY_MIN <= now_min <= h * 60 + m + CALLBACK_LATE_MIN
 
-        cursor.execute("""
-            SELECT COUNT(*) AS n FROM crm_leads
-             WHERE SUBSTRING(COALESCE(last_touch_at, ''), 1, 10) = %s
-        """, (today,))
-        done_today = cursor.fetchone()["n"]
 
-    buckets: dict = {"lunch": {}, "dinner": {}}
-    usable = 0
-    for row in rows:
-        lead = _lead_row(row)
-        # A number that didn't validate, or that the venue's own site doesn't
-        # vouch for, is never offered for dialling.
-        if not lead["phone_ok"] or not _dial_ok(row) or not _fit_ok(row):
+def _callbacks_due(cursor) -> list:
+    """Worked leads whose agreed callback time is now, as call-list rows,
+    marked so the page can say why they're on top. They'd otherwise only be
+    in Follow-ups under a date, and "call back around 4pm, ask for Mike" is
+    exactly the call that has to happen at four."""
+    cursor.execute("""
+        SELECT * FROM crm_leads
+         WHERE callback_time IS NOT NULL AND followup_date IS NOT NULL
+           AND status NOT IN ('won', 'dead')
+           AND phone IS NOT NULL AND phone <> ''
+    """)
+    due = []
+    for row in cursor.fetchall():
+        if row.get("tz_name") or row.get("tz_offset_hours") is not None:
+            there = _venue_now(row.get("tz_name"), row.get("tz_offset_hours"))
+        else:
+            there = datetime.now(_operator_tz())
+        if not callback_due(row.get("followup_date"), row.get("callback_time"), there):
             continue
-        usable += 1
-        lead["call_window"] = _call_window(row.get("tz_offset_hours"),
-                                           row.get("opening_hours"),
-                                           row.get("tz_name"))
-        lead["hours_known"] = bool(row.get("opening_hours"))
-        service = service_of(row.get("opening_hours"))
-        offset = row.get("tz_offset_hours")
-        buckets[service].setdefault(offset if offset in ZONE_OFFSETS else None,
-                                    []).append(lead)
+        lead = _lead_row(row)
+        if not lead["phone_ok"]:
+            continue
+        h, m = (int(x) for x in row["callback_time"].split(":"))
+        at = f"{h % 12 or 12}:{m:02d}{'am' if h < 12 else 'pm'}"
+        lead["callback"] = True
+        lead["zone"] = ZONE_LABELS.get(row.get("tz_offset_hours"), "—")
+        lead["call_window"] = {"good_now": True, "state": "callback", "known": True,
+                               "window": at, "hint": f"CALLBACK — they said {at}",
+                               "local_time": there.strftime("%-I:%M%p").lower()}
+        due.append(lead)
+    due.sort(key=lambda l: l["callback_time"])
+    return due
 
 
-    def _call_order(lead: dict):
-        """Which of two leads to ring first.
-
-        Whether they're reachable right now comes first — the best lead in the
-        list is worth nothing while its doors are locked. After that it's how
-        far the call can get: a name to ask for beats a direct mailbox, which
-        beats a shared inbox, and the generator's fit score breaks the rest.
-        Fewest attempts stays ahead of score so an untried lead beats a fourth
-        swing at one that never answers.
-        """
-        # A shared info@ box is the worst of the four, below an address we
-        # couldn't classify — an unclassified one is usually the venue's own
-        # mailbox (oshaughnessyspub@gmail.com), which somebody there actually
-        # reads.
-        return (WINDOW_RANK.get(lead["call_window"].get("state"), 2), *_reach(lead))
-
-    def build_zones(by_zone: dict) -> list:
-        # Every zone appears, empty or not. The sub-tabs have to be in the same
-        # place every time — a row of tabs that reshuffles itself as leads are
-        # worked off is a row you have to re-read before every click.
-        for offset in ZONE_OFFSETS:
-            by_zone.setdefault(offset, [])
-        zones = []
-        for offset, leads in by_zone.items():
-            zone = zone_state(offset)
-            leads.sort(key=_call_order)
-            ready = sum(1 for l in leads if l["call_window"]["good_now"])
-            zone.update({"leads": leads, "count": len(leads), "callable_now": ready,
-                         "target": BUCKET_TARGET,
-                         "short_by": max(0, BUCKET_TARGET - len(leads))})
-            if not leads:
-                zone.update({"headline": "Empty — the generator refills this first",
-                             "callable": False, "rank": 6})
-                zones.append(zone)
-                continue
-            if ready:
-                zone.update({"headline": f"{ready} ready to call now", "state": "good",
-                             "rank": 0, "callable": True})
-            else:
-                # The soonest window, by minutes from now — not by string. A
-                # lexicographic min over "9:00pm-11:00pm" and "11:00am-11:45am"
-                # picks the 11am one as "first", which is both wrong and looks
-                # like a typo on the screen.
-                waits = [(l["call_window"].get("starts_in"), l["call_window"].get("window"))
-                         for l in leads if l["call_window"].get("state") == "early"
-                         and l["call_window"].get("starts_in") is not None]
-                soonest = min(waits)[1] if waits else ""
-                zone.update({"headline": (f"None open yet — first window {soonest}"
-                                          if soonest else "Nothing ringable here right now"),
-                             "callable": False})
-            zones.append(zone)
-        # Fixed east-to-west order, never re-sorted by how good each one looks
-        # right now. Two reasons: the tabs stay where the hand expects them,
-        # and east-to-west IS the order the afternoon moves — Eastern hits its
-        # window first, then Central, and by the time Eastern is in the dinner
-        # rush Pacific is just opening. The "call this one" marker moves; the
-        # tabs don't.
-        order = {off: i for i, off in enumerate(ZONE_OFFSETS)}
-        zones.sort(key=lambda z: order.get(z["offset"], 99))
-        best = max(zones, key=lambda z: z["callable_now"], default=None)
-        for zone in zones:
-            zone["recommended"] = bool(best and zone is best and zone["callable_now"])
-        return zones
-
-    services = []
-    for key, label, blurb in [
-        ("lunch", "Open for lunch", "Doors open by 11:30am — reachable late morning"),
-        ("dinner", "Dinner only", "Don't open until later, plus venues with no listed hours"),
-    ]:
-        zones = build_zones(buckets[key])
-        services.append({
-            "key": key, "label": label, "blurb": blurb, "zones": zones,
-            "count": sum(z["count"] for z in zones),
-            "callable_now": sum(z["callable_now"] for z in zones),
-        })
-
-    ready = [(svc, z) for svc in services for z in svc["zones"] if z["callable_now"]]
-    ready.sort(key=lambda sz: -sz[1]["callable_now"])
-    if ready:
-        svc, zone = ready[0]
-        focus = (f"Call {zone['label']} now — {zone['callable_now']} ready "
-                 f"({svc['label'].lower()})")
-    else:
-        focus = "Nothing in a calling window right now."
-
-    return {
-        "date": today, "focus": focus, "done_today": done_today,
-        "remaining": usable, "services": services,
-        # Kept so anything still reading the old shape doesn't break.
-        "zones": services[0]["zones"] + services[1]["zones"],
-    }
+def _top_up_call_list() -> int:
+    """Fill the call list back up to its size with bars in their window now
+    (leadgen.top_up). Never lets a failure stop the list from loading."""
+    try:
+        from leadgen import top_up
+        return top_up()
+    except Exception as exc:
+        print(f"[crm] CALL_LIST_TOP_UP_FAILED {exc}", flush=True)
+        return 0
 
 
 @crm_router.get("/now", response_model=dict)
-def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
+def call_now(limit: Optional[int] = None, _: bool = Depends(require_crm_key)):
     """One list: who to ring, right now, in order. No tabs, no decisions.
 
-    The service and timezone tabs are the right way to UNDERSTAND the list —
-    they say why a venue is reachable or isn't. They are the wrong way to WORK
-    it. Sitting down to call, the question isn't "which of eight tabs holds
-    somebody who's open"; it's "who do I dial first", and answering that by
-    clicking around eight tabs reading clocks is work the screen should have
-    already done.
+    Up to leadgen.CALL_LIST_SIZE (50) bars in their calling window this
+    minute — 45 minutes before the doors open, and the 2-4pm lull for a lunch
+    place — ordered by how far the call can get: an email first, then a name
+    to ask for, then the kind of mailbox, fewest tries, fit.
 
-    So this flattens all eight cells into a single queue and sorts it by
-    whether each venue is in a calling window this minute — 30 minutes before
-    the doors open, and the 2-4pm lull — then by how far the call can get: a
-    name to ask for, then a direct mailbox, then fit.
-
-    It crosses timezones freely on purpose. At any given moment the Eastern
-    bars setting up and the Pacific ones in their lull are both good calls, and
-    which zone they're in doesn't matter once you know it's their quiet half
-    hour.
+    Opening it tops the list up from the bank first (leadgen.top_up), and the
+    page reloads it after every logged call and delete — so each lead worked
+    off is replaced by the next best bar in its window. It crosses timezones
+    freely: at any moment the Eastern bars setting up and the Pacific ones in
+    their lull are both good calls.
     """
-    limit = max(1, min(limit, 200))
+    from leadgen import CALL_LIST_SIZE
+    limit = max(1, min(limit or CALL_LIST_SIZE, 200))
+    _top_up_call_list()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -4398,6 +4803,11 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
              WHERE SUBSTRING(COALESCE(last_touch_at, ''), 1, 10) = %s
         """, (_today(),))
         done_today = cursor.fetchone()["n"]
+        try:
+            callbacks = _callbacks_due(cursor)
+        except Exception as exc:
+            print(f"[crm] CALLBACKS_FAILED {exc}", flush=True)
+            callbacks = []
 
     # Every unworked lead the query returned, before any window or phone
     # filtering. This is "is there anything on the list at all", which is a
@@ -4441,6 +4851,9 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
     reach = _reach
 
     ready.sort(key=reach)
+    # Agreed callbacks whose time has come go first: someone said "four".
+    on_top = {l["id"] for l in callbacks}
+    ready = callbacks + [l for l in ready if l["id"] not in on_top]
     # The nearly-ready ones are ordered by the clock instead: the point of
     # showing them is "this is what you're waiting for and how long".
     soon.sort(key=lambda l: (l["call_window"].get("starts_in") or 9999, *reach(l)))
@@ -4461,7 +4874,10 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
     next_best = queue[0] if queue else None
 
     op_now = datetime.now(_operator_tz())
-    if ready:
+    if callbacks:
+        headline = (f"Call {callbacks[0]['name']} back now — they said "
+                    f"{callbacks[0]['call_window']['window']}")
+    elif ready:
         headline = f"Call {ready[0]['name']} — {len(ready)} ready now"
     elif soon:
         wait = soon[0]["call_window"].get("starts_in") or 0
@@ -4491,7 +4907,8 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
 
     return {
         "headline": headline,
-        "ready": ready[:limit],
+        "ready": ready[:limit + len(callbacks)],
+        "callbacks_count": len(callbacks),
         # Capped at `limit`, not a fixed 12: when the ready pile is thin the
         # page turns this into the actual working table (see crm.html's
         # MIN_WORKING_TABLE), and a 12-row cap would starve that table before
@@ -4565,6 +4982,8 @@ CALL_FIELDS = """  "status": one of "new","contacted","warm","won","dead"
   "followup_date": YYYY-MM-DD, the day they agreed to be contacted again. Null if no day
     was agreed — the system schedules retries itself when nobody was reached
   "best_time": when they said to call, short, in their words ("Tuesdays after 2pm")
+  "callback_time": HH:MM, 24-hour, on THEIR clock, only when the notes give a clock time to
+    call back ("call back around 4pm" -> "16:00", "after 2:30" -> "14:30"). Null otherwise
   "objection": what they pushed back with, close to their words ("already use BevSpot",
     "too busy until after the holidays", "the owner does all the ordering")
   "current_setup": how they do inventory and ordering today, if said ("clipboard and a
@@ -4679,7 +5098,8 @@ def _debrief_extract(text: str, lead: Optional[dict] = None,
 
 
 def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
-                      today: str, now: str) -> tuple[dict, dict, str, Optional[dict]]:
+                      today: str, now: str, words_label: str = "Your notes"
+                      ) -> tuple[dict, dict, str, Optional[dict]]:
     """Write a debrief's extracted fields onto `lead`, log the touch, spend
     the day's counters, and return (updated_row, applied, undo_id, counters).
 
@@ -4804,6 +5224,27 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
             sets.append(f"{field} = %s"); params.append(value)
             applied[field] = value
     follow_days = followup if followup is not None else cadence_days
+    # "Call back around 4pm": the time on their clock, and — when no day was
+    # named — today there, or tomorrow if four has already gone. The call
+    # list puts the bar on top when the time comes (_callbacks_due). A later
+    # call without one clears it.
+    callback = None
+    if kind == "call":
+        cb = extracted.get("callback_time")
+        if isinstance(cb, str) and re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", cb.strip()):
+            h, m = cb.strip().split(":")
+            callback = f"{int(h):02d}:{m}"
+        sets.append("callback_time = %s"); params.append(callback)
+        if callback:
+            applied["callback_time"] = callback
+            if followup is None:
+                there = _venue_now(lead.get("tz_name"), lead.get("tz_offset_hours")) \
+                    if (lead.get("tz_name") or lead.get("tz_offset_hours") is not None) else None
+                base = there.date() if there else date.fromisoformat(today)
+                passed = there is not None and there.strftime("%H:%M") >= callback
+                follow_days = (base + timedelta(days=1 if passed else 0)
+                               - date.fromisoformat(today)).days
+                followup = follow_days
     if follow_days is not None:
         when = (date.fromisoformat(today) + timedelta(days=follow_days)).isoformat()
         sets.append("followup_date = %s"); params.append(when)
@@ -4829,6 +5270,14 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
               ("Best time", _text("best_time", 120)),
               ("Next", _text("next_step", 300))]
     extras = [(k, v) for k, v in extras if v]
+    # What they use today, as one name — from what they said about it, and
+    # the operator's own words ("they use our competitor, Margins Edge").
+    import competitors
+    system = competitors.system_of(" ".join(filter(None, [
+        _text("current_setup", 300), _text("objection", 300), raw_text])))
+    if system and system != lead.get("current_system"):
+        sets.append("current_system = %s"); params.append(system)
+        applied["current_system"] = system
     if extras:
         note += " · " + " · ".join(f"{k}: {v}" for k, v in extras)
         applied["details"] = {k: v for k, v in extras}
@@ -4839,7 +5288,7 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
     # callback opens with. Flattened to one line so each call stays one entry.
     said = re.sub(r"\s+", " ", raw_text or "").strip()[:4000]
     if said and said.lower() != summary.lower():
-        note += f" — Your notes: {said}"
+        note += f" — {words_label}: {said}"
     sets.append("notes = COALESCE(notes || E'\\n', '') || %s"); params.append(note)
     applied["note"] = note
 
@@ -5046,6 +5495,376 @@ def _claude(system: str, user: str, *, schema: Optional[dict] = None,
             "message": "The AI's answer didn't parse — try again."})
 
 
+# ============== RESEARCH: venues the operator asked the AI to find ==============
+#
+# "Find the sister restaurants and add them" used to get "tell me their names"
+# back: the AI bar only saw the book. Now it hands a `research` request to
+# _run_research — one web-search call, then every venue it names checked
+# against its own website before it's added. See research.py.
+
+WEB_SEARCH_TOOL = os.getenv("CRM_WEB_SEARCH_TOOL") or "web_search_20260209"
+
+
+def _claude_research(system: str, user: str, purpose: str = "research") -> str:
+    """One call with Anthropic's server-side web search; the answer's text.
+
+    Separate from _claude on purpose: web search answers carry citations,
+    which can't be combined with structured outputs (`output_config.format`),
+    so the JSON is asked for in the prompt instead. The server runs the
+    searches; a `pause_turn` (its own loop hit its limit) is resumed by
+    sending the turn back, at most twice. A 400 is retried once with nothing
+    optional (no effort, no fallbacks)."""
+    import httpx
+
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_unavailable", "message": "No ANTHROPIC_API_KEY is set."})
+    tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
+              "max_uses": _research_max_searches()}]
+    messages: list = [{"role": "user", "content": user}]
+
+    def send(plain: bool):
+        headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION,
+                   "content-type": "application/json"}
+        body: dict = {"model": AI_MODEL, "max_tokens": 16000, "system": system,
+                      "messages": messages, "tools": tools}
+        if not plain:
+            if AI_EFFORT:
+                body["output_config"] = {"effort": AI_EFFORT}
+            if AI_MODEL in _FALLBACK_MODELS:
+                body["fallbacks"] = "default"
+                headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
+        return httpx.post(ANTHROPIC_URL, headers=headers, json=body, timeout=240.0)
+
+    text = ""
+    for _ in range(3):
+        try:
+            resp = send(False)
+            if resp.status_code == 400:
+                print(f"[crm] AI {purpose}: request refused, retrying plain: "
+                      f"{resp.text[:200]}", flush=True)
+                resp = send(True)
+        except Exception as exc:
+            print(f"[crm] AI {purpose} request failed: {exc}", flush=True)
+            raise HTTPException(status_code=503, detail={
+                "error": "ai_unavailable", "message": "Couldn't reach the AI to search."})
+        if resp.status_code != 200:
+            print(f"[crm] AI {purpose} HTTP {resp.status_code}: {resp.text[:160]}", flush=True)
+            raise HTTPException(status_code=503, detail={
+                "error": "ai_unavailable",
+                "message": f"The search returned {resp.status_code} — {resp.text[:160]}"})
+        body = resp.json()
+        usage = body.get("usage") or {}
+        searches = (usage.get("server_tool_use") or {}).get("web_search_requests", 0)
+        print(f"[crm] AI_USAGE {purpose} model={body.get('model') or AI_MODEL} "
+              f"in={usage.get('input_tokens', 0)} out={usage.get('output_tokens', 0)} "
+              f"searches={searches}", flush=True)
+        if body.get("stop_reason") == "refusal":
+            raise HTTPException(status_code=503, detail={
+                "error": "ai_declined", "message": "The AI declined that search."})
+        content = body.get("content") or []
+        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+        if body.get("stop_reason") != "pause_turn":
+            return text
+        # Resumed by sending the paused turn back as it came — no "continue".
+        messages = messages + [{"role": "assistant", "content": content}]
+    return text
+
+
+def _research_max_searches() -> int:
+    import research
+    return research.MAX_SEARCHES
+
+
+def _check_found(venue: dict, about: str, about_page: str) -> dict:
+    """One venue the search named, checked on the web before it's saved.
+
+    Returns {"ok": True, ...fields} or {"ok": False, "why": ...}. Its own
+    website must name it (the model's URL, else the map's); the phone must be
+    one that website publishes; and the link to `about` must show on a real
+    page — this venue's site naming `about`, `about`'s site naming this one,
+    or the source page the model cited naming both."""
+    import leadgen
+    import research
+
+    name = venue["name"]
+    loc = ", ".join(x for x in [venue["city"], venue["state"]] if x)
+
+    def words(t):
+        return [w for w in leadgen._name_words(t)
+                if w not in leadgen._GENERIC_NAME_WORDS and len(w) > 2]
+
+    def page(url):
+        if not url or not leadgen._is_public_http_url(url):
+            return "", url
+        html, answered, status = leadgen._fetch_site(url)
+        return (html if leadgen._ok(status, html) else ""), answered
+
+    home, website = page(venue["website"])
+    if not home or not leadgen.site_mentions_venue(home, website, name):
+        looked = leadgen.find_venue_website(name, loc)
+        home, website = page(looked) if looked else ("", None)
+        if not home or not leadgen.site_names_venue(home, name):
+            return {"ok": False, "why": "couldn't find its own website to check it against"}
+
+    texts = [leadgen._page_text(home)]
+    for url in leadgen._contact_urls(website, home)[:2]:
+        more, status = leadgen._http(url, timeout=leadgen.PAGE_TIMEOUT, verify_public=True)
+        if leadgen._ok(status, more):
+            home += " " + more
+            texts.append(leadgen._page_text(more))
+    site_numbers = leadgen.site_phones(home)
+    # With no number from the search, a site showing exactly one is theirs
+    # (judge_phone's from_site); more than one is a group page — not guessed.
+    judged = leadgen.judge_phone(normalize_us_phone(venue["phone"]), site_numbers,
+                                 {site_numbers[0][:3]} if len(site_numbers) == 1 else ())
+    if judged["status"] not in leadgen.PHONE_OK:
+        return {"ok": False, "why": "its website doesn't show a phone number we can trust"}
+
+    joined = " ".join(texts)
+    related = research.related_on_page(joined, about, words) or research.related_on_page(
+        leadgen._page_text(about_page), name, words)
+    if not related and venue["source_url"]:
+        source, _ = page(venue["source_url"])
+        text = leadgen._page_text(source)
+        related = (research.related_on_page(text, about, words)
+                   and research.related_on_page(text, name, words))
+    if not related:
+        return {"ok": False, "why": f"no page we could open says it's connected to {about}"}
+
+    email, found_on = leadgen.find_email_on_site(website, venue_name=name)
+    return {"ok": True, "name": name, "loc": loc, "state": venue["state"],
+            "website": website, "phone": judged["phone"], "phone_status": judged["status"],
+            "phone_note": judged["note"], "email": email, "email_found_on": found_on,
+            "relation": venue["relation"], "source": venue["source_url"] or website}
+
+
+def _check_prospect(venue: dict, corporate: dict) -> dict:
+    """One venue a prospecting search named, put through the lead generator's
+    own rules before it's saved: the map entry (coordinates, hours, street),
+    `leadgen.check_fit` (its own site names it, independent, not a tourist
+    strip, spirits shown on its own pages), then the phone on its site."""
+    import leadgen
+
+    name = venue["name"]
+    loc = ", ".join(x for x in [venue["city"], venue["state"]] if x)
+    hit = leadgen.lookup_venue(name, loc) or {}
+    website = venue["website"] if venue["website"] and leadgen._is_public_http_url(
+        venue["website"]) else (hit.get("website") or "")
+    if not website:
+        return {"ok": False, "why": "couldn't find its own website to check it against"}
+    tags = {k: v for k, v in (("name", name), ("addr:street", hit.get("street")),
+                              ("addr:housenumber", hit.get("housenumber"))) if v}
+    row = {"name": name, "city": venue["city"], "website": website,
+           "lat": hit.get("lat"), "lon": hit.get("lon"),
+           "amenity": hit.get("amenity") or "bar", "raw_tags": json.dumps(tags)}
+    fit = leadgen.check_fit(row, corporate)
+    if fit["status"] != "ok":
+        return {"ok": False, "why": fit["note"]}
+
+    home, answered, status = leadgen._fetch_site(website)
+    pages = home
+    for url in leadgen._contact_urls(answered, home)[:2]:
+        more, st = leadgen._http(url, timeout=leadgen.PAGE_TIMEOUT, verify_public=True)
+        if leadgen._ok(st, more):
+            pages += " " + more
+    site_numbers = leadgen.site_phones(pages)
+    judged = leadgen.judge_phone(normalize_us_phone(venue["phone"]), site_numbers,
+                                 {site_numbers[0][:3]} if len(site_numbers) == 1 else ())
+    if judged["status"] not in leadgen.PHONE_OK:
+        return {"ok": False, "why": "its website doesn't show a phone number we can trust"}
+    email, found_on = leadgen.find_email_on_site(answered, venue_name=name)
+    state = venue["state"] or None
+    return {"ok": True, "name": name, "loc": loc, "state": venue["state"], "website": answered,
+            "phone": judged["phone"], "phone_status": judged["status"],
+            "phone_note": judged["note"], "email": email, "email_found_on": found_on,
+            "relation": venue["relation"], "source": venue["source_url"] or answered,
+            "fit_note": fit["note"], "opening_hours": hit.get("opening_hours"),
+            "tz_offset_hours": leadgen.us_tz_offset(hit.get("lon"), state, hit.get("lat")),
+            "tz_name": leadgen.us_tz_name(hit.get("lon"), state, hit.get("lat"))}
+
+
+def _run_prospect(item: dict, text: str) -> dict:
+    """"Find 20 cocktail bars in Annapolis": one web search, every venue it
+    names through the lead generator's rules and the phone check, and the ones
+    that pass added as new leads. Returns {"added", "skipped", "note"}."""
+    import leadgen
+    import research
+    from concurrent.futures import ThreadPoolExecutor
+    from contacts import email_kind as _email_kind
+
+    loc = _clean(item.get("loc"), 200) or ""
+    find = _clean(item.get("find"), 300) or ""
+    try:
+        count = max(1, min(int(item.get("count") or 10), research.MAX_PROSPECTS))
+    except (TypeError, ValueError):
+        count = 10
+    answer = _claude_research(research.PROSPECT_SYSTEM,
+                              research.prospect_prompt(find, loc, count), purpose="prospect")
+    found, note = research.parse_found(answer, limit=count)
+    with get_db() as conn:
+        corporate = leadgen.corporate_index(conn.cursor())
+
+    def check(v):
+        try:
+            return v, _check_prospect(v, corporate)
+        except Exception as exc:
+            print(f"[crm] PROSPECT_CHECK_FAILED {v.get('name')}: {exc}", flush=True)
+            return v, {"ok": False, "why": "couldn't open its website"}
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(check, found))
+
+    today, now = _today(), now_iso()
+    added, skipped = [], []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for venue, checked in results:
+            if not checked["ok"]:
+                skipped.append({"lead": venue["name"], "why": checked["why"]})
+                continue
+            if _find_existing_lead(cursor, checked["name"], checked["loc"], [checked["phone"]],
+                                   checked["email"]):
+                skipped.append({"lead": checked["name"], "why": "already in your book"})
+                continue
+            reason = leadgen._is_suppressed(cursor, checked["name"], checked["email"],
+                                            checked["phone"], checked["website"])
+            if reason:
+                skipped.append({"lead": checked["name"], "why": f"on the do-not-contact list ({reason})"})
+                continue
+            notes = "\n".join(filter(None, [
+                f"Website: {checked['website']}",
+                f"Email found on: {checked['email_found_on']}" if checked["email"] else None,
+                f"Phone: {checked['phone_note']}" if checked["phone_note"] else None,
+                checked["fit_note"],
+                f"[{today}] Found by the AI when asked for \"{find}\" in {loc}: "
+                f"{checked['relation'] or 'matches'} (source: {checked['source']})"]))
+            cursor.execute("""
+                INSERT INTO crm_leads (id, name, loc, status, source, attempts, phone, email,
+                                       email_kind, notes, tz_offset_hours, tz_name, opening_hours,
+                                       phone_status, fit_status, fit_note, created_at, updated_at)
+                VALUES (%s, %s, %s, 'new', 'research', 0, %s, %s, %s, %s, %s, %s, %s, %s, 'ok',
+                        %s, %s, %s)
+                RETURNING id, name
+            """, (generate_id(), checked["name"], checked["loc"],
+                  format_us_phone_dashed(checked["phone"]), checked["email"],
+                  _email_kind(checked["email"], checked["name"]) if checked["email"] else None,
+                  notes, checked["tz_offset_hours"], checked["tz_name"],
+                  checked["opening_hours"], checked["phone_status"], checked["fit_note"],
+                  now, now))
+            row = cursor.fetchone()
+            changed = ["added as a new lead (found by the AI, passed the owner's rules)",
+                       f"phone {format_us_phone_dashed(checked['phone'])}"]
+            if checked["email"]:
+                changed.append(f"email {checked['email']}")
+            added.append({"lead_id": row["id"], "name": row["name"], "changed": changed,
+                          "undo_id": None})
+        conn.commit()
+    print(f"[crm] PROSPECT find={find!r} loc={loc!r} found={len(found)} added={len(added)} "
+          f"skipped={len(skipped)}", flush=True)
+    return {"added": added, "skipped": skipped, "note": note}
+
+
+def _run_research(item: dict, text: str) -> dict:
+    """Find what the AI bar was asked to find, check each on the web, and add
+    what passes as a new lead. Returns {"added", "skipped", "note"}."""
+    import assist as _assist
+    import leadgen
+    import research
+    from concurrent.futures import ThreadPoolExecutor
+    from contacts import email_kind as _email_kind
+
+    about = _clean(item.get("about"), 200)
+    loc = _clean(item.get("loc"), 200) or ""
+    if not about:
+        return {"added": [], "skipped": [], "note": "didn't say which venue to research"}
+    # The first restaurant's own site: the notes of its lead, else the map.
+    about_site = None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, loc, notes FROM crm_leads ORDER BY created_at DESC LIMIT 2000")
+        for row in cursor.fetchall():
+            if leadgen.same_venue(row["name"], about):
+                about_site = _notes_website(row["notes"])
+                loc = loc or row["loc"] or ""
+                break
+    about_page = ""
+    try:
+        about_site = about_site or leadgen.find_venue_website(about, loc)
+        if about_site and leadgen._is_public_http_url(about_site):
+            html, _, status = leadgen._fetch_site(about_site)
+            about_page = html if leadgen._ok(status, html) else ""
+    except Exception as exc:
+        print(f"[crm] RESEARCH about-site failed: {exc}", flush=True)
+
+    answer = _claude_research(research.RESEARCH_SYSTEM,
+                              research.research_prompt(about, loc, _clean(item.get("find"), 300),
+                                                       about_site))
+    found, note = research.parse_found(answer)
+    found = [v for v in found if not leadgen.same_venue(v["name"], about)]
+
+    def check(v):
+        try:
+            return v, _check_found(v, about, about_page)
+        except Exception as exc:
+            print(f"[crm] RESEARCH_CHECK_FAILED {v.get('name')}: {exc}", flush=True)
+            return v, {"ok": False, "why": "couldn't open its website"}
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(check, found))
+
+    carry = _assist.words_from(text, _clean(item.get("carry"), 2000) or "") if item.get("carry") else ""
+    import competitors
+    carry_system = competitors.system_of(carry)
+    today, now = _today(), now_iso()
+    added, skipped = [], []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for venue, checked in results:
+            if not checked["ok"]:
+                skipped.append({"lead": venue["name"], "why": checked["why"]})
+                continue
+            existing = _find_existing_lead(cursor, checked["name"], checked["loc"],
+                                           [checked["phone"]], checked["email"])
+            line = research.lead_note(today, about, checked["relation"], checked["source"], carry)
+            if existing:
+                cursor.execute("UPDATE crm_leads SET notes = COALESCE(notes || E'\\n', '') || %s, "
+                               "updated_at = %s WHERE id = %s", (line, now, existing["id"]))
+                added.append({"lead_id": existing["id"], "name": existing["name"],
+                              "changed": ["already in your book — added the note"],
+                              "undo_id": None})
+                continue
+            notes = "\n".join(filter(None, [
+                f"Website: {checked['website']}",
+                f"Email found on: {checked['email_found_on']}" if checked["email"] else None,
+                f"Phone: {checked['phone_note']}" if checked["phone_note"] else None,
+                line]))
+            state = checked["state"] or None
+            cursor.execute("""
+                INSERT INTO crm_leads (id, name, loc, status, source, attempts, phone, email,
+                                       email_kind, notes, tz_offset_hours, tz_name,
+                                       phone_status, current_system, created_at, updated_at)
+                VALUES (%s, %s, %s, 'new', 'research', 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, name
+            """, (generate_id(), checked["name"], checked["loc"],
+                  format_us_phone_dashed(checked["phone"]), checked["email"],
+                  _email_kind(checked["email"], checked["name"]) if checked["email"] else None,
+                  notes, leadgen.us_tz_offset(None, state), leadgen.us_tz_name(None, state),
+                  checked["phone_status"], carry_system, now, now))
+            row = cursor.fetchone()
+            changed = ["added as a new lead (found by the AI, checked on its website)",
+                       f"phone {format_us_phone_dashed(checked['phone'])}"]
+            if checked["email"]:
+                changed.append(f"email {checked['email']}")
+            added.append({"lead_id": row["id"], "name": row["name"], "changed": changed,
+                          "undo_id": None})
+        conn.commit()
+    print(f"[crm] RESEARCH about={about!r} found={len(found)} added={len(added)} "
+          f"skipped={len(skipped)}", flush=True)
+    return {"added": added, "skipped": skipped, "note": note}
+
+
 def _apply_assist_change(cursor, lead, clean: dict, today: str, now: str) -> str:
     """Write one lead's checked change from the AI bar; return its undo id.
 
@@ -5092,6 +5911,12 @@ def _apply_assist_change(cursor, lead, clean: dict, today: str, now: str) -> str
     else:
         undo_id = _snapshot(cursor, lead, "edit (AI bar)", counters_spent=0)
         extra = fields
+        # "Olde Town uses BevSpot" is a note to the model; it's also a fact
+        # the book can be searched by.
+        import competitors
+        said_system = competitors.system_of(note) if note else None
+        if said_system and said_system != lead.get("current_system"):
+            extra = {**fields, "current_system": said_system}
         bits = _assist.describe({k: v for k, v in clean.items() if k not in ("logged", "note")})
         if bits:
             line = f"[{today}] updated: {' · '.join(bits)}" + (f" — {note}" if note else "")
@@ -5140,7 +5965,7 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, name, loc, status, contact, phone, email, followup_date,
+            SELECT id, name, loc, status, contact, phone, email, followup_date, current_system,
                    last_outcome, last_touch_at, notes, manager_name
               FROM crm_leads
              ORDER BY COALESCE(last_touch_at, '') DESC, created_at DESC
@@ -5158,15 +5983,23 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
         touches = cursor.fetchall()
 
     book, back = _assist.snapshot(leads, tries, today, data.focus_lead_id)
+    # What was said before, from the server's own log: both AI boxes, any
+    # device, the last week. The page's own copy is only the fallback.
+    remembered = _bar_memory()
     alias_of = {lead_id: alias for alias, lead_id in back.items()}
     tz = _operator_tz()
     log = "\n".join(["TOUCHES (when, your time | lead | kind | outcome)"] + [
         f"{_ask_when(t['at'], tz)} | {alias_of.get(t['lead_id'], '?')} | {t['kind']} | "
         f"{t['outcome'] or ''}" for t in touches])
-    history = [t.model_dump() for t in data.history][-4:]
+    history = remembered or [t.model_dump() for t in data.history][-4:]
+    try:
+        knowledge = _knowledge(playbook=False)
+    except Exception:
+        knowledge = ""
     out = _claude_json(_assist.BAR_SYSTEM, _assist.message_block(text, history),
                        _assist.BAR_SCHEMA,
-                       context=_assist.context_block(book, _assist.dates_table(today_d), log),
+                       context=_assist.context_block(book, _assist.dates_table(today_d), log,
+                                                     knowledge),
                        purpose="ai-bar")
 
     reply = str(out.get("reply") or "").strip()[:2000]
@@ -5219,7 +6052,134 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
         reply = (reply + " " if reply else "") + f"Saved: {said}."
     elif not applied and new_texts:
         reply = "Nothing was saved — see below."
+
+    # Venues to FIND. After the new leads above, so the bar they belong with
+    # is in the book (and its website on file) before the search starts.
+    research_items = [r for r in (out.get("research") or []) if isinstance(r, dict)][:2]
+    for item in research_items:
+        prospect = item.get("kind") == "prospect" or not _clean(item.get("about"), 200)
+        about = (_clean(item.get("loc"), 200) or "the area") if prospect \
+            else (_clean(item.get("about"), 200) or "that venue")
+        try:
+            got = _run_prospect(item, text) if prospect else _run_research(item, text)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            skipped.append({"lead": None, "why": f"couldn't search for {about} — "
+                            + str(detail.get("message") or exc.detail)})
+            continue
+        except Exception as exc:
+            print(f"[crm] RESEARCH_FAILED {exc}", flush=True)
+            skipped.append({"lead": None, "why": f"the search for {about} failed — try again"})
+            continue
+        applied += got["added"]
+        skipped += got["skipped"]
+        names = ", ".join(a["name"] for a in got["added"])
+        what = (f"{item.get('find') or 'bars'} in {about}" if prospect
+                else f"{about}'s {item.get('find') or 'related venues'}")
+        if names:
+            reply += f" Found and added — {what}: {names}."
+        elif got["skipped"]:
+            reply += (f" Searched for {what}: found {len(got['skipped'])}, but none passed the "
+                      "checks on their own websites — see below.")
+        else:
+            reply += (f" Searched the web for {what} and found none."
+                      + (f" {got['note']}" if got["note"] else ""))
+        # The model was told not to ask for names; if it did anyway, the
+        # search just answered it.
+        if question and re.search(r"\bname", question, re.I):
+            question = None
+
+    # "Remember…": kept for good, in the owner's instructions every AI reads.
+    keep = _clean(out.get("remember"), 500)
+    if keep:
+        keep = _assist.words_from(text, keep)[:500]
+        try:
+            _remember(keep, today)
+            reply += f" I'll remember that: “{keep}”."
+        except Exception as exc:
+            print(f"[crm] AI_BAR_REMEMBER_FAILED {exc}", flush=True)
+            skipped.append({"lead": None, "why": "couldn't save that to the AI Brain — add it there"})
+    reply = reply.strip()
+    _log_bar_exchange(text, " ".join(filter(None, [reply, question])),
+                      [a["name"] for a in applied])
     return {"reply": reply, "question": question, "applied": applied, "skipped": skipped}
+
+
+BAR_MEMORY_TURNS = 8          # exchanges read back into every message
+BAR_MEMORY_DAYS = 7
+
+
+def _bar_memory() -> list:
+    """The last few AI-bar exchanges, oldest first, each with when it was
+    (the operator's own clock). Empty on any failure — memory is a help,
+    never a reason for a message to fail."""
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=BAR_MEMORY_DAYS)).isoformat()
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT at, you, ai, leads FROM crm_ai_bar_log WHERE at >= %s
+                 ORDER BY at DESC LIMIT %s
+            """, (since, BAR_MEMORY_TURNS))
+            rows = cursor.fetchall()
+    except Exception as exc:
+        print(f"[crm] AI_BAR_MEMORY_UNAVAILABLE {exc}", flush=True)
+        return []
+    tz = _operator_tz()
+    out = []
+    for r in reversed(rows):
+        ai = r["ai"] or ""
+        if r.get("leads"):
+            ai += f" (changed: {r['leads']})"
+        out.append({"when": _ask_when(r["at"], tz), "you": r["you"], "ai": ai})
+    return out
+
+
+def _log_bar_exchange(you: str, ai: str, leads: list) -> None:
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO crm_ai_bar_log (id, at, you, ai, leads) "
+                           "VALUES (%s, %s, %s, %s, %s)",
+                           (generate_id(), now_iso(), you[:2000], ai[:4000],
+                            ", ".join(leads)[:1000] or None))
+            conn.commit()
+    except Exception as exc:
+        print(f"[crm] AI_BAR_LOG_FAILED {exc}", flush=True)
+
+
+def _remember(text: str, today: str) -> None:
+    """Add one line to the owner's standing instructions (the AI Brain page),
+    dated and marked as coming from the AI bar so the owner can see and
+    delete it there."""
+    line = f"- {text} (added {today} from the AI bar)"
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT owner_notes FROM crm_ai_brain WHERE id = 1 FOR UPDATE")
+        row = cursor.fetchone()
+        notes = ((row or {}).get("owner_notes") or "").rstrip()
+        if text.lower() in notes.lower():
+            return
+        cursor.execute("""
+            INSERT INTO crm_ai_brain (id, owner_notes, owner_notes_updated_at) VALUES (1, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET owner_notes = EXCLUDED.owner_notes,
+                   owner_notes_updated_at = EXCLUDED.owner_notes_updated_at
+        """, ((notes + "\n" if notes else "") + line, now_iso()))
+        conn.commit()
+
+
+@crm_router.get("/assist/history", response_model=dict)
+def assist_history(limit: int = 20, _: bool = Depends(require_crm_key)):
+    """What was said to the AI boxes lately, newest first — the page shows the
+    last few so a conversation picks up where it left off."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT at, you, ai, leads FROM crm_ai_bar_log ORDER BY at DESC LIMIT %s",
+                       (max(1, min(limit, 100)),))
+        rows = cursor.fetchall()
+    tz = _operator_tz()
+    return {"turns": [{"when": _ask_when(r["at"], tz), "you": r["you"], "ai": r["ai"],
+                       "leads": r["leads"]} for r in rows]}
 
 
 def _apply_proposed(proposed: list, back: dict, text: str, today: str,
@@ -5300,7 +6260,7 @@ def process_inbox(days: int = 3) -> dict:
         cursor.execute("SELECT message_id, lead_id FROM crm_sent_messages")
         sent = {r["message_id"]: r["lead_id"] for r in cursor.fetchall()}
 
-    tally = {"updated": 0, "no_change": 0, "ignored": 0, "failed": 0}
+    tally = {"updated": 0, "no_change": 0, "ignored": 0, "failed": 0, "bounced": 0}
     handled = 0
     for mail in mails:
         if mail["message_id"] in done or handled >= INBOX_BATCH:
@@ -5308,7 +6268,18 @@ def process_inbox(days: int = 3) -> dict:
         lead_ids = (_inbox.match_leads(mail, book, sent)
                     if _inbox.worth_reading(mail, mailer.sender()) else [])
         result, status, draft = None, "ignored", None
-        if lead_ids:
+        bounce = mail.get("bounce")
+        if bounce and bounce.get("permanent"):
+            # An address that doesn't exist comes off the lead and is never
+            # emailed again. No model: the notice says it in fields.
+            try:
+                result = _record_bounce(mail, bounce)
+                status = "bounced" if result["applied"] else "ignored"
+                lead_ids = [a["lead_id"] for a in result["applied"]]
+            except Exception as exc:
+                print(f"[crm] BOUNCE_FAILED {mail.get('subject')!r}: {exc}", flush=True)
+                result, status = {"error": str(exc)[:300]}, "failed"
+        elif lead_ids:
             handled += 1
             try:
                 result = _read_reply(mail, lead_ids)
@@ -5370,7 +6341,7 @@ def _read_reply(mail: dict, lead_ids: list) -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, name, loc, status, contact, phone, email, followup_date,
+            SELECT id, name, loc, status, contact, phone, email, followup_date, current_system,
                    last_outcome, last_touch_at, notes, manager_name
               FROM crm_leads WHERE id = ANY(%s)
         """, (lead_ids,))
@@ -5395,6 +6366,47 @@ def _read_reply(mail: dict, lead_ids: list) -> dict:
     return {"reply": str(out.get("reply") or "").strip()[:1000],
             "applied": applied, "skipped": skipped, "opt_out": opt_out,
             "needs_reply": bool(out.get("needs_reply")) and not opt_out}
+
+
+def _record_bounce(mail: dict, bounce: dict) -> dict:
+    """A permanent delivery failure for mail we sent: the address comes off
+    every lead carrying it (the lead stays — the bar and its number are
+    real), a dated note says so, and it goes on the do-not-email list so
+    nothing queued or drafted can send to it again. Only addresses we
+    actually emailed count: the notice quotes other addresses too."""
+    today, now = _today(), now_iso()
+    applied: list = []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT LOWER(to_addr) AS addr FROM crm_sent_emails
+             WHERE LOWER(to_addr) = ANY(%s)
+        """, (bounce["addresses"],))
+        ours = [r["addr"] for r in cursor.fetchall()]
+        for addr in ours:
+            cursor.execute("""
+                INSERT INTO crm_suppressions (id, kind, value, reason, created_at)
+                VALUES (%s, 'email', %s, %s, %s) ON CONFLICT DO NOTHING
+            """, (generate_id(), addr, f"bounced {today}: {bounce.get('reason') or 'address not found'}"[:500],
+                  now))
+            cursor.execute("SELECT * FROM crm_leads WHERE LOWER(email) = %s FOR UPDATE", (addr,))
+            for lead in cursor.fetchall():
+                undo_id = _snapshot(cursor, lead, "edit (email bounced)", counters_spent=0)
+                note = (f"[{today}] Email to {addr} bounced — the address doesn't work"
+                        + (f" ({bounce['reason'][:160]})" if bounce.get("reason") else "")
+                        + ". Taken off; find another address on the next call.")
+                cursor.execute("""
+                    UPDATE crm_leads SET email = NULL, email_kind = NULL, updated_at = %s,
+                           notes = COALESCE(notes || E'\\n', '') || %s
+                     WHERE id = %s
+                """, (now, note, lead["id"]))
+                applied.append({"lead_id": lead["id"], "name": lead["name"], "undo_id": undo_id,
+                                "changed": [f"{addr} bounced — taken off the lead",
+                                            "on the do-not-email list"]})
+        conn.commit()
+    names = ", ".join(a["name"] for a in applied)
+    return {"reply": (f"An email bounced: {', '.join(ours)} doesn't work. Taken off {names}."
+                      if applied else ""), "applied": applied, "bounced": ours}
 
 
 def _record_opt_out(mail: dict, lead_ids: list) -> list:
@@ -5514,7 +6526,7 @@ def inbox_feed(hours: int = 72, _: bool = Depends(require_crm_key)):
                    result, processed_at, lead_ids, opt_out, needs_reply, draft, replied_at,
                    dismissed_at
               FROM crm_inbox
-             WHERE status IN ('updated', 'no_change') AND processed_at >= %s
+             WHERE status IN ('updated', 'no_change', 'bounced') AND processed_at >= %s
              ORDER BY processed_at DESC LIMIT 200
         """, (since,))
         rows = cursor.fetchall()
@@ -6254,6 +7266,14 @@ def _quick_add(text: str, name_override: Optional[str] = None) -> dict:
         applied["email_found_on"] = found_via
     elif extracted.get("email_on_website") and not extracted.get("email"):
         applied["email_lookup"] = "couldn't find an address on their site"
+    if not matched:
+        # Timezone, hours and a phone check from the map and their own site —
+        # in the background, so the page answers now. Without a timezone a
+        # hand-added bar never came into a calling window at all.
+        import leadgen
+        threading.Thread(target=leadgen.check_and_save_hand_added, args=(updated["id"],),
+                         daemon=True, name="hand-check").start()
+        applied["checking"] = "timezone, hours and phone — against the map and their website"
     return {"lead": _lead_row(updated), "applied": applied, "undo_id": undo_id,
             "counters": _counters_row(counters) if counters else None}
 

@@ -109,6 +109,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_leadgen_daily_loop())
     asyncio.create_task(_scheduled_email_loop())
     asyncio.create_task(_inbox_loop())
+    asyncio.create_task(_cloudtalk_loop())
     asyncio.create_task(_phone_check_loop())
     asyncio.create_task(_playbook_loop())
     asyncio.create_task(_apple_sync_loop())
@@ -3404,6 +3405,20 @@ async def _inbox_loop():
         await asyncio.sleep(every)
 
 
+async def _cloudtalk_loop():
+    """Pull calls from CloudTalk, read their transcripts, score them
+    (crm.process_cloudtalk). Does nothing without CLOUDTALK_KEY_ID/SECRET."""
+    await asyncio.sleep(240)
+    every = max(2, int(os.getenv("CLOUDTALK_POLL_MINUTES", "10"))) * 60
+    while True:
+        try:
+            from crm import process_cloudtalk
+            await asyncio.to_thread(process_cloudtalk)
+        except Exception as e:
+            print(f"[cloudtalk] LOOP_ERROR {e}", flush=True)
+        await asyncio.sleep(every)
+
+
 async def _phone_check_loop():
     """Check call-list numbers against each venue's own website, a small batch
     at a time.
@@ -3425,6 +3440,9 @@ async def _phone_check_loop():
             # for leads listed before them — one after the other, never side
             # by side, so the crawl stays at two sites at a time.
             checked += await asyncio.to_thread(leadgen.fit_check_step)
+            # Bars added by hand or found by the AI: timezone, hours, and the
+            # number checked against their own site (leadgen.check_hand_added).
+            checked += await asyncio.to_thread(leadgen.hand_check_step)
             # Once: emails a wrong website lookup put on quick-added leads.
             await asyncio.to_thread(leadgen.recheck_looked_up_sites)
         except Exception as e:
