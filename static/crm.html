@@ -1812,6 +1812,7 @@ async function loadPipeline(){
     return;
   }
 
+  if(!yet && SCORE_WEEK===null) await loadScoreWeek();
   body.innerHTML=`
     <div class="zone"><div class="sheetwrap">
       <table class="sheet">
@@ -1821,7 +1822,8 @@ async function loadPipeline(){
                title="Click to put a stage at the top">STAGE ${PIPE.first
                ?`<span>· ${esc(STAGE_NAME[PIPE.first])} first</span>`:'<span>⇅</span>'}</button>`}</th>
           <th>PHONE</th><th>WHERE THINGS STAND</th>
-          ${yet?'':'<th class="reach" title="Every call, email and Facebook message — undone ones don\'t count">REACHED OUT<span class="hash">#</span></th>'}<th></th>
+          ${yet?'':'<th class="reach" title="Every call, email and Facebook message — undone ones don\'t count">REACHED OUT<span class="hash">#</span></th>'}
+          ${yet?'':`<th class="reach" title="Your salesman score on the latest CloudTalk call to this bar, out of 100: opener, discovery, objections and the ask, 25 each${SCORE_WEEK!=null?` · your average this week: ${SCORE_WEEK}`:''}">SCORE<span class="hash">${SCORE_WEEK!=null?'wk '+SCORE_WEEK:'/100'}</span></th>`}<th></th>
         </tr></thead>
         <tbody>${d.leads.map((l,i)=>pipeRow(l,S.offset+i+1,{yet,today:d.today})).join('')}</tbody>
       </table>
@@ -1931,9 +1933,36 @@ function leadDetailsCell(l, cols){
     <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
     <div class="row" style="margin-top:10px"><button data-edit>Edit</button>
       <button data-prep="${esc(l.id)}">Prep me for the call</button>
+      <button data-calls="${esc(l.id)}">Calls &amp; scores</button>
       <button data-cancel>Close</button></div>
-    <div class="wherebox hide" data-prepbox style="margin-top:10px"></div></td>`;
+    <div class="wherebox hide" data-prepbox style="margin-top:10px"></div>
+    <div class="wherebox hide" data-callsbox style="margin-top:10px"></div></td>`;
 }
+/* Every CloudTalk call to this bar: when, how long, the score and why, what
+   was said, and the full transcript on a click. */
+document.addEventListener('click', async e=>{
+  const t=e.target.closest('[data-transcript]');
+  if(t){ t.nextElementSibling?.classList.toggle('hide'); return; }
+  const b=e.target.closest('[data-calls]'); if(!b) return;
+  const box=b.closest('td')?.querySelector('[data-callsbox]'); if(!box) return;
+  if(!box.classList.contains('hide')){ box.classList.add('hide'); return; }
+  box.classList.remove('hide'); box.innerHTML='<div class="none">Loading…</div>';
+  try{
+    const d=await api(`/leads/${b.dataset.calls}/calls`);
+    if(!d.calls.length){ box.innerHTML='<div class="none">No CloudTalk calls to this number yet.</div>'; return; }
+    box.innerHTML=d.calls.map(c=>{
+      const p=(c.detail&&c.detail.parts)||null;
+      return `<div class="pt"><strong>${esc(c.when)}</strong> · ${esc(Math.round((c.talk_seconds||0)/60))} min
+        ${c.score!=null?` · <strong>score ${c.score}/100</strong>${p?` <span class="muted">(opener ${p.opener}, discovery ${p.discovery}, objections ${p.objections}, ask ${p.ask})</span>`:''}`
+          :` · <span class="muted">${esc(c.status==='done'?'not scored — no real conversation':c.status==='pending'?'transcript coming':c.status.replace('_',' '))}</span>`}
+        ${c.detail&&c.detail.did_well?`<div>Did well: ${esc(c.detail.did_well)}</div>`:''}
+        ${c.detail&&c.detail.fix?`<div>Next time: ${esc(c.detail.fix)}</div>`:''}
+        ${c.detail&&c.detail.moment?`<div class="muted">Turning point: “${esc(c.detail.moment)}”</div>`:''}
+        ${c.summary?`<div class="muted">${esc(c.summary)}</div>`:''}
+        ${c.transcript?`<button data-transcript>Transcript</button><div class="hide" style="white-space:pre-wrap;font-size:12.5px;margin-top:6px">${esc(c.transcript)}</div>`:''}
+      </div>`;}).join('');
+  }catch(err){ box.innerHTML=`<div class="none">${esc(err.message)}</div>`; }
+});
 /* Prep for a callback, from the details panel: the same sheet the call list
    shows, written with everything logged on this lead so far. */
 document.addEventListener('click', e=>{
@@ -2077,6 +2106,22 @@ function reachHtml(l){
   return `<div class="n">${t.total||0}</div>${mix?`<div class="mix">${mix}</div>`:''}`;
 }
 
+/* SCORE: the salesman score on the latest CloudTalk call to this bar (out of
+   100), the average over every scored call under it, and on hover what went
+   well and what to change. Plain text, no colour: a number to learn from,
+   not a verdict. */
+let SCORE_WEEK=null;
+async function loadScoreWeek(){
+  try{ SCORE_WEEK=(await api('/cloudtalk/status')).week_average; }catch{ SCORE_WEEK=null; }
+}
+function scoreHtml(l){
+  const c=l.call_score;
+  if(!c||!c.latest) return '<div class="n muted" title="No scored CloudTalk call yet">—</div>';
+  const tip=[c.latest.did_well&&'Did well: '+c.latest.did_well, c.latest.fix&&'Next time: '+c.latest.fix]
+    .filter(Boolean).join('\n');
+  return `<div class="n" title="${esc(tip)}">${c.latest.score}</div>`
+    + (c.calls>1?`<div class="mix"><span title="Average over ${c.calls} scored calls">avg ${c.average}</span></div>`:'');
+}
 function pipeRow(l,n,opt={}){
   /* Two lines per row instead of eight columns. Everything that was a column
      of its own — email, town, who to ask for — is still here, just stacked
@@ -2100,6 +2145,7 @@ function pipeRow(l,n,opt={}){
       : '<span class="muted">no number</span>'}</td>
     <td class="stands" title="${esc(st.note)}">${standHtml(st)}</td>
     ${opt.yet?'':`<td class="reach">${reachHtml(l)}</td>`}
+    ${opt.yet?'':`<td class="reach">${scoreHtml(l)}</td>`}
     <td><div class="acts">
       <button class="go" data-act="log">Log</button>
       <button data-act="mail">Email</button>

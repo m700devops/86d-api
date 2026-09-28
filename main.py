@@ -109,6 +109,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_leadgen_daily_loop())
     asyncio.create_task(_scheduled_email_loop())
     asyncio.create_task(_inbox_loop())
+    asyncio.create_task(_cloudtalk_loop())
     asyncio.create_task(_phone_check_loop())
     asyncio.create_task(_playbook_loop())
     asyncio.create_task(_apple_sync_loop())
@@ -3401,6 +3402,20 @@ async def _inbox_loop():
             await asyncio.to_thread(process_inbox)
         except Exception as e:
             print(f"[crm] INBOX_LOOP_ERROR {e}", flush=True)
+        await asyncio.sleep(every)
+
+
+async def _cloudtalk_loop():
+    """Pull calls from CloudTalk, read their transcripts, score them
+    (crm.process_cloudtalk). Does nothing without CLOUDTALK_KEY_ID/SECRET."""
+    await asyncio.sleep(240)
+    every = max(2, int(os.getenv("CLOUDTALK_POLL_MINUTES", "10"))) * 60
+    while True:
+        try:
+            from crm import process_cloudtalk
+            await asyncio.to_thread(process_cloudtalk)
+        except Exception as e:
+            print(f"[cloudtalk] LOOP_ERROR {e}", flush=True)
         await asyncio.sleep(every)
 
 

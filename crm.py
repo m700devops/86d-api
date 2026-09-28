@@ -330,6 +330,32 @@ def init_crm_tables():
             ON CONFLICT (id) DO NOTHING
         """, (_today(), now_iso()))
 
+        # CloudTalk: every call it reports, matched to a lead, with its
+        # transcript and the salesman score (cloudtalk.py, process_cloudtalk).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_calls (
+                call_id TEXT PRIMARY KEY,
+                lead_id TEXT,
+                number TEXT,
+                direction TEXT,
+                started_at TEXT,
+                ended_at TEXT,
+                talk_seconds INTEGER,
+                status TEXT NOT NULL,
+                tries INTEGER DEFAULT 0,
+                transcript TEXT,
+                summary TEXT,
+                score INTEGER,
+                score_json TEXT,
+                touch_id TEXT,
+                note TEXT,
+                seen_at TEXT NOT NULL,
+                processed_at TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_calls_lead ON crm_calls(lead_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_calls_status ON crm_calls(status)")
+
         # The AI bar's memory: every exchange, so the next message — from
         # either box, any device, days later — reads what was said before.
         cursor.execute("""
@@ -977,6 +1003,8 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         leads = [_lead_row(row) for row in cursor.fetchall()]
         # Every call, email and reply behind WHERE THINGS STAND and REACHED OUT.
         stories = _touch_stories(cursor, [lead["id"] for lead in leads])
+        # The salesman score from CloudTalk calls, shown beside REACHED OUT.
+        scores = _call_scores(cursor, [lead["id"] for lead in leads])
 
         # Always the totals for the whole pipeline, not for the current filter:
         # the counts are the tab labels, and a tab that renumbers itself when
@@ -994,6 +1022,7 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         lead["window"] = _call_window(lead.get("tz_offset_hours"),
                                       lead.get("opening_hours"), lead.get("tz_name"))
         lead.update(stories.get(lead["id"]) or touch_story([]))
+        lead["call_score"] = scores.get(lead["id"])
     # The page decides "overdue" against this, the same day Follow-ups uses —
     # not the browser's UTC date, which is a day behind in Manila's morning.
     return {"leads": leads, "count": len(leads), "matching": matching,
@@ -2252,6 +2281,369 @@ def _reply_ask(mail: dict, brief: str = "") -> str:
     return "\n".join(lines)
 
 
+# ============== CLOUDTALK: every call, its transcript, and a score ==============
+#
+# The AI only knew what the operator typed after a call. Now every call made
+# in CloudTalk is pulled in (cloudtalk.py), matched to its lead by number, and
+# a real conversation's transcript is read ONCE: what happened (the same
+# fields the notes reader fills), what they use today, and a salesman score —
+# opener, discovery, objections, ask, 0-25 each. It is REMEMBERED (the whole
+# transcript in crm_calls, a dated line with the score on the lead) and
+# LEARNED from (the playbook, the School's game film and every prep sheet read
+# the lead's notes). A call the operator logged gets the line; one they didn't
+# log within CLOUDTALK_LOG_AFTER_MINUTES is logged for them, at the time it
+# was made. The score shows on the CRM tab next to REACHED OUT.
+
+CLOUDTALK_LOG_AFTER_MINUTES = int(os.getenv("CLOUDTALK_LOG_AFTER_MINUTES", "45"))
+CLOUDTALK_BATCH = int(os.getenv("CLOUDTALK_BATCH", "8"))       # transcripts read a pass
+CLOUDTALK_LOOKBACK_DAYS = 2
+_cloudtalk_lock = threading.Lock()
+
+def _call_read_system() -> str:
+    """Built on use: CALL_FIELDS and CALL_RULES are defined further down."""
+    import cloudtalk
+    import coach
+    return f"""You read the transcript of a REAL cold call the founder of 86'd (Stephan, the
+"Stephan:" lines) made to a bar or restaurant, and fill in the CRM and grade the call.
+
+What he sells: {coach.PRODUCT}
+The company's asks: {coach.ASKS_TEXT}
+
+You are given TODAY, DATES, THE LEAD (the bar and what happened before), CLOUDTALK'S SUMMARY
+and the TRANSCRIPT. Fill every key; use "" for anything the call doesn't tell you.
+{CALL_FIELDS}
+
+{CALL_RULES}
+- Transcripts come from speech recognition: names and numbers can be misheard. Only use a
+  name or a time that is clearly said.
+
+{cloudtalk.SCORE_RUBRIC}"""
+
+
+def _call_read_schema() -> dict:
+    import cloudtalk
+    fields = ("status", "outcome", "spoke_to", "ask_for", "followup_date", "best_time",
+              "callback_time", "objection", "current_setup", "next_step", "summary")
+    props = {f: {"type": "string"} for f in fields}
+    props.update(cloudtalk.SCORE_SCHEMA_PROPS)
+    return {"type": "object", "properties": props, "required": list(props),
+            "additionalProperties": False}
+
+
+def _read_call(lead: dict, transcript: str, summary: Optional[str], today: str) -> dict:
+    """One model call over one transcript: the fields and the grading."""
+    import cloudtalk
+    import coach
+    system = _call_read_system()
+    about = [f"Bar: {lead.get('name')}" + (f", {lead['loc']}" if lead.get("loc") else "")]
+    if lead.get("contact"):
+        about.append(f"Asking for: {lead['contact']}")
+    history = _lead_history(lead)
+    if history:
+        about.append("Recent history (oldest first):\n" + history)
+    user = "\n\n".join([_calendar(today), "THE LEAD\n" + "\n".join(about),
+                         "CLOUDTALK'S SUMMARY\n" + (summary or "(none)"),
+                         "TRANSCRIPT\n" + transcript[:60000]])
+    return _claude_json(system, user, _call_read_schema(), purpose="call-transcript")
+
+
+def _lead_by_number(cursor, number: str) -> Optional[dict]:
+    """The lead a number belongs to: its phone, else a number written in its
+    notes (the operator often rings a cell someone gave them). A worked lead
+    wins over a never-called copy."""
+    cursor.execute("""
+        SELECT * FROM crm_leads
+         WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = %s
+         ORDER BY (last_touch_at IS NOT NULL) DESC, created_at ASC LIMIT 1
+    """, (number,))
+    row = cursor.fetchone()
+    if row:
+        return row
+    cursor.execute("""
+        SELECT * FROM crm_leads WHERE regexp_replace(COALESCE(notes, ''), '\\D', '', 'g') LIKE %s
+         ORDER BY (last_touch_at IS NOT NULL) DESC, created_at ASC LIMIT 1
+    """, (f"%{number}%",))
+    return cursor.fetchone()
+
+
+def _call_logged_by_hand(cursor, lead_id: str, started: str, ended: str) -> Optional[str]:
+    """The touch the operator logged for this call, if any: a call on this
+    lead from ten minutes before it started to an hour after it ended."""
+    try:
+        lo = (datetime.fromisoformat(started) - timedelta(minutes=10)).isoformat()
+        hi = (datetime.fromisoformat(ended or started) + timedelta(minutes=60)).isoformat()
+    except (TypeError, ValueError):
+        return None
+    cursor.execute("""
+        SELECT id FROM crm_touches WHERE lead_id = %s AND kind = 'call'
+           AND outcome IS DISTINCT FROM 'undone' AND at BETWEEN %s AND %s
+         ORDER BY at ASC LIMIT 1
+    """, (lead_id, lo, hi))
+    row = cursor.fetchone()
+    return row["id"] if row else None
+
+
+def _import_calls() -> int:
+    """Record every call CloudTalk has that we haven't seen: matched to a
+    lead, or marked no_lead. Returns how many were new."""
+    import cloudtalk
+    now = datetime.now(timezone.utc)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(started_at) AS last FROM crm_calls")
+        last = (cursor.fetchone() or {}).get("last")
+    since = now - timedelta(days=CLOUDTALK_LOOKBACK_DAYS)
+    if last:
+        try:
+            since = max(since, datetime.fromisoformat(last) - timedelta(hours=2))
+        except ValueError:
+            pass
+    calls = cloudtalk.fetch_calls(since, now)
+    new = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for c in calls:
+            cursor.execute("SELECT 1 FROM crm_calls WHERE call_id = %s", (c["call_id"],))
+            if cursor.fetchone():
+                continue
+            lead = _lead_by_number(cursor, c["number"])
+            status = ("no_lead" if not lead
+                      else "short" if c["talk_seconds"] < cloudtalk.MIN_TALK_SECONDS
+                      else "pending")
+            cursor.execute("""
+                INSERT INTO crm_calls (call_id, lead_id, number, direction, started_at, ended_at,
+                                       talk_seconds, status, seen_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+            """, (c["call_id"], lead["id"] if lead else None, c["number"], c["direction"],
+                  c["started_at"], c["ended_at"], c["talk_seconds"], status, now_iso()))
+            new += 1
+        conn.commit()
+    return new
+
+
+def _finish_call(row: dict) -> str:
+    """Read one pending call: transcript, fields, score; remember it on the
+    lead; log it if nobody did. Returns the call's new status."""
+    import cloudtalk
+    call_id = row["call_id"]
+    data, status = cloudtalk.fetch_transcript(call_id)
+    transcript = cloudtalk.transcript_text(data or {})
+    if not transcript:
+        tries = (row.get("tries") or 0) + 1
+        gone = tries >= cloudtalk.TRANSCRIPT_TRIES or status in (401, 403)
+        new_status = "no_transcript" if gone else "pending"
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE crm_calls SET tries = %s, status = %s, processed_at = %s "
+                           "WHERE call_id = %s", (tries, new_status, now_iso(), call_id))
+            conn.commit()
+        if status in (401, 403):
+            print(f"[cloudtalk] TRANSCRIPTS_UNAVAILABLE HTTP {status} — the plan may not include "
+                  "Conversation Intelligence", flush=True)
+        return new_status
+
+    summary = cloudtalk.fetch_summary(call_id)
+    today = _today()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (row["lead_id"],))
+        lead = cursor.fetchone()
+    if not lead:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE crm_calls SET status = 'no_lead', transcript = %s, "
+                           "processed_at = %s WHERE call_id = %s",
+                           (transcript[:100000], now_iso(), call_id))
+            conn.commit()
+        return "no_lead"
+
+    read = _read_call(dict(lead), transcript, summary, today)
+    score = cloudtalk.clean_score(read, transcript)
+    fields = {k: (v.strip() if isinstance(v, str) else v) for k, v in read.items()
+              if k not in cloudtalk.SCORE_SCHEMA_PROPS}
+    fields = {k: v for k, v in fields.items() if v not in ("", None)}
+    tz = _operator_tz()
+    try:
+        started = datetime.fromisoformat(row["started_at"])
+        when = started.astimezone(tz).strftime("%-I:%M%p").lower()
+    except (TypeError, ValueError):
+        started, when = None, "?"
+    heading = f"CloudTalk call ({when} your time, {cloudtalk.minutes(row.get('talk_seconds'))})"
+    said = fields.get("summary") or summary or ""
+    line = " · ".join(filter(None, [f"{heading}: {said}".strip(), cloudtalk.score_line(score)]))
+
+    now = now_iso()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM crm_leads WHERE id = %s FOR UPDATE", (lead["id"],))
+        lead = cursor.fetchone()
+        mine = _call_logged_by_hand(cursor, lead["id"], row["started_at"], row["ended_at"])
+        touch_id = mine
+        if mine:
+            # They logged it: the call keeps their words; this adds what the
+            # recording says and the score, on its own dated line.
+            cursor.execute("UPDATE crm_leads SET notes = COALESCE(notes || E'\\n', '') || %s, "
+                           "updated_at = %s WHERE id = %s", (f"[{today}] {line}", now, lead["id"]))
+            import competitors
+            system = competitors.system_of(" ".join(filter(None, [
+                fields.get("current_setup"), fields.get("objection")])))
+            if system and system != lead.get("current_system"):
+                cursor.execute("UPDATE crm_leads SET current_system = %s WHERE id = %s",
+                               (system, lead["id"]))
+        else:
+            # Nobody logged it: log it now, as the notes reader would have,
+            # at the time it was really made.
+            if "summary" not in fields and said:
+                fields["summary"] = f"{heading}: {said}"
+            updated, applied, undo_id, _ = _apply_call_notes(
+                cursor, lead, fields, cloudtalk.score_line(score), "call",
+                today, now, words_label="From the recording")
+            cursor.execute("SELECT touch_id FROM crm_lead_undo WHERE id = %s", (undo_id,))
+            touch_id = (cursor.fetchone() or {}).get("touch_id")
+            if touch_id and started:
+                local = started + timedelta(hours=lead.get("tz_offset_hours") or 0)
+                cursor.execute("UPDATE crm_touches SET at = %s, local_hour = %s, weekday = %s "
+                               "WHERE id = %s", (started.isoformat(), local.hour,
+                                                 local.weekday(), touch_id))
+        cursor.execute("""
+            UPDATE crm_calls SET status = 'done', transcript = %s, summary = %s, score = %s,
+                   score_json = %s, touch_id = %s, note = %s, processed_at = %s
+             WHERE call_id = %s
+        """, (transcript[:100000], summary, score["score"] if score else None,
+              cloudtalk.dumps(score) if score else None, touch_id, line[:2000], now, call_id))
+        conn.commit()
+    print(f"[cloudtalk] CALL_READ {call_id} lead={lead['name']!r} "
+          f"score={score['score'] if score else '-'} logged_by={'you' if mine else 'ai'}",
+          flush=True)
+    return "done"
+
+
+def process_cloudtalk() -> dict:
+    """One pass: import new calls, then read up to CLOUDTALK_BATCH pending
+    transcripts. Skipped without CloudTalk keys or the AI key."""
+    import cloudtalk
+    if not cloudtalk.configured():
+        return {"skipped": "no CLOUDTALK_KEY_ID / CLOUDTALK_KEY_SECRET"}
+    if not _cloudtalk_lock.acquire(blocking=False):
+        return {"skipped": "a pass is already running"}
+    try:
+        new = _import_calls()
+        done: dict = {}
+        if os.getenv("ANTHROPIC_API_KEY"):
+            with get_db() as conn:
+                cursor = conn.cursor()
+                # Only once the operator has had time to log it themselves:
+                # read before that, and a call they're about to log would be
+                # logged twice.
+                ripe = (datetime.now(timezone.utc)
+                        - timedelta(minutes=CLOUDTALK_LOG_AFTER_MINUTES)).isoformat()
+                cursor.execute("""
+                    SELECT * FROM crm_calls WHERE status = 'pending'
+                       AND COALESCE(ended_at, started_at) <= %s
+                     ORDER BY started_at ASC LIMIT %s
+                """, (ripe, CLOUDTALK_BATCH))
+                rows = [dict(r) for r in cursor.fetchall()]
+            for row in rows:
+                try:
+                    status = _finish_call(row)
+                except Exception as exc:
+                    print(f"[cloudtalk] CALL_FAILED {row['call_id']}: {exc}", flush=True)
+                    status = "failed_try"
+                    with get_db() as conn:
+                        cursor = conn.cursor()
+                        tries = (row.get("tries") or 0) + 1
+                        cursor.execute("UPDATE crm_calls SET tries = %s, status = %s WHERE call_id = %s",
+                                       (tries, "failed" if tries >= 3 else "pending", row["call_id"]))
+                        conn.commit()
+                done[status] = done.get(status, 0) + 1
+        if new or done:
+            print(f"[cloudtalk] PASS new={new} {done}", flush=True)
+        return {"new": new, "read": done}
+    finally:
+        _cloudtalk_lock.release()
+
+
+def _call_scores(cursor, lead_ids) -> dict:
+    """Per lead: the latest scored call and the average, for the CRM tab."""
+    ids = [i for i in lead_ids if i]
+    if not ids:
+        return {}
+    try:
+        cursor.execute("""
+            SELECT lead_id, score, score_json, started_at FROM crm_calls
+             WHERE lead_id = ANY(%s) AND score IS NOT NULL ORDER BY started_at DESC
+        """, (ids,))
+        rows = [r for r in cursor.fetchall() if isinstance(r, dict) and "score" in r]
+    except Exception as exc:
+        print(f"[crm] call scores unavailable: {exc}", flush=True)
+        return {}
+    out: dict = {}
+    for r in rows:
+        entry = out.setdefault(r["lead_id"], {"latest": None, "scores": []})
+        if entry["latest"] is None:
+            try:
+                detail = json.loads(r["score_json"] or "{}")
+            except ValueError:
+                detail = {}
+            entry["latest"] = {"score": r["score"], "at": r["started_at"],
+                               "did_well": detail.get("did_well"), "fix": detail.get("fix"),
+                               "parts": detail.get("parts")}
+        entry["scores"].append(r["score"])
+    return {k: {"latest": v["latest"], "calls": len(v["scores"]),
+                "average": round(sum(v["scores"]) / len(v["scores"]))}
+            for k, v in out.items()}
+
+
+@crm_router.get("/cloudtalk/status", response_model=dict)
+def cloudtalk_status(_: bool = Depends(require_crm_key)):
+    """Is CloudTalk connected, what has it brought in, and the rep's recent
+    average score."""
+    import cloudtalk
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status, COUNT(*) AS n FROM crm_calls GROUP BY status")
+        counts = {r["status"]: r["n"] for r in cursor.fetchall()}
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        cursor.execute("SELECT AVG(score) AS avg, COUNT(score) AS n FROM crm_calls "
+                       "WHERE score IS NOT NULL AND started_at >= %s", (since,))
+        week = cursor.fetchone() or {}
+    return {"configured": cloudtalk.configured(), "calls": counts,
+            "week_average": round(week["avg"]) if week.get("avg") is not None else None,
+            "week_scored": week.get("n") or 0}
+
+
+@crm_router.post("/cloudtalk/sync", response_model=dict)
+def cloudtalk_sync(_: bool = Depends(require_crm_key)):
+    """Run a pass now, in the background."""
+    threading.Thread(target=process_cloudtalk, daemon=True, name="cloudtalk-sync").start()
+    return {"started": True}
+
+
+@crm_router.get("/leads/{lead_id}/calls", response_model=dict)
+def lead_calls(lead_id: str, _: bool = Depends(require_crm_key)):
+    """Every CloudTalk call to this bar, newest first: when, how long, the
+    score and why, and the transcript."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT call_id, started_at, talk_seconds, status, summary, score, score_json,
+                   transcript FROM crm_calls WHERE lead_id = %s ORDER BY started_at DESC
+        """, (lead_id,))
+        rows = cursor.fetchall()
+    tz = _operator_tz()
+    out = []
+    for r in rows:
+        try:
+            detail = json.loads(r["score_json"] or "null")
+        except ValueError:
+            detail = None
+        out.append({"call_id": r["call_id"], "when": _ask_when(r["started_at"], tz),
+                    "talk_seconds": r["talk_seconds"], "status": r["status"],
+                    "summary": r["summary"], "score": r["score"], "detail": detail,
+                    "transcript": r["transcript"]})
+    return {"calls": out}
+
+
 # ============== THE COMPANY BRAIN ==============
 #
 # What the owner tells the AI (standing instructions, typed on the AI Brain
@@ -2367,6 +2759,36 @@ def _scoreboard(cursor, cutoff: str) -> dict:
          WHERE l.last_touch_at IS NOT NULL
     """)
     s.update(dict(cursor.fetchone() or {}))
+    # The salesman score from CloudTalk transcripts, by part, so the playbook
+    # can name the weakest part of the calls. A missing table (an older
+    # database mid-deploy) is no score, never a failed refresh.
+    try:
+        cursor.execute("SAVEPOINT call_scores")
+        cursor.execute("""
+            SELECT COUNT(score) AS scored, AVG(score) AS avg, score_json FROM crm_calls
+             WHERE score IS NOT NULL AND started_at >= %s GROUP BY score_json
+        """, (cutoff,))
+        rows = cursor.fetchall()
+        cursor.execute("RELEASE SAVEPOINT call_scores")
+        parts: dict = {}
+        total = n = 0
+        for r in rows:
+            k = int(r["scored"] or 0)
+            n += k
+            total += float(r["avg"] or 0) * k
+            try:
+                detail = json.loads(r["score_json"] or "{}")
+            except ValueError:
+                detail = {}
+            for part, v in (detail.get("parts") or {}).items():
+                parts.setdefault(part, []).extend([v] * k)
+        if n:
+            s["call_scored"] = n
+            s["call_score_avg"] = round(total / n)
+            s["call_parts"] = {p: round(sum(v) / len(v)) for p, v in parts.items() if v}
+    except Exception as exc:
+        cursor.execute("ROLLBACK TO SAVEPOINT call_scores")
+        print(f"[crm] scoreboard call scores unavailable: {exc}", flush=True)
     s["days"] = PLAYBOOK_DAYS
     return s
 
@@ -4676,7 +5098,8 @@ def _debrief_extract(text: str, lead: Optional[dict] = None,
 
 
 def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
-                      today: str, now: str) -> tuple[dict, dict, str, Optional[dict]]:
+                      today: str, now: str, words_label: str = "Your notes"
+                      ) -> tuple[dict, dict, str, Optional[dict]]:
     """Write a debrief's extracted fields onto `lead`, log the touch, spend
     the day's counters, and return (updated_row, applied, undo_id, counters).
 
@@ -4865,7 +5288,7 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
     # callback opens with. Flattened to one line so each call stays one entry.
     said = re.sub(r"\s+", " ", raw_text or "").strip()[:4000]
     if said and said.lower() != summary.lower():
-        note += f" — Your notes: {said}"
+        note += f" — {words_label}: {said}"
     sets.append("notes = COALESCE(notes || E'\\n', '') || %s"); params.append(note)
     applied["note"] = note
 

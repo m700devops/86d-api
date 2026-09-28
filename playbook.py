@@ -189,6 +189,13 @@ def scoreboard_lines(s: dict) -> list:
             for h in hours[:3]) + ".")
     elif dials:
         lines.append(f"No hour has {MIN_HOUR_DIALS} dials yet, so there's no best hour to read.")
+    if s.get("call_scored"):
+        parts = s.get("call_parts") or {}
+        weakest = min(parts, key=parts.get) if parts else None
+        lines.append(f"Call scores from {s['call_scored']} recorded conversations: average "
+                     f"{s['call_score_avg']}/100" + (" (" + ", ".join(
+                         f"{p} {v}/25" for p, v in parts.items()) + ")" if parts else "")
+                     + (f"; the weakest part is {weakest}." if weakest else "."))
     return lines
 
 
