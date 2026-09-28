@@ -1856,6 +1856,8 @@ const outcomeLabel = o => o ? (OUTCOME_LABEL[o] || o) : '';
 function phoneCheck(l){
   if(l.phone_status==='confirmed') return '✓ on their website';
   if(l.phone_status==='from_site') return '✓ from their website';
+  // A number typed in by hand that the bar's own site doesn't list.
+  if(l.phone_status==='mismatch') return '⚠ their website lists another number';
   return '';
 }
 

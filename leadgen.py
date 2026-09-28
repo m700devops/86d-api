@@ -1825,14 +1825,11 @@ def map_result_is_venue(result: dict, name: str, loc: Optional[str]) -> bool:
     return any(_place(address.get(k) or "") == city for k in _PLACE_KEYS)
 
 
-def find_venue_website(name: str, loc: Optional[str] = None) -> Optional[str]:
-    """A venue's own website from OpenStreetMap, looked up by name + town.
-
-    For a bar the operator found themselves: the notes say "their email is on
-    the website" without the URL, and OSM usually has the `website` tag. Only
-    a hit that is the same venue in the same town counts (map_result_is_venue);
-    with no town there is no lookup — a same-named bar anywhere in the country
-    is exactly the wrong answer this used to give."""
+def lookup_venue(name: str, loc: Optional[str] = None) -> Optional[dict]:
+    """The map's entry for a venue, looked up by name + town: the Nominatim
+    hit that IS this bar in this town (map_result_is_venue), as
+    {website, lat, lon, opening_hours, phone}, or None. With no town there is
+    no lookup — a same-named bar anywhere in the country is the wrong answer."""
     if not _loc_parts(loc)[0]:
         return None
     query = ", ".join(x for x in [name, loc] if x)
@@ -1850,9 +1847,25 @@ def find_venue_website(name: str, loc: Optional[str] = None) -> Optional[str]:
             continue
         tags = r.get("extratags") or {}
         site = (tags.get("website") or tags.get("contact:website") or "").strip()
-        if site:
-            return site if site.lower().startswith("http") else "http://" + site
+        if site and not site.lower().startswith("http"):
+            site = "http://" + site
+        try:
+            lat, lon = float(r.get("lat")), float(r.get("lon"))
+        except (TypeError, ValueError):
+            lat = lon = None
+        return {"website": site or None, "lat": lat, "lon": lon,
+                "opening_hours": (tags.get("opening_hours") or "").strip() or None,
+                "phone": first_phone(tags.get("phone") or tags.get("contact:phone"))}
     return None
+
+
+def find_venue_website(name: str, loc: Optional[str] = None) -> Optional[str]:
+    """A venue's own website from OpenStreetMap, looked up by name + town.
+
+    For a bar the operator found themselves: the notes say "their email is on
+    the website" without the URL, and OSM usually has the `website` tag."""
+    hit = lookup_venue(name, loc)
+    return hit["website"] if hit else None
 
 
 def site_names_venue(html: str, name: str) -> bool:
@@ -2665,6 +2678,142 @@ def fit_check_step() -> int:
         print(f"[leadgen] LEADGEN_FIT_CHECK_FAILED {exc}", flush=True)
         return 0
     return out.get("leads_checked", 0) + out.get("bank_checked", 0)
+
+
+# ── Bars added by hand (or found by the AI): timed and checked ─────────────
+#
+# A generated lead arrives with a timezone, opening hours and a phone its own
+# website vouches for. A bar the operator added — pasted notes, the AI bar —
+# arrived with none of it: no timezone meant no calling window, so it never
+# showed as ready on the call list; and nothing checked the number. The
+# Hideaway-style mismatch (a number the bar's own site doesn't list) went
+# straight into the book. check_hand_added fills the gaps from the map and the
+# venue's own site, and NEVER overwrites what the operator typed: a number
+# their site disagrees with is flagged, not replaced.
+
+HAND_CHECK_BATCH = 5
+
+
+def check_hand_added(row: dict) -> dict:
+    """What to write onto a hand-added lead: tz, hours, phone_status/note and
+    a note line when the site disagrees. Network (the map, their site)."""
+    out: dict = {}
+    name, loc = row.get("name") or "", row.get("loc") or ""
+    city, state = _loc_parts(loc)
+    hit = lookup_venue(name, loc) if city else None
+    lat, lon = (hit or {}).get("lat"), (hit or {}).get("lon")
+    if row.get("tz_offset_hours") is None and not row.get("tz_name"):
+        offset = us_tz_offset(lon, state.upper() if state else None, lat)
+        if offset is not None:
+            out["tz_offset_hours"] = offset
+            out["tz_name"] = us_tz_name(lon, state.upper() if state else None, lat)
+    if not row.get("opening_hours") and hit and hit.get("opening_hours"):
+        out["opening_hours"] = hit["opening_hours"]
+
+    website = None
+    for line in (row.get("notes") or "").splitlines():
+        m = re.search(r"Website: (https?://[^\s|,;·]+)", line)
+        if m:
+            website = m.group(1)
+    if not website and hit and hit.get("website") and site_is_venue(hit["website"], name):
+        website = hit["website"]
+    typed = normalize_us_phone(row.get("phone")) if row.get("phone") else None
+    if website and typed and _is_public_http_url(website):
+        home, answered, status = _fetch_site(website)
+        if _ok(status, home):
+            pages = home
+            for url in _contact_urls(answered, home)[:2]:
+                more, st = _http(url, timeout=PAGE_TIMEOUT, verify_public=True)
+                if _ok(st, more):
+                    pages += " " + more
+            judged = judge_phone(typed, site_phones(pages), {typed[:3]})
+            if judged["status"] == "confirmed":
+                out["phone_status"], out["phone_note"] = "confirmed", None
+            elif judged["status"] == "from_site":
+                listed = format_us_phone_dashed(judged["phone"])
+                out["phone_status"] = "mismatch"
+                out["phone_note"] = (f"Their website lists {listed}, not the "
+                                     f"{format_us_phone_dashed(typed)} logged here")
+                out["note"] = f"Phone check: {out['phone_note']} ({answered})"
+            elif judged["status"] == "conflict":
+                out["phone_status"], out["phone_note"] = "conflict", judged["note"]
+            else:
+                out["phone_status"], out["phone_note"] = "unconfirmed", judged["note"]
+    if website and not re.search(r"Website: ", row.get("notes") or ""):
+        out["website"] = website
+    return out
+
+
+def save_hand_check(lead_id: str, found: dict) -> None:
+    """Write check_hand_added's result. Only fills blanks for tz and hours —
+    a value set since is never replaced — and always stamps hand_checked_at so
+    one lead is never re-checked in a loop."""
+    now = now_iso()
+    today = now[:10]
+    sets = ["hand_checked_at = %s"]
+    params: list = [now]
+    for col in ("tz_offset_hours", "tz_name", "opening_hours"):
+        if col in found:
+            sets.append(f"{col} = COALESCE({col}, %s)")
+            params.append(found[col])
+    for col in ("phone_status", "phone_note"):
+        if col in found:
+            sets.append(f"{col} = %s")
+            params.append(found[col])
+    lines = []
+    if found.get("website"):
+        lines.append(f"Website: {found['website']}")
+    if found.get("note"):
+        lines.append(f"[{today}] {found['note']}")
+    if lines:
+        sets.append("notes = COALESCE(notes || E'\\n', '') || %s")
+        params.append("\n".join(lines))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s",
+                       params + [lead_id])
+        conn.commit()
+
+
+def check_and_save_hand_added(lead_id: str) -> Optional[dict]:
+    """One lead, now — right after the operator added it. Never raises."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM crm_leads WHERE id = %s", (lead_id,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        found = check_hand_added(dict(row))
+        save_hand_check(lead_id, found)
+        print(f"[leadgen] HAND_CHECKED {row['name']!r} {sorted(found)}", flush=True)
+        return found
+    except Exception as exc:
+        print(f"[leadgen] HAND_CHECK_FAILED {lead_id}: {exc}", flush=True)
+        return None
+
+
+def hand_check_step(budget_s: int = 60) -> int:
+    """One background batch over hand-added leads never checked (the ones in
+    the book before this existed): the operator's own entries, the AI's
+    finds. Each waits for a quiet scanner first, like every background crawl."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id FROM crm_leads
+             WHERE COALESCE(source, 'manual') <> 'leadgen' AND hand_checked_at IS NULL
+               AND status NOT IN ('won', 'dead')
+             ORDER BY created_at DESC LIMIT %s
+        """, (HAND_CHECK_BATCH,))
+        ids = [r["id"] for r in cursor.fetchall()]
+    deadline = time.monotonic() + budget_s
+    done = 0
+    for lead_id in ids:
+        if not activity.wait_for_quiet(until=deadline) or time.monotonic() > deadline:
+            break
+        check_and_save_hand_added(lead_id)
+        done += 1
+    return done
 
 
 # ── ONE-TIME: websites (and emails) a bad lookup put on the operator's leads ──

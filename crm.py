@@ -6550,6 +6550,14 @@ def _quick_add(text: str, name_override: Optional[str] = None) -> dict:
         applied["email_found_on"] = found_via
     elif extracted.get("email_on_website") and not extracted.get("email"):
         applied["email_lookup"] = "couldn't find an address on their site"
+    if not matched:
+        # Timezone, hours and a phone check from the map and their own site —
+        # in the background, so the page answers now. Without a timezone a
+        # hand-added bar never came into a calling window at all.
+        import leadgen
+        threading.Thread(target=leadgen.check_and_save_hand_added, args=(updated["id"],),
+                         daemon=True, name="hand-check").start()
+        applied["checking"] = "timezone, hours and phone — against the map and their website"
     return {"lead": _lead_row(updated), "applied": applied, "undo_id": undo_id,
             "counters": _counters_row(counters) if counters else None}
 
