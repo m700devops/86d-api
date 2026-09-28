@@ -303,7 +303,8 @@ def test_the_inbox_can_never_create_a_lead():
     import inbox
     assert "new_leads" not in inbox.INBOX_SCHEMA["properties"]
     assert "new_leads" not in assist.SYSTEM and "new_leads" in assist.BAR_SYSTEM
-    assert assist.BAR_SCHEMA["required"][-1] == "new_leads"
+    assert "new_leads" in assist.BAR_SCHEMA["required"]
+    assert "research" not in assist.SCHEMA["properties"]      # nor research from it
 
 
 # ── the model call ──────────────────────────────────────────────────────────

@@ -110,12 +110,29 @@ BAR_SCHEMA = {
             "required": ["text"],
             "additionalProperties": False,
         }},
+        # Venues to FIND (sister restaurants, other locations, the same
+        # owner's bars): the system searches the web and adds what it can
+        # check — see research.py.
+        "research": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "about": {"type": "string"},     # the venue they're connected to
+                "loc": {"type": "string"},       # its "City, ST"
+                "find": {"type": "string"},      # what to find, in plain words
+                "carry": {"type": "string"},     # the message's words to copy onto each
+            },
+            "required": ["about", "loc", "find", "carry"],
+            "additionalProperties": False,
+        }},
     },
-    "required": SCHEMA["required"] + ["new_leads"],
+    "required": SCHEMA["required"] + ["new_leads", "research"],
 }
 
 BAR_RULES = """
 11. A bar or restaurant the message is about that is NOT in LEADS never goes in "changes" — there is no lead to change, and a change with a name instead of an alias is thrown away. Put it in "new_leads" instead, one entry per new bar, with "text" = every part of the message about that bar copied word for word (name, phone, address, who you spoke to, what was said, when to call back). The system creates the lead, logs the call and sets the follow-up from that text itself. In reply, say you are adding it; never say it was added, logged or scheduled — the system reports that."""
+
+BAR_RULES += """
+12. When the message asks you to FIND venues it doesn't name — sister restaurants, the same owner's other bars, other locations — put one entry in "research": "about" = the venue they belong with (as the message names it), "loc" = its "City, ST", "find" = what to look for in plain words, "carry" = the part of the message to copy onto each venue found, word for word (e.g. "they use our competitor, Margins Edge, they are satisfied"; empty if nothing is to be copied). The SYSTEM searches the web and checks each venue against its own website before adding it. Never ask the salesperson for the names — finding them is the job — and never name venues yourself. In reply say you're looking them up; the system reports what it found and added."""
 
 BAR_SYSTEM = SYSTEM + BAR_RULES
 

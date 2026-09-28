@@ -24,6 +24,7 @@ import crm  # noqa: E402
 import inbox  # noqa: E402
 import leadgen  # noqa: E402
 import pitch  # noqa: E402
+import research  # noqa: E402
 import venue  # noqa: E402
 
 N = 800_000
@@ -75,6 +76,11 @@ READERS = {
     # A reply draft can echo their email back: the checker reads it all.
     "draft checker": lambda h: pitch.lint(h[:200], h, "first", h[:2000], h),
     "draft checker, reply": lambda h: pitch.lint("Re: " + h[:200], h, "reply", "", h[:4000]),
+    # The AI bar's research: the model's answer, and pages that connect venues.
+    "research answer": research.parse_found,
+    "research page link": lambda h: research.related_on_page(
+        leadgen._page_text(h), "Libbey's Coastal Kitchen", leadgen._name_words),
+    "draft checker, never spoke": lambda h: pitch.lint(h[:200], h, "first", "", h[:2000], "Mike"),
     "html email": lambda h: inbox.parse(_mail("html", h)),
     "plain email": lambda h: inbox.parse(_mail("plain", h)),
 }

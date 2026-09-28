@@ -371,8 +371,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_lead_finding.py test_order_numbers.py test_film.py test_failure_points.py
   test_owner_rules.py test_lookup_check.py test_data_quality.py test_drafter.py
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
-  test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q`
-  (1022 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
+  test_research.py -q` (1036 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -1423,6 +1423,25 @@ capture. Don't reintroduce them or describe them as current.)
   "Saved: <bars>." from what was actually written, never the model's claim. The inbox reader
   keeps plain `SCHEMA`/`SYSTEM`: strangers' email must never create leads. Covered by
   test_assist.py
+- **The AI bar can FIND venues it's asked for** (research.py, `crm._run_research`). "Find the
+  sister restaurants and add them" used to get "tell me their names" back — it only saw the book.
+  `assist.BAR_SCHEMA`'s `research` (about, loc, find, carry; rule 12: never ask for the names) →
+  ONE call with Anthropic's server-side web search (`_claude_research`: `web_search_20260209`,
+  `max_uses` 6, `pause_turn` resumed by sending the turn back, `CRM_WEB_SEARCH_TOOL` overrides
+  the type). No structured outputs on that call: search answers carry citations, which can't be
+  combined with `output_config.format`, so the JSON is asked for in the prompt and cut out
+  (`research.parse_found`; a state that isn't a two-letter code is dropped — "Maryland" cut to
+  two letters was "MA"). **Nothing the search says is saved unchecked** (`_check_found`): its own
+  website must name it (the model's URL, else the map's), the phone must be on that site
+  (`judge_phone`; with no number from the search, only a site showing exactly one), and a real
+  page must connect it to the first venue — its site naming that venue, that venue's site naming
+  it, or the cited source naming both (`research.related_on_page`). Passes become `source =
+  'research'` leads with the site, the source, the timezone, and the salesperson's words labelled
+  "From the call to <first venue>" — nobody at the new one has been spoken to. One already in the
+  book gets the note instead. Checked on the live sites: Knoxie's Table (Chesapeake Bay Beach
+  Club, Libbey's group) passes with its number and a page naming both; an unrelated bar is
+  refused. The inbox reader never gets `research`. Log: `RESEARCH`, `AI_USAGE research … searches=`.
+  Web search is billed per search on top of tokens. Covered by test_research.py
 - **Follow-ups rows have an Edit button** (between Email and Delete), and the details panel
   has one beside Close. Both open `leadEditCell()` — one form shared with the CRM tab, now
   with Bar and Where as well — saving through `PATCH /leads/{id}`

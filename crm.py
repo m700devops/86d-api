@@ -4904,6 +4904,248 @@ def _claude(system: str, user: str, *, schema: Optional[dict] = None,
             "message": "The AI's answer didn't parse — try again."})
 
 
+# ============== RESEARCH: venues the operator asked the AI to find ==============
+#
+# "Find the sister restaurants and add them" used to get "tell me their names"
+# back: the AI bar only saw the book. Now it hands a `research` request to
+# _run_research — one web-search call, then every venue it names checked
+# against its own website before it's added. See research.py.
+
+WEB_SEARCH_TOOL = os.getenv("CRM_WEB_SEARCH_TOOL") or "web_search_20260209"
+
+
+def _claude_research(system: str, user: str, purpose: str = "research") -> str:
+    """One call with Anthropic's server-side web search; the answer's text.
+
+    Separate from _claude on purpose: web search answers carry citations,
+    which can't be combined with structured outputs (`output_config.format`),
+    so the JSON is asked for in the prompt instead. The server runs the
+    searches; a `pause_turn` (its own loop hit its limit) is resumed by
+    sending the turn back, at most twice. A 400 is retried once with nothing
+    optional (no effort, no fallbacks)."""
+    import httpx
+
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        raise HTTPException(status_code=503, detail={
+            "error": "ai_unavailable", "message": "No ANTHROPIC_API_KEY is set."})
+    tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
+              "max_uses": _research_max_searches()}]
+    messages: list = [{"role": "user", "content": user}]
+
+    def send(plain: bool):
+        headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION,
+                   "content-type": "application/json"}
+        body: dict = {"model": AI_MODEL, "max_tokens": 16000, "system": system,
+                      "messages": messages, "tools": tools}
+        if not plain:
+            if AI_EFFORT:
+                body["output_config"] = {"effort": AI_EFFORT}
+            if AI_MODEL in _FALLBACK_MODELS:
+                body["fallbacks"] = "default"
+                headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
+        return httpx.post(ANTHROPIC_URL, headers=headers, json=body, timeout=240.0)
+
+    text = ""
+    for _ in range(3):
+        try:
+            resp = send(False)
+            if resp.status_code == 400:
+                print(f"[crm] AI {purpose}: request refused, retrying plain: "
+                      f"{resp.text[:200]}", flush=True)
+                resp = send(True)
+        except Exception as exc:
+            print(f"[crm] AI {purpose} request failed: {exc}", flush=True)
+            raise HTTPException(status_code=503, detail={
+                "error": "ai_unavailable", "message": "Couldn't reach the AI to search."})
+        if resp.status_code != 200:
+            print(f"[crm] AI {purpose} HTTP {resp.status_code}: {resp.text[:160]}", flush=True)
+            raise HTTPException(status_code=503, detail={
+                "error": "ai_unavailable",
+                "message": f"The search returned {resp.status_code} — {resp.text[:160]}"})
+        body = resp.json()
+        usage = body.get("usage") or {}
+        searches = (usage.get("server_tool_use") or {}).get("web_search_requests", 0)
+        print(f"[crm] AI_USAGE {purpose} model={body.get('model') or AI_MODEL} "
+              f"in={usage.get('input_tokens', 0)} out={usage.get('output_tokens', 0)} "
+              f"searches={searches}", flush=True)
+        if body.get("stop_reason") == "refusal":
+            raise HTTPException(status_code=503, detail={
+                "error": "ai_declined", "message": "The AI declined that search."})
+        content = body.get("content") or []
+        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+        if body.get("stop_reason") != "pause_turn":
+            return text
+        # Resumed by sending the paused turn back as it came — no "continue".
+        messages = messages + [{"role": "assistant", "content": content}]
+    return text
+
+
+def _research_max_searches() -> int:
+    import research
+    return research.MAX_SEARCHES
+
+
+def _check_found(venue: dict, about: str, about_page: str) -> dict:
+    """One venue the search named, checked on the web before it's saved.
+
+    Returns {"ok": True, ...fields} or {"ok": False, "why": ...}. Its own
+    website must name it (the model's URL, else the map's); the phone must be
+    one that website publishes; and the link to `about` must show on a real
+    page — this venue's site naming `about`, `about`'s site naming this one,
+    or the source page the model cited naming both."""
+    import leadgen
+    import research
+
+    name = venue["name"]
+    loc = ", ".join(x for x in [venue["city"], venue["state"]] if x)
+
+    def words(t):
+        return [w for w in leadgen._name_words(t)
+                if w not in leadgen._GENERIC_NAME_WORDS and len(w) > 2]
+
+    def page(url):
+        if not url or not leadgen._is_public_http_url(url):
+            return "", url
+        html, answered, status = leadgen._fetch_site(url)
+        return (html if leadgen._ok(status, html) else ""), answered
+
+    home, website = page(venue["website"])
+    if not home or not leadgen.site_mentions_venue(home, website, name):
+        looked = leadgen.find_venue_website(name, loc)
+        home, website = page(looked) if looked else ("", None)
+        if not home or not leadgen.site_names_venue(home, name):
+            return {"ok": False, "why": "couldn't find its own website to check it against"}
+
+    texts = [leadgen._page_text(home)]
+    for url in leadgen._contact_urls(website, home)[:2]:
+        more, status = leadgen._http(url, timeout=leadgen.PAGE_TIMEOUT, verify_public=True)
+        if leadgen._ok(status, more):
+            home += " " + more
+            texts.append(leadgen._page_text(more))
+    site_numbers = leadgen.site_phones(home)
+    # With no number from the search, a site showing exactly one is theirs
+    # (judge_phone's from_site); more than one is a group page — not guessed.
+    judged = leadgen.judge_phone(normalize_us_phone(venue["phone"]), site_numbers,
+                                 {site_numbers[0][:3]} if len(site_numbers) == 1 else ())
+    if judged["status"] not in leadgen.PHONE_OK:
+        return {"ok": False, "why": "its website doesn't show a phone number we can trust"}
+
+    joined = " ".join(texts)
+    related = research.related_on_page(joined, about, words) or research.related_on_page(
+        leadgen._page_text(about_page), name, words)
+    if not related and venue["source_url"]:
+        source, _ = page(venue["source_url"])
+        text = leadgen._page_text(source)
+        related = (research.related_on_page(text, about, words)
+                   and research.related_on_page(text, name, words))
+    if not related:
+        return {"ok": False, "why": f"no page we could open says it's connected to {about}"}
+
+    email, found_on = leadgen.find_email_on_site(website, venue_name=name)
+    return {"ok": True, "name": name, "loc": loc, "state": venue["state"],
+            "website": website, "phone": judged["phone"], "phone_status": judged["status"],
+            "phone_note": judged["note"], "email": email, "email_found_on": found_on,
+            "relation": venue["relation"], "source": venue["source_url"] or website}
+
+
+def _run_research(item: dict, text: str) -> dict:
+    """Find what the AI bar was asked to find, check each on the web, and add
+    what passes as a new lead. Returns {"added", "skipped", "note"}."""
+    import assist as _assist
+    import leadgen
+    import research
+    from concurrent.futures import ThreadPoolExecutor
+    from contacts import email_kind as _email_kind
+
+    about = _clean(item.get("about"), 200)
+    loc = _clean(item.get("loc"), 200) or ""
+    if not about:
+        return {"added": [], "skipped": [], "note": "didn't say which venue to research"}
+    # The first restaurant's own site: the notes of its lead, else the map.
+    about_site = None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, loc, notes FROM crm_leads ORDER BY created_at DESC LIMIT 2000")
+        for row in cursor.fetchall():
+            if leadgen.same_venue(row["name"], about):
+                about_site = _notes_website(row["notes"])
+                loc = loc or row["loc"] or ""
+                break
+    about_page = ""
+    try:
+        about_site = about_site or leadgen.find_venue_website(about, loc)
+        if about_site and leadgen._is_public_http_url(about_site):
+            html, _, status = leadgen._fetch_site(about_site)
+            about_page = html if leadgen._ok(status, html) else ""
+    except Exception as exc:
+        print(f"[crm] RESEARCH about-site failed: {exc}", flush=True)
+
+    answer = _claude_research(research.RESEARCH_SYSTEM,
+                              research.research_prompt(about, loc, _clean(item.get("find"), 300),
+                                                       about_site))
+    found, note = research.parse_found(answer)
+    found = [v for v in found if not leadgen.same_venue(v["name"], about)]
+
+    def check(v):
+        try:
+            return v, _check_found(v, about, about_page)
+        except Exception as exc:
+            print(f"[crm] RESEARCH_CHECK_FAILED {v.get('name')}: {exc}", flush=True)
+            return v, {"ok": False, "why": "couldn't open its website"}
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(check, found))
+
+    carry = _assist.words_from(text, _clean(item.get("carry"), 2000) or "") if item.get("carry") else ""
+    today, now = _today(), now_iso()
+    added, skipped = [], []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for venue, checked in results:
+            if not checked["ok"]:
+                skipped.append({"lead": venue["name"], "why": checked["why"]})
+                continue
+            existing = _find_existing_lead(cursor, checked["name"], checked["loc"],
+                                           [checked["phone"]], checked["email"])
+            line = research.lead_note(today, about, checked["relation"], checked["source"], carry)
+            if existing:
+                cursor.execute("UPDATE crm_leads SET notes = COALESCE(notes || E'\\n', '') || %s, "
+                               "updated_at = %s WHERE id = %s", (line, now, existing["id"]))
+                added.append({"lead_id": existing["id"], "name": existing["name"],
+                              "changed": ["already in your book — added the note"],
+                              "undo_id": None})
+                continue
+            notes = "\n".join(filter(None, [
+                f"Website: {checked['website']}",
+                f"Email found on: {checked['email_found_on']}" if checked["email"] else None,
+                f"Phone: {checked['phone_note']}" if checked["phone_note"] else None,
+                line]))
+            state = checked["state"] or None
+            cursor.execute("""
+                INSERT INTO crm_leads (id, name, loc, status, source, attempts, phone, email,
+                                       email_kind, notes, tz_offset_hours, tz_name,
+                                       phone_status, created_at, updated_at)
+                VALUES (%s, %s, %s, 'new', 'research', 0, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, name
+            """, (generate_id(), checked["name"], checked["loc"],
+                  format_us_phone_dashed(checked["phone"]), checked["email"],
+                  _email_kind(checked["email"], checked["name"]) if checked["email"] else None,
+                  notes, leadgen.us_tz_offset(None, state), leadgen.us_tz_name(None, state),
+                  checked["phone_status"], now, now))
+            row = cursor.fetchone()
+            changed = ["added as a new lead (found by the AI, checked on its website)",
+                       f"phone {format_us_phone_dashed(checked['phone'])}"]
+            if checked["email"]:
+                changed.append(f"email {checked['email']}")
+            added.append({"lead_id": row["id"], "name": row["name"], "changed": changed,
+                          "undo_id": None})
+        conn.commit()
+    print(f"[crm] RESEARCH about={about!r} found={len(found)} added={len(added)} "
+          f"skipped={len(skipped)}", flush=True)
+    return {"added": added, "skipped": skipped, "note": note}
+
+
 def _apply_assist_change(cursor, lead, clean: dict, today: str, now: str) -> str:
     """Write one lead's checked change from the AI bar; return its undo id.
 
@@ -5077,7 +5319,40 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
         reply = (reply + " " if reply else "") + f"Saved: {said}."
     elif not applied and new_texts:
         reply = "Nothing was saved — see below."
-    return {"reply": reply, "question": question, "applied": applied, "skipped": skipped}
+
+    # Venues to FIND. After the new leads above, so the bar they belong with
+    # is in the book (and its website on file) before the search starts.
+    research_items = [r for r in (out.get("research") or []) if isinstance(r, dict)][:2]
+    for item in research_items:
+        about = _clean(item.get("about"), 200) or "that venue"
+        try:
+            got = _run_research(item, text)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            skipped.append({"lead": None, "why": f"couldn't search for {about} — "
+                            + str(detail.get("message") or exc.detail)})
+            continue
+        except Exception as exc:
+            print(f"[crm] RESEARCH_FAILED {exc}", flush=True)
+            skipped.append({"lead": None, "why": f"the search for {about} failed — try again"})
+            continue
+        applied += got["added"]
+        skipped += got["skipped"]
+        names = ", ".join(a["name"] for a in got["added"])
+        if names:
+            reply += f" Found and added for {about}: {names}."
+        elif got["skipped"]:
+            reply += (f" Searched for {about}'s {item.get('find') or 'related venues'}: found "
+                      f"{len(got['skipped'])}, but none checked out on their own websites — "
+                      "see below.")
+        else:
+            reply += (f" Searched the web for {about}'s {item.get('find') or 'related venues'} "
+                      "and found none." + (f" {got['note']}" if got["note"] else ""))
+        # The model was told not to ask for names; if it did anyway, the
+        # search just answered it.
+        if question and re.search(r"\bname", question, re.I):
+            question = None
+    return {"reply": reply.strip(), "question": question, "applied": applied, "skipped": skipped}
 
 
 def _apply_proposed(proposed: list, back: dict, text: str, today: str,
