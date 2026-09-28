@@ -372,7 +372,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_owner_rules.py test_lookup_check.py test_data_quality.py test_drafter.py
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
-  test_research.py -q` (1036 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
+  test_cloudtalk.py -q` (1089 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -1442,6 +1443,72 @@ capture. Don't reintroduce them or describe them as current.)
   Club, Libbey's group) passes with its number and a page naming both; an unrelated bar is
   refused. The inbox reader never gets `research`. Log: `RESEARCH`, `AI_USAGE research … searches=`.
   Web search is billed per search on top of tokens. Covered by test_research.py
+- **Prospecting on request** (research kind `prospect`, `crm._run_prospect`): "find 20 cocktail
+  bars in Annapolis" → one web search (`research.PROSPECT_SYSTEM`, count capped at
+  `MAX_PROSPECTS` 20), then every venue through the map entry (`leadgen.lookup_venue`: coordinates,
+  street, hours), `leadgen.check_fit` (the lead generator's own owner's rules — its site names it,
+  independent, not a tourist strip, spirits on its own pages) and the phone check; skipped if
+  already in the book or suppressed. Live on five Annapolis bars: three added, one refused for no
+  spirits shown on its site, one whose site refused the fetch. Log `PROSPECT`
+- **What each bar uses today** (`crm_leads.current_system`, competitors.py): `system_of()` turns
+  what was said into one name ("Margins Edge" → MarginEdge; a product beats paper; whole words
+  only — "a bar I like" is nothing). Set on every logged call (current setup, objection, the
+  operator's words), an AI bar note, a researched sister venue's carried words, and a CloudTalk
+  transcript; filled for old leads from what their notes SAID on boot
+  (`_reconcile_current_system`, `system_from_notes`: only call/email/note lines, never the
+  generator's bookkeeping). Searchable, editable ("Uses now"), on the CRM row and in the AI's
+  view of the book. Covered by test_competitors.py
+- **"Call back around 4pm" is a time, not just a date** (`crm_leads.callback_time`, HH:MM on the
+  BAR's clock). The notes reader returns `callback_time`; with no day named the follow-up is today
+  there, tomorrow if the time has gone. `/now` puts a due callback at the TOP of the call list
+  from `CALLBACK_EARLY_MIN` (15) before to `CALLBACK_LATE_MIN` (90) after, marked CALLBACK with
+  who to ask for (`_callbacks_due`, `callback_due`). A later call without one clears it
+- **Bars added by hand get a timezone, hours and a phone check** (`leadgen.check_hand_added`).
+  They arrived with no timezone — so never in a calling window — and nothing checked the number.
+  Right after quick-add / the AI bar adds one (a background thread) and in batches of 5 from the
+  phone-check loop (`hand_check_step`, waits for a quiet scanner): timezone and hours from the map
+  (`lookup_venue`), the number checked against their own site (the notes' `Website:` or the
+  map's, if it names the bar). A number the site doesn't list is FLAGGED (`phone_status`
+  'mismatch', a note), never replaced; tz and hours only fill blanks; `hand_checked_at` stamps
+  every lead once. Live: Libbey's Coastal Kitchen's logged (410) 643-4400 flagged against the
+  410-604-0999 its site lists. Covered by test_hand_check.py
+- **The AI bar remembers** (`crm_ai_bar_log`): every exchange with either box is logged and the
+  last `BAR_MEMORY_TURNS` (8) from `BAR_MEMORY_DAYS` (7) are read back into each message, dated
+  in the operator's clock — across tabs, devices and days (the page's own history is only the
+  fallback). "Remember… / from now on…" (`remember`, rule 13) is added in the operator's words
+  to the owner's instructions on the AI Brain page (`_remember`), which every AI reads — and the
+  bar now reads them too (`context_block(knowledge=)`). `GET /assist/history`; Follow-ups shows the
+  last few when it opens. Covered by test_memory.py
+- **CLOUDTALK: every call, its transcript, a salesman score** (cloudtalk.py + crm
+  `process_cloudtalk`, main.py `_cloudtalk_loop` every `CLOUDTALK_POLL_MINUTES` (10)). CloudTalk
+  REST API v1.7 (checked against developers.cloudtalk.io 2026-09-28): Basic auth
+  `CLOUDTALK_KEY_ID`/`CLOUDTALK_KEY_SECRET`; `GET my.cloudtalk.io/api/calls/index.json` for the
+  call history; Conversation Intelligence at `api.cloudtalk.io/v1/ai/calls/{id}/transcription`
+  and `/summary` (a plan without it answers 403/404: calls are matched but not scored). Each new
+  call goes in `crm_calls`, matched to a lead by number (its phone, else a number in its notes);
+  under `MIN_TALK_SECONDS` (20) it's `short`. A real conversation, once
+  `CLOUDTALK_LOG_AFTER_MINUTES` (45) have passed, is read ONCE (`_read_call`, structured output):
+  the notes reader's fields plus the score — opener, discovery, objections, ask, 0-25 each
+  (`SCORE_RUBRIC`, against coach.ASKS), totalled in code (`clean_score`), the turning point kept
+  only if it's really in the transcript, no score when there was no real conversation. If the
+  operator logged the call (a call touch from 10 min before to an hour after), a dated line with
+  the summary and score is added to the lead; if not, the call is logged for them through
+  `_apply_call_notes` ("From the recording") and the touch re-stamped to when it was made.
+  REMEMBERED: the transcript in `crm_calls`; LEARNED: the notes feed the playbook, film and prep
+  sheet, and the scoreboard carries the average and the weakest part. The CRM tab's SCORE column
+  (next to REACHED OUT) shows the latest score, the average under it, and on hover what went
+  well / what to change; the header carries the week's average (`/cloudtalk/status`). A lead's
+  details → "Calls & scores" lists every call with its transcript (`GET /leads/{id}/calls`).
+  `POST /cloudtalk/sync` runs a pass now. Tested end to end on a real Postgres against a fake
+  CloudTalk serving the documented shapes. Logs `[cloudtalk] PASS`, `CALL_READ`. Covered by
+  test_cloudtalk.py
+- **A bounced address comes off the lead** (`inbox.bounce_of`, `crm._record_bounce`). The reader
+  skipped every mailer-daemon message, so a dead address stayed on the lead and was emailed again.
+  A standard delivery report (RFC 3464 fields) or a plain-words notice with a PERMANENT failure
+  (5.x.x, user unknown) for an address we actually sent to: off every lead carrying it (the lead
+  stays), a dated note, the do-not-email list, and a note in While you were away (crm_inbox status
+  'bounced' — not a "reply", so the playbook doesn't count it). Mailbox-full changes nothing.
+  Covered by test_bounces.py
 - **Follow-ups rows have an Edit button** (between Email and Delete), and the details panel
   has one beside Close. Both open `leadEditCell()` — one form shared with the CRM tab, now
   with Bar and Where as well — saving through `PATCH /leads/{id}`
@@ -1816,6 +1883,10 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   recorded. SPACEMAIL_HOST (default `mail.spacemail.com`), SPACEMAIL_PORT (465),
   SPACEMAIL_FROM_NAME (default: the signature's first line, "Stephan Khouri") and
   SPACEMAIL_TIMEOUT are optional
+- CLOUDTALK_KEY_ID / CLOUDTALK_KEY_SECRET — CloudTalk API key pair (CloudTalk → Account →
+  Settings → API Keys, admin only). Unset, the CloudTalk reader does nothing. Transcripts and the
+  score need CloudTalk's Conversation Intelligence. CLOUDTALK_POLL_MINUTES (10),
+  CLOUDTALK_LOG_AFTER_MINUTES (45), CLOUDTALK_BATCH (8) are optional
 - SPACEMAIL_IMAP_HOST / SPACEMAIL_IMAP_PORT — optional (default the SMTP host, 993): where
   sent copies are filed and replies are read. CRM_INBOX_POLL_MINUTES (5) and CRM_INBOX_BATCH
   (20) tune the inbox reader; it needs the mailbox AND `ANTHROPIC_API_KEY`, else it skips
