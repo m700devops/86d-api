@@ -330,6 +330,19 @@ def init_crm_tables():
             ON CONFLICT (id) DO NOTHING
         """, (_today(), now_iso()))
 
+        # The AI bar's memory: every exchange, so the next message — from
+        # either box, any device, days later — reads what was said before.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_ai_bar_log (
+                id TEXT PRIMARY KEY,
+                at TEXT NOT NULL,
+                you TEXT NOT NULL,
+                ai TEXT,
+                leads TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_bar_log_at ON crm_ai_bar_log(at DESC)")
+
         # The company brain (playbook.py): one row, pinned like crm_counters.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS crm_ai_brain (
@@ -5421,15 +5434,23 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
         touches = cursor.fetchall()
 
     book, back = _assist.snapshot(leads, tries, today, data.focus_lead_id)
+    # What was said before, from the server's own log: both AI boxes, any
+    # device, the last week. The page's own copy is only the fallback.
+    remembered = _bar_memory()
     alias_of = {lead_id: alias for alias, lead_id in back.items()}
     tz = _operator_tz()
     log = "\n".join(["TOUCHES (when, your time | lead | kind | outcome)"] + [
         f"{_ask_when(t['at'], tz)} | {alias_of.get(t['lead_id'], '?')} | {t['kind']} | "
         f"{t['outcome'] or ''}" for t in touches])
-    history = [t.model_dump() for t in data.history][-4:]
+    history = remembered or [t.model_dump() for t in data.history][-4:]
+    try:
+        knowledge = _knowledge(playbook=False)
+    except Exception:
+        knowledge = ""
     out = _claude_json(_assist.BAR_SYSTEM, _assist.message_block(text, history),
                        _assist.BAR_SCHEMA,
-                       context=_assist.context_block(book, _assist.dates_table(today_d), log),
+                       context=_assist.context_block(book, _assist.dates_table(today_d), log,
+                                                     knowledge),
                        purpose="ai-bar")
 
     reply = str(out.get("reply") or "").strip()[:2000]
@@ -5515,7 +5536,98 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
         # search just answered it.
         if question and re.search(r"\bname", question, re.I):
             question = None
-    return {"reply": reply.strip(), "question": question, "applied": applied, "skipped": skipped}
+
+    # "Remember…": kept for good, in the owner's instructions every AI reads.
+    keep = _clean(out.get("remember"), 500)
+    if keep:
+        keep = _assist.words_from(text, keep)[:500]
+        try:
+            _remember(keep, today)
+            reply += f" I'll remember that: “{keep}”."
+        except Exception as exc:
+            print(f"[crm] AI_BAR_REMEMBER_FAILED {exc}", flush=True)
+            skipped.append({"lead": None, "why": "couldn't save that to the AI Brain — add it there"})
+    reply = reply.strip()
+    _log_bar_exchange(text, " ".join(filter(None, [reply, question])),
+                      [a["name"] for a in applied])
+    return {"reply": reply, "question": question, "applied": applied, "skipped": skipped}
+
+
+BAR_MEMORY_TURNS = 8          # exchanges read back into every message
+BAR_MEMORY_DAYS = 7
+
+
+def _bar_memory() -> list:
+    """The last few AI-bar exchanges, oldest first, each with when it was
+    (the operator's own clock). Empty on any failure — memory is a help,
+    never a reason for a message to fail."""
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=BAR_MEMORY_DAYS)).isoformat()
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT at, you, ai, leads FROM crm_ai_bar_log WHERE at >= %s
+                 ORDER BY at DESC LIMIT %s
+            """, (since, BAR_MEMORY_TURNS))
+            rows = cursor.fetchall()
+    except Exception as exc:
+        print(f"[crm] AI_BAR_MEMORY_UNAVAILABLE {exc}", flush=True)
+        return []
+    tz = _operator_tz()
+    out = []
+    for r in reversed(rows):
+        ai = r["ai"] or ""
+        if r.get("leads"):
+            ai += f" (changed: {r['leads']})"
+        out.append({"when": _ask_when(r["at"], tz), "you": r["you"], "ai": ai})
+    return out
+
+
+def _log_bar_exchange(you: str, ai: str, leads: list) -> None:
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO crm_ai_bar_log (id, at, you, ai, leads) "
+                           "VALUES (%s, %s, %s, %s, %s)",
+                           (generate_id(), now_iso(), you[:2000], ai[:4000],
+                            ", ".join(leads)[:1000] or None))
+            conn.commit()
+    except Exception as exc:
+        print(f"[crm] AI_BAR_LOG_FAILED {exc}", flush=True)
+
+
+def _remember(text: str, today: str) -> None:
+    """Add one line to the owner's standing instructions (the AI Brain page),
+    dated and marked as coming from the AI bar so the owner can see and
+    delete it there."""
+    line = f"- {text} (added {today} from the AI bar)"
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT owner_notes FROM crm_ai_brain WHERE id = 1 FOR UPDATE")
+        row = cursor.fetchone()
+        notes = ((row or {}).get("owner_notes") or "").rstrip()
+        if text.lower() in notes.lower():
+            return
+        cursor.execute("""
+            INSERT INTO crm_ai_brain (id, owner_notes, owner_notes_updated_at) VALUES (1, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET owner_notes = EXCLUDED.owner_notes,
+                   owner_notes_updated_at = EXCLUDED.owner_notes_updated_at
+        """, ((notes + "\n" if notes else "") + line, now_iso()))
+        conn.commit()
+
+
+@crm_router.get("/assist/history", response_model=dict)
+def assist_history(limit: int = 20, _: bool = Depends(require_crm_key)):
+    """What was said to the AI boxes lately, newest first — the page shows the
+    last few so a conversation picks up where it left off."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT at, you, ai, leads FROM crm_ai_bar_log ORDER BY at DESC LIMIT %s",
+                       (max(1, min(limit, 100)),))
+        rows = cursor.fetchall()
+    tz = _operator_tz()
+    return {"turns": [{"when": _ask_when(r["at"], tz), "you": r["you"], "ai": r["ai"],
+                       "leads": r["leads"]} for r in rows]}
 
 
 def _apply_proposed(proposed: list, back: dict, text: str, today: str,

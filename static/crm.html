@@ -2472,8 +2472,24 @@ $('fAwayList').onclick=async e=>{
   }catch(err){ toast(err.message); sendBtn.disabled=false; sendBtn.textContent='Send reply'; }
 };
 
+/* The AI bar remembers (the server keeps every exchange for a week and reads
+   the last several back into each message). Opening Follow-ups shows the
+   last few, so the conversation visibly picks up where it left off. */
+async function showEarlier(){
+  const out=$('fAssistOut');
+  if(!out || out.dataset.live) return;
+  try{
+    const d=await api('/assist/history?limit=3');
+    if(!d.turns.length || out.dataset.live) return;
+    out.innerHTML=`<div class="muted" style="font-size:12.5px;margin-top:8px">Earlier (the AI remembers these):</div>`
+      + d.turns.slice().reverse().map(t=>`<div style="font-size:12.5px;margin-top:4px">
+          <span class="muted">${esc(t.when)} · you:</span> ${esc(t.you)}<br>
+          <span class="muted">AI:</span> ${esc(t.ai||'')}</div>`).join('');
+  }catch{}
+}
 async function loadFollowups(){
   loadAway();
+  showEarlier();
   const d=await api('/queue');
   // "(50)" when 400 are overdue would be a comforting lie, so when the list is
   // capped the header says so.
@@ -2551,6 +2567,7 @@ async function runAssist(){
   const text=box.value.trim();
   if(!text) return toast('Type what happened or what to change');
   btn.disabled=true; btn.textContent='Thinking…';
+  out.dataset.live='1';
   out.innerHTML='<p class="muted" style="margin:10px 0 0;font-size:13px">Reading your book…</p>';
   try{
     const r=await api('/assist',{method:'POST',body:JSON.stringify({

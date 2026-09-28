@@ -110,6 +110,9 @@ BAR_SCHEMA = {
             "required": ["text"],
             "additionalProperties": False,
         }},
+        # A standing instruction or fact to keep for good ("remember I don't
+        # call on Mondays"): added to the owner's instructions every AI reads.
+        "remember": {"type": "string"},
         # Venues to FIND (sister restaurants, other locations, the same
         # owner's bars): the system searches the web and adds what it can
         # check — see research.py.
@@ -125,7 +128,7 @@ BAR_SCHEMA = {
             "additionalProperties": False,
         }},
     },
-    "required": SCHEMA["required"] + ["new_leads", "research"],
+    "required": SCHEMA["required"] + ["new_leads", "research", "remember"],
 }
 
 BAR_RULES = """
@@ -133,6 +136,9 @@ BAR_RULES = """
 
 BAR_RULES += """
 12. When the message asks you to FIND venues it doesn't name — sister restaurants, the same owner's other bars, other locations — put one entry in "research": "about" = the venue they belong with (as the message names it), "loc" = its "City, ST", "find" = what to look for in plain words, "carry" = the part of the message to copy onto each venue found, word for word (e.g. "they use our competitor, Margins Edge, they are satisfied"; empty if nothing is to be copied). The SYSTEM searches the web and checks each venue against its own website before adding it. Never ask the salesperson for the names — finding them is the job — and never name venues yourself. In reply say you're looking them up; the system reports what it found and added."""
+
+BAR_RULES += """
+13. When the salesperson asks you to remember something for the future — "remember…", "from now on…", "always…", "never…", "keep in mind…" — put it in "remember", in their words. It is saved to the owner's standing instructions that every AI here reads (the drafter, the prep sheet, you). Otherwise "remember" is empty. EARLIER IN THIS CONVERSATION is kept for a week across devices, so "that bar I mentioned yesterday" can be resolved from it."""
 
 BAR_SYSTEM = SYSTEM + BAR_RULES
 
@@ -248,11 +254,12 @@ def snapshot(leads: list, tries: dict, today: str,
     return "\n".join(lines), back
 
 
-def context_block(book: str, dates: str, log: str = "") -> str:
-    """What stays the same across a run of messages — the calendar, the book
-    and the log — sent first and cached, so a second message in the same few
-    minutes reads the whole book at a tenth of the price."""
-    parts = ["DATES", dates, "", book]
+def context_block(book: str, dates: str, log: str = "", knowledge: str = "") -> str:
+    """What stays the same across a run of messages — the owner's standing
+    instructions, the calendar, the book and the log — sent first and cached,
+    so a second message in the same few minutes reads the whole book at a
+    tenth of the price."""
+    parts = ([knowledge, ""] if knowledge else []) + ["DATES", dates, "", book]
     if log:
         parts += ["", log]
     return "\n".join(parts)
@@ -262,9 +269,10 @@ def message_block(text: str, history: list) -> str:
     """What changes every message: earlier turns and the new message."""
     parts: list = []
     if history:
-        parts += ["", "EARLIER IN THIS CONVERSATION (context only)"]
+        parts += ["", "EARLIER IN THIS CONVERSATION (context only; oldest first)"]
         for turn in history:
-            parts.append(f"Them: {_clip(turn.get('you'), 1000)}")
+            when = f"[{turn['when']}] " if turn.get("when") else ""
+            parts.append(f"{when}Them: {_clip(turn.get('you'), 1000)}")
             parts.append(f"You: {_clip(turn.get('ai'), 1000)}")
         parts.append("")
     parts.append(f"NEW MESSAGE: {text.strip()}")
