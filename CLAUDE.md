@@ -120,10 +120,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   traversal away from serving the repo). Re-copy from 86d-mobile/assets when rebranding
 - callwindow.py — parses OSM `opening_hours` and decides when to ring THIS venue. Pure
   functions of (hours string, local now), so it's testable without a DB, network or clock.
-  Also owns the BUCKET definition — `service_of()`, `bucket_of()`, `all_buckets()` — the
-  (service × timezone) cells the page, the API and the generator all have to agree on. One
-  definition on purpose: three copies would drift and the tabs would stop matching what gets
-  generated. See THE CALL LIST below for the heuristic
+  Also `ZONE_OFFSETS` (the four zones the generator keeps a bank in) and `service_of()`
+  (lunch/dinner, used to pick email send times). The (service × timezone) CELLS that used to
+  live here (`bucket_of`, `all_buckets`) are gone with the tabs — see ONE CALL LIST below.
+  See THE CALL LIST below for the heuristic
 - mailer.py — sending from the real Spacemail mailbox over SMTP. **Spacemail has no API and
   doesn't need one: it speaks SMTP**, which is what every mail client uses, so this is stdlib
   `smtplib` only — no new dependency. `mail.spacemail.com:465` SSL (587 STARTTLS also works),
@@ -372,7 +372,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_owner_rules.py test_lookup_check.py test_data_quality.py test_drafter.py
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q`
-  (1005 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  (1022 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -807,32 +807,34 @@ capture. Don't reintroduce them or describe them as current.)
     check batch keeps its 90s budget: rows it can't reach wait for the next batch. What the
     operator clicked and is waiting on (quick-add's email lookup, wrong number) never waits.
     Log: `CRAWL_PAUSED` / `CRAWL_RESUMED`, once per pause however many threads wait
-- **The cap is PER TAB, not global: `LEADGEN_BUCKET_TARGET` (50) unworked leads in each of
-  the 8 (service × timezone) cells.** It used to be a single `LEADGEN_MAX_ACTIVE` of 100, and
-  that number cannot survive the tabs: 100 spread over 8 cells averages 12, so opening
-  "lunch → Eastern" showed a nearly empty screen. `MAX_ACTIVE` still exists but is DERIVED
-  (`BUCKET_TARGET × 2 services × 4 zones` = 400) and is not an independent knob — a global
-  number disagreeing with the per-cell one would starve some tabs to fill others
-- **A cell counts only leads the call list will SHOW** (`leadgen.on_call_list()`: a number
-  phones.py passes and, for a generated lead, `phone_status` in PHONE_OK and `fit_status='ok'` —
-  the same tests as `/now`'s `phone_ok`/`_dial_ok`/`_fit_ok`, checked equal in test_callnow.py).
-  It used to count every unworked lead, so leads hidden while their number or the owner's rules
-  waited to be checked held a tab at "full" while it showed a handful, and nothing refilled it
-- **Promotion is per-cell, emptiest first** (`promote_leads` → `bucket_deficits`). Score still
-  decides WHO gets promoted within a cell; it no longer decides which cells get filled. Taking
-  the global top-N by score was measured filling Pacific to 131 while Eastern sat at 12
-- **City selection follows the same deficit** (`_next_cities`). The seed list is ordered
-  roughly by population, which put most Eastern metros at the back; sorting by the zone's
-  shortfall first is what actually feeds a thin tab. Never-harvested breaks the tie, then
-  oldest, so a short zone rotates through its own cities instead of re-harvesting one forever
-- `DAILY_TARGET` (25) is now a PACE, not a ceiling. A run promotes up to the total shortfall:
-  metering a cold start of 400 out at 25/day would leave the tabs unusable for a fortnight. In
-  steady state the two coincide anyway, because the per-cell cap means only as many leads can
-  land as were called off the list
-- When every cell is full AND the bank is at floor, the run returns immediately having made
-  ZERO network calls. It still harvests when the bank is thin OR when what's banked can't
-  reach the cells that are actually short — a deep bank of Pacific candidates is still an
-  empty Eastern tab
+- **ONE CALL LIST: up to `LEADGEN_CALL_LIST_SIZE` (50) bars in their calling window NOW, one
+  out, one in** (the owner's call, 2026-09-28). It used to be eight cells (lunch/dinner × four
+  zones, `LEADGEN_BUCKET_TARGET` 50 each) filled by the morning run; at 10:21am Eastern the list
+  showed two bars with hundreds banked, because a cell held whatever it was filled with at
+  5am and most of it wasn't in a window. Now `leadgen.top_up()` fills the list back to 50 from
+  the bank with bars in their window this minute (`promote_leads` takes ONLY in-window
+  candidates, `_in_window_now`, best score first). `/now` calls it every time it's opened —
+  the page reloads `/now` after every logged call and delete, so each lead worked off is
+  replaced by the next — and every 60s while it's on screen, so the list follows the clock. It
+  never crawls (the bank is already checked), and a process lock keeps two top-ups from
+  promoting the same candidate (one worker, render-start.sh). `ready_count()` is what `/now`
+  shows as `ready`: unworked, `on_call_list()` (a number phones.py passes and, for a
+  generated lead, `phone_status` in PHONE_OK and `fit_status='ok'` — the same tests as
+  `/now`'s `phone_ok`/`_dial_ok`/`_fit_ok`, checked equal in test_callnow.py) and in a window
+  now; a row with no timezone is never in one. Promoted leads that leave their window stay
+  unworked in `crm_leads` and come back when their window does, so the list fills itself from
+  them first. Tested on a real Postgres: 60 Eastern + 20 Pacific banked at 10:54am ET → 50
+  Eastern promoted, Pacific untouched; a logged call and a delete → exactly 2 more
+- **The daily run keeps the BANK stocked; it doesn't fill the list** (`run_daily`). Every zone
+  needs stock, because the list is filled from whoever's in a window at that minute and that
+  moves west through the day. It harvests when the bank is under `LEADGEN_POOL_FLOOR` (200)
+  or any zone has under an eighth of it (`_bank_by_zone`), else returns having made ZERO
+  network calls (it still tops the list up). `/leadgen/health` warns per thin zone
+- **City selection feeds the thinnest zone's bank** (`_next_cities`). The seed list is ordered
+  roughly by population, which put most Eastern metros at the back (one run had Pacific on 131
+  and Eastern on 12). Never-harvested breaks the tie, then oldest, so a thin zone rotates
+  through its own cities instead of re-harvesting one forever
+- `GET /v1/crm/calllist` (the eight-tab view) and `zone_state()` are REMOVED
 - NOTE: none of this spends API credits — OpenStreetMap and Nominatim are free and keyless.
   The cap exists because an ever-growing list is one nobody opens, and to stop pointless
   crawling. The only paid call in the CRM is `/debrief`, once per call the operator logs
@@ -1010,7 +1012,7 @@ capture. Don't reintroduce them or describe them as current.)
   keeps it out. Also runs before each daily promote for the bank, and one batch on demand via
   `POST /v1/crm/leadgen/verify-phones` (GET shows the call list by status). Idempotent: only
   rows with no `phone_status`. `pool_depth()`'s `qualified` no longer counts banked
-  candidates that can't be promoted. The call list (`/now`, `/calllist`) also skips any
+  candidates that can't be promoted. The call list (`/now`) also skips any
   `leadgen` lead without a trusted status (`_dial_ok`); the operator's own entries are
   trusted as typed; the CSV export drops `BAD_PHONE`. Logs `LEADGEN_PHONES_VERIFIED` /
   `LEADGEN_PHONES_VERIFY_FAILED`. Covered by test_phone_check.py
@@ -1184,11 +1186,12 @@ capture. Don't reintroduce them or describe them as current.)
   tries, fit score. It used to put a manager name and a "personal" email before everything,
   which is how a tourist-strip bar with lsumpter@ at the top outranked every fit signal. A
   row with no timezone (`state='unknown'`) is never "ready" — it has no window; it used to
-  count as ready around the clock. The response still has three buckets — `ready` (in a window now), `soon` (opens
+  count as ready around the clock. **At most `LEADGEN_CALL_LIST_SIZE` (50) rows, and opening
+  it tops the list up first** (see ONE CALL LIST under LEAD GENERATOR). The response still has three buckets — `ready` (in a window now), `soon` (opens
   shortly), `rest` (past the window, shut today, permanently closed) — plus counts and a
   `headline`, but **the page only ever renders `ready` as a table.** It used to also render
   `soon`/`rest` as tables (and, before that, an eight-tab service×timezone browser via a
-  separate `/calllist` endpoint) — all removed as over-complication: the button's only job
+  separate `/calllist` endpoint, now deleted) — all removed as over-complication: the button's only job
   now is "fetch whoever I can call right now," so that's the only thing on screen. When
   `ready` is empty the page shows one line of status (list truly empty → offer to fill it;
   leads exist but none dialable → say so; leads exist but none in a window → say how many
@@ -1196,9 +1199,7 @@ capture. Don't reintroduce them or describe them as current.)
 - `WINDOW_RANK` (in crm.py, beside `_call_window`) is the ONE definition of how ringable each
   window state is. `late` ranks above `shut_today` because it does not mean closed — it
   means the quiet half hour has passed, not that the doors have. Still used to order `rest`
-  server-side even though the page no longer renders that bucket as a table, since a future
-  screen (or `/calllist`, still live server-side for anything that wants the old tabbed view)
-  can rely on the same ranking
+  server-side even though the page no longer renders that bucket as a table
 - `dialable_total` is distinct from `unworked_total`: a list of rows whose phones all failed
   validation is empty for calling purposes but must NOT trigger a lead fill, because filling
   won't fix it. Only `list_empty` (no unworked leads at all) auto-starts a fill
@@ -1306,18 +1307,8 @@ capture. Don't reintroduce them or describe them as current.)
   undo) as the call list
 
 ## THE CALL LIST (the screen the operator actually lives in)
-- `GET /v1/crm/calllist` — every unworked lead, split BY SERVICE then BY TIMEZONE. Two levels
-  because they answer two questions: the service tab answers "it's 11am, who is even open?"
-  (a bar that doesn't unlock until four is unreachable now and belongs behind another tab),
-  the zone sub-tab answers "who's in their window right now?"
-- **Zones are returned in fixed east-to-west order and every zone is always present, empty or
-  not.** Never re-sorted by how good each looks right now: the tabs stay where the hand
-  expects them, and east-to-west IS the order the afternoon moves. The `recommended` flag
-  moves instead. Venues with no hours in OSM sit under DINNER — filing them under lunch would
-  send late-morning calls to bars that don't open until four
-- Clicking an empty zone tab SHOWS that it's empty rather than bouncing you to a full one;
-  only an auto-selected zone gets skipped past. Landing somewhere else after a deliberate
-  click is the more disorienting of the two
+- The list is `/now` (CALLING MODE above): one list, no service or timezone tabs. The
+  `/calllist` endpoint that split it BY SERVICE then BY TIMEZONE is gone
 - **Call timing is PER VENUE, from its own `opening_hours`, not a blanket window.** The old
   fixed 2-5pm was wrong for much of the list: real harvested data has bars opening at 4pm and
   nightclubs at 9pm, and a 2pm dial to either reaches an empty room. The heuristic in
@@ -1494,8 +1485,26 @@ capture. Don't reintroduce them or describe them as current.)
   mention the person who picked up only as the connection, "Hi there," plus a one-line ask to
   pass it on when nobody's named. `address_to()` enforces the greeting on a FRESH outreach draft
   (first email, follow-up); a reply answers whoever wrote, and a revision keeps its greeting.
-  The compose box's hand-written starting text uses the same first-name greeting and the same
-  signature (`/mail/status` returns it). Covered by test_pitch.py
+  Covered by test_pitch.py
+- **Opening an Email box DRAFTS it, everywhere** (call list, CRM, Yet to Contact, Follow-ups:
+  `autoDraft()` in crm.html → `draft-email {auto: true}`): a follow-up from the log when the bar
+  has been called or emailed (`last_touch_at`/`call_date`/`email_date`), a first cold email when
+  not. The page used to PRE-FILL a canned body — "Thanks for taking my call. Here's the app I
+  mentioned." — whatever had happened, and The Hideaway's manager Mike got it after only the
+  bartender Jen had picked up. The body stays empty until the draft lands; the hand-written
+  text (`mailBody`, which now claims no call) goes in only when the AI can't draft, and the box
+  says why
+- **Who was really reached is worked out in CODE** (`pitch.who_we_talked_to(lead,
+  call_outcomes)`, outcomes from `crm._call_outcomes()` — every logged call, undone ones out —
+  and names from every "Spoke to:" line). WHAT WE KNOW gets one plain line ("WHO WE'VE TALKED
+  TO: Jen — NOT Mike (manager). Mike has never spoken with Stephan: never thank them for a
+  call…"), and `lint(never_spoke=)` flags `FAMILIAR_PHRASES` ("thanks for taking my call",
+  "as I mentioned", "you said", "from our call" — subject included) when the reader was never
+  reached, so the draft goes back once. Armed when: the decision maker is named and not among
+  those spoken to; or nobody at the bar was reached. Not armed when the decision maker was
+  spoken to, when someone answered and the log doesn't say who, on a reply, or when the
+  salesperson's own brief says there was a call ("thank him for the call"). Covered by
+  test_drafter.py
 - **The drafter is CHECKED, not just asked** (`pitch.lint()` → `crm._write_draft()`). The bar
   is the owner's: good, informative, human, never a robot, rarely spam — and a spam filter
   reads the same signals a person does. STYLE is written around what works in cold email now:
@@ -1795,8 +1804,9 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   "your time" clock and every upcoming-window time on the call screen
 - CRM_TIMEZONE — optional, zone name the CRM's daily counters roll over in (default UTC).
   It no longer decides when the daily lead run fires (LEADGEN_CRAWL_*)
-- LEADGEN_BUCKET_TARGET (default 50 — leads per service×timezone tab; total capacity is
-  8× this), LEADGEN_DAILY_TARGET (25, a pace not a ceiling), LEADGEN_POOL_FLOOR (50),
+- LEADGEN_CALL_LIST_SIZE (default 50 — the one call list: bars in their window now),
+  LEADGEN_DAILY_TARGET (25, used for runway), LEADGEN_POOL_FLOOR (200 — checked venues banked
+  behind the list). LEADGEN_BUCKET_TARGET is no longer read,
   LEADGEN_ENRICH_WORKERS (8),
   LEADGEN_CRAWL_HOUR (5), LEADGEN_CRAWL_WINDOW_HOURS (3), LEADGEN_CRAWL_TZ
   (America/Los_Angeles), CRAWL_QUIET_SECONDS (180) — optional lead generator tuning, see "The

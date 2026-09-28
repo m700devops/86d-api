@@ -8,7 +8,7 @@ from datetime import datetime
 
 import pytest
 
-from callwindow import (all_buckets, bucket_of, call_window, is_open_today,
+from callwindow import (call_window, is_open_today,
                         opens_at, parse_opening_hours, service_of)
 
 MON = datetime(2026, 9, 14, 15, 0)     # a Monday, 3pm local
@@ -154,7 +154,7 @@ def test_permanently_closed_is_never_callable():
     (None, "dinner"),                     # unknown is filed with dinner
     ("something unparseable", "dinner"),
 ])
-def test_service_band_splits_the_two_tabs(hours, band):
+def test_service_band_splits_lunch_from_dinner(hours, band):
     assert service_of(hours) == band
 
 
@@ -162,13 +162,3 @@ def test_a_venue_open_early_one_day_a_week_counts_as_lunch():
     # Brunch on Sunday only. Calling it before noon on a Sunday works, and the
     # generic window still covers the rest of the week.
     assert service_of("Mo-Sa 17:00-02:00; Su 10:00-22:00") == "lunch"
-
-
-def test_buckets_cover_every_tab_the_page_can_show():
-    assert len(all_buckets()) == 8
-    assert bucket_of(-5, "Mo-Su 11:00-23:00") == ("lunch", -5)
-    assert bucket_of(-8, "Mo-Fr 16:00-02:00") == ("dinner", -8)
-    # No longitude means no zone sub-tab to file it under.
-    assert bucket_of(None, "Mo-Su 11:00-23:00") == ("lunch", None)
-    # A zone outside the lower 48 isn't one of the four tabs.
-    assert bucket_of(-10, None) == ("dinner", None)

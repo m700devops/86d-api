@@ -600,29 +600,6 @@ def phone_digits(phone: Optional[str]) -> str:
 ZONE_LABELS = {-5: "Eastern", -6: "Central", -7: "Mountain", -8: "Pacific"}
 
 
-def zone_state(offset: Optional[int]) -> dict:
-    """What's happening in this timezone right now, and whether to call it."""
-    if offset is None:
-        return {"offset": None, "label": "Unknown", "local_time": "",
-                "state": "unknown", "headline": "No timezone on these",
-                "rank": 5, "callable": True}
-    local = datetime.now(timezone.utc) + timedelta(hours=offset)
-    hour = local.hour
-    label = ZONE_LABELS.get(offset, f"UTC{offset}")
-    if hour < 11:
-        state, headline, rank, ok = "closed", "Closed — nobody there yet", 3, False
-    elif hour < CALL_WINDOW_START:
-        state, headline, rank, ok = "opening", "Opening up — worth a try", 2, True
-    elif hour < CALL_WINDOW_END:
-        state, headline, rank, ok = "good", "CALL NOW — quiet before service", 0, True
-    elif hour < 21:
-        state, headline, rank, ok = "rush", "Dinner rush — skip for now", 4, False
-    else:
-        state, headline, rank, ok = "late", "Too late — they're slammed", 4, False
-    return {"offset": offset, "label": label, "local_time": local.strftime("%-I:%M%p").lower(),
-            "state": state, "headline": headline, "rank": rank, "callable": ok}
-
-
 TRY_KINDS = ("call", "email", "fb")
 
 
@@ -1749,12 +1726,6 @@ def delete_user(user_id: str, _: bool = Depends(require_crm_key)):
 
 # ============== TODAY'S CALL QUEUE ==============
 
-# Bars are shut in the morning and slammed at night. Early afternoon is when
-# somebody who can make a decision is there and not busy.
-CALL_WINDOW_START = 14   # 2pm local
-CALL_WINDOW_END = 17     # 5pm local
-
-
 # Where the person doing the calling actually is. Iloilo is UTC+8, which puts
 # the whole US calling day in the middle of their night — US Eastern afternoon
 # is around 2-4am in the Philippines. That is not something to hide behind a
@@ -2074,7 +2045,26 @@ def _sent_emails_to(lead_id: str, limit: int = 3) -> list:
     return list(reversed(rows))
 
 
-def _draft_context(row: dict, include_log: bool = True, sent: Optional[list] = None) -> str:
+def _call_outcomes(lead_id: str) -> list:
+    """The outcome of every call logged on this lead, oldest first (undone
+    dials left out) — how the drafter knows who was really reached."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT outcome FROM crm_touches
+                 WHERE lead_id = %s AND kind = 'call'
+                   AND COALESCE(outcome, '') <> 'undone'
+                 ORDER BY at ASC
+            """, (lead_id,))
+            return [r["outcome"] for r in cursor.fetchall()]
+    except Exception as exc:
+        print(f"[crm] call outcomes unavailable: {exc}", flush=True)
+        return []
+
+
+def _draft_context(row: dict, include_log: bool = True, sent: Optional[list] = None,
+                   talked: str = "") -> str:
     """WHAT WE KNOW about this bar: its facts with their sources, the
     prep-sheet points, (for a first email or a reply; a follow-up's ask
     carries its own) what's been logged, and the emails we already sent them."""
@@ -2092,7 +2082,7 @@ def _draft_context(row: dict, include_log: bool = True, sent: Optional[list] = N
             log = "…" + log[-DRAFT_LOG_CHARS:]
     if sent is None:
         sent = _sent_emails_to(row["id"])
-    return pitch.lead_context(lead, lines, points, log, sent)
+    return pitch.lead_context(lead, lines, points, log, sent, talked)
 
 
 def _draft_system() -> str:
@@ -2114,7 +2104,13 @@ def _write_draft(row: dict, ask: str, include_log: bool = True,
     import pitch
     system = _draft_system()
     sent = _sent_emails_to(row["id"])
-    context = _draft_context(row, include_log, sent)
+    # Who was really reached, worked out here rather than left to the model:
+    # it wrote "thanks for taking my call" to a manager who was out when we
+    # rang. `never_spoke` arms lint's check against exactly that.
+    talked, never_spoke = pitch.who_we_talked_to(_lead_row(row), _call_outcomes(row["id"]))
+    if kind == "reply":
+        never_spoke = None          # they wrote to us
+    context = _draft_context(row, include_log, sent, talked)
     known = f"{context}\n{ask}"
 
     # Threads we can honestly answer in: emails that went to the address this
@@ -2137,7 +2133,8 @@ def _write_draft(row: dict, ask: str, include_log: bool = True,
     # a second link, shouting, a wall of text. A draft that trips it goes back
     # ONCE with the list, and the version with fewer problems is kept — a
     # person reading it, and their spam filter, are the audience.
-    problems = pitch.lint(subject, body, kind, brief, known) if subject and body else []
+    problems = (pitch.lint(subject, body, kind, brief, known, never_spoke)
+                if subject and body else [])
     if problems:
         try:
             f_subject, f_body = parsed(_claude_json(
@@ -2146,7 +2143,7 @@ def _write_draft(row: dict, ask: str, include_log: bool = True,
                                           + pitch.lint_ask(problems)),
                 pitch.SCHEMA, max_tokens=AI_MIN_TOKENS, timeout=120.0, purpose="draft-fix"))
             if f_subject and f_body:
-                still = pitch.lint(f_subject, f_body, kind, brief, known)
+                still = pitch.lint(f_subject, f_body, kind, brief, known, never_spoke)
                 if len(still) <= len(problems):
                     subject, body, problems = f_subject, f_body, still
         except Exception as exc:
@@ -2933,6 +2930,11 @@ class DraftRequest(BaseModel):
     # The Follow-ups tab's Email button: write a follow-up from what's been
     # logged on this lead, with no brief needed.
     followup: bool = False
+    # Every other Email button: draft the right email for where this lead
+    # stands — a follow-up from the log if it's been called or emailed, a
+    # first cold email if not. Replaced a canned "Thanks for taking my call"
+    # body the page used to pre-fill whatever had happened.
+    auto: bool = False
     # Present on a revision: the draft on screen right now, which the model
     # edits rather than replacing from scratch.
     subject: Optional[str] = Field(default=None, max_length=200)
@@ -2963,9 +2965,11 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
     lead = _lead_row(row)
 
     revising = bool(data.subject or data.body)
-    followup = data.followup and not revising
     brief = data.brief.strip()
-    if not brief and not data.followup and not data.reply_to:
+    worked = bool(lead.get("last_touch_at") or lead.get("call_date") or lead.get("email_date"))
+    followup = (data.followup or (data.auto and worked)) and not revising
+    cold = data.auto and not worked and not revising
+    if not brief and not data.followup and not data.auto and not data.reply_to:
         raise HTTPException(status_code=422, detail={
             "error": "brief_required", "message": "Say what the email should cover."})
 
@@ -2981,6 +2985,11 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
         ask = _reply_ask(mail, brief)
     elif followup:
         ask = _followup_ask(lead, brief)
+    elif cold:
+        ask = ("Write a FIRST email to this bar. Nobody there has been called or emailed "
+               "yet, so it's a cold email: open with something true about THEM from WHAT WE "
+               "KNOW (or the job itself), then the one picture, the risk taken away, one easy "
+               "ask." + (f"\n\nAlso: {brief}" if brief else ""))
     else:
         ask = f"Write the email. What it needs to say: {brief}"
     import pitch
@@ -3737,7 +3746,7 @@ def leadgen_health(_: bool = Depends(require_crm_key)):
     the daily list has quietly stopped, which is exactly the failure that would
     otherwise go unnoticed until a morning with nothing to call.
     """
-    from leadgen import pool_depth, DAILY_TARGET, MAX_ACTIVE, BUCKET_TARGET
+    from leadgen import pool_depth, DAILY_TARGET, POOL_FLOOR
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM crm_leadgen_runs ORDER BY started_at DESC LIMIT 10")
@@ -3762,47 +3771,34 @@ def leadgen_health(_: bool = Depends(require_crm_key)):
 
     depth = pool_depth()
     warnings = []
-    # A full list is a normal, healthy resting state, not a fault — so it is
-    # reported as a note and never as a warning, and it suppresses the
-    # "running low" warnings that would otherwise contradict it.
-    at_cap = depth["at_capacity"]
-    if stale and not at_cap:
-        warnings.append("No successful run in the last 36 hours — the daily list has stopped.")
-    if not at_cap:
-        if depth["qualified"] < DAILY_TARGET and depth["headroom"] > DAILY_TARGET:
-            warnings.append(
-                f"Pool has {depth['qualified']} qualified leads, under one day's target "
-                f"({DAILY_TARGET}) — tomorrow's list may come up short.")
-        elif depth["days_of_runway"] < 3:
-            warnings.append(f"Only {depth['days_of_runway']} days of leads banked.")
-        if cities["unharvested"] == 0:
-            warnings.append("Every city has been harvested at least once — add more territory.")
+    if stale:
+        warnings.append("No successful run in the last 36 hours — the bank isn't being topped up.")
+    if depth["qualified"] < DAILY_TARGET:
+        warnings.append(
+            f"The bank has {depth['qualified']} checked venues, under one day's calls "
+            f"({DAILY_TARGET}) — the call list may come up short.")
+    elif depth["days_of_runway"] < 3:
+        warnings.append(f"Only {depth['days_of_runway']} days of leads banked.")
+    if cities["unharvested"] == 0:
+        warnings.append("Every city has been harvested at least once — add more territory.")
     stuck = [r for r in runs if r["phase"] == "running"]
     if len(stuck) > 1:
         warnings.append(
             f"{len(stuck)} runs are still marked in-progress — the process was probably "
             "restarted mid-run. They're reconciled automatically on the next run.")
 
-    # Thin tabs are the failure the operator actually feels — a full-looking
-    # total with an empty Eastern lunch tab is a morning with nothing to call —
-    # so they get their own warning rather than hiding inside the total.
-    thin = [b for b in depth["buckets"] if b["count"] < BUCKET_TARGET // 2]
-    if thin and not at_cap:
-        worst = ", ".join(f"{b['service']} {ZONE_LABELS.get(b['zone'], b['zone'])} "
-                          f"({b['count']})" for b in sorted(thin, key=lambda b: b["count"])[:3])
+    # The list is filled from whoever's in a window at that minute, so a zone
+    # with nothing banked is an empty list at that zone's hours.
+    thin = [z for z, n in depth["banked_by_zone"].items() if n < POOL_FLOOR // 8]
+    if thin:
         warnings.append(
-            f"Some tabs are nearly empty: {worst}. The generator fills the "
-            "emptiest first, but it needs territory in those zones.")
+            "Little banked in " + ", ".join(
+                f"{ZONE_LABELS.get(z, z)} ({depth['banked_by_zone'][z]})" for z in thin)
+            + " — the list will be thin at their hours until the next harvest.")
 
-    if at_cap:
-        note = (f"Every tab is full — {BUCKET_TARGET} leads in each of "
-                f"{len(depth['buckets'])} service/timezone combinations "
-                f"({depth['active_leads']} total). Generation is paused until "
-                "you work some off.")
-    else:
-        note = (f"{depth['headroom']} spots open across "
-                f"{len(depth['buckets'])} tabs (target {BUCKET_TARGET} each) — "
-                "the emptiest get filled first at the next run.")
+    at_cap = depth["ready_now"] >= depth["call_list_size"]
+    note = (f"{depth['ready_now']} of {depth['call_list_size']} on the call list right now; "
+            f"{depth['qualified']} checked venues banked behind it.")
 
     return {
         "healthy": (at_cap or not stale) and not warnings,
@@ -3883,7 +3879,7 @@ def leadgen_fill(max_cities: int = 2, max_enrich: int = 200,
 @crm_router.get("/leadgen/fill", response_model=dict)
 def leadgen_fill_status(_: bool = Depends(require_crm_key)):
     """Is a fill in flight, and what did the last one do?"""
-    from leadgen import bucket_deficits
+    from leadgen import CALL_LIST_SIZE, ready_count
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -3893,15 +3889,13 @@ def leadgen_fill_status(_: bool = Depends(require_crm_key)):
              ORDER BY started_at DESC LIMIT 1
         """)
         last = cursor.fetchone()
-        cursor.execute("""
-            SELECT COUNT(*) AS n FROM crm_leads
-             WHERE status = 'new' AND last_touch_at IS NULL
-        """)
-        waiting = cursor.fetchone()["n"]
+        # What the call list would show now — the page stops waiting as soon
+        # as there's someone to ring.
+        waiting = ready_count(cursor)
     return {
         "running": _fill_running(),
         "waiting_to_be_called": waiting,
-        "room_left": sum(bucket_deficits().values()),
+        "room_left": max(0, CALL_LIST_SIZE - waiting),
         "last_run": dict(last) if last else None,
     }
 
@@ -4209,182 +4203,46 @@ def export_csv(scope: str = "today", _: bool = Depends(require_crm_key)):
 
 # ============== THE CALL LIST ==============
 #
-# One screen, one job. Everything sourced and not yet worked, grouped by
-# timezone, with the zone that's callable right now first.
+# One list, one job: up to leadgen.CALL_LIST_SIZE bars you can ring right now.
+# It used to be eight tabs (lunch/dinner x four timezones, `/calllist`), with
+# the generator filling each to 50 — a morning session saw the few of one tab
+# that happened to be in a window. `/now` tops the list up from the bank each
+# time it's opened, so a logged call or a delete is replaced by the next bar
+# in its window.
 #
 # A lead leaves this list the moment it's been dealt with — a logged call, a
-# debrief, a status change, a delete. Nothing has to be tidied up by hand, and
-# the same restaurant can't be called twice because it simply isn't there any
-# more. The list shrinking IS the progress bar.
+# debrief, a status change, a delete. The same restaurant can't be called
+# twice because it simply isn't there any more.
 
-@crm_router.get("/calllist", response_model=dict)
-def call_list(_: bool = Depends(require_crm_key)):
-    """Every unworked lead, split by service then by timezone.
-
-    Two levels because they answer two different questions. The service split
-    answers "it's 11am, who is even open?" — a bar that doesn't unlock until
-    four is unreachable now and belongs behind a different tab. The timezone
-    split answers "who's in their window right now?", and as the afternoon
-    rolls west it moves through Eastern, Central, Mountain, Pacific.
-
-    Venues with no hours in OpenStreetMap sit under dinner rather than lunch.
-    Filing them under lunch would send late-morning calls to bars that don't
-    open until four; under dinner they get the generic afternoon window, which
-    is where they'd have been called anyway.
-    """
-    from callwindow import service_of, ZONE_OFFSETS
-    from leadgen import BUCKET_TARGET
-    today = _today()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM crm_leads
-             WHERE status = 'new' AND last_touch_at IS NULL
-               AND phone IS NOT NULL AND phone <> ''
-             ORDER BY COALESCE(attempts, 0) ASC, created_at DESC
-        """)
-        rows = cursor.fetchall()
-
-        cursor.execute("""
-            SELECT COUNT(*) AS n FROM crm_leads
-             WHERE SUBSTRING(COALESCE(last_touch_at, ''), 1, 10) = %s
-        """, (today,))
-        done_today = cursor.fetchone()["n"]
-
-    buckets: dict = {"lunch": {}, "dinner": {}}
-    usable = 0
-    for row in rows:
-        lead = _lead_row(row)
-        # A number that didn't validate, or that the venue's own site doesn't
-        # vouch for, is never offered for dialling.
-        if not lead["phone_ok"] or not _dial_ok(row) or not _fit_ok(row):
-            continue
-        usable += 1
-        lead["call_window"] = _call_window(row.get("tz_offset_hours"),
-                                           row.get("opening_hours"),
-                                           row.get("tz_name"))
-        lead["hours_known"] = bool(row.get("opening_hours"))
-        service = service_of(row.get("opening_hours"))
-        offset = row.get("tz_offset_hours")
-        buckets[service].setdefault(offset if offset in ZONE_OFFSETS else None,
-                                    []).append(lead)
-
-
-    def _call_order(lead: dict):
-        """Which of two leads to ring first.
-
-        Whether they're reachable right now comes first — the best lead in the
-        list is worth nothing while its doors are locked. After that it's how
-        far the call can get: a name to ask for beats a direct mailbox, which
-        beats a shared inbox, and the generator's fit score breaks the rest.
-        Fewest attempts stays ahead of score so an untried lead beats a fourth
-        swing at one that never answers.
-        """
-        # A shared info@ box is the worst of the four, below an address we
-        # couldn't classify — an unclassified one is usually the venue's own
-        # mailbox (oshaughnessyspub@gmail.com), which somebody there actually
-        # reads.
-        return (WINDOW_RANK.get(lead["call_window"].get("state"), 2), *_reach(lead))
-
-    def build_zones(by_zone: dict) -> list:
-        # Every zone appears, empty or not. The sub-tabs have to be in the same
-        # place every time — a row of tabs that reshuffles itself as leads are
-        # worked off is a row you have to re-read before every click.
-        for offset in ZONE_OFFSETS:
-            by_zone.setdefault(offset, [])
-        zones = []
-        for offset, leads in by_zone.items():
-            zone = zone_state(offset)
-            leads.sort(key=_call_order)
-            ready = sum(1 for l in leads if l["call_window"]["good_now"])
-            zone.update({"leads": leads, "count": len(leads), "callable_now": ready,
-                         "target": BUCKET_TARGET,
-                         "short_by": max(0, BUCKET_TARGET - len(leads))})
-            if not leads:
-                zone.update({"headline": "Empty — the generator refills this first",
-                             "callable": False, "rank": 6})
-                zones.append(zone)
-                continue
-            if ready:
-                zone.update({"headline": f"{ready} ready to call now", "state": "good",
-                             "rank": 0, "callable": True})
-            else:
-                # The soonest window, by minutes from now — not by string. A
-                # lexicographic min over "9:00pm-11:00pm" and "11:00am-11:45am"
-                # picks the 11am one as "first", which is both wrong and looks
-                # like a typo on the screen.
-                waits = [(l["call_window"].get("starts_in"), l["call_window"].get("window"))
-                         for l in leads if l["call_window"].get("state") == "early"
-                         and l["call_window"].get("starts_in") is not None]
-                soonest = min(waits)[1] if waits else ""
-                zone.update({"headline": (f"None open yet — first window {soonest}"
-                                          if soonest else "Nothing ringable here right now"),
-                             "callable": False})
-            zones.append(zone)
-        # Fixed east-to-west order, never re-sorted by how good each one looks
-        # right now. Two reasons: the tabs stay where the hand expects them,
-        # and east-to-west IS the order the afternoon moves — Eastern hits its
-        # window first, then Central, and by the time Eastern is in the dinner
-        # rush Pacific is just opening. The "call this one" marker moves; the
-        # tabs don't.
-        order = {off: i for i, off in enumerate(ZONE_OFFSETS)}
-        zones.sort(key=lambda z: order.get(z["offset"], 99))
-        best = max(zones, key=lambda z: z["callable_now"], default=None)
-        for zone in zones:
-            zone["recommended"] = bool(best and zone is best and zone["callable_now"])
-        return zones
-
-    services = []
-    for key, label, blurb in [
-        ("lunch", "Open for lunch", "Doors open by 11:30am — reachable late morning"),
-        ("dinner", "Dinner only", "Don't open until later, plus venues with no listed hours"),
-    ]:
-        zones = build_zones(buckets[key])
-        services.append({
-            "key": key, "label": label, "blurb": blurb, "zones": zones,
-            "count": sum(z["count"] for z in zones),
-            "callable_now": sum(z["callable_now"] for z in zones),
-        })
-
-    ready = [(svc, z) for svc in services for z in svc["zones"] if z["callable_now"]]
-    ready.sort(key=lambda sz: -sz[1]["callable_now"])
-    if ready:
-        svc, zone = ready[0]
-        focus = (f"Call {zone['label']} now — {zone['callable_now']} ready "
-                 f"({svc['label'].lower()})")
-    else:
-        focus = "Nothing in a calling window right now."
-
-    return {
-        "date": today, "focus": focus, "done_today": done_today,
-        "remaining": usable, "services": services,
-        # Kept so anything still reading the old shape doesn't break.
-        "zones": services[0]["zones"] + services[1]["zones"],
-    }
+def _top_up_call_list() -> int:
+    """Fill the call list back up to its size with bars in their window now
+    (leadgen.top_up). Never lets a failure stop the list from loading."""
+    try:
+        from leadgen import top_up
+        return top_up()
+    except Exception as exc:
+        print(f"[crm] CALL_LIST_TOP_UP_FAILED {exc}", flush=True)
+        return 0
 
 
 @crm_router.get("/now", response_model=dict)
-def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
+def call_now(limit: Optional[int] = None, _: bool = Depends(require_crm_key)):
     """One list: who to ring, right now, in order. No tabs, no decisions.
 
-    The service and timezone tabs are the right way to UNDERSTAND the list —
-    they say why a venue is reachable or isn't. They are the wrong way to WORK
-    it. Sitting down to call, the question isn't "which of eight tabs holds
-    somebody who's open"; it's "who do I dial first", and answering that by
-    clicking around eight tabs reading clocks is work the screen should have
-    already done.
+    Up to leadgen.CALL_LIST_SIZE (50) bars in their calling window this
+    minute — 45 minutes before the doors open, and the 2-4pm lull for a lunch
+    place — ordered by how far the call can get: an email first, then a name
+    to ask for, then the kind of mailbox, fewest tries, fit.
 
-    So this flattens all eight cells into a single queue and sorts it by
-    whether each venue is in a calling window this minute — 45 minutes before
-    the doors open, and the 2-4pm lull — then by how far the call can get: a
-    name to ask for, then a direct mailbox, then fit.
-
-    It crosses timezones freely on purpose. At any given moment the Eastern
-    bars setting up and the Pacific ones in their lull are both good calls, and
-    which zone they're in doesn't matter once you know it's their quiet half
-    hour.
+    Opening it tops the list up from the bank first (leadgen.top_up), and the
+    page reloads it after every logged call and delete — so each lead worked
+    off is replaced by the next best bar in its window. It crosses timezones
+    freely: at any moment the Eastern bars setting up and the Pacific ones in
+    their lull are both good calls.
     """
-    limit = max(1, min(limit, 200))
+    from leadgen import CALL_LIST_SIZE
+    limit = max(1, min(limit or CALL_LIST_SIZE, 200))
+    _top_up_call_list()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
