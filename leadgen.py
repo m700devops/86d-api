@@ -3317,19 +3317,39 @@ def _promote_one(cursor, cand: dict, now: str, corporate: Optional[dict] = None)
     return lead_id
 
 
-def bucket_counts(cursor=None) -> dict:
-    """Unworked leads per (service, zone), every cell present even at zero.
+def on_call_list(row) -> bool:
+    """Whether the call list will actually SHOW this unworked lead: a number
+    phones.py passes and, for a generated lead, one its own website vouches
+    for and a pass on the owner's rules. The same tests as crm's `/now`
+    (`phone_ok`, `_dial_ok`, `_fit_ok`) — test_callnow.py checks they agree."""
+    if not normalize_us_phone(row.get("phone")):
+        return False
+    if row.get("source") != "leadgen":
+        return True
+    return row.get("phone_status") in PHONE_OK and row.get("fit_status") == "ok"
 
-    Same filter the call list uses, so what this counts is exactly what the
-    operator would see under that tab.
+
+def bucket_counts(cursor=None) -> dict:
+    """Unworked leads per (service, zone) that the call list will show, every
+    cell present even at zero.
+
+    Only what the operator can SEE counts toward a cell's target. This used to
+    count every unworked lead, including ones the call list hides (number not
+    checked against the venue's site yet, owner's rules not checked, a number
+    that failed) — so a tab could sit "full" at 50 while showing a handful,
+    and the generator never topped it up.
     """
     def _count(cur) -> dict:
         cur.execute("""
-            SELECT tz_offset_hours, opening_hours FROM crm_leads
+            SELECT tz_offset_hours, opening_hours, source, phone, phone_status,
+                   fit_status
+              FROM crm_leads
              WHERE status = 'new' AND last_touch_at IS NULL
         """)
         counts = {b: 0 for b in all_buckets()}
         for row in cur.fetchall():
+            if not on_call_list(row):
+                continue
             bucket = bucket_of(row["tz_offset_hours"], row["opening_hours"])
             if bucket in counts:
                 counts[bucket] += 1

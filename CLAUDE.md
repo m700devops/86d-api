@@ -372,7 +372,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_owner_rules.py test_lookup_check.py test_data_quality.py test_drafter.py
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py -q`
-  (1004 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  (1005 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -813,6 +813,11 @@ capture. Don't reintroduce them or describe them as current.)
   "lunch → Eastern" showed a nearly empty screen. `MAX_ACTIVE` still exists but is DERIVED
   (`BUCKET_TARGET × 2 services × 4 zones` = 400) and is not an independent knob — a global
   number disagreeing with the per-cell one would starve some tabs to fill others
+- **A cell counts only leads the call list will SHOW** (`leadgen.on_call_list()`: a number
+  phones.py passes and, for a generated lead, `phone_status` in PHONE_OK and `fit_status='ok'` —
+  the same tests as `/now`'s `phone_ok`/`_dial_ok`/`_fit_ok`, checked equal in test_callnow.py).
+  It used to count every unworked lead, so leads hidden while their number or the owner's rules
+  waited to be checked held a tab at "full" while it showed a handful, and nothing refilled it
 - **Promotion is per-cell, emptiest first** (`promote_leads` → `bucket_deficits`). Score still
   decides WHO gets promoted within a cell; it no longer decides which cells get filled. Taking
   the global top-N by score was measured filling Pacific to 131 while Eastern sat at 12
@@ -1316,9 +1321,11 @@ capture. Don't reintroduce them or describe them as current.)
 - **Call timing is PER VENUE, from its own `opening_hours`, not a blanket window.** The old
   fixed 2-5pm was wrong for much of the list: real harvested data has bars opening at 4pm and
   nightclubs at 9pm, and a 2pm dial to either reaches an empty room. The heuristic in
-  callwindow.py. Every window now STARTS 30 MINUTES BEFORE the doors open (`PRE_OPEN_MINUTES`)
-  — staff are in, taking deliveries, not yet serving anyone; it's the quietest half hour of a
-  venue's day. A LUNCH venue (opens at/before 11:30) gets TWO windows: open-30min to
+  callwindow.py. Every window now STARTS 45 MINUTES BEFORE the doors open (`PRE_OPEN_MINUTES`,
+  the owner's call on 2026-09-28 — it was 30) — staff are in, taking deliveries, not yet
+  serving anyone; it's the quietest stretch of a venue's day. Measured on 1,084 real
+  Philadelphia venues at 10:21am on a Monday: 35 in a window at 30 minutes, 150 at 45 (the 11am
+  openers come in at 10:15, not 10:30). A LUNCH venue (opens at/before 11:30) gets TWO windows: open-45min to
   open+45min, and the 2:00-4:00pm post-lunch lull. The single
   2-4:30 window it started with made the lunch tab useless for its own purpose — from 11am
   to 2pm every row read "too early", three hours in which the doors are open and nobody has

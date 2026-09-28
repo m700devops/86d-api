@@ -8,12 +8,12 @@ that reaches nobody costs the same as one that does.
 
 The heuristic, which is about how bars actually run rather than about clocks:
 
-  opens at or before 11:30  →  ring 2:00-4:30pm. They're doing lunch at open,
-                               and the post-lunch lull is the quiet hour when
-                               the manager is doing paperwork and ordering.
-  opens after 11:30         →  ring from open to two hours after. Staff arrive
-                               to set up, the manager is on, nobody's ordering
-                               drinks yet.
+  opens at or before 11:30  →  ring from 45 minutes before opening to 45
+                               after, then 2:00-4:00pm — the post-lunch lull,
+                               when the manager is doing paperwork and ordering.
+  opens after 11:30         →  ring from 45 minutes before opening to two hours
+                               after. Staff arrive to set up, the manager is on,
+                               nobody's ordering drinks yet.
 
 Everything here is a pure function of (hours string, now) so it can be tested
 without a database, a network or a particular time of day.
@@ -35,10 +35,12 @@ LUNCH_WINDOW = (14 * 60, 16 * 60)        # 2:00pm - 4:00pm, the post-lunch lull
 # manager is on the floor and nobody has ordered yet, reported as unreachable.
 PRE_RUSH_MINUTES = 45
 # Staff are in before the doors open — setting up, taking deliveries, and not
-# yet serving anybody. It is the quietest half hour of a venue's day and the
-# one most likely to put a manager on the phone, so the window starts before
-# opening time rather than at it.
-PRE_OPEN_MINUTES = 30
+# yet serving anybody. It is the quietest stretch of a venue's day and the one
+# most likely to put a manager on the phone, so the window starts before
+# opening time rather than at it. 45 minutes, the owner's call (2026-09-28):
+# at 30, a morning on the East Coast showed two leads — an 11am opener only
+# came into its window at 10:30.
+PRE_OPEN_MINUTES = 45
 # Venues that don't do lunch: the first couple of hours after the doors open.
 POST_OPEN_MINUTES = 120
 

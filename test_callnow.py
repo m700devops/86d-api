@@ -233,3 +233,25 @@ def test_no_timezone_is_no_window_so_never_ready():
         WINDOWS.pop("unknown")
     assert [l["name"] for l in d["ready"]] == ["open"]
     assert [l["name"] for l in d["rest"]] == ["zoneless"]
+
+
+def test_the_generator_counts_exactly_the_leads_the_call_list_shows():
+    # A tab counts as "full" at LEADGEN_BUCKET_TARGET. It used to count every
+    # unworked lead, including the ones /now hides (number not vouched for by
+    # the venue's site, owner's rules not checked), so a tab could sit at 50
+    # "full" while showing two — and nothing refilled it.
+    import itertools
+    import leadgen
+    rows = []
+    for source, phone, ps, fs in itertools.product(
+            ("leadgen", "manual"), ("+1-615-742-9095", "555-0100", ""),
+            (None, "confirmed", "from_site", "conflict", "unconfirmed", "wrong"),
+            (None, "ok", "blocked")):
+        name = f"{source}|{phone}|{ps}|{fs}"
+        rows.append(_lead(name, phone=phone, source=source, phone_status=ps,
+                          fit_status=fs, opening_hours=name))
+    shown = {l["name"] for l in _run(rows, ["good"] * len(rows), limit=200)["ready"]}
+    counted = {r["name"] for r in rows if leadgen.on_call_list(r)}
+    assert counted == shown
+    assert "leadgen|+1-615-742-9095|confirmed|ok" in shown
+    assert "leadgen|+1-615-742-9095|confirmed|None" not in counted

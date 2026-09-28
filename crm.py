@@ -4375,7 +4375,7 @@ def call_now(limit: int = 60, _: bool = Depends(require_crm_key)):
     already done.
 
     So this flattens all eight cells into a single queue and sorts it by
-    whether each venue is in a calling window this minute — 30 minutes before
+    whether each venue is in a calling window this minute — 45 minutes before
     the doors open, and the 2-4pm lull — then by how far the call can get: a
     name to ask for, then a direct mailbox, then fit.
 
