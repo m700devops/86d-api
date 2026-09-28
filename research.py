@@ -40,6 +40,30 @@ connected, in a few words", "source_url": "the page that says so"}],
 An empty "found" list is a correct answer when nothing checks out."""
 
 
+MAX_PROSPECTS = 20       # venues one prospecting request may add
+
+PROSPECT_SYSTEM = """You find US bars and restaurants for a salesperson who sells an iPhone app
+for bar inventory to INDEPENDENT venues with a FULL BAR (spirits, not beer-and-wine only). You
+have web search. Find venues that match what you're asked for, in the place you're asked about.
+Leave out chains and franchises, hotel and casino bars, and bars on a main tourist strip. Only
+list a venue a real web page you found shows exists and is open; never guess, never pad the
+list, never repeat one.
+
+Answer with ONE JSON object and nothing after it:
+{"found": [{"name": "...", "city": "...", "state": "two-letter code", "website": "https://...
+(the venue's OWN site, not a listing)", "phone": "the venue's own number if a page shows it,
+else empty", "relation": "why it matches what was asked, in a few words", "source_url": "the
+page that says so"}],
+ "note": "one sentence: what you searched and what you found (or didn't)"}
+An empty "found" list is a correct answer when nothing checks out."""
+
+
+def prospect_prompt(find: str, loc: str, count: int) -> str:
+    return (f"Where: {loc or 'anywhere in the US'}\n"
+            f"Find: {find or 'independent cocktail bars and restaurants with a full bar'}\n"
+            f"How many: up to {max(1, min(count or 10, MAX_PROSPECTS))}")
+
+
 def research_prompt(about: str, loc: str, ask: str, website: Optional[str] = None) -> str:
     """The one research request: who, where, and what to find."""
     lines = [f"Venue: {about}" + (f", {loc}" if loc else "")]
@@ -53,7 +77,7 @@ def _text(value, limit: int) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
-def parse_found(text: str) -> tuple[list, str]:
+def parse_found(text: str, limit: int = MAX_FOUND) -> tuple[list, str]:
     """(venues, note) from the model's answer: the JSON object in its text.
 
     Anything malformed is dropped, never repaired. A venue needs a name and a
@@ -90,7 +114,7 @@ def parse_found(text: str) -> tuple[list, str]:
                 venue[key] = ""
         if venue["name"].lower() not in {v["name"].lower() for v in found}:
             found.append(venue)
-    return found[:MAX_FOUND], _text(data.get("note"), 500)
+    return found[:limit], _text(data.get("note"), 500)
 
 
 def related_on_page(page_text: str, name: str, words_of) -> bool:

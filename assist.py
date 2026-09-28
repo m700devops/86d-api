@@ -119,12 +119,16 @@ BAR_SCHEMA = {
         "research": {"type": "array", "items": {
             "type": "object",
             "properties": {
+                # "related": venues connected to `about` (sister restaurants,
+                # the same owner). "prospect": new venues to call, in `loc`.
+                "kind": {"type": "string", "enum": ["related", "prospect"]},
                 "about": {"type": "string"},     # the venue they're connected to
-                "loc": {"type": "string"},       # its "City, ST"
+                "loc": {"type": "string"},       # its "City, ST" / where to look
                 "find": {"type": "string"},      # what to find, in plain words
+                "count": {"type": "integer"},    # how many, for a prospect search
                 "carry": {"type": "string"},     # the message's words to copy onto each
             },
-            "required": ["about", "loc", "find", "carry"],
+            "required": ["kind", "about", "loc", "find", "count", "carry"],
             "additionalProperties": False,
         }},
     },
@@ -135,7 +139,8 @@ BAR_RULES = """
 11. A bar or restaurant the message is about that is NOT in LEADS never goes in "changes" — there is no lead to change, and a change with a name instead of an alias is thrown away. Put it in "new_leads" instead, one entry per new bar, with "text" = every part of the message about that bar copied word for word (name, phone, address, who you spoke to, what was said, when to call back). The system creates the lead, logs the call and sets the follow-up from that text itself. In reply, say you are adding it; never say it was added, logged or scheduled — the system reports that."""
 
 BAR_RULES += """
-12. When the message asks you to FIND venues it doesn't name — sister restaurants, the same owner's other bars, other locations — put one entry in "research": "about" = the venue they belong with (as the message names it), "loc" = its "City, ST", "find" = what to look for in plain words, "carry" = the part of the message to copy onto each venue found, word for word (e.g. "they use our competitor, Margins Edge, they are satisfied"; empty if nothing is to be copied). The SYSTEM searches the web and checks each venue against its own website before adding it. Never ask the salesperson for the names — finding them is the job — and never name venues yourself. In reply say you're looking them up; the system reports what it found and added."""
+12. When the message asks you to FIND venues it doesn't name — sister restaurants, the same owner's other bars, other locations — put one entry in "research": "about" = the venue they belong with (as the message names it), "loc" = its "City, ST", "find" = what to look for in plain words, "carry" = the part of the message to copy onto each venue found, word for word (e.g. "they use our competitor, Margins Edge, they are satisfied"; empty if nothing is to be copied). The SYSTEM searches the web and checks each venue against its own website before adding it. Never ask the salesperson for the names — finding them is the job — and never name venues yourself. In reply say you're looking them up; the system reports what it found and added.
+   "kind" is "related" for venues connected to one bar (then "about" is that bar). It is "prospect" when they ask you to FIND NEW BARS TO CALL — "find 20 cocktail bars in Annapolis", "get me restaurants with a full bar in Boise that opened this year": "about" empty, "loc" = the place, "find" = what kind of venue, word for word, "count" = how many they asked for (10 if they didn't say, at most 20). Every one found must pass the same rules as the lead generator (independent, pours spirits, not a tourist strip) before it is added."""
 
 BAR_RULES += """
 13. When the salesperson asks you to remember something for the future — "remember…", "from now on…", "always…", "never…", "keep in mind…" — put it in "remember", in their words. It is saved to the owner's standing instructions that every AI here reads (the drafter, the prep sheet, you). Otherwise "remember" is empty. EARLIER IN THIS CONVERSATION is kept for a week across devices, so "that bar I mentioned yesterday" can be resolved from it."""

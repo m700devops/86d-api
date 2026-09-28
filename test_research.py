@@ -155,8 +155,9 @@ MESSAGE = ("Libbey's Coastal Kitchen, Stevensville MD. Talked to Bill the manage
 OUT = {"reply": "Adding Libbey's and looking up its sister restaurants.",
        "question": "What are the names of Libbey's sister restaurants?",
        "changes": [], "new_leads": [{"text": MESSAGE}],
-       "research": [{"about": "Libbey's Coastal Kitchen", "loc": "Stevensville, MD",
-                     "find": "sister restaurants",
+       "remember": "",
+       "research": [{"kind": "related", "about": "Libbey's Coastal Kitchen",
+                     "loc": "Stevensville, MD", "find": "sister restaurants", "count": 0,
                      "carry": "they use our competitor, Margins Edge, they are satisfied"}]}
 
 
@@ -167,7 +168,7 @@ def test_the_bar_adds_the_venue_then_finds_its_sisters(monkeypatch):
     got = crm.assist_update(crm.AssistRequest(text=MESSAGE))
     assert asked and asked[0]["about"] == "Libbey's Coastal Kitchen"
     assert [a["name"] for a in got["applied"]] == ["Libbey's Coastal Kitchen", "Knoxie's Table"]
-    assert "Found and added for Libbey's Coastal Kitchen: Knoxie's Table." in got["reply"]
+    assert "Found and added — Libbey's Coastal Kitchen's sister restaurants: Knoxie's Table." in got["reply"]
     assert got["question"] is None          # it doesn't ask for names it was told to find
 
 
@@ -182,3 +183,52 @@ def test_the_bar_is_told_to_research_not_to_ask():
     assert "Never ask the salesperson for the names" in assist.BAR_SYSTEM
     # The inbox reader shares SCHEMA and must never research from strangers' mail.
     assert "research" not in assist.SCHEMA["properties"]
+
+
+# ── prospecting: "find 20 cocktail bars in Annapolis" ──────────────────────
+
+def test_a_prospect_search_goes_through_the_generators_rules(monkeypatch):
+    import leadgen
+    seen = []
+    monkeypatch.setattr(leadgen, "lookup_venue", lambda name, loc=None: {
+        "website": None, "lat": 38.97, "lon": -76.49, "opening_hours": "Mo-Su 16:00-02:00",
+        "phone": None, "street": "Main Street", "housenumber": "12", "amenity": "bar"})
+    monkeypatch.setattr(leadgen, "_is_public_http_url", lambda u: True)
+    monkeypatch.setattr(leadgen, "check_fit", lambda row, corporate=None:
+                        seen.append(row) or {"status": "ok", "note": "pours liquor: cocktail menu"})
+    monkeypatch.setattr(leadgen, "_fetch_site", lambda u: (
+        "<p>Level Bar · <a href='tel:4102680003'>410-268-0003</a></p>", u, 200))
+    monkeypatch.setattr(leadgen, "_contact_urls", lambda site, home: [])
+    monkeypatch.setattr(leadgen, "find_email_on_site", lambda site, **k: ("hi@level.example", site))
+    got = crm._check_prospect({"name": "Level", "city": "Annapolis", "state": "MD",
+                               "website": "https://level.example/", "phone": "",
+                               "relation": "craft cocktail bar", "source_url": ""}, {})
+    assert got["ok"] and got["phone"] == "4102680003" and got["tz_name"] == "America/New_York"
+    assert got["fit_note"] == "pours liquor: cocktail menu"
+    assert seen[0]["amenity"] == "bar" and '"addr:street": "Main Street"' in seen[0]["raw_tags"]
+    monkeypatch.setattr(leadgen, "check_fit", lambda row, corporate=None:
+                        {"status": "blocked", "note": "tourist strip (Main Street)"})
+    got = crm._check_prospect({"name": "Level", "city": "Annapolis", "state": "MD",
+                               "website": "https://level.example/", "phone": "",
+                               "relation": "", "source_url": ""}, {})
+    assert got == {"ok": False, "why": "tourist strip (Main Street)"}
+
+
+def test_the_bar_hands_a_prospect_search_over(monkeypatch):
+    out = {**OUT, "new_leads": [], "research": [{"kind": "prospect", "about": "",
+           "loc": "Annapolis, MD", "find": "cocktail bars", "count": 20, "carry": ""}]}
+    _bar(monkeypatch, out, {})
+    asked = []
+    monkeypatch.setattr(crm, "_run_prospect", lambda item, text: asked.append(item) or {
+        "added": [{"lead_id": "A1", "name": "Level", "changed": ["added"], "undo_id": None}],
+        "skipped": [{"lead": "Chain Grill", "why": "a chain"}], "note": ""})
+    got = crm.assist_update(crm.AssistRequest(text="find me 20 cocktail bars in Annapolis"))
+    assert asked[0]["count"] == 20
+    assert "Found and added — cocktail bars in Annapolis, MD: Level." in got["reply"]
+    assert {"lead": "Chain Grill", "why": "a chain"} in got["skipped"]
+
+
+def test_the_prospect_prompt_caps_the_count():
+    assert "up to 20" in research.prospect_prompt("bars", "Boise, ID", 500)
+    assert "up to 10" in research.prospect_prompt("bars", "Boise, ID", 0)
+    assert "tourist strip" in research.PROSPECT_SYSTEM and "FULL BAR" in research.PROSPECT_SYSTEM

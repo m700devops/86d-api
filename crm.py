@@ -5640,6 +5640,132 @@ def _check_found(venue: dict, about: str, about_page: str) -> dict:
             "relation": venue["relation"], "source": venue["source_url"] or website}
 
 
+def _check_prospect(venue: dict, corporate: dict) -> dict:
+    """One venue a prospecting search named, put through the lead generator's
+    own rules before it's saved: the map entry (coordinates, hours, street),
+    `leadgen.check_fit` (its own site names it, independent, not a tourist
+    strip, spirits shown on its own pages), then the phone on its site."""
+    import leadgen
+
+    name = venue["name"]
+    loc = ", ".join(x for x in [venue["city"], venue["state"]] if x)
+    hit = leadgen.lookup_venue(name, loc) or {}
+    website = venue["website"] if venue["website"] and leadgen._is_public_http_url(
+        venue["website"]) else (hit.get("website") or "")
+    if not website:
+        return {"ok": False, "why": "couldn't find its own website to check it against"}
+    tags = {k: v for k, v in (("name", name), ("addr:street", hit.get("street")),
+                              ("addr:housenumber", hit.get("housenumber"))) if v}
+    row = {"name": name, "city": venue["city"], "website": website,
+           "lat": hit.get("lat"), "lon": hit.get("lon"),
+           "amenity": hit.get("amenity") or "bar", "raw_tags": json.dumps(tags)}
+    fit = leadgen.check_fit(row, corporate)
+    if fit["status"] != "ok":
+        return {"ok": False, "why": fit["note"]}
+
+    home, answered, status = leadgen._fetch_site(website)
+    pages = home
+    for url in leadgen._contact_urls(answered, home)[:2]:
+        more, st = leadgen._http(url, timeout=leadgen.PAGE_TIMEOUT, verify_public=True)
+        if leadgen._ok(st, more):
+            pages += " " + more
+    site_numbers = leadgen.site_phones(pages)
+    judged = leadgen.judge_phone(normalize_us_phone(venue["phone"]), site_numbers,
+                                 {site_numbers[0][:3]} if len(site_numbers) == 1 else ())
+    if judged["status"] not in leadgen.PHONE_OK:
+        return {"ok": False, "why": "its website doesn't show a phone number we can trust"}
+    email, found_on = leadgen.find_email_on_site(answered, venue_name=name)
+    state = venue["state"] or None
+    return {"ok": True, "name": name, "loc": loc, "state": venue["state"], "website": answered,
+            "phone": judged["phone"], "phone_status": judged["status"],
+            "phone_note": judged["note"], "email": email, "email_found_on": found_on,
+            "relation": venue["relation"], "source": venue["source_url"] or answered,
+            "fit_note": fit["note"], "opening_hours": hit.get("opening_hours"),
+            "tz_offset_hours": leadgen.us_tz_offset(hit.get("lon"), state, hit.get("lat")),
+            "tz_name": leadgen.us_tz_name(hit.get("lon"), state, hit.get("lat"))}
+
+
+def _run_prospect(item: dict, text: str) -> dict:
+    """"Find 20 cocktail bars in Annapolis": one web search, every venue it
+    names through the lead generator's rules and the phone check, and the ones
+    that pass added as new leads. Returns {"added", "skipped", "note"}."""
+    import leadgen
+    import research
+    from concurrent.futures import ThreadPoolExecutor
+    from contacts import email_kind as _email_kind
+
+    loc = _clean(item.get("loc"), 200) or ""
+    find = _clean(item.get("find"), 300) or ""
+    try:
+        count = max(1, min(int(item.get("count") or 10), research.MAX_PROSPECTS))
+    except (TypeError, ValueError):
+        count = 10
+    answer = _claude_research(research.PROSPECT_SYSTEM,
+                              research.prospect_prompt(find, loc, count), purpose="prospect")
+    found, note = research.parse_found(answer, limit=count)
+    with get_db() as conn:
+        corporate = leadgen.corporate_index(conn.cursor())
+
+    def check(v):
+        try:
+            return v, _check_prospect(v, corporate)
+        except Exception as exc:
+            print(f"[crm] PROSPECT_CHECK_FAILED {v.get('name')}: {exc}", flush=True)
+            return v, {"ok": False, "why": "couldn't open its website"}
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(check, found))
+
+    today, now = _today(), now_iso()
+    added, skipped = [], []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for venue, checked in results:
+            if not checked["ok"]:
+                skipped.append({"lead": venue["name"], "why": checked["why"]})
+                continue
+            if _find_existing_lead(cursor, checked["name"], checked["loc"], [checked["phone"]],
+                                   checked["email"]):
+                skipped.append({"lead": checked["name"], "why": "already in your book"})
+                continue
+            reason = leadgen._is_suppressed(cursor, checked["name"], checked["email"],
+                                            checked["phone"], checked["website"])
+            if reason:
+                skipped.append({"lead": checked["name"], "why": f"on the do-not-contact list ({reason})"})
+                continue
+            notes = "\n".join(filter(None, [
+                f"Website: {checked['website']}",
+                f"Email found on: {checked['email_found_on']}" if checked["email"] else None,
+                f"Phone: {checked['phone_note']}" if checked["phone_note"] else None,
+                checked["fit_note"],
+                f"[{today}] Found by the AI when asked for \"{find}\" in {loc}: "
+                f"{checked['relation'] or 'matches'} (source: {checked['source']})"]))
+            cursor.execute("""
+                INSERT INTO crm_leads (id, name, loc, status, source, attempts, phone, email,
+                                       email_kind, notes, tz_offset_hours, tz_name, opening_hours,
+                                       phone_status, fit_status, fit_note, created_at, updated_at)
+                VALUES (%s, %s, %s, 'new', 'research', 0, %s, %s, %s, %s, %s, %s, %s, %s, 'ok',
+                        %s, %s, %s)
+                RETURNING id, name
+            """, (generate_id(), checked["name"], checked["loc"],
+                  format_us_phone_dashed(checked["phone"]), checked["email"],
+                  _email_kind(checked["email"], checked["name"]) if checked["email"] else None,
+                  notes, checked["tz_offset_hours"], checked["tz_name"],
+                  checked["opening_hours"], checked["phone_status"], checked["fit_note"],
+                  now, now))
+            row = cursor.fetchone()
+            changed = ["added as a new lead (found by the AI, passed the owner's rules)",
+                       f"phone {format_us_phone_dashed(checked['phone'])}"]
+            if checked["email"]:
+                changed.append(f"email {checked['email']}")
+            added.append({"lead_id": row["id"], "name": row["name"], "changed": changed,
+                          "undo_id": None})
+        conn.commit()
+    print(f"[crm] PROSPECT find={find!r} loc={loc!r} found={len(found)} added={len(added)} "
+          f"skipped={len(skipped)}", flush=True)
+    return {"added": added, "skipped": skipped, "note": note}
+
+
 def _run_research(item: dict, text: str) -> dict:
     """Find what the AI bar was asked to find, check each on the web, and add
     what passes as a new lead. Returns {"added", "skipped", "note"}."""
@@ -5931,9 +6057,11 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
     # is in the book (and its website on file) before the search starts.
     research_items = [r for r in (out.get("research") or []) if isinstance(r, dict)][:2]
     for item in research_items:
-        about = _clean(item.get("about"), 200) or "that venue"
+        prospect = item.get("kind") == "prospect" or not _clean(item.get("about"), 200)
+        about = (_clean(item.get("loc"), 200) or "the area") if prospect \
+            else (_clean(item.get("about"), 200) or "that venue")
         try:
-            got = _run_research(item, text)
+            got = _run_prospect(item, text) if prospect else _run_research(item, text)
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {}
             skipped.append({"lead": None, "why": f"couldn't search for {about} — "
@@ -5946,15 +6074,16 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
         applied += got["added"]
         skipped += got["skipped"]
         names = ", ".join(a["name"] for a in got["added"])
+        what = (f"{item.get('find') or 'bars'} in {about}" if prospect
+                else f"{about}'s {item.get('find') or 'related venues'}")
         if names:
-            reply += f" Found and added for {about}: {names}."
+            reply += f" Found and added — {what}: {names}."
         elif got["skipped"]:
-            reply += (f" Searched for {about}'s {item.get('find') or 'related venues'}: found "
-                      f"{len(got['skipped'])}, but none checked out on their own websites — "
-                      "see below.")
+            reply += (f" Searched for {what}: found {len(got['skipped'])}, but none passed the "
+                      "checks on their own websites — see below.")
         else:
-            reply += (f" Searched the web for {about}'s {item.get('find') or 'related venues'} "
-                      "and found none." + (f" {got['note']}" if got["note"] else ""))
+            reply += (f" Searched the web for {what} and found none."
+                      + (f" {got['note']}" if got["note"] else ""))
         # The model was told not to ask for names; if it did anyway, the
         # search just answered it.
         if question and re.search(r"\bname", question, re.I):

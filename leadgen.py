@@ -1853,9 +1853,12 @@ def lookup_venue(name: str, loc: Optional[str] = None) -> Optional[dict]:
             lat, lon = float(r.get("lat")), float(r.get("lon"))
         except (TypeError, ValueError):
             lat = lon = None
+        address = r.get("address") or {}
         return {"website": site or None, "lat": lat, "lon": lon,
                 "opening_hours": (tags.get("opening_hours") or "").strip() or None,
-                "phone": first_phone(tags.get("phone") or tags.get("contact:phone"))}
+                "phone": first_phone(tags.get("phone") or tags.get("contact:phone")),
+                "street": address.get("road"), "housenumber": address.get("house_number"),
+                "amenity": r.get("type") if r.get("class") == "amenity" else None}
     return None
 
 
