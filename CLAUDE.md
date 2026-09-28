@@ -373,7 +373,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
-  test_cloudtalk.py -q` (1089 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_cloudtalk.py -q` (1090 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -1493,7 +1493,14 @@ capture. Don't reintroduce them or describe them as current.)
   only if it's really in the transcript, no score when there was no real conversation. If the
   operator logged the call (a call touch from 10 min before to an hour after), a dated line with
   the summary and score is added to the lead; if not, the call is logged for them through
-  `_apply_call_notes` ("From the recording") and the touch re-stamped to when it was made.
+  `_apply_call_notes` ("From the recording") and the touch re-stamped to when it was made —
+  unless the call is STALE (older than `CLOUDTALK_AUTOLOG_HOURS` (24), or the lead was touched
+  after it): then it only gets the score and a note ("Earlier call, from the recording (not
+  counted as a new try)"), so a backfilled call from last week can't rewind the stage, spend a
+  try or overwrite a newer follow-up. **Every start reads the last `CLOUDTALK_LOOKBACK_DAYS` (14)
+  of calls** (the owner's call: the Conversation Intelligence trial started before the reader
+  existed); after the first pass only what's new (last call − 2h). `CLOUDTALK_BATCH` (15) calls
+  read per pass, `cloudtalk.MAX_PAGES` (20) pages of 100.
   REMEMBERED: the transcript in `crm_calls`; LEARNED: the notes feed the playbook, film and prep
   sheet, and the scoreboard carries the average and the weakest part. The CRM tab's SCORE column
   (next to REACHED OUT) shows the latest score, the average under it, and on hover what went
@@ -1886,7 +1893,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - CLOUDTALK_KEY_ID / CLOUDTALK_KEY_SECRET — CloudTalk API key pair (CloudTalk → Account →
   Settings → API Keys, admin only). Unset, the CloudTalk reader does nothing. Transcripts and the
   score need CloudTalk's Conversation Intelligence. CLOUDTALK_POLL_MINUTES (10),
-  CLOUDTALK_LOG_AFTER_MINUTES (45), CLOUDTALK_BATCH (8) are optional
+  CLOUDTALK_LOG_AFTER_MINUTES (45), CLOUDTALK_BATCH (15), CLOUDTALK_LOOKBACK_DAYS (14) and
+  CLOUDTALK_AUTOLOG_HOURS (24) are optional
 - SPACEMAIL_IMAP_HOST / SPACEMAIL_IMAP_PORT — optional (default the SMTP host, 993): where
   sent copies are filed and replies are read. CRM_INBOX_POLL_MINUTES (5) and CRM_INBOX_BATCH
   (20) tune the inbox reader; it needs the mailbox AND `ANTHROPIC_API_KEY`, else it skips

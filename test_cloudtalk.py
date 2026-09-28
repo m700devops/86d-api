@@ -102,3 +102,38 @@ def test_the_playbook_hears_the_scores():
                                                       "objections": 17, "ask": 15}})
     assert any("6 recorded conversations: average 61/100" in l and "weakest part is discovery" in l
                for l in lines)
+
+
+# ── two weeks back, and old calls never logged over newer work ─────────────
+
+def _fake_db(monkeypatch, last):
+    from contextlib import contextmanager
+
+    class Cur:
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchone(self):
+            return {"last": last} if "MAX(started_at)" in self.sql else None
+
+        def fetchall(self):
+            return []
+
+    @contextmanager
+    def db():
+        yield types.SimpleNamespace(cursor=lambda: Cur(), commit=lambda: None)
+
+    monkeypatch.setattr(crm, "get_db", db)
+
+
+def test_every_start_reads_two_weeks_back_then_only_whats_new(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    asked = []
+    monkeypatch.setattr(cloudtalk, "fetch_calls", lambda since, until: asked.append(until - since) or [])
+    _fake_db(monkeypatch, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    monkeypatch.setattr(crm, "_cloudtalk_backfilled", False)
+    crm._import_calls()
+    crm._import_calls()
+    assert asked[0] >= timedelta(days=13, hours=23)        # the whole window, once
+    assert asked[1] < timedelta(hours=4)                   # then from the last call on
+    assert crm.CLOUDTALK_LOOKBACK_DAYS == 14

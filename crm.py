@@ -2295,8 +2295,16 @@ def _reply_ask(mail: dict, brief: str = "") -> str:
 # was made. The score shows on the CRM tab next to REACHED OUT.
 
 CLOUDTALK_LOG_AFTER_MINUTES = int(os.getenv("CLOUDTALK_LOG_AFTER_MINUTES", "45"))
-CLOUDTALK_BATCH = int(os.getenv("CLOUDTALK_BATCH", "8"))       # transcripts read a pass
-CLOUDTALK_LOOKBACK_DAYS = 2
+CLOUDTALK_BATCH = int(os.getenv("CLOUDTALK_BATCH", "15"))      # transcripts read a pass
+# How far back the calls are read: the whole window once after every start
+# (so a backlog — or calls made before the keys were set — gets scored), then
+# only what's new. Was 2 days; the owner asked for 2 weeks.
+CLOUDTALK_LOOKBACK_DAYS = int(os.getenv("CLOUDTALK_LOOKBACK_DAYS", "14"))
+# A call older than this, or one the lead has moved past, is never logged as a
+# new touch: logging last Tuesday's call today would overwrite everything that
+# happened with that bar since. It gets its score and a note instead.
+CLOUDTALK_AUTOLOG_HOURS = int(os.getenv("CLOUDTALK_AUTOLOG_HOURS", "24"))
+_cloudtalk_backfilled = False
 _cloudtalk_lock = threading.Lock()
 
 def _call_read_system() -> str:
@@ -2392,13 +2400,15 @@ def _import_calls() -> int:
         cursor = conn.cursor()
         cursor.execute("SELECT MAX(started_at) AS last FROM crm_calls")
         last = (cursor.fetchone() or {}).get("last")
+    global _cloudtalk_backfilled
     since = now - timedelta(days=CLOUDTALK_LOOKBACK_DAYS)
-    if last:
+    if last and _cloudtalk_backfilled:
         try:
             since = max(since, datetime.fromisoformat(last) - timedelta(hours=2))
         except ValueError:
             pass
     calls = cloudtalk.fetch_calls(since, now)
+    _cloudtalk_backfilled = True
     new = 0
     with get_db() as conn:
         cursor = conn.cursor()
@@ -2479,9 +2489,24 @@ def _finish_call(row: dict) -> str:
         lead = cursor.fetchone()
         mine = _call_logged_by_hand(cursor, lead["id"], row["started_at"], row["ended_at"])
         touch_id = mine
-        if mine:
+        # Only a recent call the lead hasn't moved past is logged as a touch.
+        # An older one — the two-week backfill — would overwrite newer work on
+        # the lead (its stage, follow-up, last touch), so it gets the note and
+        # the score and changes nothing else.
+        stale = False
+        try:
+            began = datetime.fromisoformat(row["started_at"])
+            stale = datetime.now(timezone.utc) - began > timedelta(hours=CLOUDTALK_AUTOLOG_HOURS)
+            if lead.get("last_touch_at"):
+                stale = stale or datetime.fromisoformat(lead["last_touch_at"]) > began
+        except (TypeError, ValueError):
+            stale = True
+        if mine or stale:
             # They logged it: the call keeps their words; this adds what the
-            # recording says and the score, on its own dated line.
+            # recording says and the score, on its own dated line. An older
+            # call nobody logged says so, and counts as nothing else.
+            if not mine:
+                line = f"Earlier call, from the recording (not counted as a new try) — {line}"
             cursor.execute("UPDATE crm_leads SET notes = COALESCE(notes || E'\\n', '') || %s, "
                            "updated_at = %s WHERE id = %s", (f"[{today}] {line}", now, lead["id"]))
             import competitors
@@ -2513,7 +2538,7 @@ def _finish_call(row: dict) -> str:
               cloudtalk.dumps(score) if score else None, touch_id, line[:2000], now, call_id))
         conn.commit()
     print(f"[cloudtalk] CALL_READ {call_id} lead={lead['name']!r} "
-          f"score={score['score'] if score else '-'} logged_by={'you' if mine else 'ai'}",
+          f"score={score['score'] if score else '-'} logged_by={'you' if mine else 'note-only' if stale else 'ai'}",
           flush=True)
     return "done"
 
