@@ -28,7 +28,7 @@ from typing import Optional
 CORE = os.getenv("CLOUDTALK_API_BASE", "https://my.cloudtalk.io/api").rstrip("/")
 AI = os.getenv("CLOUDTALK_AI_BASE", "https://api.cloudtalk.io/v1").rstrip("/")
 PAGE_LIMIT = 100
-MAX_PAGES = 5
+MAX_PAGES = 20             # 2,000 calls: two weeks of heavy calling
 MIN_TALK_SECONDS = 20          # shorter than this there's nothing to score
 TRANSCRIPT_TRIES = 12          # ~2 hours at one look every 10 minutes
 
