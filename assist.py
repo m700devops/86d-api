@@ -224,7 +224,8 @@ def snapshot(leads: list, tries: dict, today: str,
     ordered = sorted(leads, key=rank)   # stable: keeps the caller's order within a rank
     back: dict = {}
     lines = ["LEADS (alias | name | where | stage | contact | phone | email | follow-up | "
-             "list | last outcome | tries | last touched | latest note)"]
+             "list | last outcome | tries | last touched | latest note [| uses <what they use "
+             "for inventory now>])"]
     for i, lead in enumerate(ordered, 1):
         alias = f"L{i}"
         back[alias] = lead["id"]
@@ -239,6 +240,8 @@ def snapshot(leads: list, tries: dict, today: str,
             (lead.get("last_touch_at") or "")[:10],
             _clip(notes[-1], 240) if (worked and notes) else "",
         ])
+        if lead.get("current_system"):
+            row += f" | uses {_clip(lead['current_system'], 40)}"
         if focus_id and lead["id"] == focus_id:
             row += " | <- OPEN ON SCREEN"
         lines.append(row)

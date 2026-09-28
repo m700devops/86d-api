@@ -151,6 +151,15 @@ def init_crm_tables():
             # chain): 'ok' or 'blocked', and the evidence or the reason.
             ("fit_status", "TEXT"),
             ("fit_note", "TEXT"),
+            # What they use for inventory today, one name (competitors.py):
+            # "which bars are on MarginEdge?" has an answer.
+            ("current_system", "TEXT"),
+            # "Call back around 4pm": HH:MM on the VENUE's clock, with
+            # followup_date — the call list puts it on top when it comes.
+            ("callback_time", "TEXT"),
+            # When a bar added by hand (or found by the AI) was checked
+            # against the map and its own website: timezone, hours, phone.
+            ("hand_checked_at", "TEXT"),
         ]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -368,9 +377,51 @@ def init_crm_tables():
     except Exception as e:  # a repair pass must never stop the CRM booting
         print(f"[crm] NO_ANSWER_RECONCILE_FAILED {e!r}", flush=True)
     try:
+        _reconcile_current_system()
+    except Exception as e:
+        print(f"[crm] CURRENT_SYSTEM_RECONCILE_FAILED {e!r}", flush=True)
+    try:
         init_apple_tables()
     except Exception as e:  # Apple Analytics is optional; never block the CRM
         print(f"[crm] APPLE_TABLES_FAILED {e!r}", flush=True)
+
+
+# Note lines that record what a person said — a logged call or email, an AI
+# bar note, what a sister venue's call said — never the lead generator's own
+# bookkeeping (where the email was found, the liquor evidence).
+_SAID_LINE = re.compile(r"\] (?:call|email|fb|note:|updated:)|From the call to ")
+
+
+def system_from_notes(notes: Optional[str]) -> Optional[str]:
+    """What a lead uses for inventory, read from what people SAID in its
+    notes, latest line first. Pure."""
+    import competitors
+    for line in reversed([l for l in (notes or "").splitlines() if _SAID_LINE.search(l)]):
+        found = competitors.system_of(line)
+        if found:
+            return found
+    return None
+
+
+def _reconcile_current_system() -> int:
+    """Every boot: fill `current_system` for leads logged before it existed,
+    from what their notes already say. Only fills a blank — a value set since
+    (or by hand) is never overwritten. Idempotent and cheap: no network."""
+    filled = 0
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, notes FROM crm_leads WHERE current_system IS NULL "
+                       "AND notes IS NOT NULL")
+        for row in cursor.fetchall():
+            found = system_from_notes(row["notes"])
+            if found:
+                cursor.execute("UPDATE crm_leads SET current_system = %s WHERE id = %s "
+                               "AND current_system IS NULL", (found, row["id"]))
+                filled += 1
+        conn.commit()
+    if filled:
+        print(f"[crm] CURRENT_SYSTEM_FILLED rows={filled}", flush=True)
+    return filled
 
 
 def _reconcile_no_answer() -> int:
@@ -442,6 +493,7 @@ class LeadUpdate(BaseModel):
     email_date: Optional[str] = Field(default=None, max_length=32)
     followup_date: Optional[str] = Field(default=None, max_length=32)
     notes: Optional[str] = Field(default=None, max_length=20000)
+    current_system: Optional[str] = Field(default=None, max_length=80)
 
 
 class CountersUpdate(BaseModel):
@@ -487,6 +539,7 @@ LEAD_COLUMNS = (
     "lead_score", "email_kind", "tz_name", "queued_email_at", "venue_facts",
     "manager_name", "manager_role", "manager_source", "manager_seen_at",
     "phone_status", "phone_note", "fit_status", "fit_note",
+    "current_system", "callback_time", "hand_checked_at",
 )
 
 # How long to wait before the next dial, by attempt number. Spread across days
@@ -577,7 +630,7 @@ def _no_answer_outcome(raw_text: str) -> Optional[str]:
 # values are being interpolated into a SQL fragment.
 LEAD_WRITABLE = (
     "name", "loc", "status", "contact", "phone", "email",
-    "call_date", "email_date", "followup_date", "notes",
+    "call_date", "email_date", "followup_date", "notes", "current_system",
 )
 
 
@@ -742,6 +795,7 @@ UNDO_COLUMNS = (
     # these were added simply lack them, and undo only restores what a
     # snapshot holds.
     "name", "loc",
+    "current_system", "callback_time",
 )
 
 
@@ -789,7 +843,9 @@ LEAD_VIEWS = {
 
 
 def _lead_row(row) -> dict:
-    lead = {k: row[k] for k in LEAD_COLUMNS}
+    # .get: a column added by a later migration is simply None on a row
+    # selected before it existed (or by a narrower SELECT).
+    lead = {k: row.get(k) for k in LEAD_COLUMNS}
     lead["phone_digits"] = phone_digits(lead.get("phone"))
     lead["phone_pretty"] = format_us_phone(lead["phone_digits"])
     # What the COPY button and click-to-copy actually hand the clipboard.
@@ -882,8 +938,9 @@ def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         digits = re.sub(r"\D", "", q)
         clause = ("(LOWER(name) LIKE %s OR LOWER(COALESCE(loc,'')) LIKE %s "
                   "OR LOWER(COALESCE(contact,'')) LIKE %s "
-                  "OR LOWER(COALESCE(email,'')) LIKE %s")
-        params += [term, term, term, term]
+                  "OR LOWER(COALESCE(email,'')) LIKE %s "
+                  "OR LOWER(COALESCE(current_system,'')) LIKE %s")
+        params += [term, term, term, term, term]
         if digits:
             clause += " OR REGEXP_REPLACE(COALESCE(phone,''), '[^0-9]', '', 'g') LIKE %s"
             params.append(f"%{digits}%")
@@ -4214,6 +4271,61 @@ def export_csv(scope: str = "today", _: bool = Depends(require_crm_key)):
 # debrief, a status change, a delete. The same restaurant can't be called
 # twice because it simply isn't there any more.
 
+CALLBACK_EARLY_MIN = 15      # on the list this long before the time they gave
+CALLBACK_LATE_MIN = 90       # and off it this long after, if nobody rang
+
+
+def callback_due(followup_date: Optional[str], callback_time: Optional[str],
+                 venue_now: datetime) -> bool:
+    """Whether a "call back around 4pm" is due right now on the venue's own
+    clock: the agreed day there, from a quarter of an hour before the time
+    until an hour and a half after. Pure."""
+    if not followup_date or not callback_time:
+        return False
+    if followup_date[:10] != venue_now.date().isoformat():
+        return False
+    try:
+        h, m = (int(x) for x in callback_time.split(":"))
+    except ValueError:
+        return False
+    now_min = venue_now.hour * 60 + venue_now.minute
+    return h * 60 + m - CALLBACK_EARLY_MIN <= now_min <= h * 60 + m + CALLBACK_LATE_MIN
+
+
+def _callbacks_due(cursor) -> list:
+    """Worked leads whose agreed callback time is now, as call-list rows,
+    marked so the page can say why they're on top. They'd otherwise only be
+    in Follow-ups under a date, and "call back around 4pm, ask for Mike" is
+    exactly the call that has to happen at four."""
+    cursor.execute("""
+        SELECT * FROM crm_leads
+         WHERE callback_time IS NOT NULL AND followup_date IS NOT NULL
+           AND status NOT IN ('won', 'dead')
+           AND phone IS NOT NULL AND phone <> ''
+    """)
+    due = []
+    for row in cursor.fetchall():
+        if row.get("tz_name") or row.get("tz_offset_hours") is not None:
+            there = _venue_now(row.get("tz_name"), row.get("tz_offset_hours"))
+        else:
+            there = datetime.now(_operator_tz())
+        if not callback_due(row.get("followup_date"), row.get("callback_time"), there):
+            continue
+        lead = _lead_row(row)
+        if not lead["phone_ok"]:
+            continue
+        h, m = (int(x) for x in row["callback_time"].split(":"))
+        at = f"{h % 12 or 12}:{m:02d}{'am' if h < 12 else 'pm'}"
+        lead["callback"] = True
+        lead["zone"] = ZONE_LABELS.get(row.get("tz_offset_hours"), "—")
+        lead["call_window"] = {"good_now": True, "state": "callback", "known": True,
+                               "window": at, "hint": f"CALLBACK — they said {at}",
+                               "local_time": there.strftime("%-I:%M%p").lower()}
+        due.append(lead)
+    due.sort(key=lambda l: l["callback_time"])
+    return due
+
+
 def _top_up_call_list() -> int:
     """Fill the call list back up to its size with bars in their window now
     (leadgen.top_up). Never lets a failure stop the list from loading."""
@@ -4256,6 +4368,11 @@ def call_now(limit: Optional[int] = None, _: bool = Depends(require_crm_key)):
              WHERE SUBSTRING(COALESCE(last_touch_at, ''), 1, 10) = %s
         """, (_today(),))
         done_today = cursor.fetchone()["n"]
+        try:
+            callbacks = _callbacks_due(cursor)
+        except Exception as exc:
+            print(f"[crm] CALLBACKS_FAILED {exc}", flush=True)
+            callbacks = []
 
     # Every unworked lead the query returned, before any window or phone
     # filtering. This is "is there anything on the list at all", which is a
@@ -4299,6 +4416,9 @@ def call_now(limit: Optional[int] = None, _: bool = Depends(require_crm_key)):
     reach = _reach
 
     ready.sort(key=reach)
+    # Agreed callbacks whose time has come go first: someone said "four".
+    on_top = {l["id"] for l in callbacks}
+    ready = callbacks + [l for l in ready if l["id"] not in on_top]
     # The nearly-ready ones are ordered by the clock instead: the point of
     # showing them is "this is what you're waiting for and how long".
     soon.sort(key=lambda l: (l["call_window"].get("starts_in") or 9999, *reach(l)))
@@ -4319,7 +4439,10 @@ def call_now(limit: Optional[int] = None, _: bool = Depends(require_crm_key)):
     next_best = queue[0] if queue else None
 
     op_now = datetime.now(_operator_tz())
-    if ready:
+    if callbacks:
+        headline = (f"Call {callbacks[0]['name']} back now — they said "
+                    f"{callbacks[0]['call_window']['window']}")
+    elif ready:
         headline = f"Call {ready[0]['name']} — {len(ready)} ready now"
     elif soon:
         wait = soon[0]["call_window"].get("starts_in") or 0
@@ -4349,7 +4472,8 @@ def call_now(limit: Optional[int] = None, _: bool = Depends(require_crm_key)):
 
     return {
         "headline": headline,
-        "ready": ready[:limit],
+        "ready": ready[:limit + len(callbacks)],
+        "callbacks_count": len(callbacks),
         # Capped at `limit`, not a fixed 12: when the ready pile is thin the
         # page turns this into the actual working table (see crm.html's
         # MIN_WORKING_TABLE), and a 12-row cap would starve that table before
@@ -4423,6 +4547,8 @@ CALL_FIELDS = """  "status": one of "new","contacted","warm","won","dead"
   "followup_date": YYYY-MM-DD, the day they agreed to be contacted again. Null if no day
     was agreed — the system schedules retries itself when nobody was reached
   "best_time": when they said to call, short, in their words ("Tuesdays after 2pm")
+  "callback_time": HH:MM, 24-hour, on THEIR clock, only when the notes give a clock time to
+    call back ("call back around 4pm" -> "16:00", "after 2:30" -> "14:30"). Null otherwise
   "objection": what they pushed back with, close to their words ("already use BevSpot",
     "too busy until after the holidays", "the owner does all the ordering")
   "current_setup": how they do inventory and ordering today, if said ("clipboard and a
@@ -4662,6 +4788,27 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
             sets.append(f"{field} = %s"); params.append(value)
             applied[field] = value
     follow_days = followup if followup is not None else cadence_days
+    # "Call back around 4pm": the time on their clock, and — when no day was
+    # named — today there, or tomorrow if four has already gone. The call
+    # list puts the bar on top when the time comes (_callbacks_due). A later
+    # call without one clears it.
+    callback = None
+    if kind == "call":
+        cb = extracted.get("callback_time")
+        if isinstance(cb, str) and re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", cb.strip()):
+            h, m = cb.strip().split(":")
+            callback = f"{int(h):02d}:{m}"
+        sets.append("callback_time = %s"); params.append(callback)
+        if callback:
+            applied["callback_time"] = callback
+            if followup is None:
+                there = _venue_now(lead.get("tz_name"), lead.get("tz_offset_hours")) \
+                    if (lead.get("tz_name") or lead.get("tz_offset_hours") is not None) else None
+                base = there.date() if there else date.fromisoformat(today)
+                passed = there is not None and there.strftime("%H:%M") >= callback
+                follow_days = (base + timedelta(days=1 if passed else 0)
+                               - date.fromisoformat(today)).days
+                followup = follow_days
     if follow_days is not None:
         when = (date.fromisoformat(today) + timedelta(days=follow_days)).isoformat()
         sets.append("followup_date = %s"); params.append(when)
@@ -4687,6 +4834,14 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
               ("Best time", _text("best_time", 120)),
               ("Next", _text("next_step", 300))]
     extras = [(k, v) for k, v in extras if v]
+    # What they use today, as one name — from what they said about it, and
+    # the operator's own words ("they use our competitor, Margins Edge").
+    import competitors
+    system = competitors.system_of(" ".join(filter(None, [
+        _text("current_setup", 300), _text("objection", 300), raw_text])))
+    if system and system != lead.get("current_system"):
+        sets.append("current_system = %s"); params.append(system)
+        applied["current_system"] = system
     if extras:
         note += " · " + " · ".join(f"{k}: {v}" for k, v in extras)
         applied["details"] = {k: v for k, v in extras}
@@ -5098,6 +5253,8 @@ def _run_research(item: dict, text: str) -> dict:
         results = list(pool.map(check, found))
 
     carry = _assist.words_from(text, _clean(item.get("carry"), 2000) or "") if item.get("carry") else ""
+    import competitors
+    carry_system = competitors.system_of(carry)
     today, now = _today(), now_iso()
     added, skipped = [], []
     with get_db() as conn:
@@ -5125,14 +5282,14 @@ def _run_research(item: dict, text: str) -> dict:
             cursor.execute("""
                 INSERT INTO crm_leads (id, name, loc, status, source, attempts, phone, email,
                                        email_kind, notes, tz_offset_hours, tz_name,
-                                       phone_status, created_at, updated_at)
-                VALUES (%s, %s, %s, 'new', 'research', 0, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                       phone_status, current_system, created_at, updated_at)
+                VALUES (%s, %s, %s, 'new', 'research', 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, name
             """, (generate_id(), checked["name"], checked["loc"],
                   format_us_phone_dashed(checked["phone"]), checked["email"],
                   _email_kind(checked["email"], checked["name"]) if checked["email"] else None,
                   notes, leadgen.us_tz_offset(None, state), leadgen.us_tz_name(None, state),
-                  checked["phone_status"], now, now))
+                  checked["phone_status"], carry_system, now, now))
             row = cursor.fetchone()
             changed = ["added as a new lead (found by the AI, checked on its website)",
                        f"phone {format_us_phone_dashed(checked['phone'])}"]
@@ -5192,6 +5349,12 @@ def _apply_assist_change(cursor, lead, clean: dict, today: str, now: str) -> str
     else:
         undo_id = _snapshot(cursor, lead, "edit (AI bar)", counters_spent=0)
         extra = fields
+        # "Olde Town uses BevSpot" is a note to the model; it's also a fact
+        # the book can be searched by.
+        import competitors
+        said_system = competitors.system_of(note) if note else None
+        if said_system and said_system != lead.get("current_system"):
+            extra = {**fields, "current_system": said_system}
         bits = _assist.describe({k: v for k, v in clean.items() if k not in ("logged", "note")})
         if bits:
             line = f"[{today}] updated: {' · '.join(bits)}" + (f" — {note}" if note else "")
@@ -5240,7 +5403,7 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, name, loc, status, contact, phone, email, followup_date,
+            SELECT id, name, loc, status, contact, phone, email, followup_date, current_system,
                    last_outcome, last_touch_at, notes, manager_name
               FROM crm_leads
              ORDER BY COALESCE(last_touch_at, '') DESC, created_at DESC
@@ -5503,7 +5666,7 @@ def _read_reply(mail: dict, lead_ids: list) -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, name, loc, status, contact, phone, email, followup_date,
+            SELECT id, name, loc, status, contact, phone, email, followup_date, current_system,
                    last_outcome, last_touch_at, notes, manager_name
               FROM crm_leads WHERE id = ANY(%s)
         """, (lead_ids,))

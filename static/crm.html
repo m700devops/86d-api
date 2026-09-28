@@ -1299,6 +1299,9 @@ async function loadCalls(){
 /* Why this row is where it is. The list reorders itself for reasons the
    screen should state, or it just looks arbitrary. */
 function whyTag(l){
+  // An agreed callback whose time has come: someone said "call back at four".
+  if(l.callback) return '<span class="qchip">CALLBACK</span>'
+    + (l.contact?`<div class="ask">Ask for ${esc(l.contact)}</div>`:'');
   if(l.queued_email_at) return '<span class="qchip">EMAIL QUEUED</span>'
     + (l.manager_name?'<span class="why">NAME</span>':'');
   if(l.manager_name) return '<span class="why">NAME</span>';
@@ -1886,6 +1889,7 @@ function leadEditCell(l, cols){
         `<option value="${k}" ${k===l.status?'selected':''}>${v}</option>`).join('')}</select></div>
     ${inp('Contact','contact',l.contact)}${inp('Phone','phone',l.phone)}${inp('Email','email',l.email)}
     ${inp('Callback','followup_date',l.followup_date,'YYYY-MM-DD')}
+    ${inp('Uses now','current_system',l.current_system,'MarginEdge, spreadsheet, clipboard…')}
     <p class="hint" style="margin:10px 0 4px">Notes</p>
     <textarea data-f="notes" rows="5">${esc(l.notes||'')}</textarea>
     <div class="row"><button class="go" data-save-lead>Save</button>
@@ -1895,6 +1899,10 @@ function leadEditCell(l, cols){
 
 /* The full record: every field, every attempt, and the notes. Shared by the
    CRM tab, Yet to Contact and Follow-ups so the three can't drift apart. */
+/* "16:00" -> "4pm", "14:30" -> "2:30pm". */
+const clock12=t=>{ const [h,m]=String(t||'').split(':').map(Number);
+  if(isNaN(h)) return t||''; const ap=h<12?'am':'pm', h12=h%12||12;
+  return m?`${h12}:${String(m).padStart(2,'0')}${ap}`:`${h12}${ap}`; };
 function leadDetailsCell(l, cols){
   const f=(k,v)=>v?`<div class="mailrow"><label>${k}</label><div>${esc(String(v))}</div></div>`:'';
   const t=l.tries||{total:l.attempts||0};
@@ -1903,7 +1911,9 @@ function leadDetailsCell(l, cols){
   return `<td colspan="${cols}">
     ${f('Bar',l.name)}${f('Where',l.loc)}${f('Stage',l.status)}
     ${f('Last touch',[outcomeLabel(l.last_outcome),(l.last_touch_at||'').slice(0,10)].filter(Boolean).join(' · '))}
-    ${f('Tries',t.total?`${t.total}${why?' ('+why+')':''}`:'')}${f('Call back',l.followup_date)}
+    ${f('Tries',t.total?`${t.total}${why?' ('+why+')':''}`:'')}${f('Call back',
+      [l.followup_date, l.callback_time&&`at ${clock12(l.callback_time)} their time`].filter(Boolean).join(' '))}
+    ${f('Uses now',l.current_system)}
     ${f('Ask for',l.contact)}${f('Phone',l.phone_dial||l.phone)}
     ${f('Phone check',l.phone_note||phoneCheck(l))}${f('Email',l.email)}
     ${f('Manager',l.manager_name&&`${l.manager_name}${l.manager_role?' ('+l.manager_role+')':''}`)}
@@ -2072,7 +2082,8 @@ function pipeRow(l,n,opt={}){
      eight separate things to track across. */
   const who=l.contact ? `ask for ${l.contact}`
           : (l.manager_name ? `ask if ${l.manager_name} is still ${l.manager_role||'there'}` : '');
-  const sub=[who, l.email, l.loc].filter(Boolean).join(' · ');
+  const sub=[who, l.email, l.loc, l.current_system&&`uses ${l.current_system}`]
+    .filter(Boolean).join(' · ');
 
   const st=standing(l, opt.today);
   return `<tr data-id="${esc(l.id)}" data-email="${esc(l.email||'')}"
