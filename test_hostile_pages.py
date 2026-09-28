@@ -81,6 +81,9 @@ READERS = {
     "research page link": lambda h: research.related_on_page(
         leadgen._page_text(h), "Libbey's Coastal Kitchen", leadgen._name_words),
     "draft checker, never spoke": lambda h: pitch.lint(h[:200], h, "first", "", h[:2000], "Mike"),
+    "bounce reader": lambda h: inbox.bounce_of(
+        inbox.message_from_bytes(b"Content-Type: text/plain\r\n\r\nx"), "mailer-daemon@x.com",
+        "Undeliverable", h),
     "html email": lambda h: inbox.parse(_mail("html", h)),
     "plain email": lambda h: inbox.parse(_mail("plain", h)),
 }

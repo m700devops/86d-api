@@ -64,6 +64,71 @@ def new_text(body: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()[:TEXT_LIMIT]
 
 
+# ── Bounces: a "this address doesn't exist" notice for mail we sent ─────────
+#
+# The reader used to skip every mailer-daemon message as a robot, so an
+# address that bounced stayed on the lead and was emailed again — and repeated
+# hard bounces are one of the fastest ways for a small sender to get filtered.
+# A standard notice (RFC 3464, multipart/report) says it in fields; others only
+# in words, and those are read for the permanent-failure wording alone.
+_BOUNCE_SUBJECT = re.compile(r"undeliver|delivery status notification|delivery (?:has )?fail"
+                             r"|returned mail|mail delivery (?:failed|subsystem)|failure notice"
+                             r"|could not be delivered|address not found", re.I)
+_PERMANENT = re.compile(r"\b5\.[0-7]\.\d{1,3}\b|\b55[0-4]\b|does(?:n'?t| not) exist|user unknown"
+                        r"|no such (?:user|mailbox|recipient)|address (?:not found|rejected)"
+                        r"|recipient (?:address )?rejected|mailbox (?:unavailable|not found)"
+                        r"|invalid (?:recipient|address|mailbox)|account (?:has been )?disabled",
+                        re.I)
+_ADDR = re.compile(r"(?<![\w.+-])[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){1,8}", re.I)
+
+
+def _dsn_fields(msg) -> dict:
+    """Final-Recipient / Status / Diagnostic-Code from a message/delivery-status
+    part, if there is one."""
+    for part in msg.walk():
+        if part.get_content_type() != "message/delivery-status":
+            continue
+        blocks = part.get_payload()
+        found: dict = {}
+        for block in blocks if isinstance(blocks, list) else []:
+            for key in ("Final-Recipient", "Original-Recipient", "Status", "Action",
+                        "Diagnostic-Code"):
+                value = block.get(key)
+                if value and key not in found:
+                    found[key] = str(value)
+        if found:
+            return found
+    return {}
+
+
+def bounce_of(msg, from_addr: str, subject: str, text: str) -> Optional[dict]:
+    """{"addresses", "permanent", "reason"} when this is a delivery-failure
+    notice, else None. `addresses` are the ones it may be about — the CRM
+    keeps only those it actually sent to. Only a PERMANENT failure (5.x.x,
+    "user unknown") takes an address off a lead; "mailbox full" is not one."""
+    fields = _dsn_fields(msg)
+    robot = bool(_BOUNCE_RE.match(from_addr or "")) or msg.get_content_type() == "multipart/report"
+    if not fields and not (robot and _BOUNCE_SUBJECT.search(subject or "")):
+        return None
+    if fields:
+        rcpt = (fields.get("Final-Recipient") or fields.get("Original-Recipient") or "")
+        addresses = [a.lower() for a in _ADDR.findall(rcpt)]
+        status = fields.get("Status", "")
+        action = fields.get("Action", "").lower()
+        permanent = status.strip().startswith("5") or action == "failed" and not status
+        reason = (fields.get("Diagnostic-Code") or status or action)[:300]
+    else:
+        body = (text or "")[:20000]
+        addresses = list(dict.fromkeys(a.lower() for a in _ADDR.findall(body)))[:10]
+        m = _PERMANENT.search(body)
+        permanent = bool(m)
+        reason = body[max(0, m.start() - 80):m.end() + 120].strip() if m else ""
+    if not addresses:
+        return None
+    return {"addresses": addresses, "permanent": permanent,
+            "reason": re.sub(r"\s+", " ", reason).strip()[:300]}
+
+
 def parse(raw: bytes) -> dict:
     msg = message_from_bytes(raw, policy=policy.default)
     name, addr = parseaddr(str(msg.get("From", "")))
@@ -71,15 +136,18 @@ def parse(raw: bytes) -> dict:
         when = parsedate_to_datetime(str(msg.get("Date"))).isoformat()
     except Exception:
         when = None
+    subject = str(msg.get("Subject", "")).strip()[:300]
+    text = new_text(_text_of(msg))
     return {
+        "bounce": bounce_of(msg, addr.strip().lower(), subject, _text_of(msg)),
         "message_id": (_ids(str(msg.get("Message-ID", ""))) or [None])[0],
         "replying_to": _ids(str(msg.get("In-Reply-To", ""))) + _ids(str(msg.get("References", ""))),
         "from_name": name.strip(),
         "from_addr": addr.strip().lower(),
         "to": [a.lower() for _, a in getaddresses([str(msg.get("To", ""))])],
-        "subject": str(msg.get("Subject", "")).strip()[:300],
+        "subject": subject,
         "date": when,
-        "text": new_text(_text_of(msg)),
+        "text": text,
     }
 
 

@@ -5596,7 +5596,7 @@ def process_inbox(days: int = 3) -> dict:
         cursor.execute("SELECT message_id, lead_id FROM crm_sent_messages")
         sent = {r["message_id"]: r["lead_id"] for r in cursor.fetchall()}
 
-    tally = {"updated": 0, "no_change": 0, "ignored": 0, "failed": 0}
+    tally = {"updated": 0, "no_change": 0, "ignored": 0, "failed": 0, "bounced": 0}
     handled = 0
     for mail in mails:
         if mail["message_id"] in done or handled >= INBOX_BATCH:
@@ -5604,7 +5604,18 @@ def process_inbox(days: int = 3) -> dict:
         lead_ids = (_inbox.match_leads(mail, book, sent)
                     if _inbox.worth_reading(mail, mailer.sender()) else [])
         result, status, draft = None, "ignored", None
-        if lead_ids:
+        bounce = mail.get("bounce")
+        if bounce and bounce.get("permanent"):
+            # An address that doesn't exist comes off the lead and is never
+            # emailed again. No model: the notice says it in fields.
+            try:
+                result = _record_bounce(mail, bounce)
+                status = "bounced" if result["applied"] else "ignored"
+                lead_ids = [a["lead_id"] for a in result["applied"]]
+            except Exception as exc:
+                print(f"[crm] BOUNCE_FAILED {mail.get('subject')!r}: {exc}", flush=True)
+                result, status = {"error": str(exc)[:300]}, "failed"
+        elif lead_ids:
             handled += 1
             try:
                 result = _read_reply(mail, lead_ids)
@@ -5691,6 +5702,47 @@ def _read_reply(mail: dict, lead_ids: list) -> dict:
     return {"reply": str(out.get("reply") or "").strip()[:1000],
             "applied": applied, "skipped": skipped, "opt_out": opt_out,
             "needs_reply": bool(out.get("needs_reply")) and not opt_out}
+
+
+def _record_bounce(mail: dict, bounce: dict) -> dict:
+    """A permanent delivery failure for mail we sent: the address comes off
+    every lead carrying it (the lead stays — the bar and its number are
+    real), a dated note says so, and it goes on the do-not-email list so
+    nothing queued or drafted can send to it again. Only addresses we
+    actually emailed count: the notice quotes other addresses too."""
+    today, now = _today(), now_iso()
+    applied: list = []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT LOWER(to_addr) AS addr FROM crm_sent_emails
+             WHERE LOWER(to_addr) = ANY(%s)
+        """, (bounce["addresses"],))
+        ours = [r["addr"] for r in cursor.fetchall()]
+        for addr in ours:
+            cursor.execute("""
+                INSERT INTO crm_suppressions (id, kind, value, reason, created_at)
+                VALUES (%s, 'email', %s, %s, %s) ON CONFLICT DO NOTHING
+            """, (generate_id(), addr, f"bounced {today}: {bounce.get('reason') or 'address not found'}"[:500],
+                  now))
+            cursor.execute("SELECT * FROM crm_leads WHERE LOWER(email) = %s FOR UPDATE", (addr,))
+            for lead in cursor.fetchall():
+                undo_id = _snapshot(cursor, lead, "edit (email bounced)", counters_spent=0)
+                note = (f"[{today}] Email to {addr} bounced — the address doesn't work"
+                        + (f" ({bounce['reason'][:160]})" if bounce.get("reason") else "")
+                        + ". Taken off; find another address on the next call.")
+                cursor.execute("""
+                    UPDATE crm_leads SET email = NULL, email_kind = NULL, updated_at = %s,
+                           notes = COALESCE(notes || E'\\n', '') || %s
+                     WHERE id = %s
+                """, (now, note, lead["id"]))
+                applied.append({"lead_id": lead["id"], "name": lead["name"], "undo_id": undo_id,
+                                "changed": [f"{addr} bounced — taken off the lead",
+                                            "on the do-not-email list"]})
+        conn.commit()
+    names = ", ".join(a["name"] for a in applied)
+    return {"reply": (f"An email bounced: {', '.join(ours)} doesn't work. Taken off {names}."
+                      if applied else ""), "applied": applied, "bounced": ours}
 
 
 def _record_opt_out(mail: dict, lead_ids: list) -> list:
@@ -5810,7 +5862,7 @@ def inbox_feed(hours: int = 72, _: bool = Depends(require_crm_key)):
                    result, processed_at, lead_ids, opt_out, needs_reply, draft, replied_at,
                    dismissed_at
               FROM crm_inbox
-             WHERE status IN ('updated', 'no_change') AND processed_at >= %s
+             WHERE status IN ('updated', 'no_change', 'bounced') AND processed_at >= %s
              ORDER BY processed_at DESC LIMIT 200
         """, (since,))
         rows = cursor.fetchall()
