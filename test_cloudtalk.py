@@ -193,3 +193,14 @@ def test_a_refused_call_list_is_an_error_not_an_empty_pass(monkeypatch):
     now = datetime.now(timezone.utc)
     with pytest.raises(RuntimeError, match="403"):
         cloudtalk.fetch_calls(now, now)
+
+
+def test_a_pasted_key_loses_its_spaces_and_quotes_and_is_never_shown(monkeypatch):
+    monkeypatch.setenv("CLOUDTALK_KEY_ID", '  "ABCDEFGHIJTESTKEY1"\n')
+    monkeypatch.setenv("CLOUDTALK_KEY_SECRET", " X05Dg4c331c3h61An ")
+    assert cloudtalk._creds() == ("ABCDEFGHIJTESTKEY1", "X05Dg4c331c3h61An")
+    hint = cloudtalk.key_hint()
+    assert '"ABCD…"' in hint and "18 characters" in hint and "17 characters" in hint
+    assert "were ignored" in hint and "X05D" not in hint
+    monkeypatch.setenv("CLOUDTALK_KEY_SECRET", "   ")
+    assert cloudtalk._creds() is None and not cloudtalk.configured()

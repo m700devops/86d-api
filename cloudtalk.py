@@ -33,9 +33,32 @@ MIN_TALK_SECONDS = 20          # shorter than this there's nothing to score
 TRANSCRIPT_TRIES = 12          # ~2 hours at one look every 10 minutes
 
 
+def _clean(value: Optional[str]) -> str:
+    """A key as pasted into Render, without what a paste drags along: spaces,
+    line breaks, and quotes around it. Any of those makes CloudTalk answer 401
+    for a key that is otherwise right."""
+    return (value or "").strip().strip("\"'").strip()
+
+
 def _creds() -> Optional[tuple]:
-    key, secret = os.getenv("CLOUDTALK_KEY_ID"), os.getenv("CLOUDTALK_KEY_SECRET")
+    key, secret = _clean(os.getenv("CLOUDTALK_KEY_ID")), _clean(os.getenv("CLOUDTALK_KEY_SECRET"))
     return (key, secret) if key and secret else None
+
+
+def key_hint() -> str:
+    """What the page may show about the configured key so it can be compared
+    with CloudTalk's: the ID's first characters and both lengths. Never the
+    secret itself."""
+    creds = _creds()
+    if not creds:
+        return ""
+    key, secret = creds
+    raw_key, raw_secret = os.getenv("CLOUDTALK_KEY_ID") or "", os.getenv("CLOUDTALK_KEY_SECRET") or ""
+    bits = [f"The key ID on Render starts \"{key[:4]}…\" and is {len(key)} characters; "
+            f"the secret is {len(secret)} characters."]
+    if raw_key != key or raw_secret != secret:
+        bits.append("(Spaces or quotes around them on Render were ignored.)")
+    return " ".join(bits)
 
 
 def configured() -> bool:
