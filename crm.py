@@ -2326,6 +2326,10 @@ CLOUDTALK_LOOKBACK_DAYS = int(os.getenv("CLOUDTALK_LOOKBACK_DAYS", "14"))
 CLOUDTALK_AUTOLOG_HOURS = int(os.getenv("CLOUDTALK_AUTOLOG_HOURS", "24"))
 _cloudtalk_backfilled = False
 _cloudtalk_lock = threading.Lock()
+# The last background pass, for the page: when it ran and, if it failed, why.
+# In memory on purpose — the next pass overwrites it, and a restart runs one
+# within minutes.
+_cloudtalk_last: dict = {}
 
 def _call_read_system() -> str:
     """Built on use: CALL_FIELDS and CALL_RULES are defined further down."""
@@ -2447,6 +2451,20 @@ def _import_calls() -> int:
             """, (c["call_id"], lead["id"] if lead else None, c["number"], c["direction"],
                   c["started_at"], c["ended_at"], c["talk_seconds"], status, now_iso()))
             new += 1
+        # A call to a number no bar had isn't written off: the bar may have
+        # been added (or its number corrected) since. Try again each pass.
+        cursor.execute("""
+            SELECT call_id, number, talk_seconds FROM crm_calls
+             WHERE status = 'no_lead' AND transcript IS NULL AND started_at >= %s
+             ORDER BY started_at DESC LIMIT 200
+        """, ((now - timedelta(days=CLOUDTALK_LOOKBACK_DAYS)).isoformat(),))
+        for r in cursor.fetchall():
+            lead = _lead_by_number(cursor, r["number"])
+            if lead:
+                cursor.execute(
+                    "UPDATE crm_calls SET lead_id = %s, status = %s WHERE call_id = %s",
+                    (lead["id"], "short" if (r.get("talk_seconds") or 0) < cloudtalk.MIN_TALK_SECONDS
+                     else "pending", r["call_id"]))
         conn.commit()
     return new
 
@@ -2572,7 +2590,12 @@ def process_cloudtalk() -> dict:
     if not _cloudtalk_lock.acquire(blocking=False):
         return {"skipped": "a pass is already running"}
     try:
-        new = _import_calls()
+        try:
+            new = _import_calls()
+        except Exception as exc:
+            _cloudtalk_last.update(at=now_iso(), error=str(exc)[:300])
+            raise
+        _cloudtalk_last.update(at=now_iso(), error="")
         done: dict = {}
         if os.getenv("ANTHROPIC_API_KEY"):
             with get_db() as conn:
@@ -2644,22 +2667,111 @@ def _call_scores(cursor, lead_ids) -> dict:
             for k, v in out.items()}
 
 
-@crm_router.get("/cloudtalk/status", response_model=dict)
-def cloudtalk_status(_: bool = Depends(require_crm_key)):
-    """Is CloudTalk connected, what has it brought in, and the rep's recent
-    average score."""
+def _cloudtalk_state() -> dict:
+    """Everything the page needs to say why there are or aren't scores: calls
+    by status, the week's average, the last pass, the recent calls that
+    matched no bar, and the plain-words explanation (cloudtalk.explain)."""
     import cloudtalk
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT status, COUNT(*) AS n FROM crm_calls GROUP BY status")
         counts = {r["status"]: r["n"] for r in cursor.fetchall()}
+        cursor.execute("SELECT COUNT(score) AS n FROM crm_calls")
+        scored = (cursor.fetchone() or {}).get("n") or 0
         since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         cursor.execute("SELECT AVG(score) AS avg, COUNT(score) AS n FROM crm_calls "
                        "WHERE score IS NOT NULL AND started_at >= %s", (since,))
         week = cursor.fetchone() or {}
-    return {"configured": cloudtalk.configured(), "calls": counts,
+        cursor.execute("""
+            SELECT number, started_at, talk_seconds FROM crm_calls
+             WHERE status = 'no_lead' AND COALESCE(talk_seconds, 0) >= %s
+             ORDER BY started_at DESC LIMIT 12
+        """, (cloudtalk.MIN_TALK_SECONDS,))
+        unmatched = cursor.fetchall()
+    tz = _operator_tz()
+    last = dict(_cloudtalk_last)
+    ai = bool(os.getenv("ANTHROPIC_API_KEY"))
+    return {"configured": cloudtalk.configured(), "ai": ai, "calls": counts,
             "week_average": round(week["avg"]) if week.get("avg") is not None else None,
-            "week_scored": week.get("n") or 0}
+            "week_scored": week.get("n") or 0,
+            "last_pass": _ask_when(last["at"], tz) if last.get("at") else None,
+            "last_error": last.get("error") or "",
+            "unmatched": [{"number": format_us_phone(r["number"]) or r["number"],
+                           "when": _ask_when(r["started_at"], tz),
+                           "talk": cloudtalk.minutes(r.get("talk_seconds"))} for r in unmatched],
+            "explain": cloudtalk.explain(cloudtalk.configured(), ai, counts,
+                                         last.get("error") or "", scored)}
+
+
+@crm_router.get("/cloudtalk/status", response_model=dict)
+def cloudtalk_status(_: bool = Depends(require_crm_key)):
+    """Is CloudTalk connected, what has it brought in, why there are or
+    aren't scores, and the rep's recent average score."""
+    return _cloudtalk_state()
+
+
+@crm_router.post("/cloudtalk/check", response_model=dict)
+def cloudtalk_check(_: bool = Depends(require_crm_key)):
+    """Ask CloudTalk right now, step by step, and say in plain words what
+    happened: are the keys accepted, what calls does it have for the last two
+    weeks, do their numbers match bars in the book, and will it hand over a
+    transcript. Reads only; changes nothing."""
+    import cloudtalk
+    steps: list = []
+
+    def step(ok, text):
+        steps.append({"ok": ok, "text": text})
+
+    if not cloudtalk.configured():
+        step(False, "CLOUDTALK_KEY_ID and CLOUDTALK_KEY_SECRET aren't set on Render. Add them "
+                    "(CloudTalk → Account → Settings → API Keys) and save.")
+        return {"steps": steps, **_cloudtalk_state()}
+    now = datetime.now(timezone.utc)
+    probe = cloudtalk.probe_calls(now - timedelta(days=CLOUDTALK_LOOKBACK_DAYS), now)
+    if probe["status"] == 401:
+        step(False, "CloudTalk rejected the API key (401). Copy the key ID and secret again from "
+                    "CloudTalk → Account → Settings → API Keys into Render.")
+        return {"steps": steps, **_cloudtalk_state()}
+    if probe["status"] != 200:
+        step(False, f"CloudTalk didn't give the call list (HTTP {probe['status']}): "
+                    f"{probe['error'] or 'no reason given'}")
+        return {"steps": steps, **_cloudtalk_state()}
+    step(True, "CloudTalk accepted the API key.")
+    calls = probe["calls"]
+    if not calls:
+        step(False, f"CloudTalk has no calls with a phone number in the last "
+                    f"{CLOUDTALK_LOOKBACK_DAYS} days on this account. If you made calls, check the "
+                    "key belongs to the same CloudTalk account you call from.")
+        return {"steps": steps, **_cloudtalk_state()}
+    real = [c for c in calls if c["talk_seconds"] >= cloudtalk.MIN_TALK_SECONDS]
+    step(True, f"CloudTalk has {probe['total']} call{'s' if probe['total'] != 1 else ''} in the last "
+               f"{CLOUDTALK_LOOKBACK_DAYS} days; {len(real)} of the newest {len(calls)} lasted "
+               f"{cloudtalk.MIN_TALK_SECONDS} seconds or more.")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        matched = [c for c in real if _lead_by_number(cursor, c["number"])]
+    if real:
+        step(bool(matched), f"{len(matched)} of {len(real)} match a bar's number in your book"
+             + ("." if matched else " — a call only gets a score when its number is a bar's phone "
+                                   "(or written in its notes)."))
+    target = (matched or real or calls)[-1]
+    data, status = cloudtalk.fetch_transcript(target["call_id"])
+    text = cloudtalk.transcript_text(data or {})
+    if status == 200 and text:
+        step(True, "CloudTalk hands over transcripts — the newest real call has one.")
+    elif status == 200:
+        step(False, "CloudTalk answered, but that call has no transcript (yet). Transcripts can "
+                    "take a while after the call; make sure the call was recorded.")
+    else:
+        step(False, f"CloudTalk refused the transcript (HTTP {status}). Transcripts come from "
+                    "Conversation Intelligence: check it's switched on for the number you call "
+                    "from, and that calls are recorded.")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        step(False, "ANTHROPIC_API_KEY isn't set on Render, so nothing can read or score the calls.")
+    # Pull them in now rather than waiting for the next 10-minute pass.
+    threading.Thread(target=process_cloudtalk, daemon=True, name="cloudtalk-check").start()
+    step(True, "Started a pass now — anything scoreable is read over the next few minutes.")
+    return {"steps": steps, **_cloudtalk_state()}
 
 
 @crm_router.post("/cloudtalk/sync", response_model=dict)
@@ -2869,6 +2981,7 @@ def coach_hub(days: int = 30, _: bool = Depends(require_crm_key)):
                for c in calls]
     return {"days": days, "configured": cloudtalk.configured(),
             "ai": bool(os.getenv("ANTHROPIC_API_KEY")),
+            "cloudtalk": _cloudtalk_state(),
             "stats": stats, "calls": listing, "waiting": waiting,
             "techniques": callcoach.techniques(), "parts": callcoach.PART_LABEL,
             "targets": callcoach.TARGETS,

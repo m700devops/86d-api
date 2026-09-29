@@ -1884,7 +1884,7 @@ async function loadPipeline(){
                ?`<span>· ${esc(STAGE_NAME[PIPE.first])} first</span>`:'<span>⇅</span>'}</button>`}</th>
           <th>PHONE</th><th>WHERE THINGS STAND</th>
           ${yet?'':'<th class="reach" title="Every call, email and Facebook message — undone ones don\'t count">REACHED OUT<span class="hash">#</span></th>'}
-          ${yet?'':`<th class="reach" title="Your salesman score on the latest CloudTalk call to this bar, out of 100: opener, discovery, objections and the ask, 25 each${SCORE_WEEK!=null?` · your average this week: ${SCORE_WEEK}`:''}">SCORE<span class="hash">${SCORE_WEEK!=null?'wk '+SCORE_WEEK:'/100'}</span></th>`}<th></th>
+          ${yet?'':`<th class="reach" title="Your salesman score on the latest CloudTalk call to this bar, out of 100: opener, discovery, objections and the ask, 25 each${SCORE_WEEK!=null?` · your average this week: ${SCORE_WEEK}`:''}">SCORE<span class="hash">${SCORE_WEEK!=null?'wk '+SCORE_WEEK:(CT_STATUS&&!CT_STATUS.explain?.ok?'<a href="#" class="ctwhy" title="Why there are no scores yet">why none?</a>':'/100')}</span></th>`}<th></th>
         </tr></thead>
         <tbody>${d.leads.map((l,i)=>pipeRow(l,S.offset+i+1,{yet,today:d.today})).join('')}</tbody>
       </table>
@@ -2171,9 +2171,15 @@ function reachHtml(l){
    100), the average over every scored call under it, and on hover what went
    well and what to change. Plain text, no colour: a number to learn from,
    not a verdict. */
-let SCORE_WEEK=null;
+let SCORE_WEEK=null, CT_STATUS=null;
 async function loadScoreWeek(){
-  try{ SCORE_WEEK=(await api('/cloudtalk/status')).week_average; }catch{ SCORE_WEEK=null; }
+  try{ CT_STATUS=await api('/cloudtalk/status'); SCORE_WEEK=CT_STATUS.week_average; }
+  catch{ SCORE_WEEK=null; CT_STATUS=null; }
+}
+/* No scores anywhere yet: the column says why in one click, instead of a
+   column of dashes nobody can explain. */
+function openCoachWhy(){
+  const b=$('menu').querySelector('button[data-tab="coachhub"]'); if(b) switchTab(b);
 }
 function scoreHtml(l){
   const c=l.call_score;
@@ -4076,11 +4082,9 @@ function chRender(){
   const d=CH.data; if(!d) return;
   if(CH.call) return chRenderCall();
   let body='';
-  if(!d.configured&&!d.calls.length)
-    body=`<div class="banner">CloudTalk isn't connected yet (CLOUDTALK_KEY_ID / CLOUDTALK_KEY_SECRET on Render). Once it is, every real conversation lands here, scored and broken down.</div>`;
-  else if(!d.calls.length)
-    body=`<div class="banner">No scored calls in the last ${d.days} days yet. Calls are read about 45 minutes after they end, once CloudTalk has the transcript.</div>`;
-  else body=({overview:chOverview,calls:chCalls,phrases:chPhrases,objections:chObjections,methods:chMethods,ask:chAsk}[CH.view])();
+  if(!d.calls.length)
+    body=`<p class="muted" style="margin:0 0 10px">No scored calls in the last ${d.days} days yet. Here's why:</p>`+chCloudTalk(true);
+  else body=({overview:()=>chCloudTalk(!!CH.check||!CH.data.cloudtalk?.explain?.ok)+chOverview(),calls:chCalls,phrases:chPhrases,objections:chObjections,methods:chMethods,ask:chAsk}[CH.view])();
   if(CH.view==='methods'&&!d.calls.length) body=chMethods();
   if(CH.view==='ask'&&!d.calls.length) body=chAsk();
   $('chBody').innerHTML=chNav()+body;
@@ -4267,6 +4271,22 @@ function chAddCards(list){
   let n=0; list.forEach(([ctx,front,back])=>{ if(addCard(ctx,front,back,true)) n++; });
   toast(n?`${n} added to Replay misses in School — due today.`:'Already in Replay misses.');
 }
+document.addEventListener('click', e=>{
+  if(e.target.closest('a.ctwhy')){ e.preventDefault(); e.stopPropagation(); openCoachWhy(); }
+});
+function chCloudTalk(open){
+  const ct=CH.data?.cloudtalk; if(!ct) return '';
+  const ex=ct.explain||{lines:[]};
+  const steps=CH.check?`<div class="ch-sec" style="margin-top:12px">JUST NOW</div>${CH.check.map(x=>`<div class="ch-habit ${x.ok?'':'off'}"><div>${x.ok?'✓':'✗'} ${esc(x.text)}</div></div>`).join('')}`:'';
+  const um=(ct.unmatched||[]).length?`<div class="ch-sec" style="margin-top:12px">CALLS THAT DIDN'T MATCH A BAR IN YOUR BOOK</div>
+      <p class="muted" style="font-size:12px;margin:0 0 6px">A call is scored against the bar whose phone number it rang. Add the bar (or put this number in its notes) and the next pass scores it.</p>
+      ${ct.unmatched.map(u=>`<div class="ch-habit"><div>${esc(u.number)} <span class="muted">· ${esc(u.when)}</span></div><div class="v">${esc(u.talk)}</div></div>`).join('')}`:'';
+  return `<details class="ch-card" ${open?'open':''}><summary style="cursor:pointer"><strong>CloudTalk</strong> — ${esc(ex.headline||'')}
+      ${ct.last_pass?`<span class="muted" style="font-size:12px"> · last checked ${esc(ct.last_pass)}</span>`:''}</summary>
+    <div style="margin-top:10px">${(ex.lines||[]).map(l=>`<div class="ch-why" style="margin:4px 0">${esc(l)}</div>`).join('')}</div>
+    ${steps}${um}
+    <div class="ch-tools"><button id="chCtCheck" ${CH.busy?'disabled':''}>${CH.busy==='check'?'Asking CloudTalk…':'Check CloudTalk now'}</button></div></details>`;
+}
 $('chBody').addEventListener('click', async e=>{
   const days=e.target.closest('[data-chdays]');
   if(days){ CH.days=+days.dataset.chdays; return loadCoachHub().catch(err=>toast(err.message)); }
@@ -4276,6 +4296,10 @@ $('chBody').addEventListener('click', async e=>{
   if(row) return chOpenCall(row.dataset.chcall);
   const id=e.target.id;
   if(id==='chBack'){ CH.call=null; CH.view='calls'; return chRender(); }
+  if(id==='chCtCheck'){ if(CH.busy) return; CH.busy='check'; chRender();
+    try{ const r=await api('/cloudtalk/check',{method:'POST'}); CH.check=r.steps; CH.data.cloudtalk=r; }
+    catch(err){ toast(err.message); }
+    CH.busy=false; return chRender(); }
   if(id==='chReview'){ if(CH.busy) return; CH.busy=true; chRenderCall();
     try{ const r=await api(`/coach/calls/${encodeURIComponent(CH.call.call_id)}/review`,{method:'POST'});
       if(!r.review) toast(r.message||'Nothing to coach on this call.');

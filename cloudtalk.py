@@ -215,6 +215,10 @@ def fetch_calls(date_from: datetime, date_to: datetime) -> list:
             raise PermissionError("CloudTalk rejected the API key (401)")
         if resp.status_code != 200:
             print(f"[cloudtalk] CALLS HTTP {resp.status_code}: {resp.text[:160]}", flush=True)
+            if page == 1:
+                # Nothing came back at all: say so, so the page can show it,
+                # instead of a pass that quietly found no calls.
+                raise RuntimeError(f"CloudTalk answered HTTP {resp.status_code}: {resp.text[:160]}")
             break
         batch, pages = parse_calls(resp.json())
         calls += batch
@@ -222,6 +226,80 @@ def fetch_calls(date_from: datetime, date_to: datetime) -> list:
             break
     calls.sort(key=lambda c: c["started_at"] or "")
     return calls
+
+
+def probe_calls(date_from: datetime, date_to: datetime) -> dict:
+    """One page of call history, for the page's "Check CloudTalk now": the
+    HTTP status, CloudTalk's own words when it refuses, and the calls. Never
+    raises — a check must always come back with an answer."""
+    fmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        resp = _get(f"{CORE}/calls/index.json", {
+            "date_from": date_from.astimezone(timezone.utc).strftime(fmt),
+            "date_to": date_to.astimezone(timezone.utc).strftime(fmt),
+            "limit": PAGE_LIMIT, "page": 1})
+    except Exception as exc:
+        return {"status": 0, "error": f"couldn't reach CloudTalk: {exc}"[:300], "calls": [], "total": 0}
+    if resp.status_code != 200:
+        return {"status": resp.status_code, "error": (resp.text or "")[:300], "calls": [], "total": 0}
+    try:
+        body = resp.json()
+    except ValueError:
+        return {"status": 200, "error": "CloudTalk answered with something that isn't JSON",
+                "calls": [], "total": 0}
+    calls, _pages = parse_calls(body)
+    total = _int(((body or {}).get("responseData") or {}).get("itemsCount")) or len(calls)
+    return {"status": 200, "error": "", "calls": calls, "total": total}
+
+
+def explain(configured: bool, ai: bool, counts: dict, last_error: str = "",
+            scored: Optional[int] = None) -> dict:
+    """Why there are (or aren't) scores, in plain words, from what the reader
+    has stored. `counts` is crm_calls by status. Returns {ok, headline, lines}."""
+    if not configured:
+        return {"ok": False, "headline": "CloudTalk isn't connected yet.",
+                "lines": ["On Render, add CLOUDTALK_KEY_ID and CLOUDTALK_KEY_SECRET (CloudTalk → "
+                          "Account → Settings → API Keys), then save. Calls start coming in about "
+                          "4 minutes after the restart."]}
+    lines = []
+    if last_error:
+        lines.append(f"The last time it asked CloudTalk, it failed: {last_error}")
+    if not ai:
+        lines.append("ANTHROPIC_API_KEY isn't set on Render, so calls come in but nothing can read "
+                     "or score them.")
+    total = sum(counts.values())
+    if not total:
+        lines.append("No calls have come in from CloudTalk yet. If you've made calls in the last "
+                     "two weeks, press \"Check CloudTalk now\" to see what CloudTalk says.")
+        return {"ok": False, "headline": "No calls from CloudTalk yet.", "lines": lines}
+    done = counts.get("done", 0)
+    scored = done if scored is None else min(scored, done)
+    parts = [f"{total} call{'s' if total != 1 else ''} came in from CloudTalk"]
+    if scored:
+        parts.append(f"{scored} scored")
+    if done - scored:
+        parts.append(f"{done - scored} read but not scored — no real conversation on the "
+                     "recording (voicemail, a hang-up, a wrong number)")
+    lines.insert(0, (f"{parts[0]}: {', '.join(parts[1:])}." if len(parts) > 1 else parts[0] + "."))
+    why = {
+        "no_lead": "didn't match any bar's phone number in your book, so there's no bar to put a "
+                   "score on — see the numbers below",
+        "short": f"were under {MIN_TALK_SECONDS} seconds (no answer, voicemail or a quick hang-up) "
+                 "— nothing to score",
+        "pending": "are waiting: a call is read 45 minutes after it ends, 15 every 10 minutes",
+        "no_transcript": "have no transcript — CloudTalk didn't give one to the API. Check that "
+                         "Conversation Intelligence (transcription) is switched on for your number "
+                         "and that the calls are recorded",
+        "failed": "couldn't be read after 3 tries",
+    }
+    for status, text in why.items():
+        n = counts.get(status, 0)
+        if n:
+            lines.append(f"{n} {text}.")
+    ok = bool(scored)
+    headline = (f"{scored} call{'s' if scored != 1 else ''} scored." if ok
+                else "Calls are coming in, but none has been scored yet.")
+    return {"ok": ok, "headline": headline, "lines": lines}
 
 
 def fetch_transcript(call_id: str) -> tuple[Optional[dict], int]:
