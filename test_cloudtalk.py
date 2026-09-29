@@ -137,3 +137,59 @@ def test_every_start_reads_two_weeks_back_then_only_whats_new(monkeypatch):
     assert asked[0] >= timedelta(days=13, hours=23)        # the whole window, once
     assert asked[1] < timedelta(hours=4)                   # then from the last call on
     assert crm.CLOUDTALK_LOOKBACK_DAYS == 14
+
+
+def test_no_scores_is_always_explained():
+    off = cloudtalk.explain(False, True, {})
+    assert not off["ok"] and "CLOUDTALK_KEY_ID" in off["lines"][0]
+    empty = cloudtalk.explain(True, True, {})
+    assert not empty["ok"] and "Check CloudTalk now" in " ".join(empty["lines"])
+    stuck = cloudtalk.explain(True, True, {"no_lead": 9, "short": 4, "no_transcript": 2})
+    text = " ".join(stuck["lines"])
+    assert not stuck["ok"] and stuck["lines"][0].startswith("15 calls came in")
+    assert "9 didn't match any bar" in text and "4 were under 20 seconds" in text
+    assert "2 have no transcript" in text and "Conversation Intelligence" in text
+    good = cloudtalk.explain(True, True, {"done": 3, "short": 1})
+    assert good["ok"] and good["headline"] == "3 calls scored."
+    read_only = cloudtalk.explain(True, True, {"done": 4}, scored=3)
+    assert read_only["headline"] == "3 calls scored." and "1 read but not scored" in read_only["lines"][0]
+    none_real = cloudtalk.explain(True, True, {"done": 2}, scored=0)
+    assert not none_real["ok"] and "2 read but not scored" in none_real["lines"][0]
+    no_ai = cloudtalk.explain(True, False, {"pending": 2}, last_error="HTTP 500")
+    assert "ANTHROPIC_API_KEY" in " ".join(no_ai["lines"]) and "HTTP 500" in no_ai["lines"][1]
+
+
+def test_the_live_check_says_what_cloudtalk_answered(monkeypatch):
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
+    class R:
+        def __init__(self, code, body=None, text=""):
+            self.status_code, self._body, self.text = code, body, text
+
+        def json(self):
+            return self._body
+
+    monkeypatch.setattr(cloudtalk, "_get", lambda url, params=None, timeout=20.0: R(401, text="Unauthorized"))
+    assert cloudtalk.probe_calls(now, now)["status"] == 401
+    monkeypatch.setattr(cloudtalk, "_get", lambda url, params=None, timeout=20.0: R(200, HISTORY))
+    ok = cloudtalk.probe_calls(now, now)
+    assert ok["status"] == 200 and [c["call_id"] for c in ok["calls"]] == ["5001", "5003"] and ok["total"] == 3
+
+    def boom(*a, **k):
+        raise OSError("network down")
+    monkeypatch.setattr(cloudtalk, "_get", boom)
+    assert cloudtalk.probe_calls(now, now)["status"] == 0
+
+
+def test_a_refused_call_list_is_an_error_not_an_empty_pass(monkeypatch):
+    from datetime import datetime, timezone
+    import pytest
+
+    class R:
+        status_code, text = 403, "Forbidden: API access not enabled"
+
+    monkeypatch.setattr(cloudtalk, "_get", lambda *a, **k: R())
+    now = datetime.now(timezone.utc)
+    with pytest.raises(RuntimeError, match="403"):
+        cloudtalk.fetch_calls(now, now)
