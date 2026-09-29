@@ -2729,8 +2729,11 @@ def cloudtalk_check(_: bool = Depends(require_crm_key)):
     now = datetime.now(timezone.utc)
     probe = cloudtalk.probe_calls(now - timedelta(days=CLOUDTALK_LOOKBACK_DAYS), now)
     if probe["status"] == 401:
-        step(False, "CloudTalk rejected the API key (401). Copy the key ID and secret again from "
-                    "CloudTalk → Account → Settings → API Keys into Render.")
+        step(False, "CloudTalk rejected the API key (401). In CloudTalk → Account → Settings → "
+                    "API Keys, check the key is still there and active, and that its ID matches "
+                    "what Render has. " + cloudtalk.key_hint() + " If the ID doesn't match, or the "
+                    "secret wasn't saved when the key was made, create a new key and paste the ID "
+                    "into CLOUDTALK_KEY_ID and the secret into CLOUDTALK_KEY_SECRET (not swapped).")
         return {"steps": steps, **_cloudtalk_state()}
     if probe["status"] != 200:
         step(False, f"CloudTalk didn't give the call list (HTTP {probe['status']}): "

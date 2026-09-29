@@ -373,7 +373,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
-  test_cloudtalk.py test_callcoach.py -q` (1107 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_cloudtalk.py test_callcoach.py -q` (1108 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -1519,7 +1519,9 @@ capture. Don't reintroduce them or describe them as current.)
   scored), and the CRM tab's SCORE header says "why none?" linking there. **`POST
   /cloudtalk/check`** asks CloudTalk live, step by step (`probe_calls`: key accepted? calls in the
   last 14 days? do their numbers match bars? will it hand over a transcript?), then starts a pass.
-  Reads only. A refused call list on page 1 now RAISES (it used to end the pass silently, looking
+  Reads only. On a 401 it shows `cloudtalk.key_hint()` — the key ID's first 4 characters and
+  both lengths, never the secret — to compare with CloudTalk's API Keys page; `_creds()` strips
+  spaces, line breaks and quotes a paste into Render drags along. A refused call list on page 1 now RAISES (it used to end the pass silently, looking
   exactly like "no calls"). **A no_lead call is re-matched every pass** (last
   `CLOUDTALK_LOOKBACK_DAYS`): add the bar, or its number, and the next pass scores the call.
 - **THE CALL COACH HUB** (callcoach.py, burger → **Call Coach**, `GET /v1/crm/coach/hub?days=`).
