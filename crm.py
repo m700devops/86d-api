@@ -399,6 +399,26 @@ def init_crm_tables():
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE crm_ai_brain ADD COLUMN {col} TEXT")
 
+        # The Call Coach hub (callcoach.py): each call's line-by-line review
+        # and its measured habits, and one row for the cross-call patterns.
+        for col in ("review", "review_at"):
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'crm_calls' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE crm_calls ADD COLUMN {col} TEXT")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_coach_hub (
+                id INTEGER PRIMARY KEY,
+                patterns TEXT,
+                patterns_at TEXT,
+                patterns_calls INTEGER,
+                CONSTRAINT crm_coach_hub_single_row CHECK (id = 1)
+            )
+        """)
+        cursor.execute("INSERT INTO crm_coach_hub (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
+
         conn.commit()
 
         # Deliberately loud and distinctive: this is the line to grep for in
@@ -2581,9 +2601,14 @@ def process_cloudtalk() -> dict:
                                        (tries, "failed" if tries >= 3 else "pending", row["call_id"]))
                         conn.commit()
                 done[status] = done.get(status, 0) + 1
-        if new or done:
-            print(f"[cloudtalk] PASS new={new} {done}", flush=True)
-        return {"new": new, "read": done}
+        reviewed = 0
+        try:
+            reviewed = review_pending_calls()
+        except Exception as exc:
+            print(f"[coach] REVIEW_PASS_FAILED {exc}", flush=True)
+        if new or done or reviewed:
+            print(f"[cloudtalk] PASS new={new} {done} reviewed={reviewed}", flush=True)
+        return {"new": new, "read": done, "reviewed": reviewed}
     finally:
         _cloudtalk_lock.release()
 
@@ -2667,6 +2692,287 @@ def lead_calls(lead_id: str, _: bool = Depends(require_crm_key)):
                     "summary": r["summary"], "score": r["score"], "detail": detail,
                     "transcript": r["transcript"]})
     return {"calls": out}
+
+
+# ============== THE CALL COACH HUB ==============
+#
+# The score says how a call went; the hub says what to do about it
+# (callcoach.py): every scored call gets a line-by-line review — the exact
+# line that cost something, why, what to say instead, and the same moment
+# answered through several named methods — and across calls it keeps the
+# measured habits, the lines that worked, every objection heard with the best
+# answers, and the patterns costing the most. Reviews are written in the
+# background after a call is scored (CLOUDTALK_REVIEW_BATCH a pass), or on
+# demand from the page.
+
+CLOUDTALK_REVIEW_BATCH = int(os.getenv("CLOUDTALK_REVIEW_BATCH", "5"))
+COACH_RETRY_HOURS = 6            # a review that failed waits this long to be tried again
+COACH_PATTERN_CALLS = 20         # calls the cross-call patterns read
+COACH_HUB_MAX_CALLS = 400
+
+
+def _coach_knowledge() -> str:
+    try:
+        k = _knowledge(playbook=True)
+    except Exception as exc:
+        print(f"[coach] knowledge unavailable: {exc}", flush=True)
+        k = ""
+    return ("WHAT THE COMPANY HAS LEARNED (the owner's instructions and the playbook):\n" + k) if k else ""
+
+
+def _review_call(call_id: str) -> Optional[dict]:
+    """Write (or rewrite) one call's review and store it. Returns it, or None
+    when the call has no transcript or nothing in the review checked out."""
+    import callcoach
+    import coach
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT c.call_id, c.lead_id, c.started_at, c.talk_seconds, c.transcript, c.summary,
+                   c.score, c.score_json, l.name, l.loc, l.contact, l.notes
+              FROM crm_calls c LEFT JOIN crm_leads l ON l.id = c.lead_id
+             WHERE c.call_id = %s
+        """, (call_id,))
+        row = cursor.fetchone()
+    if not row or not (row.get("transcript") or "").strip():
+        return None
+    row = dict(row)
+    try:
+        detail = json.loads(row.get("score_json") or "null") or {}
+    except ValueError:
+        detail = {}
+    m = callcoach.metrics(row["transcript"])
+    about = [f"Bar: {row.get('name') or 'unknown'}" + (f", {row['loc']}" if row.get("loc") else "")]
+    if row.get("contact"):
+        about.append(f"Decision maker we ask for: {row['contact']}")
+    history = _lead_history(row) if row.get("notes") else ""
+    if history:
+        about.append("Before this call (oldest first):\n" + history)
+    if detail.get("parts"):
+        p = detail["parts"]
+        about.append(f"Score {row.get('score')}/100 — opener {p.get('opener')}, discovery "
+                     f"{p.get('discovery')}, objections {p.get('objections')}, ask {p.get('ask')}")
+    about.append(f"Measured: he talked {m['rep_share']}% of the words, asked {m['questions']} "
+                 f"questions, longest stretch {m['longest_monologue']} words, "
+                 f"{m['fillers_per_100']} filler words per 100")
+    user = "\n\n".join(["THE CALL\n" + "\n".join(about),
+                         "CLOUDTALK'S SUMMARY\n" + (row.get("summary") or "(none)"),
+                         "TRANSCRIPT\n" + row["transcript"][:60000]])
+    system = callcoach.review_system(coach.PRODUCT, coach.ASKS_TEXT, _coach_knowledge())
+    now = now_iso()
+    try:
+        out = _claude_json(system, user, callcoach.review_schema(), purpose="call-review")
+        review = callcoach.clean_review(out, row["transcript"])
+    except Exception:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE crm_calls SET review_at = %s WHERE call_id = %s", (now, call_id))
+            conn.commit()
+        raise
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE crm_calls SET review = %s, review_at = %s WHERE call_id = %s",
+                       (json.dumps(review or {"empty": True}), now, call_id))
+        conn.commit()
+    print(f"[coach] CALL_REVIEWED {call_id} moments={len((review or {}).get('moments') or [])} "
+          f"objections={len((review or {}).get('objections') or [])}", flush=True)
+    return review
+
+
+def review_pending_calls(limit: Optional[int] = None) -> int:
+    """Review the newest scored calls that have none yet. Called after each
+    CloudTalk pass; a failure rests COACH_RETRY_HOURS before its next try."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=COACH_RETRY_HOURS)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT call_id FROM crm_calls
+             WHERE status = 'done' AND score IS NOT NULL AND review IS NULL
+               AND transcript IS NOT NULL AND (review_at IS NULL OR review_at < %s)
+             ORDER BY started_at DESC LIMIT %s
+        """, (cutoff, limit or CLOUDTALK_REVIEW_BATCH))
+        ids = [r["call_id"] for r in cursor.fetchall()]
+    done = 0
+    for call_id in ids:
+        try:
+            _review_call(call_id)
+            done += 1
+        except Exception as exc:
+            print(f"[coach] CALL_REVIEW_FAILED {call_id}: {exc}", flush=True)
+    return done
+
+
+def _json_or(value, default=None):
+    try:
+        v = json.loads(value) if value else default
+    except (TypeError, ValueError):
+        return default
+    return v
+
+
+def _coach_calls(days: int) -> list:
+    """Scored or reviewed calls in the window, newest first, as callcoach.hub reads them."""
+    import callcoach
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT c.call_id, c.lead_id, c.started_at, c.talk_seconds, c.score, c.score_json,
+                   c.review, c.transcript, l.name
+              FROM crm_calls c LEFT JOIN crm_leads l ON l.id = c.lead_id
+             WHERE c.status = 'done' AND c.started_at >= %s
+               AND (c.score IS NOT NULL OR c.review IS NOT NULL)
+             ORDER BY c.started_at DESC LIMIT %s
+        """, (since, COACH_HUB_MAX_CALLS))
+        rows = cursor.fetchall()
+    tz = _operator_tz()
+    out = []
+    for r in rows:
+        detail = _json_or(r.get("score_json"), {}) or {}
+        review = _json_or(r.get("review"))
+        if isinstance(review, dict) and review.get("empty"):
+            review = None
+        out.append({"call_id": r["call_id"], "lead_id": r.get("lead_id"),
+                    "bar": r.get("name") or "Unknown bar", "when": _ask_when(r["started_at"], tz),
+                    "started_at": r["started_at"], "talk_seconds": r.get("talk_seconds"),
+                    "score": r.get("score"), "parts": detail.get("parts"),
+                    "did_well": detail.get("did_well"), "fix": detail.get("fix"),
+                    "review": review if isinstance(review, dict) else None,
+                    "metrics": callcoach.metrics(r.get("transcript") or ""),
+                    "transcript": r.get("transcript") or ""})
+    return out
+
+
+@crm_router.get("/coach/hub", response_model=dict)
+def coach_hub(days: int = 30, _: bool = Depends(require_crm_key)):
+    """The hub: counted stats over the window, the call list, the phrasebook,
+    the objection library, the methods, and the last cross-call patterns."""
+    import callcoach
+    import cloudtalk
+    days = max(1, min(int(days), 365))
+    calls = _coach_calls(days)
+    stats = callcoach.hub(calls)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT patterns, patterns_at, patterns_calls FROM crm_coach_hub WHERE id = 1")
+        prow = cursor.fetchone() or {}
+        cursor.execute("SELECT COUNT(*) AS n FROM crm_calls WHERE status = 'done' AND score IS NOT NULL "
+                       "AND review IS NULL AND transcript IS NOT NULL")
+        waiting = (cursor.fetchone() or {}).get("n") or 0
+    listing = [{k: c[k] for k in ("call_id", "lead_id", "bar", "when", "talk_seconds", "score",
+                                   "parts", "did_well", "fix")}
+               | {"reviewed": bool(c["review"]),
+                  "headline": (c["review"] or {}).get("headline"),
+                  "focus": (c["review"] or {}).get("focus")}
+               for c in calls]
+    return {"days": days, "configured": cloudtalk.configured(),
+            "ai": bool(os.getenv("ANTHROPIC_API_KEY")),
+            "stats": stats, "calls": listing, "waiting": waiting,
+            "techniques": callcoach.techniques(), "parts": callcoach.PART_LABEL,
+            "targets": callcoach.TARGETS,
+            "patterns": _json_or(prow.get("patterns")),
+            "patterns_at": _ask_when(prow.get("patterns_at"), _operator_tz()) if prow.get("patterns_at") else None,
+            "patterns_calls": prow.get("patterns_calls")}
+
+
+@crm_router.get("/coach/calls/{call_id}", response_model=dict)
+def coach_call(call_id: str, _: bool = Depends(require_crm_key)):
+    """One call's breakdown: transcript as turns, measured habits, score, review."""
+    import callcoach
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT c.call_id, c.lead_id, c.started_at, c.talk_seconds, c.score, c.score_json,
+                   c.review, c.review_at, c.summary, c.transcript, l.name, l.loc
+              FROM crm_calls c LEFT JOIN crm_leads l ON l.id = c.lead_id
+             WHERE c.call_id = %s
+        """, (call_id,))
+        r = cursor.fetchone()
+    if not r:
+        raise HTTPException(status_code=404, detail={"error": "not_found", "message": "No such call."})
+    m = callcoach.metrics(r.get("transcript") or "")
+    review = _json_or(r.get("review"))
+    return {"call_id": r["call_id"], "lead_id": r.get("lead_id"), "bar": r.get("name"),
+            "loc": r.get("loc"), "when": _ask_when(r["started_at"], _operator_tz()),
+            "talk_seconds": r.get("talk_seconds"), "score": r.get("score"),
+            "detail": _json_or(r.get("score_json")), "summary": r.get("summary"),
+            "turns": [{"rep": rep, "text": t} for rep, t in callcoach.turns(r.get("transcript") or "")],
+            "metrics": m, "habits": callcoach.metric_verdicts(m, r.get("talk_seconds") or 0),
+            "review": review if isinstance(review, dict) and not review.get("empty") else None,
+            "review_empty": bool(isinstance(review, dict) and review.get("empty")),
+            "has_transcript": bool((r.get("transcript") or "").strip())}
+
+
+@crm_router.post("/coach/calls/{call_id}/review", response_model=dict)
+def coach_call_review(call_id: str, _: bool = Depends(require_crm_key)):
+    """Write this call's review now (or again)."""
+    review = _review_call(call_id)
+    if review is None:
+        return {"review": None, "message": "Nothing in this call could be coached from the "
+                                           "transcript — too short, or no real conversation."}
+    return {"review": review}
+
+
+@crm_router.post("/coach/hub/patterns", response_model=dict)
+def coach_hub_patterns(_: bool = Depends(require_crm_key)):
+    """Read across the latest reviewed calls: the habits costing the most, what
+    to keep, and a talk track built from his own calls. Stored for the page."""
+    import callcoach
+    import coach
+    calls = [c for c in _coach_calls(90) if c["review"] or c["score"] is not None][:COACH_PATTERN_CALLS]
+    if len(calls) < 2:
+        raise HTTPException(status_code=409, detail={
+            "error": "too_few_calls",
+            "message": "Patterns need at least 2 scored calls. Make a few more and try again."})
+    stats = callcoach.hub(calls)
+    counted = [f"Calls: {stats['scored']}, average score {stats['average']}, parts {stats['parts']}"]
+    for h in stats["habits"]:
+        counted.append(f"{h['label']}: {h['value']} (guide {h['target']})")
+    user = "\n\n".join(["COUNTED ACROSS THESE CALLS\n" + "\n".join(counted)]
+                        + [callcoach.call_digest(c) for c in calls])
+    system = callcoach.patterns_system(coach.PRODUCT, coach.ASKS_TEXT, _coach_knowledge())
+    out = _claude_json(system, user, callcoach.patterns_schema(), purpose="call-patterns")
+    flat = " ".join(" ".join(callcoach._norm(t) for rep, t in callcoach.turns(c["transcript"]) if rep)
+                    for c in calls)
+    patterns = callcoach.clean_patterns(out, flat)
+    if not patterns:
+        raise HTTPException(status_code=502, detail={
+            "error": "patterns_unusable", "message": "The coach's read didn't check out. Try again."})
+    now = now_iso()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE crm_coach_hub SET patterns = %s, patterns_at = %s, patterns_calls = %s "
+                       "WHERE id = 1", (json.dumps(patterns), now, len(calls)))
+        conn.commit()
+    print(f"[coach] PATTERNS calls={len(calls)} habits={len(patterns['habits'])}", flush=True)
+    return {"patterns": patterns, "patterns_at": _ask_when(now, _operator_tz()),
+            "patterns_calls": len(calls)}
+
+
+class CoachAsk(BaseModel):
+    question: str = Field(..., min_length=2, max_length=2000)
+
+
+@crm_router.post("/coach/hub/ask", response_model=dict)
+def coach_hub_ask(data: CoachAsk, _: bool = Depends(require_crm_key)):
+    """Ask the coach anything, answered with his own calls in view."""
+    import callcoach
+    import coach
+    stats = callcoach.hub(_coach_calls(60))
+    seen = []
+    for o in stats["objections"][:8]:
+        heard = "; ".join(f'"{h["text"]}"' for h in o["heard"][:3])
+        seen.append(f"- {o['label']} (heard {o['count']}x): {heard}")
+    habits = [f"- {h['label']}: {h['value']} (guide {h['target']})" for h in stats["habits"]]
+    context = "\n".join(["HIS CALLS LATELY",
+                         f"Average score {stats['average']}, weakest part {stats['weakest']}",
+                         *habits, "Objections he hears:", *(seen or ["- none recorded yet"])])
+    system = callcoach.ask_system(coach.PRODUCT, coach.ASKS_TEXT, _coach_knowledge())
+    out = _claude_json(system, context + "\n\nHIS QUESTION\n" + data.question.strip(),
+                       callcoach.ask_schema(), purpose="coach-ask")
+    return callcoach.clean_ask(out)
 
 
 # ============== THE COMPANY BRAIN ==============

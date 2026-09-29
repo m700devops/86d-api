@@ -326,6 +326,60 @@
      compact value, change vs the previous window (green/red by whether that
      direction is GOOD — more crashes is red), and a per-day bar trend in the
      muted ink with the latest day in the accent. */
+  /* ── Call Coach hub (behind the burger) ───────────────────────────────────
+     Amber marks a line to change, green what to say instead — never red: the
+     owner reads red as alarm, and a coach isn't an alarm. */
+  .ch-nav{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px}
+  .ch-nav button{padding:7px 13px;font-size:13px}
+  .ch-nav button.on{border-color:var(--accent);color:var(--accent);background:#FF6B351A}
+  .ch-sec{margin:22px 0 8px;font-size:11px;letter-spacing:1px;font-weight:700;color:var(--text3)}
+  .ch-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:10px}
+  .ch-card h4{margin:0 0 6px;font-size:14px}
+  .ch-grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:10px}
+  .ch-quote{border-left:3px solid var(--wait);padding:4px 0 4px 11px;margin:6px 0;font-size:14px;line-height:1.45}
+  .ch-quote.them{border-left-color:var(--text3);color:var(--text2)}
+  .ch-quote.good{border-left-color:var(--go)}
+  .ch-say{border-left:3px solid var(--go);background:#3DD68C0F;border-radius:0 8px 8px 0;
+          padding:8px 11px;margin:8px 0;font-size:14px;line-height:1.45}
+  .ch-say b{display:block;font-size:10px;letter-spacing:1px;color:var(--go);margin-bottom:2px}
+  .ch-alt{display:flex;gap:10px;align-items:flex-start;padding:6px 0;border-top:1px solid var(--line);font-size:13.5px;line-height:1.45}
+  .ch-alt:first-of-type{border-top:0}
+  .meth{flex:none;display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;
+        background:var(--surface2);border:1px solid var(--line2);color:var(--text2);white-space:nowrap;cursor:help}
+  .ch-why{font-size:13px;color:var(--text2);margin:2px 0}
+  .ch-part{font-size:10px;letter-spacing:1px;font-weight:700;color:var(--wait);text-transform:uppercase}
+  .ch-bars{display:grid;grid-template-columns:110px 1fr 44px;gap:8px 10px;align-items:center;font-size:13px}
+  .ch-bar{height:9px;border-radius:5px;background:var(--surface2);overflow:hidden}
+  .ch-bar i{display:block;height:100%;background:var(--text2);border-radius:5px}
+  .ch-bar.low i{background:var(--wait)}
+  .ch-habit{display:grid;grid-template-columns:1fr auto;gap:2px 12px;padding:9px 0;border-top:1px solid var(--line);font-size:13px}
+  .ch-habit:first-child{border-top:0}
+  .ch-habit .v{font-weight:700;text-align:right}
+  .ch-habit .t{grid-column:1/-1;color:var(--text3);font-size:12px}
+  .ch-habit.off .v{color:var(--wait)}
+  .ch-trend{display:flex;align-items:flex-end;gap:6px;height:80px;margin-top:8px}
+  .ch-trend div{flex:1;max-width:46px;background:var(--text3);border-radius:4px 4px 0 0;position:relative;min-height:3px}
+  .ch-trend div:last-child{background:var(--accent)}
+  .ch-trend span{position:absolute;top:-17px;left:0;right:0;text-align:center;font-size:11px;color:var(--text2)}
+  .ch-weeks{display:flex;gap:6px;font-size:10px;color:var(--text3)}
+  .ch-weeks div{flex:1;max-width:46px;text-align:center}
+  .ch-tx{font-size:13.5px;line-height:1.5}
+  .ch-tx .ln{display:grid;grid-template-columns:62px 1fr;gap:10px;padding:5px 6px;border-radius:6px}
+  .ch-tx .ln .who{color:var(--text3);font-size:12px;padding-top:1px}
+  .ch-tx .ln.rep .who{color:var(--text2);font-weight:600}
+  .ch-tx .ln.fix{background:#FFB02012}
+  .ch-tx .ln.win{background:#3DD68C10}
+  .ch-tx .ln .mk{font-size:11px;font-weight:700;margin-left:6px}
+  .ch-tx .ln.fix .mk{color:var(--wait)} .ch-tx .ln.win .mk{color:var(--go)}
+  table.sheet.ch td:last-child,table.sheet.ch th:last-child{position:static;box-shadow:none}
+  table.sheet.ch tr{cursor:pointer}
+  .ch-score{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}
+  .ch-mini{font-size:11px;color:var(--text3);white-space:nowrap}
+  .ch-head{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}
+  .ch-head>div:first-child{flex:1;min-width:220px}
+  .ch-big{font-size:34px;font-weight:750;letter-spacing:-1px;line-height:1}
+  .ch-tools{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  @media (max-width:520px){.ch-alt{flex-direction:column;gap:4px}.ch-bars{grid-template-columns:86px 1fr 40px}}
   .applehead{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
   .applehead > div:first-child{flex:1;min-width:180px}
   .applehead .small{font-size:12px}
@@ -537,6 +591,8 @@
             <em>everyone who signed up in the app</em></button>
           <button data-tab="scanner" role="menuitem">Scanner
             <em>how well each AI reads bottles, and how fast</em></button>
+          <button data-tab="coachhub" role="menuitem">Call Coach
+            <em>every real call broken down: what to say instead, and why</em></button>
           <button data-tab="school" role="menuitem">School
             <em>warm up and learn before you dial</em></button>
           <button data-tab="yet" role="menuitem">Yet to Contact
@@ -886,6 +942,11 @@
       <div id="appleBody"></div>
     </section>
 
+    <!-- The Call Coach hub: real CloudTalk calls, reviewed line by line (callcoach.py). -->
+    <section data-panel="coachhub" class="hide">
+      <div id="chBody"></div>
+    </section>
+
     <!-- How each AI reads bottles, from the app's own scan log (scanstats.py). -->
     <section data-panel="scanner" class="hide">
       <div id="scannerBody"></div>
@@ -1016,7 +1077,7 @@ function switchTab(b){
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide',p.dataset.panel!==TAB));
   ({calls:loadCalls,pipeline:loadPipeline,followups:loadFollowups,
     apple:loadApple,users:loadUsers,yet:loadPipeline,brain:loadBrain,scanner:loadScanner,
-    school:loadSchoolPanel}[TAB])()
+    school:loadSchoolPanel,coachhub:loadCoachHub}[TAB])()
     .catch(e=>toast(e.message));
 }
 
@@ -3982,6 +4043,268 @@ $('sRefresh').onclick=async()=>{
     if(tries>40){ clearInterval(t); b.disabled=false; b.textContent='Update the school now'; } },15000);
 };
 tRender(); prRender();
+
+/* ── Call Coach hub ─────────────────────────────────────────────────────────
+   Real CloudTalk calls, reviewed line by line (callcoach.py): where a line
+   cost something, what to say instead, and the same moment through several
+   named methods; across calls, the habits, phrasebook, objection library and
+   a talk track built from his own calls. Everything shown was checked against
+   the transcript on the server. "Practise these" files lines into the
+   School's Replay misses (addCard), so coaching turns into reps. */
+const CH={days:30, view:'overview', data:null, call:null, busy:false};
+const PART_ORDER=['opener','discovery','objections','ask','tone'];
+function chMeth(key){
+  const t=(CH.data?.techniques||[]).find(x=>x.key===key);
+  return t?`<span class="meth" title="${esc(t.what+' — '+t.source)}">${esc(t.name)}</span>`:'';
+}
+function chAlt(a){ return `<div class="ch-alt">${chMeth(a.technique)}<div>“${esc(a.line)}”</div></div>`; }
+function chPartLabel(p){ return (CH.data?.parts||{})[p]||p; }
+async function loadCoachHub(){
+  CH.call=null;
+  $('chBody').innerHTML='<div class="muted">Loading your calls…</div>';
+  CH.data=await api('/coach/hub?days='+CH.days);
+  chRender();
+}
+function chNav(){
+  const tabs=[['overview','Overview'],['calls','Calls'],['phrases','Phrasebook'],['objections','Objections'],['methods','Methods'],['ask','Ask the coach']];
+  return `<div class="applehead"><div><strong>Call Coach</strong>
+      <span class="muted">your real calls, broken down line by line</span></div>
+      <div class="aseg">${[7,30,90].map(w=>`<button data-chdays="${w}" class="${w===CH.days?'on':''}">${w} days</button>`).join('')}</div></div>
+    <div class="ch-nav">${tabs.map(([k,l])=>`<button data-chview="${k}" class="${CH.view===k?'on':''}">${l}</button>`).join('')}</div>`;
+}
+function chRender(){
+  const d=CH.data; if(!d) return;
+  if(CH.call) return chRenderCall();
+  let body='';
+  if(!d.configured&&!d.calls.length)
+    body=`<div class="banner">CloudTalk isn't connected yet (CLOUDTALK_KEY_ID / CLOUDTALK_KEY_SECRET on Render). Once it is, every real conversation lands here, scored and broken down.</div>`;
+  else if(!d.calls.length)
+    body=`<div class="banner">No scored calls in the last ${d.days} days yet. Calls are read about 45 minutes after they end, once CloudTalk has the transcript.</div>`;
+  else body=({overview:chOverview,calls:chCalls,phrases:chPhrases,objections:chObjections,methods:chMethods,ask:chAsk}[CH.view])();
+  if(CH.view==='methods'&&!d.calls.length) body=chMethods();
+  if(CH.view==='ask'&&!d.calls.length) body=chAsk();
+  $('chBody').innerHTML=chNav()+body;
+  if(CH.view==='ask') chAskWire();
+}
+function chOverview(){
+  const d=CH.data, st=d.stats;
+  const tile=(l,v,sub)=>`<div class="atile"><div class="al">${esc(l)}</div><div class="av">${v??'—'}</div>${sub?`<div class="delta">${sub}</div>`:''}</div>`;
+  const weakest=st.weakest?chPartLabel(st.weakest):'—';
+  let h=`<div class="agrid">${tile('Average score',st.average!=null?st.average+'<span class="muted" style="font-size:14px"> /100</span>':null)}
+    ${tile('Calls scored',st.scored, st.reviewed?`${st.reviewed} broken down`:'')}
+    ${tile('Best call',st.best)}${tile('Work on',esc(weakest),'your lowest part')}</div>`;
+  if(d.waiting) h+=`<div class="banner ok" style="color:var(--text2)">${d.waiting} scored call${d.waiting===1?'':'s'} waiting for a breakdown — the coach writes ${d.waiting>5?'5 every 10 minutes':'them within 10 minutes'}, or open one in Calls and write it now.</div>`;
+  // score by part, 0-25 each
+  const parts=['opener','discovery','objections','ask'];
+  h+=`<div class="ch-grid2"><div class="ch-card"><h4>Score by part</h4><div class="ch-bars">${parts.map(p=>{
+      const v=st.parts[p]; const pct=v==null?0:Math.round(v/25*100);
+      return `<div>${esc(chPartLabel(p))}</div><div class="ch-bar ${v!=null&&v<13?'low':''}"><i style="width:${pct}%"></i></div><div class="ch-mini">${v==null?'—':v+'/25'}</div>`;}).join('')}</div>
+    ${st.trend.length>1?`<div class="ch-sec" style="margin-top:16px">WEEKLY AVERAGE</div>${chTrend(st.trend)}`:''}</div>`;
+  // measured habits
+  h+=`<div class="ch-card"><h4>Habits, counted from the transcripts</h4>${st.habits.length?st.habits.map(x=>`<div class="ch-habit ${x.ok?'':'off'}"><div>${esc(x.label)} <span class="muted">· guide ${esc(x.target)}</span></div><div class="v">${esc(x.value)}</div><div class="t">${esc(x.tip)}</div></div>`).join(''):'<div class="muted">No transcripts yet.</div>'}
+    <p class="muted" style="font-size:11px;margin:8px 0 0">Averages over your calls. The guides are coaching rules of thumb, not laws.</p></div></div>`;
+  // patterns
+  h+=`<div class="ch-sec">PATTERNS ACROSS YOUR CALLS</div>`+chPatterns();
+  // missed openings
+  if(st.missed.length){
+    h+=`<div class="ch-sec">OPENINGS YOU DIDN'T TAKE</div><div class="ch-grid2">${st.missed.slice(0,6).map(m=>`<div class="ch-card">
+      <div class="muted" style="font-size:12px">${esc(m.bar)} · ${esc(m.when)}</div>
+      <div class="ch-quote them">They said: “${esc(m.their_words)}”</div>
+      <div class="ch-why">${esc(m.signal)}</div>
+      <div class="ch-say"><b>ASK THIS</b>“${esc(m.ask_this)}”</div></div>`).join('')}</div>`;
+  }
+  return h;
+}
+function chTrend(t){
+  const max=100;
+  return `<div class="ch-trend">${t.map(w=>`<div style="height:${Math.max(4,Math.round(w.avg/max*100))}%" title="${w.calls} call${w.calls===1?'':'s'}"><span>${w.avg}</span></div>`).join('')}</div>
+    <div class="ch-weeks">${t.map(w=>`<div>${esc(new Date(w.week+'T12:00:00').toLocaleDateString(undefined,{month:'short',day:'numeric'}))}</div>`).join('')}</div>`;
+}
+function chPatterns(){
+  const d=CH.data, p=d.patterns;
+  const btn=`<button id="chPatBtn" ${CH.busy?'disabled':''}>${p?'Re-read my calls':'Find my patterns'}</button>`;
+  if(!p) return `<div class="ch-card"><p style="margin:0 0 10px">The coach reads your latest calls together — the habits costing you the most (with your own lines as proof), what to keep doing, and a talk track built from what worked on YOUR calls.</p>${btn}</div>`;
+  const s=p.script||{};
+  let h=`<div class="ch-card"><div class="muted" style="font-size:12px;margin-bottom:8px">Read from ${d.patterns_calls||0} call${d.patterns_calls===1?'':'s'} · ${esc(d.patterns_at||'')}</div>`;
+  if(p.goal) h+=`<div class="ch-say"><b>THIS WEEK'S GOAL</b>${esc(p.goal)}</div>`;
+  (p.habits||[]).forEach((x,i)=>{ h+=`<div style="margin-top:14px"><h4>${i+1}. ${esc(x.habit)}</h4>
+    ${x.evidence.map(e=>`<div class="ch-quote">“${esc(e)}”</div>`).join('')}
+    <div class="ch-why"><strong>What it costs:</strong> ${esc(x.cost)}</div>
+    <div class="ch-why"><strong>The fix:</strong> ${esc(x.fix)}</div>
+    <div class="ch-why"><strong>Practise:</strong> ${esc(x.practice)}</div></div>`; });
+  if((p.keep_doing||[]).length) h+=`<div style="margin-top:14px"><h4>Keep doing</h4>${p.keep_doing.map(k=>`<div class="ch-quote good">${esc(k)}</div>`).join('')}</div>`;
+  h+=`<div class="ch-tools">${btn}</div></div>`;
+  if(s.opener||(s.discovery||[]).length){
+    h+=`<div class="ch-card"><h4>Your talk track</h4><p class="muted" style="font-size:12px;margin:0 0 8px">Built from what worked on your own calls. Say it in your words.</p>`;
+    if(s.opener) h+=`<div class="ch-part">Opener</div>${chAlt(s.opener)}`;
+    if((s.discovery||[]).length) h+=`<div class="ch-part" style="margin-top:10px">Discovery questions</div>${s.discovery.map(chAlt).join('')}`;
+    if((s.objections||[]).length) h+=`<div class="ch-part" style="margin-top:10px">When they push back</div>${s.objections.map(o=>`<div class="ch-alt">${chMeth(o.technique)}<div><span class="muted">${esc(o.label)}:</span> “${esc(o.line)}”</div></div>`).join('')}`;
+    if(s.ask) h+=`<div class="ch-part" style="margin-top:10px">The ask</div>${chAlt(s.ask)}`;
+    if(s.voicemail) h+=`<div class="ch-part" style="margin-top:10px">Voicemail</div><div class="ch-alt"><div>“${esc(s.voicemail)}”</div></div>`;
+    h+=`<div class="ch-tools"><button id="chScriptPractise">Practise the talk track</button></div></div>`;
+  }
+  return h;
+}
+function chCalls(){
+  const d=CH.data;
+  return `<div class="sheetwrap"><table class="sheet ch"><thead><tr><th>WHEN</th><th>BAR</th><th>LENGTH</th><th>SCORE</th><th>BY PART</th><th>THE COACH SAYS</th></tr></thead><tbody>
+    ${d.calls.map(c=>`<tr data-chcall="${esc(c.call_id)}"><td class="ch-mini">${esc(c.when)}</td><td class="nm">${esc(c.bar)}</td>
+      <td class="ch-mini">${c.talk_seconds?Math.floor(c.talk_seconds/60)+'m '+String(c.talk_seconds%60).padStart(2,'0')+'s':'—'}</td>
+      <td class="ch-score">${c.score??'—'}</td>
+      <td class="ch-mini">${c.parts?['opener','discovery','objections','ask'].map(p=>`${chPartLabel(p).replace('The ask','Ask')} ${c.parts[p]}`).join(' · '):''}</td>
+      <td style="font-size:13px">${c.reviewed?esc(c.headline||c.focus||''):`<span class="muted">${esc(c.fix||'Not broken down yet — open it')}</span>`}</td></tr>`).join('')}
+  </tbody></table></div>`;
+}
+function chPhrases(){
+  const st=CH.data.stats; let h='';
+  if(st.best_lines.length) h+=`<div class="ch-sec">YOUR OWN BEST LINES</div><div class="ch-grid2">${st.best_lines.map(b=>`<div class="ch-card">
+      <div class="ch-quote good">“${esc(b.quote)}”</div><div class="ch-why">${esc(b.why)}</div>
+      <div class="muted" style="font-size:12px;margin-top:4px">${esc(b.bar)} · ${esc(b.when)} ${b.technique?chMeth(b.technique):''}</div></div>`).join('')}</div>`;
+  const pb=st.phrasebook||{};
+  PART_ORDER.filter(p=>pb[p]).forEach(p=>{
+    h+=`<div class="ch-sec">${esc(chPartLabel(p).toUpperCase())} — BETTER LINES</div><div class="ch-card">${pb[p].map(x=>`<div class="ch-alt">${chMeth(x.technique)}<div>“${esc(x.line)}”
+      ${x.instead_of?`<div class="muted" style="font-size:12px">instead of “${esc(x.instead_of)}” · ${esc(x.bar)}</div>`:''}</div></div>`).join('')}</div>`;
+  });
+  if(!h) h='<div class="banner">No breakdowns yet. Open a call under Calls and the coach writes one.</div>';
+  else h+=`<div class="ch-tools"><button id="chPhrasePractise">Practise these lines</button></div>`;
+  return h;
+}
+function chObjections(){
+  const obs=CH.data.stats.objections;
+  if(!obs.length) return '<div class="banner">No pushback recorded yet. Every objection a bar gives you lands here with better answers.</div>';
+  return obs.map(o=>`<div class="ch-card"><h4>${esc(o.label)} <span class="muted" style="font-weight:400">· heard ${o.count} time${o.count===1?'':'s'}</span></h4>
+    ${o.heard.map(x=>`<div class="ch-quote them">“${esc(x.text)}” <span class="muted" style="font-size:12px">— ${esc(x.bar)}</span></div>`).join('')}
+    ${o.you_said.length?`<div class="ch-sec" style="margin-top:10px">WHAT YOU SAID</div>${o.you_said.map(x=>`<div class="ch-quote">“${esc(x.text)}”</div>`).join('')}`:''}
+    <div class="ch-sec" style="margin-top:10px">BETTER ANSWERS</div>${o.better.map(chAlt).join('')}</div>`).join('')
+    +`<div class="ch-tools"><button id="chObjPractise">Practise these answers</button></div>`;
+}
+function chMethods(){
+  const st=CH.data.stats||{}, pb=st.phrasebook||{}, use=st.technique_use||{};
+  const all=Object.values(pb).flat();
+  return `<p class="muted" style="font-size:13px;margin:0 0 12px">The methods the coach uses. Each suggestion in a breakdown says which one it is — hover a method's name anywhere for a reminder.</p>
+    <div class="ch-grid2">${CH.data.techniques.map(t=>{ const mine=all.filter(x=>x.technique===t.key).slice(0,3);
+      return `<div class="ch-card"><h4>${esc(t.name)}</h4><div class="muted" style="font-size:12px">${esc(t.source)}${use[t.key]?` · suggested ${use[t.key]}× on your calls`:''}</div>
+        <p style="font-size:13.5px;margin:8px 0">${esc(t.what)}</p><div class="ch-say"><b>SOUNDS LIKE</b>“${esc(t.example)}”</div>
+        ${mine.length?`<div class="ch-part" style="color:var(--text3)">From your calls</div>${mine.map(x=>`<div class="ch-alt"><div>“${esc(x.line)}”</div></div>`).join('')}`:''}</div>`;}).join('')}</div>`;
+}
+function chAsk(){
+  return `<div class="ch-card"><p style="margin:0 0 10px">Ask anything about calling — “how do I answer ‘send me an email’?”, “how do I get past the bartender?”, “what should I say when they already use MarginEdge?”. The coach answers with your own calls in view, and gives you lines to say.</p>
+    <textarea id="chQ" placeholder="Ask the coach…"></textarea><div class="ch-tools"><button class="go" id="chAskBtn">Ask</button></div></div><div id="chAnswer"></div>`;
+}
+function chAskWire(){
+  const b=$('chAskBtn'); if(!b) return;
+  const go=async()=>{ const q=$('chQ').value.trim(); if(!q) return;
+    b.disabled=true; $('chAnswer').innerHTML='<div class="muted">The coach is thinking…</div>';
+    try{ const r=await api('/coach/hub/ask',{method:'POST',body:JSON.stringify({question:q})});
+      CH.lastAsk={q,r};
+      $('chAnswer').innerHTML=`<div class="ch-card"><div style="white-space:pre-wrap;font-size:14px;line-height:1.55">${esc(r.answer)}</div>
+        ${r.lines.length?`<div class="ch-sec">SAY IT LIKE THIS</div>${r.lines.map(chAlt).join('')}<div class="ch-tools"><button id="chAskPractise">Add these to Replay</button></div>`:''}</div>`;
+    }catch(e){ $('chAnswer').innerHTML=`<div class="banner">${esc(e.message)}</div>`; }
+    b.disabled=false; };
+  b.onclick=go; $('chQ').onkeydown=e=>{ if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)) go(); };
+}
+async function chOpenCall(id){
+  CH.call={call_id:id, loading:true}; window.scrollTo(0,0);
+  $('chBody').innerHTML='<div class="muted">Opening the call…</div>';
+  try{ CH.call=await api('/coach/calls/'+encodeURIComponent(id)); }
+  catch(e){ CH.call=null; toast(e.message); return chRender(); }
+  chRenderCall();
+}
+function chRenderCall(){
+  const c=CH.call, r=c.review;
+  const p=c.detail?.parts;
+  let h=`<div class="ch-nav"><button id="chBack">← All calls</button></div>
+    <div class="ch-head"><div><div style="font-size:20px;font-weight:700">${esc(c.bar||'Unknown bar')}</div>
+      <div class="muted">${esc(c.loc||'')} · ${esc(c.when)} · ${c.talk_seconds?Math.floor(c.talk_seconds/60)+'m '+String(c.talk_seconds%60).padStart(2,'0')+'s':''}</div></div>
+      ${c.score!=null?`<div style="text-align:right"><div class="ch-big">${c.score}</div><div class="ch-mini">out of 100</div></div>`:''}</div>`;
+  if(p) h+=`<div class="ch-card"><div class="ch-bars">${['opener','discovery','objections','ask'].map(k=>`<div>${esc(chPartLabel(k))}</div><div class="ch-bar ${p[k]<13?'low':''}"><i style="width:${Math.round(p[k]/25*100)}%"></i></div><div class="ch-mini">${p[k]}/25</div>`).join('')}</div>
+    ${c.detail.did_well?`<div class="ch-why" style="margin-top:10px"><strong>Did well:</strong> ${esc(c.detail.did_well)}</div>`:''}
+    ${c.detail.fix?`<div class="ch-why"><strong>Next time:</strong> ${esc(c.detail.fix)}</div>`:''}</div>`;
+  if(c.habits.length) h+=`<div class="ch-card"><h4>Counted on this call</h4>${c.habits.map(x=>`<div class="ch-habit ${x.ok?'':'off'}"><div>${esc(x.label)} <span class="muted">· guide ${esc(x.target)}</span></div><div class="v">${esc(x.value)}</div><div class="t">${esc(x.tip)}</div></div>`).join('')}</div>`;
+  if(!r){
+    h+=`<div class="ch-card">${c.review_empty?'<p style="margin:0 0 10px">Last time the coach found nothing it could stand behind on this call — usually a very short or one-sided conversation.</p>':'<p style="margin:0 0 10px">This call hasn\'t been broken down yet.</p>'}
+      ${c.has_transcript?`<button class="go" id="chReview" ${CH.busy?'disabled':''}>${CH.busy?'The coach is reading the call… (up to a minute)':'Break it down now'}</button>`:'<div class="muted">No transcript from CloudTalk for this call.</div>'}</div>`;
+  } else {
+    h+=`<div class="ch-card"><h4>${esc(r.headline)}</h4>
+      ${r.focus?`<div class="ch-say"><b>NEXT CALL, DO THIS</b>${esc(r.focus)}</div>`:''}
+      ${r.drill?`<div class="ch-why"><strong>Drill:</strong> ${esc(r.drill)}</div>`:''}
+      <div class="ch-tools"><button class="go" id="chCallPractise">Practise this call's fixes</button><button id="chReview">Break it down again</button></div></div>`;
+    if(r.moments.length){ h+=`<div class="ch-sec">WHERE IT WENT WRONG — AND WHAT TO SAY INSTEAD</div>`;
+      r.moments.forEach((m,i)=>{ h+=`<div class="ch-card"><div class="ch-part">${i+1} · ${esc(chPartLabel(m.part))}</div>
+        <div class="ch-quote">You said: “${esc(m.quote)}”</div>
+        <div class="ch-why"><strong>${esc(m.problem)}</strong>${m.why?' — '+esc(m.why):''}</div>
+        ${m.say_instead?`<div class="ch-say"><b>SAY INSTEAD ${m.technique?'· '+esc((CH.data?.techniques||[]).find(t=>t.key===m.technique)?.name||'').toUpperCase():''}</b>“${esc(m.say_instead)}”</div>`:''}
+        ${m.alternatives.length?`<div class="ch-part" style="color:var(--text3);margin-top:6px">OTHER WAYS TO PLAY IT</div>${m.alternatives.map(chAlt).join('')}`:''}</div>`; }); }
+    if(r.objections.length){ h+=`<div class="ch-sec">THEIR PUSHBACK</div>`;
+      r.objections.forEach(o=>{ h+=`<div class="ch-card"><div class="ch-quote them">They said: “${esc(o.their_words)}”</div>
+        ${o.you_said?`<div class="ch-quote">You said: “${esc(o.you_said)}”</div>`:'<div class="ch-why">You didn\'t answer it.</div>'}
+        <div class="ch-part" style="color:var(--text3);margin-top:6px">BETTER ANSWERS</div>${o.better.map(chAlt).join('')}</div>`; }); }
+    if(r.missed.length){ h+=`<div class="ch-sec">OPENINGS YOU DIDN'T TAKE</div>`;
+      r.missed.forEach(m=>{ h+=`<div class="ch-card"><div class="ch-quote them">They said: “${esc(m.their_words)}”</div><div class="ch-why">${esc(m.signal)}</div>
+        <div class="ch-say"><b>ASK THIS</b>“${esc(m.ask_this)}”</div></div>`; }); }
+    if(r.strengths.length){ h+=`<div class="ch-sec">WHAT WORKED</div>`;
+      r.strengths.forEach(s=>{ h+=`<div class="ch-card"><div class="ch-quote good">“${esc(s.quote)}”</div><div class="ch-why">${esc(s.why)} ${s.technique?chMeth(s.technique):''}</div></div>`; }); }
+  }
+  if(c.turns.length) h+=`<div class="ch-sec">THE WHOLE CALL</div><div class="ch-card ch-tx">${chTranscript(c)}</div>`;
+  $('chBody').innerHTML=h;
+}
+/* The transcript, with the lines the review points at marked: amber where a
+   moment is, green where a strength is — matched the way the server checked
+   them (words only, case and punctuation ignored). */
+function chNorm(t){ return (String(t||'').toLowerCase().match(/[a-z0-9']+/g)||[]).join(' '); }
+function chTranscript(c){
+  const r=c.review||{moments:[],strengths:[]};
+  const marks=(text)=>{ const n=chNorm(text);
+    const mi=r.moments.findIndex(m=>chNorm(m.quote.split(/\.\.\.|…/)[0]) && n.includes(chNorm(m.quote.split(/\.\.\.|…/)[0])));
+    if(mi>=0) return ['fix',`#${mi+1}`];
+    if(r.strengths.some(s=>n.includes(chNorm(s.quote)))) return ['win','worked'];
+    return ['',''];
+  };
+  return c.turns.map(t=>{ const [cls,mk]=t.rep?marks(t.text):['',''];
+    return `<div class="ln ${t.rep?'rep':''} ${cls}"><div class="who">${t.rep?'You':'Them'}</div><div>${esc(t.text)}${mk?`<span class="mk">${esc(mk)}</span>`:''}</div></div>`; }).join('');
+}
+function chAddCards(list){
+  let n=0; list.forEach(([ctx,front,back])=>{ if(addCard(ctx,front,back,true)) n++; });
+  toast(n?`${n} added to Replay misses in School — due today.`:'Already in Replay misses.');
+}
+$('chBody').addEventListener('click', async e=>{
+  const days=e.target.closest('[data-chdays]');
+  if(days){ CH.days=+days.dataset.chdays; return loadCoachHub().catch(err=>toast(err.message)); }
+  const v=e.target.closest('[data-chview]');
+  if(v){ CH.view=v.dataset.chview; CH.call=null; return chRender(); }
+  const row=e.target.closest('tr[data-chcall]');
+  if(row) return chOpenCall(row.dataset.chcall);
+  const id=e.target.id;
+  if(id==='chBack'){ CH.call=null; CH.view='calls'; return chRender(); }
+  if(id==='chReview'){ if(CH.busy) return; CH.busy=true; chRenderCall();
+    try{ const r=await api(`/coach/calls/${encodeURIComponent(CH.call.call_id)}/review`,{method:'POST'});
+      if(!r.review) toast(r.message||'Nothing to coach on this call.');
+      CH.call=await api('/coach/calls/'+encodeURIComponent(CH.call.call_id));
+      CH.data=await api('/coach/hub?days='+CH.days);
+    }catch(err){ toast(err.message); }
+    CH.busy=false; return CH.call?chRenderCall():chRender(); }
+  if(id==='chPatBtn'){ if(CH.busy) return; CH.busy=true; e.target.disabled=true; e.target.textContent='Reading your calls… (up to a minute)';
+    try{ const r=await api('/coach/hub/patterns',{method:'POST'});
+      Object.assign(CH.data,r); }catch(err){ toast(err.message); }
+    CH.busy=false; return chRender(); }
+  if(id==='chCallPractise'){ const c=CH.call, r=c.review, ctx=`From your call with ${c.bar}`;
+    return chAddCards([...r.moments.filter(m=>m.say_instead).map(m=>[ctx,`You said: “${m.quote}”`,m.say_instead]),
+      ...r.objections.map(o=>[ctx,`${c.bar}: “${o.their_words}”`,o.better[0].line]),
+      ...r.missed.map(m=>[ctx,`${c.bar}: “${m.their_words}”`,m.ask_this])]); }
+  if(id==='chObjPractise') return chAddCards(CH.data.stats.objections.flatMap(o=>o.heard.slice(0,1).map(x=>
+      [`Objection: ${o.label}`,`${x.bar}: “${x.text}”`,(o.better[0]||{}).line])));
+  if(id==='chPhrasePractise') return chAddCards(Object.values(CH.data.stats.phrasebook).flat().filter(x=>x.instead_of).slice(0,20)
+      .map(x=>[`Better line · ${x.bar}`,`You said: “${x.instead_of}”`,x.line]));
+  if(id==='chScriptPractise'){ const s=CH.data.patterns.script, cards=[];
+    if(s.opener) cards.push(['Your talk track','Open the call',s.opener.line]);
+    (s.discovery||[]).forEach((q,i)=>cards.push(['Your talk track',`Discovery question ${i+1}`,q.line]));
+    (s.objections||[]).forEach(o=>cards.push(['Your talk track',`They say: ${o.label}`,o.line]));
+    if(s.ask) cards.push(['Your talk track','Make the ask',s.ask.line]);
+    if(s.voicemail) cards.push(['Your talk track','Leave the voicemail',s.voicemail]);
+    return chAddCards(cards); }
+  if(id==='chAskPractise'&&CH.lastAsk) return chAddCards(CH.lastAsk.r.lines.map(l=>['Ask the coach',CH.lastAsk.q,l.line]));
+});
+
 
 (function(){let k=null;try{k=localStorage.getItem(KEY_STORE)}catch{}
   if(k) unlock(k); else lock(null);})();
