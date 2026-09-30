@@ -24,7 +24,7 @@ import pitch  # noqa: E402
 
 def test_the_sheet_carries_the_owners_facts():
     sheet = pitch.master_sheet()
-    for fact in ("Stephan", "910-335-2760", "$29.99/month", "First month free",
+    for fact in ("Stephan", "910-335-2760", "$49.99/month", "15 days free",
                  "No credit card", pitch.APP_URL, "iOS only", "restaurant's name",
                  "bar manager's name"):
         assert fact in sheet, fact
@@ -346,3 +346,14 @@ def test_a_revision_keeps_its_greeting(drafted, monkeypatch):
 def test_the_page_gets_the_same_signature():
     import mailer
     assert crm.mail_status(True)["signature"] == SIG
+
+
+def test_trial_length_is_one_number_everywhere():
+    # What the pitch promises is what signup grants: main.py sets trial_ends_at
+    # from pitch.TRIAL_DAYS, and no sales line may still promise a month.
+    import coach
+    assert pitch.TRIAL_DAYS == 15
+    for text in (pitch.master_sheet(), pitch.STYLE, pitch.EXAMPLE_EMAIL, coach.PRODUCT, coach.ASKS_TEXT):
+        assert "month free" not in text.lower() and "first month" not in text.lower()
+        assert "{TRIAL" not in text
+    assert "15 days free" in pitch.master_sheet() and "15 days free" in pitch.STYLE

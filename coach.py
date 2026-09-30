@@ -26,6 +26,8 @@ from what was on file — was tried and removed at the owner's request.)
 """
 from typing import Optional
 
+import pitch
+
 WIN_TRUST = 70
 WIN_PAINS = 2
 PAIN_BONUS = 8          # patience back when you find what's actually hurting them
@@ -199,8 +201,8 @@ def _product() -> str:
             "restaurants. Point the camera at a bottle and AI identifies it, tap in the count, "
             "and it sorts everything by distributor and emails every distributor its order in "
             "one tap, with the restaurant's and bar manager's names on it. Each bottle's price, "
-            "par and distributor are set once and remembered, and every order is saved. First "
-            f"month free with no credit card, then {pitch.PRICE}. It does NOT connect to a "
+            "par and distributor are set once and remembered, and every order is saved. The "
+            f"first {pitch.TRIAL_DAYS} days are free with no credit card, then {pitch.PRICE}. It does NOT connect to a "
             "POS, measure how full a bottle is, or order through distributor portals, and "
             "there are no customer numbers or testimonials to quote. The rep is the founder.")
 
@@ -209,7 +211,7 @@ PRODUCT = _product()
 
 # The three asks the company actually makes (pitch.py's WHAT WE ASK FOR).
 # Practice drills these, not a generic "book the meeting".
-ASKS = ("try it on their next count: download from the App Store, first month free, no card",
+ASKS = (f"try it on their next count: download from the App Store, {pitch.TRIAL}, no card",
         "a short call with the founder to see it",
         "the name of whoever counts and orders, and when they're in")
 ASKS_TEXT = "; ".join(f"({i + 1}) {a}" for i, a in enumerate(ASKS))
