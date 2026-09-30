@@ -77,7 +77,7 @@ def test_the_brief_uses_the_history_and_is_kept(monkeypatch):
     assert d["ask_for"] == "Brent, the owner, per Lesley"
     assert d["watch_for"] and d["points"] == ["Brent does the ordering himself."]
     assert "Lesley says Brent owns it" in st["user"]              # the call before
-    assert "MASTER SHEET" in st["system"] and "$29.99" in st["system"]
+    assert "MASTER SHEET" in st["system"] and "$49.99" in st["system"]
     stored = json.loads(st["writes"][0][0])
     assert stored["v"] == crm.BRIEF_VERSION and stored["fp"]
     # Same inputs: served from the cache, no second model call.

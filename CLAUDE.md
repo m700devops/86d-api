@@ -373,7 +373,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
-  test_cloudtalk.py test_callcoach.py -q` (1108 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_cloudtalk.py test_callcoach.py test_launch_price.py -q` (1114 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -1581,7 +1581,7 @@ capture. Don't reintroduce them or describe them as current.)
   with its outcome), then the notes. The Email button swaps that panel for the compose box
 - **The drafter works from a MASTER SHEET** (pitch.py). `master_sheet()` is everything it may
   say about 86'd — owner Stephan and his direct line (910-335-2760), the four-step "how it
-  works", what's on every order, 15 days free (`pitch.TRIAL_DAYS`, which main.py also uses for `trial_ends_at`) with no card, then $29.99/month, the App
+  works", what's on every order, 15 days free (`pitch.TRIAL_DAYS`, which main.py also uses for `trial_ends_at`) with no card, then $49.99/month (`pitch.PRICE`), the App
   Store link and the website — each checked against this repo. `EXAMPLE_EMAIL` is the
   owner's own email, given as the reference for substance; `STYLE` asks for more human than
   that (relevance first, the founder's own voice with no invented backstory, one easy ask, a
@@ -1916,6 +1916,13 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - RESEND_API_KEY — order emails and password resets cannot send without it
 - STRIPE_SECRET_KEY — checkout/billing endpoints 503 without it
 - STRIPE_PRICE_ID — checkout endpoint 503s without it, nobody can subscribe
+- STRIPE_LAUNCH_PRICE_ID — the $29.99/month launch price. The first `LAUNCH_PRICE_SLOTS` (10)
+  real accounts ever made (oldest `created_at`, live, not `crm.TEST_EMAIL_PATTERN`) check out
+  at it; everyone else at STRIPE_PRICE_ID ($49.99/month). Unset = everyone pays the regular
+  price. It only picks the price of a NEW checkout: an existing Stripe subscription stays on
+  the price it started on. `GET /v1/billing/price` tells the paywall which one (`price`,
+  `launch`, `regular_price`); PRICE_LABEL / LAUNCH_PRICE_LABEL override the shown amounts
+  ("$49.99" / "$29.99"). Covered by test_launch_price.py
 - STRIPE_WEBHOOK_SECRET — without it, payments don't activate subscriptions (customers pay and stay locked out)
 - CRM_API_KEY — shared key for `/v1/crm/*`; unset means every CRM endpoint 503s (the UI at
   `/crm` still loads, it just can't do anything). Not used by the mobile app at all

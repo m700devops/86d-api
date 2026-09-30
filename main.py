@@ -74,6 +74,7 @@ async def lifespan(app: FastAPI):
         ("RESEND_API_KEY", bool(os.getenv("RESEND_API_KEY")), "order emails and password resets cannot send"),
         ("STRIPE_SECRET_KEY", bool(os.getenv("STRIPE_SECRET_KEY")), "checkout/billing endpoints will 503"),
         ("STRIPE_PRICE_ID", bool(os.getenv("STRIPE_PRICE_ID")), "checkout endpoint will 503 — nobody can subscribe"),
+        ("STRIPE_LAUNCH_PRICE_ID", bool(os.getenv("STRIPE_LAUNCH_PRICE_ID")), "the first 10 accounts are charged the regular price, not the $29.99 launch price"),
         ("STRIPE_WEBHOOK_SECRET", bool(os.getenv("STRIPE_WEBHOOK_SECRET")), "payments won't activate subscriptions — customers pay and stay locked out"),
         ("ANTHROPIC_API_KEY", bool(os.getenv("ANTHROPIC_API_KEY")), "the CRM can't read call notes into fields — they get typed by hand (sales tool only, no effect on the app)"),
         ("SPACEMAIL_USER / SPACEMAIL_PASSWORD", bool(os.getenv("SPACEMAIL_USER") and os.getenv("SPACEMAIL_PASSWORD")), "the CRM's Email button falls back to a mailto: link and sends nothing itself (sales tool only)"),
@@ -3514,6 +3515,54 @@ async def _leadgen_daily_loop():
         await asyncio.sleep(LEADGEN_CHECK_INTERVAL_SECONDS)
 
 
+# ============== PRICE ==============
+# $49.99/month (STRIPE_PRICE_ID), except the first LAUNCH_PRICE_SLOTS (10)
+# accounts ever made, which keep the launch price of $29.99
+# (STRIPE_LAUNCH_PRICE_ID). "First" = oldest created_at among live accounts
+# that aren't ours or App Store review's (crm.TEST_EMAIL_PATTERN, the same
+# filter as the CRM's Customers list), so a review account can't take a slot.
+# It only picks the price a NEW checkout uses: a subscription Stripe already
+# holds stays on whatever price it was started on. Without
+# STRIPE_LAUNCH_PRICE_ID set, everyone gets STRIPE_PRICE_ID.
+LAUNCH_PRICE_SLOTS = int(os.getenv("LAUNCH_PRICE_SLOTS", "10"))
+PRICE_LABEL = os.getenv("PRICE_LABEL") or "$49.99"
+LAUNCH_PRICE_LABEL = os.getenv("LAUNCH_PRICE_LABEL") or "$29.99"
+
+
+def _launch_user_ids(cursor) -> list:
+    if LAUNCH_PRICE_SLOTS <= 0:
+        return []
+    from crm import TEST_EMAIL_PATTERN
+    cursor.execute(
+        "SELECT id FROM users WHERE deleted_at IS NULL AND email !~* %s "
+        "ORDER BY created_at, id LIMIT %s",
+        (TEST_EMAIL_PATTERN, LAUNCH_PRICE_SLOTS),
+    )
+    return [r["id"] for r in cursor.fetchall()]
+
+
+def _price_for(cursor, user_id: str) -> dict:
+    """The Stripe price, and the label the app shows, for this account."""
+    launch_id = os.getenv("STRIPE_LAUNCH_PRICE_ID")
+    if launch_id and user_id in _launch_user_ids(cursor):
+        return {"price_id": launch_id, "label": LAUNCH_PRICE_LABEL, "launch": True}
+    return {"price_id": os.getenv("STRIPE_PRICE_ID"), "label": PRICE_LABEL, "launch": False}
+
+
+@v1_router.get("/billing/price")
+def billing_price(user_id: str = Depends(get_current_user)):
+    """What this account would pay per month — the paywall shows it. Never
+    fails the paywall: a database hiccup answers the regular price."""
+    try:
+        with get_db() as conn:
+            p = _price_for(conn.cursor(), user_id)
+    except Exception as e:
+        print(f"[billing] PRICE_LOOKUP_FAILED {e}", flush=True)
+        p = {"label": PRICE_LABEL, "launch": False}
+    return {"price": p["label"], "per": "month", "launch": p["launch"],
+            "regular_price": PRICE_LABEL}
+
+
 @v1_router.post("/billing/create-checkout-session")
 def create_checkout_session(user_id: str = Depends(get_current_user)):
     """Create a Stripe Checkout session for the current user and hand back
@@ -3523,8 +3572,7 @@ def create_checkout_session(user_id: str = Depends(get_current_user)):
             "error": "billing_not_configured",
             "message": "Billing isn't set up on the server yet (STRIPE_SECRET_KEY missing)"
         })
-    price_id = os.getenv("STRIPE_PRICE_ID")
-    if not price_id:
+    if not os.getenv("STRIPE_PRICE_ID"):
         raise HTTPException(status_code=503, detail={
             "error": "billing_not_configured",
             "message": "Billing isn't set up on the server yet (STRIPE_PRICE_ID missing)"
@@ -3537,6 +3585,7 @@ def create_checkout_session(user_id: str = Depends(get_current_user)):
             (user_id,)
         )
         row = cursor.fetchone()
+        price_id = _price_for(cursor, user_id)["price_id"]
     if not row:
         raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
 

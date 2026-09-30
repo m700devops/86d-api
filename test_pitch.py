@@ -24,7 +24,7 @@ import pitch  # noqa: E402
 
 def test_the_sheet_carries_the_owners_facts():
     sheet = pitch.master_sheet()
-    for fact in ("Stephan", "910-335-2760", "$29.99/month", "15 days free",
+    for fact in ("Stephan", "910-335-2760", "$49.99/month", "15 days free",
                  "No credit card", pitch.APP_URL, "iOS only", "restaurant's name",
                  "bar manager's name"):
         assert fact in sheet, fact

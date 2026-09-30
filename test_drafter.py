@@ -312,8 +312,8 @@ def test_a_made_up_re_comes_off_a_draft_and_a_real_one_stays(monkeypatch):
 
 
 def test_a_reply_keeps_their_subject_and_carries_no_opt_out_line(monkeypatch):
-    _drafter(monkeypatch, {"subject": "Re: pricing?", "body": "Hi Jed,\n\nIt's $29.99/month "
-                           "after the free first month.\n\nThanks,"})
+    _drafter(monkeypatch, {"subject": "Re: pricing?", "body": "Hi Jed,\n\nIt's $49.99/month "
+                           "after the 15-day free trial.\n\nThanks,"})
     out = crm._write_draft(ROW, "Reply.", kind="reply", outreach=False)
     assert out["subject"] == "Re: pricing?"
     assert out["body"].endswith(pitch.SIGNATURE) and pitch.OPT_OUT_LINE not in out["body"]

@@ -25,7 +25,7 @@ from typing import Optional
 OWNER_NAME = os.getenv("COMPANY_OWNER_NAME") or "Stephan"
 OWNER_TITLE = os.getenv("COMPANY_OWNER_TITLE") or "Owner of 86'd"
 OWNER_PHONE = os.getenv("COMPANY_PHONE") or "910-335-2760"
-PRICE = os.getenv("COMPANY_PRICE") or "$29.99/month"
+PRICE = os.getenv("COMPANY_PRICE") or "$49.99/month"
 # The free trial every new account gets (main.py sets trial_ends_at from this).
 # One number for the product AND the pitch, so what we promise is what they get.
 TRIAL_DAYS = 15
