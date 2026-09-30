@@ -36,6 +36,7 @@ from apple_auth import (
     DEFAULT_BUNDLE_ID as APPLE_DEFAULT_BUNDLE_ID,
 )
 from crm import crm_router, init_crm_tables
+from pitch import TRIAL_DAYS  # the free trial's length, shared with the sales pitch
 import activity
 from leadgen import init_leadgen_tables
 import openai
@@ -313,7 +314,7 @@ def register(user_data: UserCreate):
             user_id = generate_id()
             now = now_iso()
             password_hash = get_password_hash(user_data.password)
-            trial_ends = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            trial_ends = (datetime.now(timezone.utc) + timedelta(days=TRIAL_DAYS)).isoformat()
             
             cursor.execute("""
                 INSERT INTO users (id, email, password_hash, name, terms_accepted_at, privacy_accepted_at,
@@ -544,7 +545,7 @@ def apple_sign_in(request: AppleSignInRequest):
                 })
 
             user_id = generate_id()
-            trial_ends = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            trial_ends = (datetime.now(timezone.utc) + timedelta(days=TRIAL_DAYS)).isoformat()
             cursor.execute("SAVEPOINT apple_insert")
             try:
                 cursor.execute("""
@@ -3146,7 +3147,7 @@ def _save_order_history(request, user_id: str, order_distributors: list, results
     return order_id
 
 # ============== BILLING (Stripe) ==============
-# No card is ever collected at signup — every account gets a 30-day trial
+# No card is ever collected at signup — every account gets a TRIAL_DAYS (15) day trial
 # (see register_user) and only talks to Stripe once they hit "Subscribe."
 # Checkout happens in the system browser (not an embedded webview), and a
 # webhook is the only thing that ever flips subscription_status to 'active'.
@@ -3682,7 +3683,7 @@ def legal_terms():
         If a staff member with access leaves, change your password in Settings — that signs out
         every other device.</p>
         <h2>Subscription &amp; trial</h2>
-        <p>New accounts get a free 30-day trial with no card required. After that, continued use
+        <p>New accounts get a free 15-day trial with no card required. After that, continued use
         requires a paid subscription, billed through Stripe. Cancel anytime; your data stays
         intact and access resumes if you re-subscribe.</p>
         <h2>Important: verify your orders</h2>

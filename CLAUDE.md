@@ -305,7 +305,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
     guest) → after calling, watch the film. The passive "today's video" left the home screen
     (videos stay in Learn): the minutes before a session belong to the calls
   - **The School teaches the company's real asks** (`coach.ASKS`, the master sheet's WHAT WE ASK
-    FOR: try it on the next count — free month, no card; a short call with the founder; the name
+    FOR: try it on the next count — 15 days free, no card; a short call with the founder; the name
     and hours of whoever orders). It used to drill "15 minutes Tuesday at 2 on your price list".
     The grader and the tape review judge the ask against them; school.py's refresh writes new
     Gauntlet rounds and questions from `coach.PRODUCT` + `coach.ASKS_TEXT` (it used to feed the
@@ -314,7 +314,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
     fill-level reading), and the Gauntlet lost an unverified "you can export it" line.
     Covered by test_coach.py and test_film.py
 - coach.py — cold-call PRACTICE, opened via **School** in the burger menu (`data-panel`
-  section). **`PRODUCT` is built from pitch.py** (real price, first month free, no card, how it
+  section). **`PRODUCT` is built from pitch.py** (real price, 15 days free, no card, how it
   works) so a practice owner who asks the price gets the real one and the grader marks a wrong
   one down; `curveball_prompt(level, real)` bases about half its lines on objections prospects
   REALLY gave (`crm._real_objections()`: the "Objection:" detail logged calls carry, then the
@@ -1581,7 +1581,7 @@ capture. Don't reintroduce them or describe them as current.)
   with its outcome), then the notes. The Email button swaps that panel for the compose box
 - **The drafter works from a MASTER SHEET** (pitch.py). `master_sheet()` is everything it may
   say about 86'd — owner Stephan and his direct line (910-335-2760), the four-step "how it
-  works", what's on every order, first month free with no card, then $29.99/month, the App
+  works", what's on every order, 15 days free (`pitch.TRIAL_DAYS`, which main.py also uses for `trial_ends_at`) with no card, then $29.99/month, the App
   Store link and the website — each checked against this repo. `EXAMPLE_EMAIL` is the
   owner's own email, given as the reference for substance; `STYLE` asks for more human than
   that (relevance first, the founder's own voice with no invented backstory, one easy ask, a
@@ -1651,7 +1651,7 @@ capture. Don't reintroduce them or describe them as current.)
   is the owner's: good, informative, human, never a robot, rarely spam — and a spam filter
   reads the same signals a person does. STYLE is written around what works in cold email now:
   relevance first (a line only true of THIS bar), one picture not a feature list, the risk
-  taken away once (free month, no card, cancel any time), ONE easy yes/no ask (interest, not a
+  taken away once (15 days free, no card, cancel any time), ONE easy yes/no ask (interest, not a
   meeting), short (60-150 words first, 30-90 follow-up), no pressure, a lowercase human subject
   with no "free"/"trial"/"$"/"%"/"!", and NEVER a backstory for the founder — nothing on the
   sheet says he tended bar, and an invented line about himself is the one a bar owner

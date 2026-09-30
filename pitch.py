@@ -2,8 +2,8 @@
 
 Everything the drafting model may say about 86'd lives in `master_sheet()`,
 and every fact in it was checked against the code: the order email carries
-the restaurant and manager name (main.py's /orders/email), the trial is 30
-days from sign-up with no card (checkout only opens once it lapses), a
+the restaurant and manager name (main.py's /orders/email), the trial is
+TRIAL_DAYS (15) days from sign-up with no card (checkout only opens once it lapses), a
 bottle's distributor, price and par are set once (the product book), and each
 emailed order carries its own number (#1001, #1002, … per bar — main.py's
 _next_order_number), in the subject and with a request to put it on the
@@ -26,6 +26,10 @@ OWNER_NAME = os.getenv("COMPANY_OWNER_NAME") or "Stephan"
 OWNER_TITLE = os.getenv("COMPANY_OWNER_TITLE") or "Owner of 86'd"
 OWNER_PHONE = os.getenv("COMPANY_PHONE") or "910-335-2760"
 PRICE = os.getenv("COMPANY_PRICE") or "$29.99/month"
+# The free trial every new account gets (main.py sets trial_ends_at from this).
+# One number for the product AND the pitch, so what we promise is what they get.
+TRIAL_DAYS = 15
+TRIAL = f"{TRIAL_DAYS} days free"
 APP_URL = (os.getenv("COMPANY_APP_URL")
            or "https://apps.apple.com/us/app/86d-bar-inventory/id6798359825")
 WEBSITE = os.getenv("COMPANY_WEBSITE") or "https://my86d.com"
@@ -71,7 +75,7 @@ Here's how it works:
 
 Each order is sent with its own order number, your restaurant's name and your bar manager's name. You set each product's distributor and price once, and the app remembers it from then on. Every order is saved, so you can look back at your ordering history anytime.
 
-The first month is free, with no credit card required. Just download and go. After that, it's {PRICE}.
+The first {TRIAL_DAYS} days are free, with no credit card required. Just download and go. After that, it's {PRICE}.
 
 If you have any questions, call me directly at {OWNER_PHONE}.
 
@@ -141,7 +145,7 @@ DETAILS THAT ARE TRUE
 - Nothing to buy or install beyond the app: no scale, no scanner, no hardware.
 
 PRICE
-- First month free. No credit card needed to start: download and go.
+- {TRIAL}. No credit card needed to start: download and go.
 - After that, {PRICE}. Cancel any time, from the app.
 
 LINKS (the only URLs that exist; never invent another)
@@ -178,14 +182,14 @@ HONEST ANSWERS TO THE USUAL PUSHBACK
   works for them, say so and leave the door open. 86'd is for teams still counting by hand.
 - "I don't have time." That's the point: the count and the orders take 10-15 minutes. Offer
   a five-minute call outside service, or just the link to try it on the next count.
-- "What does it cost?" {PRICE} after the free first month; no card to start.
+- "What does it cost?" {PRICE} after the {TRIAL_DAYS}-day free trial; no card to start.
 - "My staff use Android." It's iPhone only for now: whoever counts needs an iPhone.
 - "I order through my rep." Nothing changes with the rep: the app emails them the order.
 - "Send me something." Send the App Store link and one line on how it works, and ask when
   to follow up.
 
 WHAT WE ASK FOR (one per email or call, never all three)
-- Try it on their next count: download from the App Store, first month free, no card.
+- Try it on their next count: download from the App Store, {TRIAL}, no card.
 - A short call with {OWNER_NAME} to see it: {OWNER_PHONE}.
 - The name of whoever counts and orders, and when they're in."""
 
@@ -228,7 +232,7 @@ What works in 2026 (use it, don't announce it):
    minutes. Show it the way they'd live it: point the phone at the bottle, tap the count,
    every rep gets their order at once. The four-step list is fine in a first email; skip
    it in a follow-up unless they asked how it works.
-3. TAKE AWAY THE RISK. First month free, no card, cancel any time. Said once, plainly.
+3. TAKE AWAY THE RISK. {TRIAL}, no card, cancel any time. Said once, plainly.
 4. ONE EASY ASK. End with a question they can answer in one word or one tap — interest,
    not a meeting: "Worth trying on your next count?", "Want the link for your GM?",
    "Should I call Thursday before you open?". One ask only. Never "let me know your
@@ -247,7 +251,7 @@ Follow-ups (when EMAILS WE ALREADY SENT is in WHAT WE KNOW):
   subject is "Re: " plus that email's subject word for word (it's what threads it under
   the first one), and the body a line or two that stands on its own.
 - After two or more emails with no reply, write a short, gracious last note: you won't keep
-  emailing, the free month is there whenever the count gets old, and his direct line. No
+  emailing, the free trial is there whenever the count gets old, and his direct line. No
   guilt, no "should I close your file?".
 
 Subject line:
@@ -278,6 +282,7 @@ Hard rules:
 5. No P.S. and no sign-off: the email ends at the closing word ("Thanks," / "Best,"); the
    signature and the opt-out line are added underneath automatically.
 6. Do exactly what the salesperson asked. Their instruction beats the defaults above."""
+STYLE = STYLE.replace("{TRIAL}", TRIAL)  # a plain string, not an f-string: it quotes "{Bar name}"
 
 
 # ── The draft checker: what a person would notice, caught in code ─────────

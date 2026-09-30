@@ -110,7 +110,7 @@ def test_tape_scoring_punishes_false_accusations():
 
 def test_practice_knows_the_real_price_and_trial():
     import pitch
-    assert pitch.PRICE in coach.PRODUCT and "First month free with no credit card" in coach.PRODUCT
+    assert pitch.PRICE in coach.PRODUCT and "first 15 days are free with no credit card" in coach.PRODUCT
     assert "NO Android" in coach.PRODUCT
 
 
@@ -152,7 +152,7 @@ def test_logged_objections_are_read_back_for_practice(monkeypatch):
 # ── the asks the company actually makes ──────────────────────────────────────
 
 def test_practice_drills_the_real_asks():
-    assert "first month free, no card" in coach.ASKS_TEXT
+    assert "15 days free, no card" in coach.ASKS_TEXT
     _, user = coach.grade_prompt("Owner", "Send me something", "Sure", 5, False)
     assert coach.ASKS_TEXT in user
     import school
