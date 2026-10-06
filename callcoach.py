@@ -75,7 +75,7 @@ TECHNIQUES = {
     "micro_ask": (
         "One small ask", "modern cold-calling practice",
         "End with ONE low-effort yes/no ask — interest, not a meeting — and wait for the answer.",
-        "Worth trying on your next count? First month's free, no card."),
+        "Worth trying on your next count? The first 15 days are free, no card."),
 }
 TECHNIQUE_KEYS = tuple(TECHNIQUES)
 

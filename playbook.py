@@ -209,7 +209,7 @@ def percents_in(lines: Iterable[str]) -> set:
 # ── the digest: the log as the model reads it ───────────────────────────────
 
 RICH_OUTCOMES = {"answered", "callback", "not_interested", "gatekeeper"}
-CUSTOMER_LABEL = {"active": "PAYING CUSTOMER", "trial": "SIGNED UP (on the free month)",
+CUSTOMER_LABEL = {"active": "PAYING CUSTOMER", "trial": "SIGNED UP (on the free trial)",
                   "canceled": "SIGNED UP, later cancelled"}
 
 

@@ -1520,7 +1520,7 @@ I'm Stephan, and I own 86'd, an iPhone app for the bar count.
 
 You point your iPhone at each bottle, it knows what it is, and you tap in the count. Then every distributor gets its order at once. The count and the orders take 10 to 15 minutes.
 
-The first month is free, no card to start:
+The first 15 days are free, no card to start:
 ${(MAIL&&MAIL.app_url)||APP_URL_DEFAULT}
 
 Worth trying on your next count?
@@ -3302,7 +3302,7 @@ const P_MODS=[
   ['The reason, as a problem','One sentence naming a problem they already have. No features.','“Most bar owners I talk to lose a couple of hours a week counting bottles and retyping it into orders, and the order still comes in wrong. Is that you, or have you got it handled?”','30+minutes+to+presidents+club+problem+proposition','opener'],
   ['Discovery','Ask, then stop talking. Find out about prices, distributors, and who does the counts.','“Who does your counts, and when?” · “How many distributors?” · “When a price changes, where does that get written down?”','sales+discovery+questions+cold+call','discovery'],
   ['Objections','Acknowledge, ask about it, then answer. Don\'t argue with the first no.','“Totally fair, most people have a system. Out of curiosity, what does yours look like on a Sunday night?”','handling+cold+call+objections+josh+braun','objections'],
-  ['The ask','One small ask, never three. Best: try it on their next count, free for the first month, no card. If not that, a short call with Stephan, or the name of whoever orders and when they\'re in.','“Want to try it on your next count? The first month\'s free and there\'s no card. I\'ll email you the link right now, and your next count is on your phone.”','cold+call+close+free+trial','ask'],
+  ['The ask','One small ask, never three. Best: try it on their next count, free for 15 days, no card. If not that, a short call with Stephan, or the name of whoever orders and when they\'re in.','“Want to try it on your next count? The first 15 days are free and there\'s no card. I\'ll email you the link right now, and your next count is on your phone.”','cold+call+close+free+trial','ask'],
   ['Gatekeepers & voicemail','Whoever answers is on your side. Get the owner\'s name and when they\'re in.','“Quick one: who handles the liquor orders there? … Perfect. When\'s Maria usually in before service?”','cold+call+gatekeeper+voicemail+script','opener']
 ];
 /* Every video is embeddable, under 21 minutes, and checked by hand: [id, title, channel, length, topic].
@@ -3356,12 +3356,12 @@ document.addEventListener('click',e=>{
 });
 const P_QUIZ=[
   ['Which opener does Gong\'s data say hurts booking rates most?',['“How have you been?”','“Did I catch you at a bad time?”','“The reason I\'m calling is…”','“I know this is out of the blue.”'],1,'Asking if it\'s a bad time invites “yes, bye.” It cost about 40% in Gong\'s data.'],
-  ['First real conversation. What do you ask for?',['Everything at once: a trial, a demo and a meeting','Try it on their next count: free month, no card','A one-hour demo next month','Their budget'],1,'One small ask. Trying it on their own next count is the easiest yes to give.'],
+  ['First real conversation. What do you ask for?',['Everything at once: a trial, a demo and a meeting','Try it on their next count: 15 days free, no card','A one-hour demo next month','Their budget'],1,'One small ask. Trying it on their own next count is the easiest yes to give.'],
   ['Owner: “We already have a system.” First move?',['Explain why 86\'d is better','Offer a discount','Acknowledge it, then ask what it looks like on a busy night','Call back next month'],2,'Acknowledge and ask. Their answer shows you where it hurts.'],
   ['Strongest pitch in Nevada?',['Labour cost: no tip credit, so every counting hour is full wage','Time savings only','Android support','Chain-wide rollout'],0,'NV, like CA, WA and OR, has no tip credit, so the labour maths works for you.'],
   ['“My staff use Android.” You say…',['It works fine','Be straight: it\'s iPhone-only. Does the owner or manager have an iPhone?','Change the subject','Android is coming soon'],1,'It\'s iOS-only. Find out who has an iPhone, and never promise what doesn\'t exist.'],
   ['“Does it work with my POS?” You say…',['“Yes, it plugs right in.”','“It doesn\'t connect to a POS. It counts the bottles and sends the orders to your reps.”','Change the subject','“That\'s coming soon.”'],1,'It doesn\'t connect to a POS. Say what it does do, and never promise what it doesn\'t.'],
-  ['Strongest way to end the call?',['“Can I send you some info?”','“Let me know if you\'re interested.”','“Want to try it on your next count? First month free, no card, I\'ll email the link now.”','“What\'s your budget?”'],2,'Small, specific, and on their own next count.'],
+  ['Strongest way to end the call?',['“Can I send you some info?”','“Let me know if you\'re interested.”','“Want to try it on your next count? 15 days free, no card, I\'ll email the link now.”','“What\'s your budget?”'],2,'Small, specific, and on their own next count.'],
   ['A bartender picks up. Best move?',['Pitch them','Ask who handles liquor orders and when they\'re in','Hang up','Leave a long message'],1,'Get a name and a time to call back.'],
   ['What\'s the pause after a question for?',['Filling silence','Letting them think and answer. The silence does the work','Sounding friendly','Keeping it short'],1,'Ask, then stop talking.'],
   ['A “problem proposition” is…',['A list of features','A pain they already feel, said in their words','A discount','A case study'],1,'Name the problem, not the product.'],
@@ -3369,7 +3369,7 @@ const P_QUIZ=[
   ['A bar changed hands 3 months ago. Good lead?',['No, too new','Yes: ownership transfers count, and new owners inherit messy processes','Only if it\'s a chain','Only in Nevada'],1,'An ownership change of an operating bar is in the window.'],
   ['Why skip bars open longer than 9 months?',['They\'re closing','They usually have an entrenched process already','They can\'t afford it','Licence rules'],1,'Past 9 months, habits are set and the pain feels normal.'],
   ['“So the camera tells you how full the bottle is?”',['“Yes, it reads the level.”','“No. The camera identifies the bottle, and you tap in the count.”','“Sometimes.”','“In the next version.”'],1,'It identifies the bottle; you enter the count. Never claim it reads fill levels.'],
-  ['What does trying 86\'d cost a bar on day one?',['The first month up front','Nothing: the first month is free and there\'s no card to start','A setup fee','A one-year contract'],1,'First month free, no card to start, cancel any time from the app.'],
+  ['What does trying 86\'d cost a bar on day one?',['The first month up front','Nothing: the first 15 days are free and there\'s no card to start','A setup fee','A one-year contract'],1,'15 days free, no card to start, cancel any time from the app.'],
   ['“How much is it?” in the first 20 seconds. Best reply?',['Give the full price breakdown','“Fair question. Depends on how many bottles. Roughly how many do you carry?”','Dodge it','“It\'s cheap”'],1,'Answer honestly and turn it into a discovery question.'],
   ['“Just email me.” Best reply?',['“Sure, what\'s your email?” and hang up','“Happy to. So I send the right thing, is counting or ordering the bigger headache?”','Argue','Ignore it'],1,'Agree, then earn one more answer so the email is worth opening.'],
   ['The best time to label an emotion is…',['Never','When they sound stressed or annoyed: “Sounds like it\'s been a long week”','After the close','Only by email'],1,'Labels lower tension so they can keep listening.'],
@@ -3423,7 +3423,7 @@ const GAUNT=[
   ['Owner, voicemail','(voicemail beep)',['Leave a 60-second pitch','“Hi, it\'s [name], about the Sunday counts. I\'ll try you Tuesday at 2.”','Hang up without a message'],1,'Short, specific, with a promised time.'],
   ['Owner, positive','“Actually, counts do kill my Sundays.”',['Start the pitch','“How long do they take, start to finish?”','“Great, sign up!”'],1,'Dig deeper before you pitch.'],
   ['Owner, comparing','“How are you different from BevSpot?”',['Trash BevSpot','“What do you like or not like about what you\'re using now?”','“We\'re cheaper.”'],1,'Let them tell you the gap.'],
-  ['Owner, ready','“OK, what\'s the next step?”',['“I\'ll send info.”','“Try it on your next count: download 86\'d, the first month\'s free, no card. I\'ll email you the link now. Best address?”','“Whenever you want.”'],1,'One small step, on their own next count.'],
+  ['Owner, ready','“OK, what\'s the next step?”',['“I\'ll send info.”','“Try it on your next count: download 86\'d, the first 15 days are free, no card. I\'ll email you the link now. Best address?”','“Whenever you want.”'],1,'One small step, on their own next count.'],
   ['Owner, hesitant','“I need to talk to my partner.”',['“Can\'t you decide?”','“Makes sense. What will your partner ask that I can answer now?”','“OK, bye.”'],1,'Prepare them to sell it for you.']
 ];
 
@@ -3897,7 +3897,7 @@ const TAPES=[
     ['rep','Makes sense. Anyway, let me know if you\'re ever interested and I can send some info.'],['owner','Sure. Bye.']],
     m:[[0,'bad_time','Handed him the easy exit in the first line.','“Hey Sal, it\'s Chris with 86\'d. I know I\'m catching you during prep. 30 seconds on why I called?”'],
        [6,'feature_dump','He just told you his pain, and you answered with a feature list.','“Three hours on a Sunday, then four texts. What would you do with that night back?”'],
-       [12,'weak_ask','He admitted the pain twice and you ended on “let me know.”','“Want to try it on your next count? First month free, no card. I\'ll email the link now.”']]},
+       [12,'weak_ask','He admitted the pain twice and you ended on “let me know.”','“Want to try it on your next count? 15 days free, no card. I\'ll email the link now.”']]},
   {owner:'Dana, The Copper Owl, Reno',lines:[
     ['rep','Hi Dana, it\'s Chris with 86\'d. The reason I\'m calling is bar inventory. Can I have 30 seconds, and you tell me if it\'s worth more?'],['owner','Fine, 30 seconds.'],
     ['rep','Most owners I talk to lose hours to counts and still get wrong orders. Is that you, or have you got it handled?'],['owner','We use BevSpot. It\'s fine.'],
