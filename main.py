@@ -36,6 +36,7 @@ from apple_auth import (
     DEFAULT_BUNDLE_ID as APPLE_DEFAULT_BUNDLE_ID,
 )
 from crm import crm_router, init_crm_tables
+from phones import normalize_us_phone, format_us_phone_dashed
 from pitch import TRIAL_DAYS  # the free trial's length, shared with the sales pitch
 import activity
 from leadgen import init_leadgen_tables
@@ -3901,7 +3902,7 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, subscription_status,
+            SELECT id, email, name, business_name, manager_name, phone, subscription_status,
                    subscription_tier, trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
@@ -3913,12 +3914,29 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
         result["subscription_tier"] = result.get("subscription_tier") or "starter"
         return result
 
+def _clean_profile_phone(raw: Optional[str]) -> Optional[str]:
+    """A customer's own number, from the bar-name screen: blank clears it,
+    anything else must be a dialable US number (phones.py) and is stored
+    dashed, the form the CRM copies into CloudTalk. 422 otherwise, so the app
+    can say so instead of saving something nobody can call."""
+    if raw is None or not str(raw).strip():
+        return None
+    digits = normalize_us_phone(str(raw))
+    if not digits:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_phone",
+            "message": "That doesn't look like a US phone number. Check it, or leave it blank."})
+    return format_us_phone_dashed(digits)
+
+
 @v1_router.patch("/users/me", response_model=UserProfileResponse)
 def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(get_current_user)):
     """Update the current user's business_name / manager_name."""
     updates = request.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail={"error": "no_fields", "message": "No fields to update"})
+    if "phone" in updates:
+        updates["phone"] = _clean_profile_phone(updates["phone"])
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -3932,7 +3950,7 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
         conn.commit()
 
         cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, subscription_status,
+            SELECT id, email, name, business_name, manager_name, phone, subscription_status,
                    subscription_tier, trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))

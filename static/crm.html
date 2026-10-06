@@ -2967,7 +2967,7 @@ function timeAgo(iso){
 function userRow(u,n){
   const st=subBadge(u);
   const who=u.business_name||u.name||u.email;
-  const sub=[who!==u.email?u.email:null, u.manager_name].filter(Boolean).join(' · ');
+  const sub=[who!==u.email?u.email:null, u.manager_name, u.phone].filter(Boolean).join(' · ');
   const active=timeAgo(u.last_active_at);
   const activity=u.sessions_completed
     ? `${u.sessions_completed} count${u.sessions_completed===1?'':'s'}${active?` · last ${active}`:''}`

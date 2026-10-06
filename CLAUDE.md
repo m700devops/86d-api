@@ -373,7 +373,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
-  test_cloudtalk.py test_callcoach.py test_launch_price.py -q` (1114 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_cloudtalk.py test_callcoach.py test_launch_price.py test_profile_phone.py -q` (1127 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -659,6 +659,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 
 ## Key API Routes (all under /v1)
 - POST /auth/register, /auth/login, /auth/refresh
+- PATCH /users/me — business_name, manager_name and **phone** (optional, from the app's bar-name
+  screen, "for setup help"): blank clears it, anything else must pass `phones.normalize_us_phone`
+  (422 `invalid_phone`) and is stored dashed (615-742-9095, what CloudTalk accepts). Shown and
+  searchable (digits only) on the CRM's Customers page. Covered by test_profile_phone.py
 - POST /auth/apple — Sign in with Apple. Matched on Apple's `sub`, NEVER the email: the
   address can be a Hide My Email relay alias, the user can switch it off later, and it is
   not a stable identifier. An existing password account on the same address is LINKED

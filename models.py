@@ -15,6 +15,7 @@ class UserCreate(UserBase):
 class UserResponse(UserBase):
     id: str
     business_name: Optional[str] = None
+    phone: Optional[str] = None
     manager_name: Optional[str] = None
     subscription_status: str = "trial"
     subscription_tier: str = "starter"
@@ -33,6 +34,9 @@ class UserProfileResponse(UserResponse):
 class UpdateProfileRequest(BaseModel):
     business_name: Optional[str] = Field(default=None, max_length=200)
     manager_name: Optional[str] = Field(default=None, max_length=200)
+    # Optional contact number from the bar-name screen ("for setup help").
+    # Checked and stored as 615-742-9095 by the route; "" clears it.
+    phone: Optional[str] = Field(default=None, max_length=40)
 
 class AcceptTermsRequest(BaseModel):
     terms_version: str

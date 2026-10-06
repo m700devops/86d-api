@@ -531,7 +531,7 @@ def init_db():
         # hide behind a relay alias at any time.
         # password_reset_attempts: wrong reset codes against the current one —
         # the code is thrown away after RESET_MAX_ATTEMPTS (main.reset_password).
-        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT"), ("password_reset_attempts", "INTEGER DEFAULT 0")]:
+        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT"), ("password_reset_attempts", "INTEGER DEFAULT 0"), ("phone", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'users' AND column_name = %s
