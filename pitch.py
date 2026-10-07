@@ -30,6 +30,62 @@ PRICE = os.getenv("COMPANY_PRICE") or "$49.99/month"
 # One number for the product AND the pitch, so what we promise is what they get.
 TRIAL_DAYS = 15
 TRIAL = f"{TRIAL_DAYS} days free"
+
+
+# An offer we no longer make, quoted back: a monthly price other than PRICE,
+# or a free trial other than TRIAL_DAYS. Until 2026-10-06 it was $29.99 and
+# the first month free, and that is still written in old emails (the drafter
+# learns from the ones that got replies), the playbook learned from calls and
+# old call reviews. Bounded patterns only: a reply draft can echo a stranger's
+# email (test_hostile_pages.py).
+_OFFER_PRICE = re.compile(
+    r"\$[ \t]?(\d{1,4}(?:\.\d{2})?)([ \t]{0,3}(?:/|a|per)[ \t]{0,3}mo(?:nth)?\b)?", re.I)
+_OFFER_MONTH = re.compile(
+    r"\bmonth (?:is )?free\b|\bfree month\b|\bfree (?:for )?(?:a|one|the first|your first) month\b",
+    re.I)
+_OFFER_DAYS = re.compile(
+    r"\b(\d{1,3})[ -]days? (?:free|trial)\b|\b(\d{1,3})[ -]day free trial\b"
+    r"|\bfree (?:for )?(\d{1,3}) days\b|\bfirst (\d{1,3}) days (?:are |is )?free\b", re.I)
+
+
+def _amount(text: str) -> Optional[float]:
+    m = re.search(r"\d+(?:\.\d+)?", text or "")
+    return float(m.group()) if m else None
+
+
+def stale_offer(text: str, allowed: str = "") -> list:
+    """Each place `text` quotes an old price or trial, as a problem to fix.
+
+    A price counts when it's said per month ("$29.99/month", "$29.99 a
+    month") or looks like a price ($NN.99): "$800 at the vet" is a story, not
+    an offer. `allowed` is what a person told the writer (the salesperson's
+    brief, WHAT WE KNOW): a figure from there is theirs to quote."""
+    flat = re.sub(r"\s+", " ", text or "")
+    ok = re.sub(r"\s+", " ", allowed or "").lower()
+    current = _amount(PRICE)
+    problems = []
+    for m in _OFFER_PRICE.finditer(flat):
+        amount = m.group(1)
+        if m.group(2) is None and not amount.endswith(".99"):
+            continue
+        if current is None or float(amount) == current:
+            continue
+        if re.search(r"\$ ?" + re.escape(amount) + r"(?![\d.])", ok):
+            continue
+        problems.append(f'"{m.group(0).strip()}" is an old price — it\'s {PRICE} now')
+    for m in _OFFER_MONTH.finditer(flat):
+        if TRIAL_DAYS not in (30, 31) and m.group(0).lower() not in ok:
+            problems.append(f'"{m.group(0)}" is the old trial — it\'s {TRIAL} now')
+    for m in _OFFER_DAYS.finditer(flat):
+        days = next(int(g) for g in m.groups() if g)
+        if days != TRIAL_DAYS and m.group(0).lower() not in ok:
+            problems.append(f'"{m.group(0)}" is the old trial — it\'s {TRIAL} now')
+    return list(dict.fromkeys(problems))[:4]
+
+
+def offer_stamp() -> str:
+    """What saved sales content was written against; it's stale once this changes."""
+    return f"{PRICE}|{TRIAL_DAYS}"
 APP_URL = (os.getenv("COMPANY_APP_URL")
            or "https://apps.apple.com/us/app/86d-bar-inventory/id6798359825")
 WEBSITE = os.getenv("COMPANY_WEBSITE") or "https://my86d.com"
@@ -405,6 +461,7 @@ def lint(subject: str, body: str, kind: str = "first", brief: str = "",
     for phrase in UNBACKED_CLAIMS:
         if phrase in low and phrase not in told:
             problems.append(f'"{phrase}" claims something we can\'t back — cut it')
+    problems.extend(stale_offer(f"{subject or ''}\n{body or ''}", allowed=f"{brief}\n{known}"))
     known_figures = {re.sub(r"\s", "", f) for f in _PERCENT.findall(told)}
     for pct in _PERCENT.findall(body or ""):
         if re.sub(r"\s", "", pct.lower()) not in known_figures:

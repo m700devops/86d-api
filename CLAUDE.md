@@ -373,7 +373,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
-  test_cloudtalk.py test_callcoach.py test_launch_price.py test_profile_phone.py test_billing.py -q` (1167 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_cloudtalk.py test_callcoach.py test_launch_price.py test_profile_phone.py test_billing.py
+  test_offer.py -q` (1196 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -2011,6 +2012,18 @@ on a real Postgres 16 with four concurrent deliveries of one event (one write, t
 - **`GET /billing/price` carries `first_charge_date`**: a trialing Stripe subscription's own
   `trial_end`; otherwise what a Checkout started now would do; null = charged today / already
   billing. A Stripe error → null (`FIRST_CHARGE_LOOKUP_FAILED`), never a failed price
+
+- **Nothing keeps quoting the old offer** ($29.99/month and the first month free, until #66).
+  `pitch.stale_offer(text, allowed)` finds a monthly price other than `PRICE` (said per month,
+  or shaped $NN.99 — "$800 at the vet" is a story) or a trial other than `TRIAL_DAYS` ("first
+  month free", "30-day trial"); a figure the salesperson gave (`allowed`) is theirs. Applied
+  where old wording survives: `lint()` (drafts learn from past emails that got replies),
+  `playbook.clean()` and `render()` (pinned points too), `callcoach.line_ok()`. Prep sheets'
+  fingerprint now includes `pitch.master_sheet()`, so a price change rewrites them; a School
+  pack carries `offer` (`pitch.offer_stamp()`) and one written against another offer is served
+  without its AI quiz/Gauntlet (the page's built-ins stand in until the next refresh). The
+  OWNER'S notes on the AI Brain page are never filtered: an old price there is the owner's to
+  fix. **Changing PRICE or TRIAL_DAYS again needs nothing more.** Covered by test_offer.py
 
 ## FAILURE POINTS FIXED (audit, 2026-09-25) — don't reintroduce these
 Each is covered by test_failure_points.py unless noted.

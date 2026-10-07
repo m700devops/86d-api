@@ -335,6 +335,9 @@ def line_ok(line: str) -> bool:
     low = (line or "").lower()
     if not low.strip() or "%" in low or re.search(r"\bpercent\b", low):
         return False
+    import pitch
+    if pitch.stale_offer(line):       # an old price or trial
+        return False
     return not any(b in low for b in _BANNED)
 
 
