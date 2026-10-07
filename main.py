@@ -4967,9 +4967,14 @@ def _find_product(result: dict, user_id: str, location_id: Optional[str] = None)
             # The location must be the caller's own, so a forged location_id can
             # only ever change the order of this user's own matches.
             if location_id:
+                # A bottle is in the bar's book with a par/price row OR with only a
+                # distributor saved — the bartender set that once, and landing on
+                # another copy of the bottle would ask for it again.
                 cursor.execute("""
                     SELECT DISTINCT p.id, p.size, p.name FROM products p
-                    JOIN par_levels pl ON pl.product_id = p.id
+                    JOIN (SELECT product_id, location_id FROM par_levels
+                          UNION SELECT product_id, location_id FROM location_product_distributors) pl
+                      ON pl.product_id = p.id
                     JOIN locations l ON l.id = pl.location_id
                     WHERE pl.location_id = %s AND l.user_id = %s
                       AND p.deleted_at IS NULL
