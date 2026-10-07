@@ -161,8 +161,6 @@ class Cur:
         elif q.startswith("SELECT subscription_status, trial_ends_at, stripe_subscription_id"):
             u = s.users[params[0]]
             self._row = {k: u.get(k) for k in ("subscription_status", "trial_ends_at", "stripe_subscription_id")}
-        elif "FROM users WHERE deleted_at IS NULL AND email !~*" in q:   # launch-price ranking
-            self._row = []
 
     def fetchone(self):
         return self._row
@@ -195,7 +193,6 @@ def store(monkeypatch):
     monkeypatch.setattr(main, "datetime", _FrozenDatetime)
     monkeypatch.setattr(main.stripe, "api_key", "sk_test")
     monkeypatch.setenv("STRIPE_PRICE_ID", "price_regular")
-    monkeypatch.delenv("STRIPE_LAUNCH_PRICE_ID", raising=False)
     return st
 
 

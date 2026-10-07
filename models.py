@@ -481,13 +481,29 @@ class LocationProductDistributorCreate(BaseModel):
     product_id: str
     distributor_id: str
 
+# What the assignment list carries about each side. NOT DistributorResponse /
+# ProductResponse: those require user_id, category and timestamps the list's
+# join never selects, so the first saved assignment made every GET a 500 — and
+# the app, reading no assignments back, asked for every distributor again.
+class AssignedDistributor(BaseModel):
+    id: str
+    name: str
+    email: Optional[str] = None
+
+class AssignedProduct(BaseModel):
+    id: str
+    name: str
+    brand: Optional[str] = None
+    product_type: Optional[str] = None
+    size: Optional[str] = None
+
 class LocationProductDistributorResponse(BaseModel):
     id: str
     location_id: str
     product_id: str
     distributor_id: str
-    distributor: Optional[DistributorResponse] = None
-    product: Optional[ProductResponse] = None
+    distributor: Optional[AssignedDistributor] = None
+    product: Optional[AssignedProduct] = None
     created_at: datetime
     
     class Config:
