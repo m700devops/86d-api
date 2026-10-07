@@ -36,9 +36,13 @@ and builds the distributor order.
   `STRIPE_LAUNCH_PRICE_ID`. The 11th account pays the regular price. `GET /v1/billing/price`
   tells the app which one applies. Covered by `test_launch_price.py`.
 
-> ⚠️ **my86d.com currently advertises "30 days free" and "$29.99 / month" to everyone.**
-> That does not match this backend (15 days; $29.99 only for the first 10). One of the two
-> needs to change — see the note at the bottom of this file.
+> **The launch price is being retired.** PR #71 removes `LAUNCH_PRICE_SLOTS`,
+> `STRIPE_LAUNCH_PRICE_ID` and the "first 10" ranking entirely — every checkout becomes
+> $49.99/month. When that merges, delete the bullet above and the `LAUNCH_PRICE_SLOTS` row
+> in the environment table. `GET /v1/billing/price` keeps returning `launch` and
+> `regular_price` so shipped app builds keep working.
+
+my86d.com matches this backend: 15-day trial, $49.99/month.
 
 ## Quick Start
 
@@ -180,17 +184,3 @@ southportai@hotmail.com
 
 Proprietary — © Southport AI Solutions. All rights reserved. No license is granted.
 
----
-
-### Open question for the owner
-
-The website's pricing does not match the backend's:
-
-| | my86d.com | This backend |
-|---|---|---|
-| Trial | 30 days free, no card | **15 days** free, no card |
-| Price | $29.99/month, "one plan" | **$49.99/month**, $29.99 only for the first 10 accounts |
-
-A bar that signs up from the website expecting 30 days at $29.99 will hit a 15-day trial and,
-once the 10 launch slots are gone, a $49.99 charge. Decide which is correct and change the
-other — then delete this section.
