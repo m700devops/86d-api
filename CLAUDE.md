@@ -373,7 +373,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
-  test_cloudtalk.py test_callcoach.py test_launch_price.py test_profile_phone.py test_billing.py -q` (1167 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
+  test_product_distributors.py test_offer.py -q` (1197 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -728,7 +729,16 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   `answers_agree`'s one-typo tolerance is kept) — 51ms, and test_duplicates.py checks the result is
   identical to the brute force on the whole seeded catalog and 60 random messy books
 - GET/POST /locations/{id}/product-distributors — the other half of that memory: which
-  distributor a bottle is ordered from at this bar, set once and applied to every future scan
+  distributor a bottle is ordered from at this bar, set once and applied to every future scan.
+  **The GET's nested `distributor`/`product` are the slim `AssignedDistributor` /
+  `AssignedProduct` models, NOT DistributorResponse/ProductResponse**: those require user_id,
+  category and timestamps the join never selects, so from a bar's FIRST saved assignment the
+  GET was a 500 (200 with none, which is how it hid). Saves landed; the app read none back and
+  showed every bottle Unassigned on the next count. A model whose required fields a route
+  doesn't fill fails at response time, not at import — check it when nesting one. The
+  scanner's `bar_book` step counts a bottle with only a distributor saved (no par_levels row)
+  as the bar's own, so a scan can't land on another copy and drop it. Covered by
+  test_product_distributors.py; both halves run on a real Postgres 16
 - POST /inventory/start, GET /inventory/{session_id}, POST /inventory/{session_id}/scan
 - POST /inventory/{session_id}/scan/bulk
 - POST /scans/analyze — the live AI vision route (OpenAI and Gemini side by side), see AI Vision Rules above
@@ -1919,14 +1929,13 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   default (the model's own: medium on 3.6 Flash). Billed as output and waited for; see AI Vision Rules
 - RESEND_API_KEY — order emails and password resets cannot send without it
 - STRIPE_SECRET_KEY — checkout/billing endpoints 503 without it
-- STRIPE_PRICE_ID — checkout endpoint 503s without it, nobody can subscribe
-- STRIPE_LAUNCH_PRICE_ID — the $29.99/month launch price. The first `LAUNCH_PRICE_SLOTS` (10)
-  real accounts ever made (oldest `created_at`, live, not `crm.TEST_EMAIL_PATTERN`) check out
-  at it; everyone else at STRIPE_PRICE_ID ($49.99/month). Unset = everyone pays the regular
-  price. It only picks the price of a NEW checkout: an existing Stripe subscription stays on
-  the price it started on. `GET /v1/billing/price` tells the paywall which one (`price`,
-  `launch`, `regular_price`); PRICE_LABEL / LAUNCH_PRICE_LABEL override the shown amounts
-  ("$49.99" / "$29.99"). Covered by test_launch_price.py
+- STRIPE_PRICE_ID — the ONE price, $49.99/month, for every new checkout. Checkout 503s without
+  it, so nobody can subscribe. An existing Stripe subscription stays on the price it started on.
+  `GET /v1/billing/price` gives the paywall its label (`price`; PRICE_LABEL overrides "$49.99"),
+  and still answers `launch: false` / `regular_price` for app builds that read them.
+  **There is no launch price** (the owner's call, 2026-10-07): the $29.99-for-the-first-10 offer
+  and STRIPE_LAUNCH_PRICE_ID, LAUNCH_PRICE_SLOTS and LAUNCH_PRICE_LABEL are gone and not read,
+  so a leftover STRIPE_LAUNCH_PRICE_ID on Render does nothing. Covered by test_price.py
 - STRIPE_WEBHOOK_SECRET — without it, payments don't activate subscriptions (customers pay and stay locked out)
 - CRM_API_KEY — shared key for `/v1/crm/*`; unset means every CRM endpoint 503s (the UI at
   `/crm` still loads, it just can't do anything). Not used by the mobile app at all
@@ -1983,7 +1992,7 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 
 ## BILLING (billing.py + main.py, hardened 2026-10-07)
 The rules are pure in billing.py; main.py does the Stripe and database I/O. Covered by
-test_billing.py (every rule mutation-checked) and test_launch_price.py; the webhook was also run
+test_billing.py (every rule mutation-checked) and test_price.py; the webhook was also run
 on a real Postgres 16 with four concurrent deliveries of one event (one write, three duplicates).
 - **Subscribing early keeps the free days.** Checkout gets `subscription_data.trial_end` = the
   account's `trial_ends_at` while it's in 'trial' with at least `TRIAL_END_MIN` (48h + 5 min)
@@ -2011,6 +2020,18 @@ on a real Postgres 16 with four concurrent deliveries of one event (one write, t
 - **`GET /billing/price` carries `first_charge_date`**: a trialing Stripe subscription's own
   `trial_end`; otherwise what a Checkout started now would do; null = charged today / already
   billing. A Stripe error → null (`FIRST_CHARGE_LOOKUP_FAILED`), never a failed price
+
+- **Nothing keeps quoting the old offer** ($29.99/month and the first month free, until #66).
+  `pitch.stale_offer(text, allowed)` finds a monthly price other than `PRICE` (said per month,
+  or shaped $NN.99 — "$800 at the vet" is a story) or a trial other than `TRIAL_DAYS` ("first
+  month free", "30-day trial"); a figure the salesperson gave (`allowed`) is theirs. Applied
+  where old wording survives: `lint()` (drafts learn from past emails that got replies),
+  `playbook.clean()` and `render()` (pinned points too), `callcoach.line_ok()`. Prep sheets'
+  fingerprint now includes `pitch.master_sheet()`, so a price change rewrites them; a School
+  pack carries `offer` (`pitch.offer_stamp()`) and one written against another offer is served
+  without its AI quiz/Gauntlet (the page's built-ins stand in until the next refresh). The
+  OWNER'S notes on the AI Brain page are never filtered: an old price there is the owner's to
+  fix. **Changing PRICE or TRIAL_DAYS again needs nothing more.** Covered by test_offer.py
 
 ## FAILURE POINTS FIXED (audit, 2026-09-25) — don't reintroduce these
 Each is covered by test_failure_points.py unless noted.
