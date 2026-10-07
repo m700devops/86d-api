@@ -1,124 +1,182 @@
 # 86'd API
 
-Bar inventory management API for iOS app. Helps bartenders scan bottles and track inventory with offline-first sync.
+FastAPI backend for **86'd** — AI bar inventory scanning. Point a phone at a bottle, the AI
+identifies name, brand and category, the bartender confirms the count, and 86'd matches prices
+and builds the distributor order.
 
-**Live API:** https://eight6d-api.onrender.com
+**Live on the App Store:** https://apps.apple.com/app/id6798359825 (iPhone only, iOS 15+)
+**Website:** https://my86d.com
+**Live API:** https://eight6d-api.onrender.com · [`/health`](https://eight6d-api.onrender.com/health)
+**Mobile app:** https://github.com/m700devops/86d-mobile
+
+> **`CLAUDE.md` is the authoritative document for this repo.** It carries the architecture, the
+> AI vision rules, the CRM design and a long "failure points fixed" log. This README is a map,
+> not a spec — when the two disagree, `CLAUDE.md` wins.
 
 ## Tech Stack
 
-- **Framework:** FastAPI (Python 3.11+)
-- **Database:** SQLite with WAL mode
-- **Auth:** JWT tokens
-- **Deploy:** Render free tier
+- **Framework:** FastAPI, Python 3.11.4 (pinned in `.python-version`)
+- **Database:** PostgreSQL via `psycopg2` with a threaded connection pool.
+  `DATABASE_URL` is **required** — the app raises on startup without it.
+- **Auth:** JWT access + refresh tokens (`auth.py`), plus Sign in with Apple (`apple_auth.py`)
+- **AI bottle vision:** OpenAI (`OPENAI_MODEL`, default `gpt-4o`, primary) and Google Gemini
+  (`GEMINI_MODEL`, default `gemini-3.6-flash`) asked **side by side**, each a second opinion
+  on the other. See the AI Vision Rules in `CLAUDE.md`.
+- **Billing:** Stripe (`billing.py`), with a webhook at `POST /billing/webhook`
+- **Email:** SpaceMail over SMTP/IMAP (`mailer.py`, `inbox.py`); Resend as an alternate sender
+- **Deploy:** Render — **Starter plan ($7/mo, 0.5 CPU, 512MB)**, not Free. It does not spin
+  down, so there is no cold start to design around. Postgres is on a paid tier separately.
+
+## Pricing (as the code actually behaves)
+
+- **15-day free trial, no credit card.** No card is collected at signup; checkout only opens
+  once the trial lapses (`pitch.TRIAL_DAYS = 15`, `main.py` ~3154).
+- **$49.99/month, one price for everyone.** Every checkout uses `STRIPE_PRICE_ID`. The
+  label the app shows comes from `PRICE_LABEL` (`main.py`, default `$49.99`); the sales
+  copy's wording comes from `COMPANY_PRICE` (`pitch.py`, default `$49.99/month`). Neither
+  is set on Render, so both defaults apply. Covered by `test_price.py` and `test_offer.py`.
+- `GET /v1/billing/price` still returns `launch: false` and `regular_price` alongside
+  `price`, so app builds already in the field keep working.
+
+my86d.com matches this backend: 15-day trial, $49.99/month.
 
 ## Quick Start
 
+The system Python has none of the pinned deps, and this box has no `python3-venv` and no
+passwordless `sudo`. Use `uv`:
+
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+uv venv ~/.venvs/86d-api
+uv pip install --python ~/.venvs/86d-api/bin/python -r requirements.txt pytest
 
-# Run locally
-uvicorn main:app --reload
+# DATABASE_URL is mandatory — point it at a local or branch Postgres
+export DATABASE_URL="postgresql://user:pass@localhost:5432/86d"
+export SECRET_KEY="dev-only-change-me"
 
-# API docs available at http://localhost:8000/docs
+~/.venvs/86d-api/bin/python -m uvicorn main:app --reload
+# API docs: http://localhost:8000/docs
 ```
+
+### Tests
+
+```bash
+~/.venvs/86d-api/bin/python -m pytest -q
+```
+
+59 test files, **1197 tests**, ~2 minutes. Green at `0b53974` (2026-10-07).
+
+## Layout
+
+`main.py` is a large single-file monolith holding the product API, the AI scan path and the
+legal/billing/support pages. The sales side lives in its own modules.
+
+| File | What |
+|---|---|
+| `main.py` | Product routes, AI scan pipeline, legal pages, Stripe webhook, `/crm` static mount |
+| `database.py` | PostgreSQL pool and schema creation |
+| `auth.py` / `apple_auth.py` | JWT tokens; Sign in with Apple |
+| `models.py` | Pydantic request/response models |
+| `helpers.py` | Level classification, ID generation, variance, order generation |
+| `billing.py` | Stripe checkout, portal, subscription state |
+| `seed_data.py` | 457 seeded master products |
+| `scanstats.py` | Scanner report card |
+
+### Internal sales CRM — not part of the product
+
+`crm.py` (~8.1k lines) exposes a `/v1/crm` router with **its own shared-key auth
+(`CRM_API_KEY`), its own models and its own `crm_*` tables**. It shares a process and a
+database with the product API but is deliberately self-contained — nothing in the
+inventory, scan or order paths reads from it.
+
+| File | What |
+|---|---|
+| `crm.py` | `/v1/crm` router, leads, call list, follow-ups, Apple Analytics routes |
+| `static/crm.html` | The whole CRM UI, served at `/crm`. Single self-contained file, no build step. Holds no credentials — the operator types the key and it lives in their browser's localStorage |
+| `leadgen.py` | Lead discovery, enrichment, the owner's qualification rules |
+| `contacts.py` | Email validation — does an address actually belong to the venue |
+| `mailer.py` / `inbox.py` | Sending, bounces, reply handling, opt-outs |
+| `apple.py` | Apple Analytics via App Store Connect's Analytics Reports API (connected 2026-09-26) |
+| `cloudtalk.py` / `callcoach.py` / `coach.py` | Call import, scoring and per-call coaching |
+| `pitch.py` / `playbook.py` / `school.py` | Pitch facts, call playbook, training packs |
+| `research.py` / `competitors.py` / `venue.py` / `phones.py` | Prospect research and data quality |
+
+## API
+
+95 routes across two routers: `v1_router` (the product API, `/v1/*`) and `crm_router`
+(internal sales). Full interactive list at **`/docs`** — that is generated from the code and
+will not drift the way a hand-written list here would.
+
+**Unprefixed:** `GET /` · `GET /health` · `GET /legal/privacy` · `GET /legal/terms` ·
+`GET /support` · `GET /billing/success` · `GET /billing/cancel` · `POST /billing/webhook` ·
+`POST /admin/activate-account` · `GET /crm`
+
+**Product API** (`/v1/`), grouped:
+
+- **Auth** — `register`, `login`, `refresh`, `forgot-password`, `reset-password`,
+  `change-password`, `auth/apple`
+- **Users** — `GET`/`PATCH`/`DELETE /users/me`, `users/me/accept-terms`
+- **Products** — list, `search`, `barcode/{upc}`, create, `increment-scan`, `merge`
+- **Locations** — list, create, patch, `duplicates`, `par-levels` (get/set/bulk),
+  `product-distributors`, per-location product overrides
+- **Distributors** — list, create, update, delete
+- **Inventory** — `start`, `draft` (get/put/delete), get session, `scan`, `scan/bulk`,
+  `voice`, `complete`, `cancel`
+- **Scans** — `scans/analyze` (the AI vision call), `scans/warm`, `scans/{id}/outcome`
+- **Orders** — list, get, `export`, `prepare-emails`, `email`
+- **Billing** — `billing/price`, `create-checkout-session`, `create-portal-session`
+- **Sync** — `POST /sync` (bulk, offline support), `GET /sync/{location_id}`
+- **Events** — `POST /events`
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_PATH` | SQLite database file path | `86d.db` |
-| `SECRET_KEY` | JWT signing key | (change in production) |
+`DATABASE_URL` and `SECRET_KEY` are the only two the app cannot run without. ~95 others are
+optional and gate individual features; grep `os.getenv` for the full set.
 
-## API Endpoints
-
-All endpoints are prefixed with `/v1/`
-
-### Health & Info
-- `GET /` - API info
-- `GET /health` - Health check
-
-### Auth
-- `POST /v1/auth/register` - Create account
-- `POST /v1/auth/login` - Login
-- `POST /v1/auth/refresh` - Refresh token
-- `POST /v1/auth/forgot-password` - Request password reset
-- `POST /v1/auth/reset-password` - Reset password with token
-- `PUT /v1/auth/change-password` - Change password (auth required)
-
-### Users
-- `GET /v1/users/me` - Get user profile
-- `DELETE /v1/users/me` - Delete account
-- `POST /v1/users/me/accept-terms` - Accept terms & privacy
-
-### Products
-- `GET /v1/products` - List products
-- `GET /v1/products/search?q={query}` - Search
-- `GET /v1/products/barcode/{upc}` - Lookup by UPC
-- `POST /v1/products` - Add product (auth)
-- `POST /v1/products/{id}/increment-scan` - Increment scan count
-
-### Locations
-- `GET /v1/locations` - List locations
-- `POST /v1/locations` - Create location
-- `GET /v1/locations/{id}/par-levels` - Get par levels
-- `POST /v1/locations/{id}/par-levels` - Set par level
-- `POST /v1/locations/{id}/par-levels/bulk` - Bulk update
-
-### Distributors
-- `GET /v1/distributors` - List distributors
-- `POST /v1/distributors` - Create distributor
-- `PUT /v1/distributors/{id}` - Update distributor
-- `DELETE /v1/distributors/{id}` - Delete distributor
-- `GET /v1/locations/{id}/product-distributors` - List product-distributor assignments
-- `POST /v1/locations/{id}/product-distributors` - Assign product to distributor
-
-### Inventory
-- `POST /v1/inventory/start` - Start session
-- `GET /v1/inventory/{id}` - Get session
-- `POST /v1/inventory/{id}/scan` - Add scan
-- `POST /v1/inventory/{id}/scan/bulk` - Bulk scans
-- `POST /v1/inventory/{id}/voice` - Add voice note
-- `POST /v1/inventory/{id}/complete` - Complete & generate order
-- `POST /v1/inventory/{id}/cancel` - Cancel session
-
-### Orders
-- `GET /v1/orders` - List orders
-- `GET /v1/orders/{id}` - Get order
-- `POST /v1/orders/{id}/export` - Export order
-- `POST /v1/orders/{id}/prepare-emails` - Prepare distributor emails
-
-### Sync
-- `POST /v1/sync` - Bulk sync (offline support)
-- `GET /v1/sync/{location_id}` - Get location data
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | **Required.** PostgreSQL connection string; app raises without it |
+| `SECRET_KEY` | **Required.** JWT signing, and derives the Fernet key for Apple's stored `.p8` — rotating it makes that key unreadable and the Apple tab asks to reconnect |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` | Primary bottle vision (default `gpt-4o`) |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | Second-opinion vision (default `gemini-3.6-flash`) |
+| `STRIPE_SECRET_KEY` / `STRIPE_PRICE_ID` / `STRIPE_WEBHOOK_SECRET` | Billing. A leftover `STRIPE_LAUNCH_PRICE_ID` is ignored |
+| `PRICE_LABEL` | The price the app displays (default `$49.99`) |
+| `COMPANY_PRICE` / `COMPANY_APP_URL` / `COMPANY_WEBSITE` / `COMPANY_PHONE` | Pitch and email facts (`COMPANY_PRICE` default `$49.99/month`) |
+| `CRM_API_KEY` | Shared key for the whole `/v1/crm` surface |
+| `SPACEMAIL_*` | Outbound SMTP and inbound IMAP for sales email |
+| `CLOUDTALK_KEY_ID` / `CLOUDTALK_KEY_SECRET` | Call import and scoring |
+| `APPLE_ISSUER_ID` / `APPLE_KEY_ID` / `APPLE_PRIVATE_KEY` / `APPLE_APP_ID` | Override the saved App Store Connect key. Needs the **Admin** role |
+| `SENTRY_DSN` | Error reporting |
 
 ## Database Schema
 
-See `database.py` for full schema. Key tables:
+Created on boot by `database.py`. ~43 tables. Product side:
 
-- `users` - User accounts (with subscription fields)
-- `locations` - Bars/venues
-- `products` - Master product database (25 seeded)
-- `distributors` - Distributor contacts
-- `location_product_distributors` - Product-distributor mappings
-- `par_levels` - Target stock levels
-- `inventory_sessions` - Count sessions
-- `scans` - Individual bottle scans
-- `voice_notes` - Voice recordings
-- `orders` - Generated orders
+`users` · `locations` · `products` · `product_aliases` · `product_merges` · `distributors` ·
+`location_product_distributors` · `par_levels` · `par_levels_backfill_log` ·
+`inventory_sessions` · `inventory_drafts` · `scans` · `scan_events` · `scan_outcomes` ·
+`voice_notes` · `orders` · `order_sends` · `sync_queue` · `usage_history` · `stripe_events` ·
+`app_events`
 
-## Deployment
+Internal CRM side — all prefixed `crm_`: `crm_leads` · `crm_counters` · `crm_calls` ·
+`crm_touches` · `crm_inbox` · `crm_sent_emails` · `crm_scheduled_emails` · `crm_suppressions` ·
+`crm_lead_candidates` · `crm_leadgen_runs` · `crm_apple_metrics` · `crm_coach_hub` ·
+`crm_ai_brain` and others.
 
-### Render
+## Deploy Rules
 
-1. Create new Web Service
-2. Connect GitHub repo `m700devops/86d-api`
-3. Set build command: `pip install -r requirements.txt`
-4. Set start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-5. Deploy
+- Deployed on Render via `Procfile` → `render-start.sh` → `uvicorn main:app`, 1 worker.
+  **Do not change without approval.**
+- **Cannot push directly to `main`** — work on a feature branch and open a PR. Branch names
+  are assigned per session, not fixed.
+- **Requirements are fully pinned.** Check compatibility before upgrading anything. `openai`,
+  `stripe` and `sentry-sdk` were `>=` until 2026-09-25, and stripe 15 silently broke the
+  Stripe webhook. See the failure-points log in `CLAUDE.md`.
 
-**URL:** https://eight6d-api.onrender.com
+## Support
+
+southportai@hotmail.com
 
 ## License
 
-MIT
+Proprietary — © Southport AI Solutions. All rights reserved. No license is granted.
+
