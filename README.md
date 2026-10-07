@@ -31,16 +31,12 @@ and builds the distributor order.
 
 - **15-day free trial, no credit card.** No card is collected at signup; checkout only opens
   once the trial lapses (`pitch.TRIAL_DAYS = 15`, `main.py` ~3154).
-- **$49.99/month** regular (`COMPANY_PRICE`).
-- **$29.99/month launch price for the first `LAUNCH_PRICE_SLOTS` (10) real accounts**, via
-  `STRIPE_LAUNCH_PRICE_ID`. The 11th account pays the regular price. `GET /v1/billing/price`
-  tells the app which one applies. Covered by `test_launch_price.py`.
-
-> **The launch price is being retired.** PR #71 removes `LAUNCH_PRICE_SLOTS`,
-> `STRIPE_LAUNCH_PRICE_ID` and the "first 10" ranking entirely — every checkout becomes
-> $49.99/month. When that merges, delete the bullet above and the `LAUNCH_PRICE_SLOTS` row
-> in the environment table. `GET /v1/billing/price` keeps returning `launch` and
-> `regular_price` so shipped app builds keep working.
+- **$49.99/month, one price for everyone.** Every checkout uses `STRIPE_PRICE_ID`. The
+  label the app shows comes from `PRICE_LABEL` (`main.py`, default `$49.99`); the sales
+  copy's wording comes from `COMPANY_PRICE` (`pitch.py`, default `$49.99/month`). Neither
+  is set on Render, so both defaults apply. Covered by `test_price.py` and `test_offer.py`.
+- `GET /v1/billing/price` still returns `launch: false` and `regular_price` alongside
+  `price`, so app builds already in the field keep working.
 
 my86d.com matches this backend: 15-day trial, $49.99/month.
 
@@ -67,7 +63,7 @@ export SECRET_KEY="dev-only-change-me"
 ~/.venvs/86d-api/bin/python -m pytest -q
 ```
 
-57 test files, **1167 tests**, ~2 minutes. Green at `327cf1e` (2026-10-07).
+59 test files, **1197 tests**, ~2 minutes. Green at `0b53974` (2026-10-07).
 
 ## Layout
 
@@ -142,9 +138,9 @@ optional and gate individual features; grep `os.getenv` for the full set.
 | `SECRET_KEY` | **Required.** JWT signing, and derives the Fernet key for Apple's stored `.p8` — rotating it makes that key unreadable and the Apple tab asks to reconnect |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | Primary bottle vision (default `gpt-4o`) |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | Second-opinion vision (default `gemini-3.6-flash`) |
-| `STRIPE_SECRET_KEY` / `STRIPE_PRICE_ID` / `STRIPE_LAUNCH_PRICE_ID` / `STRIPE_WEBHOOK_SECRET` | Billing |
-| `LAUNCH_PRICE_SLOTS` | How many accounts get the launch price (10) |
-| `COMPANY_PRICE` / `COMPANY_APP_URL` / `COMPANY_WEBSITE` / `COMPANY_PHONE` | Pitch and email facts |
+| `STRIPE_SECRET_KEY` / `STRIPE_PRICE_ID` / `STRIPE_WEBHOOK_SECRET` | Billing. A leftover `STRIPE_LAUNCH_PRICE_ID` is ignored |
+| `PRICE_LABEL` | The price the app displays (default `$49.99`) |
+| `COMPANY_PRICE` / `COMPANY_APP_URL` / `COMPANY_WEBSITE` / `COMPANY_PHONE` | Pitch and email facts (`COMPANY_PRICE` default `$49.99/month`) |
 | `CRM_API_KEY` | Shared key for the whole `/v1/crm` surface |
 | `SPACEMAIL_*` | Outbound SMTP and inbound IMAP for sales email |
 | `CLOUDTALK_KEY_ID` / `CLOUDTALK_KEY_SECRET` | Call import and scoring |
