@@ -373,7 +373,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
-  test_cloudtalk.py test_callcoach.py test_launch_price.py test_profile_phone.py test_billing.py -q` (1167 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_cloudtalk.py test_callcoach.py test_launch_price.py test_profile_phone.py test_billing.py
+  test_product_distributors.py -q` (1170 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -728,7 +729,16 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   `answers_agree`'s one-typo tolerance is kept) — 51ms, and test_duplicates.py checks the result is
   identical to the brute force on the whole seeded catalog and 60 random messy books
 - GET/POST /locations/{id}/product-distributors — the other half of that memory: which
-  distributor a bottle is ordered from at this bar, set once and applied to every future scan
+  distributor a bottle is ordered from at this bar, set once and applied to every future scan.
+  **The GET's nested `distributor`/`product` are the slim `AssignedDistributor` /
+  `AssignedProduct` models, NOT DistributorResponse/ProductResponse**: those require user_id,
+  category and timestamps the join never selects, so from a bar's FIRST saved assignment the
+  GET was a 500 (200 with none, which is how it hid). Saves landed; the app read none back and
+  showed every bottle Unassigned on the next count. A model whose required fields a route
+  doesn't fill fails at response time, not at import — check it when nesting one. The
+  scanner's `bar_book` step counts a bottle with only a distributor saved (no par_levels row)
+  as the bar's own, so a scan can't land on another copy and drop it. Covered by
+  test_product_distributors.py; both halves run on a real Postgres 16
 - POST /inventory/start, GET /inventory/{session_id}, POST /inventory/{session_id}/scan
 - POST /inventory/{session_id}/scan/bulk
 - POST /scans/analyze — the live AI vision route (OpenAI and Gemini side by side), see AI Vision Rules above
