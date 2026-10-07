@@ -26,6 +26,9 @@ class _Cur:
     def execute(self, sql, params=()):
         self.log.append((" ".join(sql.split()), params))
 
+    def fetchone(self):
+        return None  # the profile read in /billing/price: no subscription on file
+
     def fetchall(self):
         limit = self.log[-1][1][1]
         return [{"id": i} for i in self.first_ids[:limit]]
@@ -74,7 +77,7 @@ def test_the_price_route_answers_the_label_and_never_fails(monkeypatch):
 
     monkeypatch.setattr(main, "get_db", db)
     assert main.billing_price("u1") == {"price": "$29.99", "per": "month", "launch": True,
-                                        "regular_price": "$49.99"}
+                                        "regular_price": "$49.99", "first_charge_date": None}
 
     @contextmanager
     def broken():
@@ -105,6 +108,8 @@ def test_checkout_uses_the_launch_price_for_a_launch_account(monkeypatch):
         return types.SimpleNamespace(url="https://checkout")
 
     monkeypatch.setattr(main.stripe.checkout.Session, "create", create)
+    monkeypatch.setattr(main.stripe.Subscription, "list",
+                        lambda **kw: types.SimpleNamespace(data=[]))  # no live subscription yet
     assert main.create_checkout_session("u1") == {"checkout_url": "https://checkout"}
     assert seen["line_items"] == [{"price": "price_launch", "quantity": 1}]
     main.create_checkout_session("u2")
