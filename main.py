@@ -77,7 +77,6 @@ async def lifespan(app: FastAPI):
         ("RESEND_API_KEY", bool(os.getenv("RESEND_API_KEY")), "order emails and password resets cannot send"),
         ("STRIPE_SECRET_KEY", bool(os.getenv("STRIPE_SECRET_KEY")), "checkout/billing endpoints will 503"),
         ("STRIPE_PRICE_ID", bool(os.getenv("STRIPE_PRICE_ID")), "checkout endpoint will 503 — nobody can subscribe"),
-        ("STRIPE_LAUNCH_PRICE_ID", bool(os.getenv("STRIPE_LAUNCH_PRICE_ID")), "the first 10 accounts are charged the regular price, not the $29.99 launch price"),
         ("STRIPE_WEBHOOK_SECRET", bool(os.getenv("STRIPE_WEBHOOK_SECRET")), "payments won't activate subscriptions — customers pay and stay locked out"),
         ("ANTHROPIC_API_KEY", bool(os.getenv("ANTHROPIC_API_KEY")), "the CRM can't read call notes into fields — they get typed by hand (sales tool only, no effect on the app)"),
         ("SPACEMAIL_USER / SPACEMAIL_PASSWORD", bool(os.getenv("SPACEMAIL_USER") and os.getenv("SPACEMAIL_PASSWORD")), "the CRM's Email button falls back to a mailto: link and sends nothing itself (sales tool only)"),
@@ -3519,37 +3518,16 @@ async def _leadgen_daily_loop():
 
 
 # ============== PRICE ==============
-# $49.99/month (STRIPE_PRICE_ID), except the first LAUNCH_PRICE_SLOTS (10)
-# accounts ever made, which keep the launch price of $29.99
-# (STRIPE_LAUNCH_PRICE_ID). "First" = oldest created_at among live accounts
-# that aren't ours or App Store review's (crm.TEST_EMAIL_PATTERN, the same
-# filter as the CRM's Customers list), so a review account can't take a slot.
-# It only picks the price a NEW checkout uses: a subscription Stripe already
-# holds stays on whatever price it was started on. Without
-# STRIPE_LAUNCH_PRICE_ID set, everyone gets STRIPE_PRICE_ID.
-LAUNCH_PRICE_SLOTS = int(os.getenv("LAUNCH_PRICE_SLOTS", "10"))
+# One price for everyone: $49.99/month (STRIPE_PRICE_ID). There was a $29.99
+# launch price for the first 10 accounts (STRIPE_LAUNCH_PRICE_ID); the owner
+# dropped it on 2026-10-07, so that variable is no longer read. A subscription
+# Stripe already holds stays on whatever price it was started on.
 PRICE_LABEL = os.getenv("PRICE_LABEL") or "$49.99"
-LAUNCH_PRICE_LABEL = os.getenv("LAUNCH_PRICE_LABEL") or "$29.99"
 
 
-def _launch_user_ids(cursor) -> list:
-    if LAUNCH_PRICE_SLOTS <= 0:
-        return []
-    from crm import TEST_EMAIL_PATTERN
-    cursor.execute(
-        "SELECT id FROM users WHERE deleted_at IS NULL AND email !~* %s "
-        "ORDER BY created_at, id LIMIT %s",
-        (TEST_EMAIL_PATTERN, LAUNCH_PRICE_SLOTS),
-    )
-    return [r["id"] for r in cursor.fetchall()]
-
-
-def _price_for(cursor, user_id: str) -> dict:
-    """The Stripe price, and the label the app shows, for this account."""
-    launch_id = os.getenv("STRIPE_LAUNCH_PRICE_ID")
-    if launch_id and user_id in _launch_user_ids(cursor):
-        return {"price_id": launch_id, "label": LAUNCH_PRICE_LABEL, "launch": True}
-    return {"price_id": os.getenv("STRIPE_PRICE_ID"), "label": PRICE_LABEL, "launch": False}
+def _price() -> dict:
+    """The Stripe price a checkout uses, and the label the app shows."""
+    return {"price_id": os.getenv("STRIPE_PRICE_ID"), "label": PRICE_LABEL}
 
 
 @v1_router.get("/billing/price")
@@ -3560,15 +3538,15 @@ def billing_price(user_id: str = Depends(get_current_user)):
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            p = _price_for(cursor, user_id)
             cursor.execute(
                 "SELECT subscription_status, trial_ends_at, stripe_subscription_id "
                 "FROM users WHERE id = %s AND deleted_at IS NULL", (user_id,))
             row = cursor.fetchone()
     except Exception as e:
         print(f"[billing] PRICE_LOOKUP_FAILED {e}", flush=True)
-        p = {"label": PRICE_LABEL, "launch": False}
-    return {"price": p["label"], "per": "month", "launch": p["launch"],
+    # `launch` and `regular_price` stay for app builds that read them: there is
+    # no launch price any more, so it's always false and the one price.
+    return {"price": PRICE_LABEL, "per": "month", "launch": False,
             "regular_price": PRICE_LABEL, "first_charge_date": _first_charge_date(row)}
 
 
@@ -3613,7 +3591,7 @@ def create_checkout_session(user_id: str = Depends(get_current_user)):
             (user_id,)
         )
         row = cursor.fetchone()
-        price_id = _price_for(cursor, user_id)["price_id"]
+        price_id = _price()["price_id"]
     if not row:
         raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
 

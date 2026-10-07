@@ -373,8 +373,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
-  test_cloudtalk.py test_callcoach.py test_launch_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py -q` (1170 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
+  test_product_distributors.py -q` (1168 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -1929,14 +1929,13 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   default (the model's own: medium on 3.6 Flash). Billed as output and waited for; see AI Vision Rules
 - RESEND_API_KEY — order emails and password resets cannot send without it
 - STRIPE_SECRET_KEY — checkout/billing endpoints 503 without it
-- STRIPE_PRICE_ID — checkout endpoint 503s without it, nobody can subscribe
-- STRIPE_LAUNCH_PRICE_ID — the $29.99/month launch price. The first `LAUNCH_PRICE_SLOTS` (10)
-  real accounts ever made (oldest `created_at`, live, not `crm.TEST_EMAIL_PATTERN`) check out
-  at it; everyone else at STRIPE_PRICE_ID ($49.99/month). Unset = everyone pays the regular
-  price. It only picks the price of a NEW checkout: an existing Stripe subscription stays on
-  the price it started on. `GET /v1/billing/price` tells the paywall which one (`price`,
-  `launch`, `regular_price`); PRICE_LABEL / LAUNCH_PRICE_LABEL override the shown amounts
-  ("$49.99" / "$29.99"). Covered by test_launch_price.py
+- STRIPE_PRICE_ID — the ONE price, $49.99/month, for every new checkout. Checkout 503s without
+  it, so nobody can subscribe. An existing Stripe subscription stays on the price it started on.
+  `GET /v1/billing/price` gives the paywall its label (`price`; PRICE_LABEL overrides "$49.99"),
+  and still answers `launch: false` / `regular_price` for app builds that read them.
+  **There is no launch price** (the owner's call, 2026-10-07): the $29.99-for-the-first-10 offer
+  and STRIPE_LAUNCH_PRICE_ID, LAUNCH_PRICE_SLOTS and LAUNCH_PRICE_LABEL are gone and not read,
+  so a leftover STRIPE_LAUNCH_PRICE_ID on Render does nothing. Covered by test_price.py
 - STRIPE_WEBHOOK_SECRET — without it, payments don't activate subscriptions (customers pay and stay locked out)
 - CRM_API_KEY — shared key for `/v1/crm/*`; unset means every CRM endpoint 503s (the UI at
   `/crm` still loads, it just can't do anything). Not used by the mobile app at all
@@ -1993,7 +1992,7 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 
 ## BILLING (billing.py + main.py, hardened 2026-10-07)
 The rules are pure in billing.py; main.py does the Stripe and database I/O. Covered by
-test_billing.py (every rule mutation-checked) and test_launch_price.py; the webhook was also run
+test_billing.py (every rule mutation-checked) and test_price.py; the webhook was also run
 on a real Postgres 16 with four concurrent deliveries of one event (one write, three duplicates).
 - **Subscribing early keeps the free days.** Checkout gets `subscription_data.trial_end` = the
   account's `trial_ends_at` while it's in 'trial' with at least `TRIAL_END_MIN` (48h + 5 min)
