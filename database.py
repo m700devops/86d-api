@@ -531,7 +531,7 @@ def init_db():
         # hide behind a relay alias at any time.
         # password_reset_attempts: wrong reset codes against the current one —
         # the code is thrown away after RESET_MAX_ATTEMPTS (main.reset_password).
-        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT"), ("password_reset_attempts", "INTEGER DEFAULT 0")]:
+        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT"), ("password_reset_attempts", "INTEGER DEFAULT 0"), ("phone", "TEXT"), ("stripe_subscription_id", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'users' AND column_name = %s
@@ -574,6 +574,17 @@ def init_db():
         # lost (bar wifi, a timeout) is retried under the same ref, and a
         # distributor already 'sent' under it is skipped. See
         # main.send_order_emails.
+        # Stripe webhook events already applied (main._handle_billing_event):
+        # the id is inserted in the SAME transaction as the status write, so a
+        # redelivered event (Stripe retries, and can deliver one twice at
+        # once) is applied exactly once.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stripe_events (
+                event_id TEXT PRIMARY KEY,
+                type TEXT,
+                received_at TEXT NOT NULL
+            )
+        """)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS order_sends (
                 user_id TEXT NOT NULL,

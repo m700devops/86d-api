@@ -373,7 +373,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scan_path.py test_match_key.py test_label_check.py test_second_opinion.py
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
-  test_cloudtalk.py test_callcoach.py test_launch_price.py -q` (1114 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_cloudtalk.py test_callcoach.py test_launch_price.py test_profile_phone.py test_billing.py -q` (1167 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -659,6 +659,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 
 ## Key API Routes (all under /v1)
 - POST /auth/register, /auth/login, /auth/refresh
+- PATCH /users/me — business_name, manager_name and **phone** (optional, from the app's bar-name
+  screen, "for setup help"): blank clears it, anything else must pass `phones.normalize_us_phone`
+  (422 `invalid_phone`) and is stored dashed (615-742-9095, what CloudTalk accepts). Shown and
+  searchable (digits only) on the CRM's Customers page. Covered by test_profile_phone.py
 - POST /auth/apple — Sign in with Apple. Matched on Apple's `sub`, NEVER the email: the
   address can be a Hide My Email relay alias, the user can switch it off later, and it is
   not a stable identifier. An existing password account on the same address is LINKED
@@ -1977,14 +1981,45 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   LABEL_CHECK (enforce | log | off), SECOND_OPINION (on | off), SECOND_OPINION_WAIT_SEC (2.0),
   SCAN_THREADS (16) — optional tuning, see AI Vision Rules above
 
+## BILLING (billing.py + main.py, hardened 2026-10-07)
+The rules are pure in billing.py; main.py does the Stripe and database I/O. Covered by
+test_billing.py (every rule mutation-checked) and test_launch_price.py; the webhook was also run
+on a real Postgres 16 with four concurrent deliveries of one event (one write, three duplicates).
+- **Subscribing early keeps the free days.** Checkout gets `subscription_data.trial_end` = the
+  account's `trial_ends_at` while it's in 'trial' with at least `TRIAL_END_MIN` (48h + 5 min)
+  left — Stripe's API reference: trial_end "Has to be at least 48 hours in the future". Under
+  that, or no trial left, they're charged on subscribing; the trial is never extended.
+  `payment_method_collection="always"` is set explicitly (it is Stripe's default; the card is
+  taken up front), so `trial_settings.end_behavior.missing_payment_method` is irrelevant and
+  not sent
+- **No second subscription.** Before Checkout, the customer's subscriptions are listed; any
+  in `billing.LIVE` (active, trialing, past_due, unpaid) → 409 `already_subscribed` with
+  `message` (every app build shows detail.message) and, when the portal answers, `portal_url`.
+  Log `ALREADY_SUBSCRIBED`
+- **The webhook never trusts the event's copy of the status.** `_handle_billing_event`:
+  `stripe.Subscription.retrieve()` FIRST, with no DB connection held (a failure → 503 so Stripe
+  retries; `BILLING_STRIPE_RETRIEVE_FAILED`), then ONE transaction: claim the event id in
+  `stripe_events` (`INSERT … ON CONFLICT DO NOTHING RETURNING`; nothing back → duplicate, rolled
+  back, `BILLING_EVENT_DUPLICATE`; a `UniqueViolation` from a concurrent delivery answers 200
+  too), find the user (`stripe_subscription_id`, then metadata user id, then
+  `stripe_customer_id`, each `FOR UPDATE`) and write `billing.app_status()` of Stripe's CURRENT
+  status: trialing/active/past_due → 'active'; anything else → 'trial' while free days remain
+  (cancelling during the trial doesn't take the rest of it), else 'canceled'. So events arriving
+  out of order, or an old 'canceled' after a re-subscribe, can't lock a payer out.
+  `users.stripe_subscription_id` is kept while the subscription is live, cleared once it ends.
+  Unknown subscription → `BILLING_USER_NOT_FOUND`, no write. Success → `BILLING_APPLIED`
+- **`GET /billing/price` carries `first_charge_date`**: a trialing Stripe subscription's own
+  `trial_end`; otherwise what a Checkout started now would do; null = charged today / already
+  billing. A Stripe error → null (`FIRST_CHARGE_LOOKUP_FAILED`), never a failed price
+
 ## FAILURE POINTS FIXED (audit, 2026-09-25) — don't reintroduce these
 Each is covered by test_failure_points.py unless noted.
 - **The Stripe webhook reads the VERIFIED payload with `json.loads`, never the library's
   event object.** requirements.txt allowed any `stripe>=7`; a clean build installs 15.x, where
   `StripeObject` is no longer a dict, so `event["data"]["object"].get(...)` raised on EVERY
-  webhook — a customer paid and stayed locked out, cancellations never landed. The DB work runs
-  in `_apply_billing_event` via `asyncio.to_thread`. A checkout that completes `unpaid` (delayed
-  payment methods) waits for the subscription's own "active" update
+  webhook — a customer paid and stayed locked out, cancellations never landed. The work runs
+  in `_handle_billing_event` via `asyncio.to_thread` (see BILLING). A checkout that completes
+  `unpaid` (delayed payment methods) waits for the subscription's own "active" update
 - **`openai`, `stripe` and `sentry-sdk` are PINNED** (3.19.2 / 15.6.1 / 2.70.0 — what a clean
   build installed on 2026-09-25, and what the code was verified against). They were `>=`, so any
   deploy could pull a breaking major. Upgrade on purpose, and re-run test_failure_points.py

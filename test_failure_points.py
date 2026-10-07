@@ -91,38 +91,49 @@ def _hook(monkeypatch, event, sig=None):
     return asyncio.run(main.billing_webhook(_Req(body, sig or good)))
 
 
+def _sub(monkeypatch, status, sub_id="sub_1", **extra):
+    """Stripe's current copy of the subscription, which the webhook reads
+    instead of trusting the event (test_billing.py covers the ordering)."""
+    obj = types.SimpleNamespace(to_dict=lambda: {"id": sub_id, "status": status, "customer": "cus_9",
+                                                 "metadata": {"user_id": "user-1"}, **extra})
+    monkeypatch.setattr(main.stripe.Subscription, "retrieve", lambda _id: obj)
+
+
+USER_ROWS = {"INSERT INTO stripe_events": [{"event_id": "evt_1"}],
+             "WHERE id = %s AND deleted_at IS NULL FOR UPDATE": [{"id": "user-1", "trial_ends_at": None}]}
+
+
 def test_a_paid_checkout_activates_the_account_on_the_installed_stripe(monkeypatch):
-    log = _db(monkeypatch, main)
+    log = _db(monkeypatch, main, USER_ROWS)
+    _sub(monkeypatch, "active")
     out = _hook(monkeypatch, {"id": "evt_1", "object": "event", "type": "checkout.session.completed",
                               "data": {"object": {"object": "checkout.session", "id": "cs_1",
                                                   "client_reference_id": "user-1", "customer": "cus_9",
-                                                  "payment_status": "paid"}}})
+                                                  "subscription": "sub_1", "payment_status": "paid"}}})
     assert out == {"received": True}
     sql, params = log[-1]
-    assert "subscription_status = 'active'" in sql and params[0] == "cus_9" and params[2] == "user-1"
-
-
-def test_the_user_id_can_come_from_metadata(monkeypatch):
-    log = _db(monkeypatch, main)
-    _hook(monkeypatch, {"type": "checkout.session.completed", "data": {"object": {
-        "customer": "cus_9", "metadata": {"user_id": "user-2"}}}})
-    assert log[-1][1][2] == "user-2"
+    assert sql.startswith("UPDATE users SET subscription_status") and params[0] == "active"
+    assert params[1] == "sub_1" and params[2] == "cus_9" and params[4] == "user-1"
 
 
 def test_an_unpaid_checkout_waits_for_the_subscription(monkeypatch):
-    log = _db(monkeypatch, main)
-    _hook(monkeypatch, {"type": "checkout.session.completed", "data": {"object": {
-        "client_reference_id": "user-1", "customer": "cus_9", "payment_status": "unpaid"}}})
+    log = _db(monkeypatch, main, USER_ROWS)
+    _sub(monkeypatch, "incomplete")
+    _hook(monkeypatch, {"id": "evt_1", "type": "checkout.session.completed", "data": {"object": {
+        "client_reference_id": "user-1", "customer": "cus_9", "subscription": "sub_1",
+        "payment_status": "unpaid"}}})
     assert not any("UPDATE users" in q for q, _ in log)
 
 
 @pytest.mark.parametrize("status,expected", [("active", "active"), ("past_due", "active"),
+                                             ("trialing", "active"),
                                              ("canceled", "canceled"), ("unpaid", "canceled")])
 def test_subscription_changes_land(monkeypatch, status, expected):
-    log = _db(monkeypatch, main)
-    _hook(monkeypatch, {"type": "customer.subscription.updated",
-                        "data": {"object": {"customer": "cus_9", "status": status}}})
-    assert log[-1][1][0] == expected and log[-1][1][2] == "cus_9"
+    log = _db(monkeypatch, main, USER_ROWS)
+    _sub(monkeypatch, status)
+    _hook(monkeypatch, {"id": "evt_1", "type": "customer.subscription.updated",
+                        "data": {"object": {"id": "sub_1", "customer": "cus_9", "status": status}}})
+    assert log[-1][1][0] == expected and log[-1][1][4] == "user-1"
 
 
 def test_a_forged_webhook_is_refused(monkeypatch):

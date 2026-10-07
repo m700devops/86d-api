@@ -36,7 +36,9 @@ from apple_auth import (
     DEFAULT_BUNDLE_ID as APPLE_DEFAULT_BUNDLE_ID,
 )
 from crm import crm_router, init_crm_tables
+from phones import normalize_us_phone, format_us_phone_dashed
 from pitch import TRIAL_DAYS  # the free trial's length, shared with the sales pitch
+import billing
 import activity
 from leadgen import init_leadgen_tables
 import openai
@@ -44,6 +46,7 @@ import os
 import httpx
 import random
 import psycopg2
+import psycopg2.errors
 import hashlib
 import secrets
 from pydantic import BaseModel, Field
@@ -3553,14 +3556,38 @@ def _price_for(cursor, user_id: str) -> dict:
 def billing_price(user_id: str = Depends(get_current_user)):
     """What this account would pay per month — the paywall shows it. Never
     fails the paywall: a database hiccup answers the regular price."""
+    row = None
     try:
         with get_db() as conn:
-            p = _price_for(conn.cursor(), user_id)
+            cursor = conn.cursor()
+            p = _price_for(cursor, user_id)
+            cursor.execute(
+                "SELECT subscription_status, trial_ends_at, stripe_subscription_id "
+                "FROM users WHERE id = %s AND deleted_at IS NULL", (user_id,))
+            row = cursor.fetchone()
     except Exception as e:
         print(f"[billing] PRICE_LOOKUP_FAILED {e}", flush=True)
         p = {"label": PRICE_LABEL, "launch": False}
     return {"price": p["label"], "per": "month", "launch": p["launch"],
-            "regular_price": PRICE_LABEL}
+            "regular_price": PRICE_LABEL, "first_charge_date": _first_charge_date(row)}
+
+
+def _first_charge_date(row) -> Optional[str]:
+    """When this account's first charge is (ISO date), or None for today /
+    already billing. A subscription Stripe holds decides it (our local
+    trial_ends_at is stale once they subscribe), read with no DB connection
+    held. Never fails the route: unknown is None."""
+    if not row:
+        return None
+    sub = None
+    if row.get("stripe_subscription_id") and stripe.api_key:
+        try:
+            sub = stripe.Subscription.retrieve(row["stripe_subscription_id"]).to_dict()
+        except Exception as e:
+            print(f"[billing] FIRST_CHARGE_LOOKUP_FAILED {type(e).__name__}: {e}", flush=True)
+            return None
+    return billing.first_charge_date(sub, row.get("subscription_status"),
+                                     row.get("trial_ends_at"), datetime.now(timezone.utc))
 
 
 @v1_router.post("/billing/create-checkout-session")
@@ -3581,7 +3608,8 @@ def create_checkout_session(user_id: str = Depends(get_current_user)):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT email, stripe_customer_id FROM users WHERE id = %s AND deleted_at IS NULL",
+            "SELECT email, stripe_customer_id, subscription_status, trial_ends_at "
+            "FROM users WHERE id = %s AND deleted_at IS NULL",
             (user_id,)
         )
         row = cursor.fetchone()
@@ -3603,6 +3631,24 @@ def create_checkout_session(user_id: str = Depends(get_current_user)):
                 )
                 conn.commit()
 
+        else:
+            # One subscription per customer: a second Checkout (a double tap,
+            # two devices, a stale build) would bill them twice a month.
+            live = [s for s in stripe.Subscription.list(customer=customer_id, status="all", limit=10).data
+                    if s["status"] in billing.LIVE]
+            if live:
+                raise _already_subscribed(customer_id)
+
+        subscription_data = {"metadata": {"user_id": user_id}}
+        trial_end = billing.checkout_trial_end(
+            row.get("subscription_status"), row.get("trial_ends_at"), datetime.now(timezone.utc))
+        if trial_end:
+            # Subscribing during the free trial: billing starts when the trial
+            # would have ended, not today. Less than Checkout's 48h minimum
+            # left (billing.TRIAL_END_MIN) charges now; the trial is never
+            # extended.
+            subscription_data["trial_end"] = trial_end
+
         session = stripe.checkout.Session.create(
             customer=customer_id,
             mode="subscription",
@@ -3610,11 +3656,38 @@ def create_checkout_session(user_id: str = Depends(get_current_user)):
             success_url=f"{APP_BASE_URL}/billing/success",
             cancel_url=f"{APP_BASE_URL}/billing/cancel",
             client_reference_id=user_id,
-            subscription_data={"metadata": {"user_id": user_id}},
+            subscription_data=subscription_data,
+            # Stripe's default already ("By default, Checkout Sessions collect
+            # a payment method to use after the trial ends"). Spelled out so a
+            # move to "if_required" is a visible decision. With "always" a
+            # trial can't end without a card, so trial_settings.end_behavior.
+            # missing_payment_method is deliberately NOT set: it could never fire.
+            payment_method_collection="always",
         )
+    except HTTPException:
+        raise
     except _STRIPE_ERROR as exc:
         raise _stripe_unavailable(exc)
     return {"checkout_url": session.url}
+
+
+def _already_subscribed(customer_id: str) -> HTTPException:
+    """409, not a new response shape: every app build already shows
+    detail.message from a failed checkout ("Couldn't start checkout" + this),
+    so an old build gets an explanation instead of a dead button. portal_url
+    is extra, for builds that open it; a portal failure just leaves it out."""
+    portal_url = None
+    try:
+        portal_url = stripe.billing_portal.Session.create(
+            customer=customer_id, return_url=f"{APP_BASE_URL}/billing/success").url
+    except Exception as e:
+        print(f"[billing] PORTAL_FOR_409_FAILED {type(e).__name__}: {e}", flush=True)
+    print(f"[billing] ALREADY_SUBSCRIBED customer={customer_id}", flush=True)
+    detail = {"error": "already_subscribed",
+              "message": "You already have a subscription. Manage it in Settings → Manage Subscription."}
+    if portal_url:
+        detail["portal_url"] = portal_url
+    return HTTPException(status_code=409, detail=detail)
 
 
 @v1_router.post("/billing/create-portal-session")
@@ -3808,58 +3881,104 @@ async def billing_webhook(request: Request):
     # never landed. requirements.txt allowed any stripe >= 7, so the next clean
     # build would have installed it. json.loads works on every version.
     event = json.loads(payload)
-    # Database work off the event loop: this process serves every request on
-    # one loop, and a blocking query here stalls all of them.
-    await asyncio.to_thread(_apply_billing_event, event)
+    # Off the event loop: the Stripe lookup and the queries both block, and
+    # this process serves every request on one loop.
+    await asyncio.to_thread(_handle_billing_event, event)
     return {"received": True}
 
 
-def _apply_billing_event(event: dict) -> None:
+def _handle_billing_event(event: dict) -> None:
+    """Apply one verified Stripe event. In this order, on purpose:
+
+    1. Ask Stripe for the subscription's CURRENT state, with no database
+       connection held. Events arrive out of order (a late "trialing" after
+       "active"), so the event's own copy is never trusted; whatever order
+       they come in, the account ends up matching Stripe. If Stripe can't be
+       reached, nothing is written and nothing is marked done: the 503 makes
+       Stripe deliver the event again later.
+    2. ONE transaction that records the event id AND writes the status. A
+       redelivered event finds its id and changes nothing; two deliveries of
+       the same event at once both try the insert, the second waits for the
+       first and gets no row back (ON CONFLICT DO NOTHING), and a unique
+       violation that slips through anyway is answered 200, not 500, because
+       the event WAS applied.
+    """
+    event_id = event.get("id")
+    kind = event.get("type") or ""
     obj = (event.get("data") or {}).get("object") or {}
-    kind = event.get("type")
-    now = now_iso()
+    sub_id = billing.subscription_id_of(event)
+    if not event_id or not sub_id:
+        return  # not a subscription event we act on
+    if kind == "checkout.session.completed" and obj.get("payment_status") == "unpaid":
+        # A delayed payment method finishes checkout unpaid; the
+        # subscription's own update activates it once it clears.
+        print(f"[billing] checkout {obj.get('id')} completed unpaid — waiting for the "
+              f"subscription to go active", flush=True)
+        return
 
-    with get_db() as conn:
-        cursor = conn.cursor()
+    try:
+        sub = stripe.Subscription.retrieve(sub_id).to_dict()
+    except Exception as e:
+        print(f"[billing] BILLING_STRIPE_RETRIEVE_FAILED {sub_id} {type(e).__name__}: {e}", flush=True)
+        raise HTTPException(status_code=503, detail={"error": "stripe_unreachable"})
 
-        if kind == "checkout.session.completed":
-            # A delayed payment method finishes checkout UNPAID; the
-            # subscription's own "active" update activates it once it clears.
-            if obj.get("payment_status") == "unpaid":
-                print(f"[billing] checkout {obj.get('id')} completed unpaid — waiting for the "
-                      f"subscription to go active", flush=True)
+    metadata_user = ((sub.get("metadata") or {}).get("user_id")
+                     or obj.get("client_reference_id")
+                     or (obj.get("metadata") or {}).get("user_id"))
+    customer_id = sub.get("customer") if isinstance(sub.get("customer"), str) else (sub.get("customer") or {}).get("id")
+    stripe_status = sub.get("status")
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO stripe_events (event_id, type, received_at) VALUES (%s, %s, %s) "
+                "ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
+                (event_id, kind, now_iso()))
+            if not cursor.fetchone():
+                conn.rollback()
+                print(f"[billing] BILLING_EVENT_DUPLICATE {event_id}", flush=True)
                 return
-            user_id = obj.get("client_reference_id") or (obj.get("metadata") or {}).get("user_id")
-            customer_id = obj.get("customer")
-            if user_id:
-                cursor.execute(
-                    "UPDATE users SET subscription_status = 'active', stripe_customer_id = %s, updated_at = %s WHERE id = %s",
-                    (customer_id, now, user_id)
-                )
-                if cursor.rowcount == 0:
-                    print(f"[billing] BILLING_NO_USER checkout for unknown user {user_id}", flush=True)
+            user = _billing_user(cursor, sub_id, metadata_user, customer_id)
+            if not user:
+                # Recorded, so a retry doesn't loop on it; logged to be looked at.
                 conn.commit()
+                print(f"[billing] BILLING_USER_NOT_FOUND event={event_id} sub={sub_id} "
+                      f"customer={customer_id} user={metadata_user}", flush=True)
+                return
+            new_status = billing.app_status(stripe_status, user["trial_ends_at"], datetime.now(timezone.utc))
+            # The subscription id is kept while it can still bill them, and
+            # cleared once it ended, so a new one can take its place.
+            keep_sub = stripe_status in billing.LIVE or stripe_status in ("incomplete",)
+            cursor.execute(
+                "UPDATE users SET subscription_status = %s, stripe_subscription_id = %s, "
+                "stripe_customer_id = COALESCE(%s, stripe_customer_id), updated_at = %s WHERE id = %s",
+                (new_status, sub_id if keep_sub else None, customer_id, now_iso(), user["id"]))
+            conn.commit()
+            print(f"[billing] BILLING_APPLIED event={event_id} type={kind} user={user['id']} "
+                  f"stripe={stripe_status} -> {new_status}", flush=True)
+    except psycopg2.errors.UniqueViolation:
+        print(f"[billing] BILLING_EVENT_DUPLICATE {event_id} (concurrent)", flush=True)
+        return
 
-        elif kind in ("customer.subscription.updated", "customer.subscription.deleted"):
-            customer_id = obj.get("customer")
-            status = obj.get("status")  # active, past_due, canceled, unpaid, etc.
-            # past_due = a renewal charge failed but Stripe is still retrying
-            # the card (smart retries + dunning emails, typically about a
-            # week). An expired card that gets replaced mid-dunning recovers
-            # on its own — locking the bar out of their inventory during that
-            # window punishes a paying customer for a card hiccup. Access is
-            # cut when Stripe actually gives up: canceled / unpaid.
-            new_status = (
-                "active" if status in ("active", "past_due")
-                else "trial" if status == "trialing"
-                else "canceled"
-            )
-            if customer_id:
-                cursor.execute(
-                    "UPDATE users SET subscription_status = %s, updated_at = %s WHERE stripe_customer_id = %s",
-                    (new_status, now, customer_id)
-                )
-                conn.commit()
+
+def _billing_user(cursor, sub_id: str, metadata_user: Optional[str], customer_id: Optional[str]):
+    """The account a subscription belongs to: by the subscription id we stored,
+    then the user id we put in its metadata, then the Stripe customer. Locked
+    for the write. Never a guess: no match is None."""
+    for sql, arg in (
+        ("SELECT id, trial_ends_at FROM users WHERE stripe_subscription_id = %s AND deleted_at IS NULL", sub_id),
+        ("SELECT id, trial_ends_at FROM users WHERE id = %s AND deleted_at IS NULL", metadata_user),
+        ("SELECT id, trial_ends_at FROM users WHERE stripe_customer_id = %s AND deleted_at IS NULL", customer_id),
+    ):
+        if not arg:
+            continue
+        cursor.execute(sql + " FOR UPDATE", (arg,))
+        row = cursor.fetchone()
+        if row:
+            return row
+    return None
+
 
 # TEMPORARY — one-off admin utility to activate an account without waiting
 # on Stripe, for pre-launch testing. Guarded by SECRET_KEY as a bearer
@@ -3901,7 +4020,7 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, subscription_status,
+            SELECT id, email, name, business_name, manager_name, phone, subscription_status,
                    subscription_tier, trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
@@ -3913,12 +4032,29 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
         result["subscription_tier"] = result.get("subscription_tier") or "starter"
         return result
 
+def _clean_profile_phone(raw: Optional[str]) -> Optional[str]:
+    """A customer's own number, from the bar-name screen: blank clears it,
+    anything else must be a dialable US number (phones.py) and is stored
+    dashed, the form the CRM copies into CloudTalk. 422 otherwise, so the app
+    can say so instead of saving something nobody can call."""
+    if raw is None or not str(raw).strip():
+        return None
+    digits = normalize_us_phone(str(raw))
+    if not digits:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_phone",
+            "message": "That doesn't look like a US phone number. Check it, or leave it blank."})
+    return format_us_phone_dashed(digits)
+
+
 @v1_router.patch("/users/me", response_model=UserProfileResponse)
 def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(get_current_user)):
     """Update the current user's business_name / manager_name."""
     updates = request.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail={"error": "no_fields", "message": "No fields to update"})
+    if "phone" in updates:
+        updates["phone"] = _clean_profile_phone(updates["phone"])
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -3932,7 +4068,7 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
         conn.commit()
 
         cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, subscription_status,
+            SELECT id, email, name, business_name, manager_name, phone, subscription_status,
                    subscription_tier, trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))

@@ -1746,10 +1746,13 @@ def list_users(status: Optional[str] = None, q: Optional[str] = None,
         # Business name, manager name, the account holder's own name, or
         # email — whichever the operator happens to remember.
         term = f"%{q.strip().lower()}%"
+        digits = re.sub(r"[^0-9]", "", q)  # "615 742" finds a stored 615-742-9095
         where.append(
             "(LOWER(email) LIKE %s OR LOWER(COALESCE(business_name,'')) LIKE %s "
-            "OR LOWER(COALESCE(manager_name,'')) LIKE %s OR LOWER(COALESCE(name,'')) LIKE %s)")
-        params += [term, term, term, term]
+            "OR LOWER(COALESCE(manager_name,'')) LIKE %s OR LOWER(COALESCE(name,'')) LIKE %s"
+            + (" OR REGEXP_REPLACE(COALESCE(phone,''), '[^0-9]', '', 'g') LIKE %s" if digits else "")
+            + ")")
+        params += [term, term, term, term] + ([f"%{digits}%"] if digits else [])
     sql_where = " AND ".join(where)
 
     with get_db() as conn:
@@ -1758,7 +1761,7 @@ def list_users(status: Optional[str] = None, q: Optional[str] = None,
         matching = cursor.fetchone()["n"]
 
         cursor.execute(f"""
-            SELECT u.id, u.email, u.name, u.business_name, u.manager_name,
+            SELECT u.id, u.email, u.name, u.business_name, u.manager_name, u.phone,
                    u.subscription_status, u.subscription_tier,
                    u.trial_started_at, u.trial_ends_at, u.created_at,
                    (SELECT COUNT(*) FROM locations
