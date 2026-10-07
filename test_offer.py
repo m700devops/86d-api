@@ -56,9 +56,9 @@ def test_current_offer_and_ordinary_text_pass(text):
 
 
 def test_a_figure_the_salesperson_gave_is_theirs():
-    # e.g. a bar in the first 10 accounts told its launch price on purpose
+    # e.g. an existing subscriber reminded what they already pay, on purpose
     assert pitch.stale_offer("It's $29.99 a month for you.",
-                             allowed="tell her she keeps the $29.99 launch price") == []
+                             allowed="remind her she's still on her $29.99 plan") == []
     assert pitch.stale_offer("It's $29.99 a month for you.", allowed="$29") != []
 
 
