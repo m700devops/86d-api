@@ -39,6 +39,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import pitch
+
 SCHOOL_TZ = os.getenv("SCHOOL_TZ", "Asia/Manila")
 SCHOOL_RUN_HOUR = int(os.getenv("SCHOOL_RUN_HOUR", "10"))
 SCHOOL_EVERY_DAYS = max(1, int(os.getenv("SCHOOL_EVERY_DAYS", "3")))
@@ -398,6 +400,7 @@ def build_pack(run_no: int, recent_ids: set, ask) -> dict:
         log.append(f"content failed: {str(exc)[:80]}")
 
     return {"run": run_no, "videos": videos, "gauntlet": gauntlet, "quiz": quiz,
+            "offer": pitch.offer_stamp(),
             "stats": {"searched": len(queries_for(run_no)), "candidates": len(cands),
                       "kept": len(verdicts)}, "log": log}
 
@@ -516,6 +519,12 @@ def latest_pack() -> dict:
     if row:
         pack = row["pack"] if isinstance(row["pack"], dict) else json.loads(row["pack"] or "{}")
         pack.pop("log", None)
+        # Quiz and Gauntlet rounds written before the price or trial changed
+        # teach the old offer: the page uses its built-in ones until the next
+        # refresh writes new ones. The videos don't quote it and stay.
+        if pack.get("offer") != pitch.offer_stamp():
+            pack.pop("quiz", None)
+            pack.pop("gauntlet", None)
     last_ok = row["started_at"] if row else None
     return {
         "pack": pack, "pack_id": row["id"] if row else None,

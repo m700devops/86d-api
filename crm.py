@@ -3671,7 +3671,9 @@ def lead_brief(lead_id: str, refresh: bool = False, quick: bool = False,
     lines = venue.facts_to_lines(venue.loads(row.get("venue_facts")))
     knowledge = _knowledge()
     ask = _brief_input(row, lines, profile, knowledge)
-    fp = _brief_fingerprint(ask)
+    # The master sheet is in the system prompt, not `ask`: without it here a
+    # price or trial change left every saved prep sheet quoting the old one.
+    fp = _brief_fingerprint(ask + "\n" + pitch.master_sheet())
     stored = _brief_of(row)
 
     def answer(brief: dict, cached: bool, pending: bool = False) -> dict:

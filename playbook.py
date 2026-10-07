@@ -390,7 +390,8 @@ def clean(out: dict, known_names, *, allowed_percents: Optional[set] = None,
             if not isinstance(p, dict):
                 continue
             text = _COUNT_ASIDE_RE.sub("", _one_line(p.get("text"), POINT_CHARS)).strip()
-            if not text or _unsafe(text) or _like_any(text, rejected_texts):
+            # An old price or trial learned from calls made before it changed.
+            if not text or _unsafe(text) or _like_any(text, rejected_texts) or _stale(text):
                 continue
             if allowed_percents is not None and any(
                     int(x) not in allowed_percents for x in _PERCENT_RE.findall(text)):
@@ -475,6 +476,11 @@ def diff(before: Optional[dict], after: Optional[dict]) -> dict:
             "dropped": [t for t in old if not _like_any(t, [p["text"] for p in new])]}
 
 
+def _stale(text) -> bool:
+    import pitch
+    return bool(pitch.stale_offer(str(text or "")))
+
+
 def render(pb: Optional[dict], refreshed_at: Optional[str] = None) -> str:
     """The playbook as other prompts read it. Evidence becomes a count, not
     names: an email to one bar must never name another."""
@@ -488,6 +494,10 @@ def render(pb: Optional[dict], refreshed_at: Optional[str] = None) -> str:
     for sec in pb["sections"]:
         lines.append(f"{sec['title']}:")
         for p in sec["points"]:
+            # A point saved before the price or trial changed (pinned ones too)
+            # would teach every prompt the old offer.
+            if _stale(p.get("text")):
+                continue
             n = len(p.get("evidence") or [])
             tag = f"{n} bar{'s' if n != 1 else ''}" if n else ""
             if p.get("pinned"):
