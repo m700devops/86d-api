@@ -553,6 +553,17 @@ def init_db():
         if not cursor.fetchone():
             cursor.execute("ALTER TABLE distributors ADD COLUMN delivery_days TEXT")
             print("[db] migrated distributors: added delivery_days TEXT", flush=True)
+        # A distributor address Resend reported as bouncing (or as marking an
+        # order as spam), so the app can say so instead of failing silently.
+        # Cleared by a later delivery or by editing the address.
+        for col in ("email_problem", "email_problem_reason", "email_problem_at"):
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'distributors' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE distributors ADD COLUMN {col} TEXT")
+                print(f"[db] migrated distributors: added {col} TEXT", flush=True)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS location_distributor_accounts (
                 location_id TEXT NOT NULL REFERENCES locations(id),

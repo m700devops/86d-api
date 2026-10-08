@@ -50,6 +50,7 @@ import random
 import psycopg2
 import psycopg2.errors
 import hashlib
+import email_events
 import secrets
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal
@@ -2672,6 +2673,11 @@ def update_distributor(distributor_id: str, distributor_data: DistributorUpdate,
         if distributor_data.email is not None:
             updates.append("email = %s")
             params.append(distributor_data.email)
+            # A new address hasn't bounced. (Same address re-saved: the flag
+            # stays — it's still the address that bounced.)
+            updates.append("email_problem = CASE WHEN LOWER(COALESCE(email, '')) = LOWER(%s) "
+                           "THEN email_problem ELSE NULL END")
+            params.append(distributor_data.email)
         if distributor_data.phone is not None:
             updates.append("phone = %s")
             params.append(distributor_data.phone)
@@ -4049,6 +4055,50 @@ def billing_success():
 def billing_cancel():
     from fastapi.responses import HTMLResponse
     return HTMLResponse(_billing_page("No charge made", "You can head back to the 86'd app any time to subscribe."))
+
+
+@app.post("/webhooks/resend")
+async def resend_webhook(request: Request):
+    """Resend's delivery events for order emails (email_events.py). A permanent
+    bounce or a spam complaint marks every distributor row with that address;
+    a delivery clears it. Unsigned or stale requests are 401; no secret set is
+    503 — never open. Always quick: Resend retries anything that isn't 2xx."""
+    secret = os.getenv("RESEND_WEBHOOK_SECRET")
+    if not secret:
+        raise HTTPException(status_code=503, detail={"error": "webhook_not_configured"})
+    body = await request.body()
+    h = request.headers
+    if not email_events.verify(secret, h.get("svix-id", ""), h.get("svix-timestamp", ""),
+                               h.get("svix-signature", ""), body, time.time()):
+        raise HTTPException(status_code=401, detail={"error": "bad_signature"})
+    try:
+        event = json.loads(body)
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"error": "bad_payload"})
+    kind, addresses, reason = email_events.classify(event)
+    if not kind or not addresses:
+        return {"ok": True, "recorded": 0}
+    count = await asyncio.to_thread(_record_email_event, kind, addresses, reason)
+    print(f"[orders] EMAIL_EVENT kind={kind} to={','.join(addresses)} distributors={count}", flush=True)
+    return {"ok": True, "recorded": count}
+
+
+def _record_email_event(kind: str, addresses: list, reason: str) -> int:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if kind == "delivered":
+            cursor.execute(
+                "UPDATE distributors SET email_problem = NULL, email_problem_reason = NULL, "
+                "email_problem_at = NULL WHERE LOWER(email) = ANY(%s) AND email_problem IS NOT NULL",
+                (addresses,))
+        else:
+            cursor.execute(
+                "UPDATE distributors SET email_problem = %s, email_problem_reason = %s, "
+                "email_problem_at = %s WHERE LOWER(email) = ANY(%s) AND deleted_at IS NULL",
+                (kind, reason, now_iso(), addresses))
+        count = cursor.rowcount
+        conn.commit()
+    return count
 
 
 @app.post("/billing/webhook")
