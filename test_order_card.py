@@ -77,6 +77,12 @@ def test_the_title_and_the_bar_location():
     assert "Order sent by Marlins Seafood and Grille." in _mail(sender_name="Marlins Seafood and Grille")["text"]
 
 
+def test_a_default_or_repeated_location_name_is_left_out():
+    for loc in ("My Bar", "my bar ", "Marlins Seafood and Grille"):
+        text = _mail(location_name=loc)["text"]
+        assert "Grille." in text and "(" not in text.split("Order sent by")[1].split("Please")[0]
+
+
 def test_the_html_card_says_the_same_and_escapes_what_a_bar_typed():
     html = _mail()["html"]
     for part in ("Order #1042 from Marlins Seafood and Grille", "Acct #4471", "Deliver by Fri, Oct 9",

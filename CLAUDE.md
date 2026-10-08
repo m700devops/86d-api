@@ -374,7 +374,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
   test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py -q` (1245 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py -q` (1246 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -771,7 +771,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   Chartreuse — 1 btl`; `Total: 2 cases + 1 btl (25 btl)`; then `Order sent by Dana Reyes, Bar
   Manager at <bar>[ (<location>)]. Please put order #1042 on the invoice.` and `Sent with 86'd bar
   inventory`. The name is `users.manager_name` (else `name`); the title is `users.title`, blank =
-  "Bar Manager"; no person on file = "Order sent by <bar>." Plain text AND a light HTML card with
+  "Bar Manager"; no person on file = "Order sent by <bar>." The location is shown only when it is a
+  real second name — never the app's default "My Bar" or the bar's own name. Plain text AND a light HTML card with
   the same words (tables + inline styles, every typed value escaped). **From** is exactly `ORDER_EMAIL_FROM`
   (`86'd Orders <orders@my86d.com>`), the same for every bar — a per-bar "<bar> via 86'd" name
   was tried and dropped at the owner's request (2026-10-08): the bar's name is in the subject and

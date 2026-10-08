@@ -764,8 +764,11 @@ def order_email(
     and every value a bar typed is escaped before it goes into the HTML.
     """
     ref = format_order_number(order_number)
-    where = business_name + (f" ({location_name})"
-                             if location_name and location_name != business_name else "")
+    # A location still named by the app's default ("My Bar") or by the bar's own
+    # name says nothing the distributor needs; only a real second name is shown.
+    loc = " ".join((location_name or "").split())
+    show_loc = bool(loc) and loc.lower() not in ("my bar", (business_name or "").strip().lower())
+    where = business_name + (f" ({loc})" if show_loc else "")
     subject = f"Order {ref} from {business_name}" if ref else f"Order from {business_name}"
 
     info = []
