@@ -772,13 +772,13 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   Manager at <bar>[ (<location>)]. Please put order #1042 on the invoice.` and `Sent with 86'd bar
   inventory`. The name is `users.manager_name` (else `name`); the title is `users.title`, blank =
   "Bar Manager"; no person on file = "Order sent by <bar>." Plain text AND a light HTML card with
-  the same words (tables + inline styles, every typed value escaped). **From** is the bar on 86'd's
-  address — `_order_sender()`: `"<bar> via 86'd" <address of ORDER_EMAIL_FROM>` (formataddr, so a
-  name can't add a header or address); **To** is `Metro Beverage <their email>`; **Reply-To** and
+  the same words (tables + inline styles, every typed value escaped). **From** is exactly `ORDER_EMAIL_FROM`
+  (`86'd Orders <orders@my86d.com>`), the same for every bar — a per-bar "<bar> via 86'd" name
+  was tried and dropped at the owner's request (2026-10-08): the bar's name is in the subject and
+  body. **To** is `Metro Beverage <their email>`; **Reply-To** and
   the BCC proof copy go to `users.order_reply_to` if set (PATCH /users/me, one plain address or
   422 `invalid_email`; for Apple hidden-email accounts whose relay may refuse a distributor's
-  reply), else the login email. The bar's name only shows as the sender once `ORDER_EMAIL_FROM`
-  is on a domain verified in Resend (`86'd Orders <orders@my86d.com>`); on the sandbox sender it
+  reply), else the login email. On the sandbox sender (ORDER_EMAIL_FROM unset) it
   still sends. Covered by test_order_card.py, run on a real Postgres 16 from the old schema
 - **A bounced distributor address is shown, not silent** (`POST /webhooks/resend`,
   email_events.py). "Sent" only ever meant Resend ACCEPTED the email, so a dead rep address

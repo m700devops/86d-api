@@ -3,8 +3,8 @@
 Subject "Order #1042 from <bar>"; under it the bar's account number with this
 distributor and the date it wants delivery; one line per item with its unit;
 "Order sent by Dana Reyes, Bar Manager at <bar>. Please put order #1042 on the
-invoice."; plain text plus a light HTML card with the same words. From shows
-the bar ("<bar> via 86'd"), To shows the distributor, and replies go to the
+invoice."; plain text plus a light HTML card with the same words. From is
+86'd's own address (ORDER_EMAIL_FROM), To shows the distributor, and replies go to the
 bar's chosen reply-to, else its login email.
 
 The account number is saved once per bar per distributor (Settings, or typed
@@ -103,18 +103,20 @@ def test_account_numbers_and_delivery_days_are_cleaned():
 
 # ── who it's from, who it's to, where replies go ─────────────────────────────
 
-def test_the_sender_is_the_bar_on_86ds_address(monkeypatch):
+def test_the_sender_is_86ds_own_address(monkeypatch):
+    # From is ORDER_EMAIL_FROM as set, the same for every bar.
     monkeypatch.setenv("ORDER_EMAIL_FROM", "86'd Orders <orders@my86d.com>")
-    assert main._order_sender("Marlins Seafood and Grille") == \
-        "Marlins Seafood and Grille via 86'd <orders@my86d.com>"
-    # A comma would split the address list: it's quoted.
-    assert main._order_sender("Smith, Jones & Co") == '"Smith, Jones & Co via 86\'d" <orders@my86d.com>'
-    # A name can't smuggle a header or a second address in.
-    sneaky = main._order_sender("Bar\r\nBcc: x@evil.com")
-    assert "\n" not in sneaky and sneaky.endswith("<orders@my86d.com>")
+    seen = {}
+
+    class R:
+        status_code = 200
+
+    monkeypatch.setattr(main.httpx, "post", lambda url, headers, json, timeout: (seen.update(json) or R()))
+    main._send_via_resend("k", "rep@metro.com", "S", "T")
+    assert seen["from"] == "86'd Orders <orders@my86d.com>"
     monkeypatch.delenv("ORDER_EMAIL_FROM")
-    assert main._order_sender("Marlins").endswith("<onboarding@resend.dev>")
-    assert main._order_sender("") == "86'd Orders <onboarding@resend.dev>"
+    main._send_via_resend("k", "rep@metro.com", "S", "T")
+    assert seen["from"] == "86'd Orders <onboarding@resend.dev>"
 
 
 def test_reply_to_must_be_one_plain_address():
@@ -127,7 +129,7 @@ def test_reply_to_must_be_one_plain_address():
 
 
 def test_resend_gets_the_card_the_names_and_the_reply_to(monkeypatch):
-    monkeypatch.setenv("ORDER_EMAIL_FROM", "orders@my86d.com")
+    monkeypatch.setenv("ORDER_EMAIL_FROM", "86'd Orders <orders@my86d.com>")
     seen = {}
 
     class R:
@@ -136,9 +138,9 @@ def test_resend_gets_the_card_the_names_and_the_reply_to(monkeypatch):
     monkeypatch.setattr(main.httpx, "post", lambda url, headers, json, timeout: (seen.update(json) or R()))
     ok, _ = main._send_via_resend("k", "rep@metro.com", "S", "T", reply_to="dana@marlins.com",
                                   bcc="dana@marlins.com", html="<p>H</p>",
-                                  from_name="Marlins", to_name="Metro Beverage")
+                                  to_name="Metro Beverage")
     assert ok
-    assert seen["from"] == "Marlins via 86'd <orders@my86d.com>"
+    assert seen["from"] == "86'd Orders <orders@my86d.com>"
     assert seen["to"] == ["Metro Beverage <rep@metro.com>"]
     assert seen["html"] == "<p>H</p>" and seen["text"] == "T"
     assert seen["reply_to"] == "dana@marlins.com" and seen["bcc"] == ["dana@marlins.com"]
@@ -203,7 +205,7 @@ def test_the_route_sends_the_card_from_the_bar_with_the_saved_account(monkeypatc
     assert m["subject"] == "Order #1042 from Marlins Seafood and Grille"
     assert "Acct #4471\nDeliver by Fri, Oct 9\n" in m["body"]
     assert "Order sent by Dana Reyes, Bar Manager at Marlins Seafood and Grille." in m["body"]
-    assert m["html"] and m["from_name"] == "Marlins Seafood and Grille" and m["to_name"] == "Metro Beverage"
+    assert m["html"] and "from_name" not in m and m["to_name"] == "Metro Beverage"
     assert m["reply_to"] == "dana@icloud.com"
 
 

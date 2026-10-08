@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone, timedelta
-from email.utils import formataddr, parseaddr
+from email.utils import formataddr
 import asyncio
 import functools
 import weakref
@@ -3003,24 +3003,13 @@ class SendOrderEmailsRequest(BaseModel):
 ORDER_FROM_DEFAULT = "86'd Orders <onboarding@resend.dev>"
 
 
-def _order_sender(business_name: str | None) -> str:
-    """The From line a distributor sees: the BAR's name on 86'd's own address
-    ("Marlins Seafood and Grille via 86'd <orders@my86d.com>"), so the inbox
-    shows who is ordering. The address is ORDER_EMAIL_FROM's (a domain
-    verified in Resend); its display name is replaced per bar. formataddr
-    quotes and encodes the name, so a bar name can't add a second address."""
-    _, address = parseaddr(os.getenv("ORDER_EMAIL_FROM") or ORDER_FROM_DEFAULT)
-    if not address:
-        _, address = parseaddr(ORDER_FROM_DEFAULT)
-    name = " ".join((business_name or "").split())[:80]
-    return formataddr((f"{name} via 86'd" if name else "86'd Orders", address))
-
-
 def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None,
-                     bcc: str | None = None, html: str | None = None, from_name: str | None = None,
+                     bcc: str | None = None, html: str | None = None,
                      to_name: str | None = None) -> tuple[bool, str | None]:
     """Send one email through the Resend API. Returns (ok, error_message)."""
-    sender = _order_sender(from_name) if from_name is not None else (os.getenv("ORDER_EMAIL_FROM") or ORDER_FROM_DEFAULT)
+    # From is exactly ORDER_EMAIL_FROM (e.g. "86'd Orders <orders@my86d.com>"),
+    # the same for every bar; the bar's name is in the subject and the body.
+    sender = os.getenv("ORDER_EMAIL_FROM") or ORDER_FROM_DEFAULT
     to = formataddr((" ".join(to_name.split())[:80], to_email)) if to_name else to_email
     payload = {"from": sender, "to": [to], "subject": subject, "text": body_text}
     if html:
@@ -3292,7 +3281,7 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
         # never received it. "Sent" only means Resend accepted it.
         ok, error = _send_via_resend(api_key, dist["email"], mail["subject"], mail["text"],
                                      reply_to=reply_to, bcc=reply_to, html=mail["html"],
-                                     from_name=business_name, to_name=dist["name"])
+                                     to_name=dist["name"])
         if ref:
             _finish_send(user_id, ref, dist["id"], ihash, ok, order_number, dist["email"], error)
         results.append({
