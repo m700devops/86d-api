@@ -740,3 +740,67 @@ Thank you,
 {business_name}
 (sent via 86'd bar inventory)"""
     return subject, body
+
+
+# ── How fast a bar goes through each bottle, from its own sent orders ────────
+#
+# The app rounds a shortfall up to a full case only when the extra bottles
+# would be used soon, so it needs a usage rate per bottle. A bar that orders
+# back up to par is, in each order, replacing what it used since the last one:
+# so the bottles in every order AFTER the first, divided by the time from the
+# first order to the last, is its rate. (The first order's own quantity covers
+# a stretch before the window and is left out.) Fewer than two orders, or less
+# than USAGE_MIN_SPAN_DAYS between them, is no rate at all — the app then falls
+# back to the bottle's par, never a guess dressed up as data.
+
+USAGE_WINDOW_DAYS = 56
+USAGE_MIN_SPAN_DAYS = 6
+
+
+def parse_iso(value) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _usage_name_key(name) -> str:
+    return " ".join(str(name or "").lower().split())
+
+
+def order_usage(orders: list) -> dict:
+    """orders: [(sent_at datetime, order_data dict)], any order.
+
+    Returns {"span_days": float, "products": {product_id: bottles},
+    "names": {lowercased line name: bottles}}, counting only orders after the
+    first. `names` covers lines from builds that sent no product_id. A line's
+    quantity is bottles, case lines included. span_days 0 = no usable rate.
+    """
+    dated = sorted((o for o in orders if o[0] is not None), key=lambda o: o[0])
+    empty = {"span_days": 0, "products": {}, "names": {}}
+    if len(dated) < 2:
+        return empty
+    span = (dated[-1][0] - dated[0][0]).total_seconds() / 86400
+    if span < USAGE_MIN_SPAN_DAYS:
+        return empty
+    products: dict = {}
+    names: dict = {}
+    for _, data in dated[1:]:
+        for dist in (data or {}).get("distributors") or []:
+            if dist.get("status") not in (None, "sent"):
+                continue          # a line that never reached the distributor wasn't ordered
+            for item in dist.get("items") or []:
+                try:
+                    qty = float(item.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if qty <= 0:
+                    continue
+                pid = item.get("product_id")
+                if pid:
+                    products[pid] = products.get(pid, 0) + qty
+                key = _usage_name_key(item.get("name"))
+                if key:
+                    names[key] = names.get(key, 0) + qty
+    return {"span_days": round(span, 2), "products": products, "names": names}

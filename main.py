@@ -28,6 +28,7 @@ from helpers import (
     normalize_match_text, NORM_SQL, product_match_key, seed_display_name,
     size_ml, sizes_compatible, label_supports, answers_agree, barcode_variants, clean_barcode,
     duplicate_groups, FIRST_ORDER_NUMBER, format_order_number, order_email,
+    order_usage, parse_iso, USAGE_WINDOW_DAYS,
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -1229,7 +1230,7 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
                 "full_quantity": float(row["full_quantity"] or 0),
                 "current_stock": float(row["current_stock"] or 0),
                 "price": float(row["price"]) if row["price"] else None,
-                "order_unit": row.get("order_unit") or "bottle",
+                "order_unit": row.get("order_unit") or None,
                 "case_size": row.get("case_size") or None,
                 "updated_at": row["updated_at"],
                 "product": {
@@ -1250,6 +1251,39 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
             par_levels.append(pl)
 
         return {"par_levels": par_levels}
+
+@v1_router.get("/locations/{location_id}/order-usage", response_model=dict)
+def get_order_usage(location_id: str, user_id: str = Depends(get_current_user)):
+    """How many bottles of each product this bar went through lately, read off
+    its own sent orders (helpers.order_usage). The app uses it to decide, per
+    bottle, whether a shortfall rounds up to a case: only when the extra
+    bottles would be used soon. Read-only; nothing the bar sees changes if it's
+    unavailable — the app falls back to the bottle's par."""
+    since = (datetime.now(timezone.utc) - timedelta(days=USAGE_WINDOW_DAYS)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=403, detail={
+                "error": "forbidden", "message": "Access denied to this location"})
+        cursor.execute(
+            "SELECT created_at, order_data FROM orders WHERE location_id = %s AND created_at >= %s "
+            "ORDER BY created_at",
+            (location_id, since)
+        )
+        rows = cursor.fetchall()
+    orders = []
+    for r in rows:
+        try:
+            data = json.loads(r["order_data"]) if isinstance(r["order_data"], str) else (r["order_data"] or {})
+            orders.append((parse_iso(r["created_at"]), data))
+        except (ValueError, TypeError):
+            continue
+    return order_usage(orders)
+
 
 @v1_router.get("/locations/{location_id}/duplicates", response_model=dict)
 def get_duplicates(location_id: str, user_id: str = Depends(get_current_user)):
@@ -1469,10 +1503,15 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         # Stamped only when this request actually carried a par, so the column
         # stays a record of deliberate choices rather than of row activity.
         new_par_set_at = now if data.par is not None else (existing["par_set_at"] if existing else None)
-        # Order unit: preserved like price when the request doesn't mention it.
-        # case_size 0 clears it; "case" with no pack size on record is refused
-        # rather than guessed (a 1.75L is 6 to a case, a 375ml 24).
-        new_unit = data.order_unit or ((existing["order_unit"] if existing else None) or "bottle")
+        # Order unit: NULL = nobody chose, the app decides from how fast the
+        # bar goes through the bottle; "bottle"/"case" = the bar overrode it.
+        # Preserved like price when the request doesn't mention it; "auto"
+        # hands it back. case_size 0 clears it; "case" with no pack size on
+        # record is refused rather than guessed (a 1.75L is 6, a 375ml 24).
+        if data.order_unit is None:
+            new_unit = existing["order_unit"] if existing else None
+        else:
+            new_unit = None if data.order_unit == "auto" else data.order_unit
         if data.case_size is not None:
             new_case_size = data.case_size or None
         else:
@@ -2530,7 +2569,7 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
                 "full_quantity": float(row["full_quantity"] or 0),
                 "current_stock": float(row["current_stock"] or 0),
                 "price": float(row["price"]) if row["price"] else None,
-                "order_unit": row.get("order_unit") or "bottle",
+                "order_unit": row.get("order_unit") or None,
                 "case_size": row.get("case_size") or None,
                 "updated_at": row["updated_at"],
                 "product": {
@@ -2852,6 +2891,9 @@ class OrderEmailItem(BaseModel):
     # neither and every line is a bottle line, exactly as before.
     unit: Literal["bottle", "case"] | None = None
     case_size: int | None = Field(default=None, ge=2, le=120)
+    # Which product this line is, so the bar's order history can tell the app
+    # how fast it goes through each bottle. Older builds send only the name.
+    product_id: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _case_needs_a_size(self):
@@ -2939,12 +2981,15 @@ SEND_DEDUPE_HOURS = 12
 def _order_line(i: OrderEmailItem) -> dict:
     """One order line as it's emailed, hashed and kept in the history.
 
-    The case keys are added ONLY to a case line. _items_hash fingerprints the
-    whole dict, so adding them to every line (even as None) would change the
-    hash of every bottle-only order: a retry straddling the deploy would no
-    longer match its first send and the distributor would be emailed twice.
+    The case keys (and product_id) are added ONLY when the line carries them.
+    _items_hash fingerprints the whole dict, so adding them to every line
+    (even as None) would change the hash of every order an old build sends:
+    a retry straddling the deploy would no longer match its first send and
+    the distributor would be emailed twice.
     """
     line = {"name": i.name, "quantity": i.quantity, "size": i.size or None, "price": i.price}
+    if i.product_id:
+        line["product_id"] = i.product_id
     if i.unit == "case":
         line["unit"] = "case"
         line["case_size"] = i.case_size

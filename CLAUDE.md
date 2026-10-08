@@ -374,7 +374,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
   test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py test_offer.py test_case_orders.py -q` (1214 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_product_distributors.py test_offer.py test_case_orders.py -q` (1221 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -763,24 +763,37 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   distributor ever saw a number on them, so backfilling one would be a reference nobody else
   can match. `OrderResponse` declares the field: a field the response_model doesn't list is
   silently dropped before it reaches the app
-- **Ordering by the case** (2026-10-08). A bar can set a bottle to order by the case:
-  `par_levels.order_unit` ('case', NULL/'bottle' = by the bottle) + `case_size` (bottles per
-  case), set through `PATCH /locations/{id}/products/{pid}` (`order_unit`, `case_size`; 0
-  clears the size; omitted = kept, like price; "case" with no size on record is a 422
-  `case_size_required` — never guessed, a 1.75L is 6 to a case and a 375ml 24), returned by
-  `GET /par-levels`, carried through a product merge. An order line may carry `unit: "case"`
-  + `case_size`; **`quantity` stays BOTTLES on every line, a case line included** (2 cases of
-  12 = quantity 24), so cost totals, the history and an old build's reorder all stay right.
-  The email spells both out: "- Tito's 1L x 2 cases (12/cs, 24 bottles)", "x 1 case + 3
-  bottles (12/cs, 15 bottles)", and the total becomes "3 cases + 2 bottles (32 bottles)" —
-  a bare "x 24" on a case item is how a rep orders the wrong amount. `_order_line()` adds the
-  case keys ONLY to a case line: `_items_hash` fingerprints the whole dict, and a key added
-  to every line would change every bottle order's hash, so a retry straddling the deploy
-  would be emailed twice. A bottle-only email is byte-for-byte the old one. `OrderLineItem`
-  declares `unit`/`case_size` (GET /orders would strip them). Rounding a shortfall to whole
-  cases is the APP's job (one shared helper beside its order-quantity rule), so the badge and
-  the order agree. Case pricing and distributor split fees/minimums are not built: they
-  vary by state and distributor and aren't public. Covered by test_case_orders.py
+- **Ordering by the case** (2026-10-08). Bars order fast movers by the case and the top shelf by
+  the bottle; **the app decides which, per bottle per order, and the bar is never asked**
+  (86d-mobile utils/caseOrder.ts): a shortfall rounds up to a full case only when the extra
+  bottles would be used within 3 weeks, judged from how fast THIS bar goes through it.
+  - `par_levels.order_unit`: **NULL = nobody chose, the app decides** (every row by default);
+    'bottle' / 'case' = the bar's own tap, never second-guessed. `case_size` = bottles per case
+    (when the bar set one; the app otherwise uses the bottle size's usual one). Through
+    `PATCH /locations/{id}/products/{pid}` (`order_unit` auto|bottle|case — "auto" hands it back;
+    `case_size`, 0 clears; omitted = kept, like price; "case" with no size on record is a 422
+    `case_size_required`, never guessed), returned by `GET /par-levels`, carried through a merge.
+  - `GET /locations/{id}/order-usage` (`helpers.order_usage`): bottles per product (and per line
+    name, for lines from builds that sent no product_id) in every sent order AFTER the first in
+    the last `USAGE_WINDOW_DAYS` (56), with `span_days` from the first order to the last — a bar
+    ordering back to par replaces what it used, so that's its rate. Under two orders or
+    `USAGE_MIN_SPAN_DAYS` (6) apart: `span_days` 0, no rate (the app falls back to par). Lines
+    whose distributor send failed don't count. Read-only.
+  - An order line may carry `unit: "case"` + `case_size` and `product_id`; **`quantity` stays
+    BOTTLES on every line, a case line included** (2 cases of 12 = 24), so cost totals, the
+    history and an old build's reorder all stay right. The email: "- Tito's 1L x 2 cases
+    (12/cs, 24 bottles)", "x 1 case + 3 bottles (12/cs, 15 bottles)", total "3 cases + 2
+    bottles (32 bottles)" — a bare "x 24" on a case item is how a rep orders the wrong amount.
+    `_order_line()` adds those keys ONLY when the line carries them: `_items_hash` fingerprints
+    the whole dict, and a key added to every line would change the hash of every order an old
+    build sends, so a retry straddling the deploy would be emailed twice. A bottle-only email is
+    byte-for-byte the old one. `OrderLineItem` declares unit/case_size/product_id (GET /orders
+    would strip them).
+  - Not built: case pricing, distributor split fees and minimums — they vary by state and
+    distributor and aren't public. Covered by test_case_orders.py; the whole path (migration
+    from the old schema, 422, save/auto/read back, merge, a mixed order email, a retry not
+    re-sent, the order list keeping the unit, usage over a real 10-day span) was run on a real
+    Postgres 16
 - POST /billing/create-checkout-session — Stripe hosted checkout (no IAP, checkout happens in system browser)
 - GET /health, GET / (API info), GET /docs
 

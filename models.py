@@ -177,9 +177,11 @@ class ParLevelResponse(BaseModel):
     full_quantity: float = 0.0
     current_stock: float = 0.0
     price: Optional[float] = None
-    # How this bar orders this bottle: "bottle" (the default) or "case" of
-    # case_size bottles. Par, stock and price stay in bottles either way.
-    order_unit: str = "bottle"
+    # How this bar orders this bottle. None = nobody chose: the app decides per
+    # order from how fast the bar goes through it. "bottle" / "case" = the bar
+    # overrode that on purpose, and the app never second-guesses it. Par, stock
+    # and price stay in bottles either way; case_size is bottles per case.
+    order_unit: Optional[str] = None
     case_size: Optional[int] = None
     updated_at: datetime
 
@@ -209,10 +211,11 @@ class ProductStockUpdate(BaseModel):
     # Per-location bottle price (what THIS bar pays) — deliberately not on the
     # shared products table, where one bar's price would leak to every bar.
     price: Optional[float] = Field(default=None, ge=0)
-    # Order this bottle by the bottle or by the case. case_size is bottles per
-    # case (750ml/1L usually 12, 1.75L 6, 375ml 24 — the bar's distributor
-    # decides); 0 clears it, like price. Omitted = keep what's saved.
-    order_unit: Optional[Literal["bottle", "case"]] = None
+    # "bottle" / "case" = the bar chose; "auto" = hand it back to the app (the
+    # default). case_size is bottles per case (750ml/1L usually 12, 1.75L 6,
+    # 375ml 24 — the bar's distributor decides); 0 clears it, like price.
+    # Omitted = keep what's saved.
+    order_unit: Optional[Literal["auto", "bottle", "case"]] = None
     case_size: Optional[int] = Field(default=None, ge=0, le=120)
 
 class ProductStockResponse(BaseModel):
@@ -222,7 +225,7 @@ class ProductStockResponse(BaseModel):
     current_stock: float
     par: Optional[float]
     price: Optional[float] = None
-    order_unit: str = "bottle"
+    order_unit: Optional[str] = None
     case_size: Optional[int] = None
     updated_at: str
 
@@ -350,6 +353,7 @@ class OrderLineItem(BaseModel):
     # GET /orders runs through response_model and drops undeclared keys.
     unit: Optional[str] = None
     case_size: Optional[int] = None
+    product_id: Optional[str] = None
 
 class OrderDistributor(BaseModel):
     distributor_id: Optional[str] = None

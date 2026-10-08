@@ -87,6 +87,12 @@ def test_a_bottle_line_is_the_same_dict_and_hash_as_before():
     assert main._items_hash([_line()]) == main._items_hash([old])
 
 
+def test_product_id_rides_along_only_when_sent():
+    line = _line(product_id="p1")
+    assert line["product_id"] == "p1" and "product_id" not in _line()
+    assert main._items_hash([line]) != main._items_hash([_line()])
+
+
 def test_a_case_line_carries_its_unit_and_hashes_differently():
     line = _line(unit="case", case_size=12)
     assert line["unit"] == "case" and line["case_size"] == 12 and line["quantity"] == 24
@@ -185,9 +191,21 @@ def test_a_patch_that_doesnt_mention_it_keeps_it(monkeypatch):
     assert out["order_unit"] == "case" and out["case_size"] == 6 and insert[8:10] == ("case", 6)
 
 
-def test_a_new_row_defaults_to_bottles(monkeypatch):
+def test_a_new_row_is_left_to_the_app(monkeypatch):
+    # NULL = nobody chose: the app decides per order from how fast the bar goes
+    # through the bottle. Only a bar's own tap stores "bottle" or "case".
     out, insert = _patch(monkeypatch, None, par=4)
-    assert out["order_unit"] == "bottle" and out["case_size"] is None
+    assert out["order_unit"] is None and out["case_size"] is None and insert[8] is None
+
+
+def test_auto_hands_a_choice_back_to_the_app(monkeypatch):
+    out, insert = _patch(monkeypatch, dict(ROW, order_unit="bottle", case_size=12), order_unit="auto")
+    assert out["order_unit"] is None and insert[8] is None and out["case_size"] == 12
+
+
+def test_choosing_bottles_is_stored_as_a_choice(monkeypatch):
+    out, insert = _patch(monkeypatch, ROW, order_unit="bottle")
+    assert out["order_unit"] == "bottle" and insert[8] == "bottle"
 
 
 def test_case_with_no_pack_size_is_refused_not_guessed(monkeypatch):
@@ -205,6 +223,48 @@ def test_back_to_bottles_keeps_the_pack_size_for_next_time(monkeypatch):
 
 def test_the_book_response_declares_the_fields():
     base = dict(id="1", location_id="l", product_id="p", par_quantity=6, updated_at="2026-10-08T00:00:00")
-    assert ParLevelResponse(**base).order_unit == "bottle"
+    assert ParLevelResponse(**base).order_unit is None
     r = ParLevelResponse(**base, order_unit="case", case_size=12)
     assert r.model_dump()["case_size"] == 12
+
+
+# ── how fast the bar goes through a bottle (helpers.order_usage) ─────────────
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+T0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+
+def _order(days, *items, status="sent"):
+    return (T0 + timedelta(days=days),
+            {"distributors": [{"status": status, "items": [dict(i) for i in items]}]})
+
+
+def test_usage_counts_every_order_after_the_first_over_the_span():
+    u = helpers.order_usage([
+        _order(0, {"name": "Tito's 1L", "quantity": 40, "product_id": "t"}),   # before the window: left out
+        _order(7, {"name": "Tito's 1L", "quantity": 6, "product_id": "t"}),
+        _order(14, {"name": "Tito's 1L", "quantity": 8, "product_id": "t"},
+               {"name": "Green Chartreuse", "quantity": 1}),
+    ])
+    assert u["span_days"] == 14 and u["products"] == {"t": 14}
+    assert u["names"]["green chartreuse"] == 1 and u["names"]["tito's 1l"] == 14
+
+
+def test_one_order_or_a_short_span_is_no_rate_not_a_guess():
+    assert helpers.order_usage([_order(0, {"name": "A", "quantity": 5})])["span_days"] == 0
+    two_days = helpers.order_usage([_order(0, {"name": "A", "quantity": 5}),
+                                    _order(2, {"name": "A", "quantity": 5})])
+    assert two_days == {"span_days": 0, "products": {}, "names": {}}
+
+
+def test_lines_that_never_went_out_dont_count():
+    u = helpers.order_usage([_order(0, {"name": "A", "quantity": 1}),
+                             _order(10, {"name": "A", "quantity": 9}, status="failed"),
+                             _order(12, {"name": "A", "quantity": "x"}, {"name": "A", "quantity": 3})])
+    assert u["names"] == {"a": 3}
+
+
+def test_usage_reads_iso_strings_with_or_without_z():
+    assert helpers.parse_iso("2026-10-08T13:13:33.451790Z") == helpers.parse_iso("2026-10-08T13:13:33.451790+00:00")
+    assert helpers.parse_iso("2026-10-08T13:13:33").tzinfo is not None
