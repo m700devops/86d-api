@@ -374,7 +374,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
   test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py test_offer.py -q` (1197 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py -q` (1234 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -763,6 +763,64 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   distributor ever saw a number on them, so backfilling one would be a reference nobody else
   can match. `OrderResponse` declares the field: a field the response_model doesn't list is
   silently dropped before it reaches the app
+- **The order email IS the landing page's order card** (2026-10-08, `helpers.order_email()` →
+  `{subject, text, html}`, keyword-only). Subject `Order #1042 from <bar>` (no date — every mail
+  app shows it); under it `Acct #4471` (this bar's account number with that distributor) and
+  `Deliver by Fri, Oct 10` (the date the app sends, `DistributorOrder.deliver_by`), each left out
+  when absent; one line per item WITH a unit — `- Tito's 1L — 2 cases (24 btl)`, `- Green
+  Chartreuse — 1 btl`; `Total: 2 cases + 1 btl (25 btl)`; then `Order sent by Dana Reyes, Bar
+  Manager at <bar>[ (<location>)]. Please put order #1042 on the invoice.` and `Sent with 86'd bar
+  inventory`. The name is `users.manager_name` (else `name`); the title is `users.title`, blank =
+  "Bar Manager"; no person on file = "Order sent by <bar>." Plain text AND a light HTML card with
+  the same words (tables + inline styles, every typed value escaped). **From** is the bar on 86'd's
+  address — `_order_sender()`: `"<bar> via 86'd" <address of ORDER_EMAIL_FROM>` (formataddr, so a
+  name can't add a header or address); **To** is `Metro Beverage <their email>`; **Reply-To** and
+  the BCC proof copy go to `users.order_reply_to` if set (PATCH /users/me, one plain address or
+  422 `invalid_email`; for Apple hidden-email accounts whose relay may refuse a distributor's
+  reply), else the login email. The bar's name only shows as the sender once `ORDER_EMAIL_FROM`
+  is on a domain verified in Resend (`86'd Orders <orders@my86d.com>`); on the sandbox sender it
+  still sends. Covered by test_order_card.py, run on a real Postgres 16 from the old schema
+- **Account numbers: per BAR per distributor** (`location_distributor_accounts`, PK (location,
+  distributor)) — a distributor gives every licensed bar its own number, and distributors belong
+  to the account. `GET /locations/{id}/distributor-accounts`, `PUT
+  /locations/{id}/distributor-accounts/{distributor_id}` (`helpers.clean_account_number`: "Acct #
+  4471" → "4471"; "" deletes). A number typed on the order screen arrives as
+  `DistributorOrder.account_number` and is SAVED for good before the send; every email reads the
+  saved one. Kept in the order history (`OrderDistributor.account_number`, `deliver_by`).
+  **Delivery days per distributor**: `distributors.delivery_days` ("mon,thu",
+  `helpers.clean_delivery_days`, 422 `invalid_delivery_days`) on create/update/list; the app fills
+  in the next one
+- **Ordering by the case** (2026-10-08). Bars order fast movers by the case and the top shelf by
+  the bottle; **the app decides which, per bottle per order, and the bar is never asked**
+  (86d-mobile utils/caseOrder.ts): a shortfall rounds up to a full case only when the extra
+  bottles would be used within 3 weeks, judged from how fast THIS bar goes through it.
+  - `par_levels.order_unit`: **NULL = nobody chose, the app decides** (every row by default);
+    'bottle' / 'case' = the bar's own tap, never second-guessed. `case_size` = bottles per case
+    (when the bar set one; the app otherwise uses the bottle size's usual one). Through
+    `PATCH /locations/{id}/products/{pid}` (`order_unit` auto|bottle|case — "auto" hands it back;
+    `case_size`, 0 clears; omitted = kept, like price; "case" with no size on record is a 422
+    `case_size_required`, never guessed), returned by `GET /par-levels`, carried through a merge.
+  - `GET /locations/{id}/order-usage` (`helpers.order_usage`): bottles per product (and per line
+    name, for lines from builds that sent no product_id) in every sent order AFTER the first in
+    the last `USAGE_WINDOW_DAYS` (56), with `span_days` from the first order to the last — a bar
+    ordering back to par replaces what it used, so that's its rate. Under two orders or
+    `USAGE_MIN_SPAN_DAYS` (6) apart: `span_days` 0, no rate (the app falls back to par). Lines
+    whose distributor send failed don't count. Read-only.
+  - An order line may carry `unit: "case"` + `case_size` and `product_id`; **`quantity` stays
+    BOTTLES on every line, a case line included** (2 cases of 12 = 24), so cost totals, the
+    history and an old build's reorder all stay right. The email: "- Tito's 1L x 2 cases
+    (12/cs, 24 bottles)", "x 1 case + 3 bottles (12/cs, 15 bottles)", total "3 cases + 2
+    bottles (32 bottles)" — a bare "x 24" on a case item is how a rep orders the wrong amount.
+    `_order_line()` adds those keys ONLY when the line carries them: `_items_hash` fingerprints
+    the whole dict, and a key added to every line would change the hash of every order an old
+    build sends, so a retry straddling the deploy would be emailed twice. A bottle-only email is
+    byte-for-byte the old one. `OrderLineItem` declares unit/case_size/product_id (GET /orders
+    would strip them).
+  - Not built: case pricing, distributor split fees and minimums — they vary by state and
+    distributor and aren't public. Covered by test_case_orders.py; the whole path (migration
+    from the old schema, 422, save/auto/read back, merge, a mixed order email, a retry not
+    re-sent, the order list keeping the unit, usage over a real 10-day span) was run on a real
+    Postgres 16
 - POST /billing/create-checkout-session — Stripe hosted checkout (no IAP, checkout happens in system browser)
 - GET /health, GET / (API info), GET /docs
 

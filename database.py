@@ -531,7 +531,7 @@ def init_db():
         # hide behind a relay alias at any time.
         # password_reset_attempts: wrong reset codes against the current one —
         # the code is thrown away after RESET_MAX_ATTEMPTS (main.reset_password).
-        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT"), ("password_reset_attempts", "INTEGER DEFAULT 0"), ("phone", "TEXT"), ("stripe_subscription_id", "TEXT")]:
+        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT"), ("password_reset_attempts", "INTEGER DEFAULT 0"), ("phone", "TEXT"), ("stripe_subscription_id", "TEXT"), ("title", "TEXT"), ("order_reply_to", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'users' AND column_name = %s
@@ -539,6 +539,29 @@ def init_db():
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
                 print(f"[db] migrated users: added {col} {col_type}", flush=True)
+        conn.commit()
+
+        # Distributor delivery days ("mon,thu"): set once per distributor, so the
+        # order screen can fill in the next delivery day by itself. And the bar's
+        # account number WITH each distributor, per location: a distributor
+        # gives every licensed bar its own number, and distributors belong to
+        # the account, not to one bar. Saved once and kept until edited.
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'distributors' AND column_name = 'delivery_days'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE distributors ADD COLUMN delivery_days TEXT")
+            print("[db] migrated distributors: added delivery_days TEXT", flush=True)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS location_distributor_accounts (
+                location_id TEXT NOT NULL REFERENCES locations(id),
+                distributor_id TEXT NOT NULL REFERENCES distributors(id),
+                account_number TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (location_id, distributor_id)
+            )
+        """)
         conn.commit()
 
         # Order numbers: users.last_order_number is the per-account counter
@@ -610,6 +633,18 @@ def init_db():
             """, (col,))
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE par_levels ADD COLUMN {col} {col_type} DEFAULT 0")
+                print(f"[db] migrated par_levels: added {col} {col_type}", flush=True)
+        conn.commit()
+
+        # Migrate par_levels: how this bar orders this bottle. NULL = by the
+        # bottle (every row before this), so nothing existing changes.
+        for col, col_type in [("order_unit", "TEXT"), ("case_size", "INTEGER")]:
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'par_levels' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE par_levels ADD COLUMN {col} {col_type}")
                 print(f"[db] migrated par_levels: added {col} {col_type}", flush=True)
         conn.commit()
 

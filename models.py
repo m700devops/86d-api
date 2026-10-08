@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, EmailStr
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
 
 # ============== USER MODELS ==============
@@ -17,6 +17,8 @@ class UserResponse(UserBase):
     business_name: Optional[str] = None
     phone: Optional[str] = None
     manager_name: Optional[str] = None
+    title: Optional[str] = None
+    order_reply_to: Optional[str] = None
     subscription_status: str = "trial"
     subscription_tier: str = "starter"
     trial_ends_at: Optional[datetime] = None
@@ -37,6 +39,13 @@ class UpdateProfileRequest(BaseModel):
     # Optional contact number from the bar-name screen ("for setup help").
     # Checked and stored as 615-742-9095 by the route; "" clears it.
     phone: Optional[str] = Field(default=None, max_length=40)
+    # Who's sending orders, as the distributor email says it: "Order sent by
+    # Dana Reyes, Bar Manager at …". Blank = the email says "Bar Manager".
+    title: Optional[str] = Field(default=None, max_length=80)
+    # Where distributors' replies go, when it shouldn't be the login email —
+    # e.g. an Apple "Hide My Email" relay, which may refuse a distributor's
+    # reply. "" clears it.
+    order_reply_to: Optional[str] = Field(default=None, max_length=254)
 
 class AcceptTermsRequest(BaseModel):
     terms_version: str
@@ -177,6 +186,12 @@ class ParLevelResponse(BaseModel):
     full_quantity: float = 0.0
     current_stock: float = 0.0
     price: Optional[float] = None
+    # How this bar orders this bottle. None = nobody chose: the app decides per
+    # order from how fast the bar goes through it. "bottle" / "case" = the bar
+    # overrode that on purpose, and the app never second-guesses it. Par, stock
+    # and price stay in bottles either way; case_size is bottles per case.
+    order_unit: Optional[str] = None
+    case_size: Optional[int] = None
     updated_at: datetime
 
     class Config:
@@ -205,6 +220,12 @@ class ProductStockUpdate(BaseModel):
     # Per-location bottle price (what THIS bar pays) — deliberately not on the
     # shared products table, where one bar's price would leak to every bar.
     price: Optional[float] = Field(default=None, ge=0)
+    # "bottle" / "case" = the bar chose; "auto" = hand it back to the app (the
+    # default). case_size is bottles per case (750ml/1L usually 12, 1.75L 6,
+    # 375ml 24 — the bar's distributor decides); 0 clears it, like price.
+    # Omitted = keep what's saved.
+    order_unit: Optional[Literal["auto", "bottle", "case"]] = None
+    case_size: Optional[int] = Field(default=None, ge=0, le=120)
 
 class ProductStockResponse(BaseModel):
     location_id: str
@@ -213,6 +234,8 @@ class ProductStockResponse(BaseModel):
     current_stock: float
     par: Optional[float]
     price: Optional[float] = None
+    order_unit: Optional[str] = None
+    case_size: Optional[int] = None
     updated_at: str
 
 # ============== SCAN MODELS ==============
@@ -332,9 +355,14 @@ class InventoryDraftResponse(BaseModel):
 
 class OrderLineItem(BaseModel):
     name: str
-    quantity: float
+    quantity: float              # bottles, case lines included
     size: Optional[str] = None
     price: Optional[float] = None
+    # Present only on a line ordered by the case. Declared here because
+    # GET /orders runs through response_model and drops undeclared keys.
+    unit: Optional[str] = None
+    case_size: Optional[int] = None
+    product_id: Optional[str] = None
 
 class OrderDistributor(BaseModel):
     distributor_id: Optional[str] = None
@@ -342,6 +370,8 @@ class OrderDistributor(BaseModel):
     email: Optional[str] = None
     status: str  # sent | failed | no_email
     items: List[OrderLineItem] = []
+    account_number: Optional[str] = None   # what the email carried
+    deliver_by: Optional[str] = None       # ISO date the email asked for
 
 class OrderResponse(BaseModel):
     id: str
@@ -455,6 +485,8 @@ class DistributorBase(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     rep_name: Optional[str] = None
+    # The days this distributor delivers, "mon,thu" (helpers.clean_delivery_days).
+    delivery_days: Optional[str] = None
 
 class DistributorCreate(DistributorBase):
     pass
@@ -464,6 +496,11 @@ class DistributorUpdate(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     rep_name: Optional[str] = None
+    delivery_days: Optional[str] = None   # "" clears
+
+class DistributorAccountUpdate(BaseModel):
+    """This bar's account number with one distributor; "" clears it."""
+    account_number: str = Field(max_length=40)
 
 class DistributorResponse(DistributorBase):
     id: str

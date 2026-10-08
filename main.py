@@ -5,7 +5,8 @@ from fastapi.responses import JSONResponse, FileResponse
 from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
+from email.utils import formataddr, parseaddr
 import asyncio
 import functools
 import weakref
@@ -28,6 +29,7 @@ from helpers import (
     normalize_match_text, NORM_SQL, product_match_key, seed_display_name,
     size_ml, sizes_compatible, label_supports, answers_agree, barcode_variants, clean_barcode,
     duplicate_groups, FIRST_ORDER_NUMBER, format_order_number, order_email,
+    order_usage, parse_iso, USAGE_WINDOW_DAYS, clean_delivery_days, clean_account_number,
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -49,7 +51,8 @@ import psycopg2
 import psycopg2.errors
 import hashlib
 import secrets
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from typing import Literal
 
 # Startup time for uptime calculation
 START_TIME = time.time()
@@ -955,7 +958,7 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
             # after an order was already sent must not silently double what's
             # on hand.
             cursor.execute(
-                "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels "
+                "SELECT par_quantity, full_quantity, current_stock, price, order_unit, case_size FROM par_levels "
                 "WHERE location_id = %s AND product_id = %s",
                 (location_id, source_id)
             )
@@ -963,7 +966,7 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
 
             if src_row:
                 cursor.execute(
-                    "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels "
+                    "SELECT par_quantity, full_quantity, current_stock, price, order_unit, case_size FROM par_levels "
                     "WHERE location_id = %s AND product_id = %s",
                     (location_id, target_id)
                 )
@@ -971,16 +974,23 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
 
                 if tgt_row:
                     merged_price = float(tgt_row["price"] or 0) or float(src_row["price"] or 0)
+                    # The order unit goes with whichever side the bar set to
+                    # "case" (keeper first), and its pack size with it.
+                    unit_row = next((r for r in (tgt_row, src_row)
+                                     if r["order_unit"] == "case" and r["case_size"]), None)
+                    merged_unit = "case" if unit_row else (tgt_row["order_unit"] or src_row["order_unit"])
+                    merged_case = (unit_row["case_size"] if unit_row
+                                   else (tgt_row["case_size"] or src_row["case_size"]))
                     cursor.execute("""
                         UPDATE par_levels
                         SET par_quantity = %s, full_quantity = %s, current_stock = %s,
-                            price = %s, updated_at = %s
+                            price = %s, order_unit = %s, case_size = %s, updated_at = %s
                         WHERE location_id = %s AND product_id = %s
                     """, (
                         max(float(tgt_row["par_quantity"] or 0), float(src_row["par_quantity"] or 0)),
                         max(float(tgt_row["full_quantity"] or 0), float(src_row["full_quantity"] or 0)),
                         max(float(tgt_row["current_stock"] or 0), float(src_row["current_stock"] or 0)),
-                        merged_price, now, location_id, target_id
+                        merged_price, merged_unit, merged_case, now, location_id, target_id
                     ))
                     cursor.execute(
                         "DELETE FROM par_levels WHERE location_id = %s AND product_id = %s",
@@ -1221,6 +1231,8 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
                 "full_quantity": float(row["full_quantity"] or 0),
                 "current_stock": float(row["current_stock"] or 0),
                 "price": float(row["price"]) if row["price"] else None,
+                "order_unit": row.get("order_unit") or None,
+                "case_size": row.get("case_size") or None,
                 "updated_at": row["updated_at"],
                 "product": {
                     "id": row["product_id"],
@@ -1240,6 +1252,39 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
             par_levels.append(pl)
 
         return {"par_levels": par_levels}
+
+@v1_router.get("/locations/{location_id}/order-usage", response_model=dict)
+def get_order_usage(location_id: str, user_id: str = Depends(get_current_user)):
+    """How many bottles of each product this bar went through lately, read off
+    its own sent orders (helpers.order_usage). The app uses it to decide, per
+    bottle, whether a shortfall rounds up to a case: only when the extra
+    bottles would be used soon. Read-only; nothing the bar sees changes if it's
+    unavailable — the app falls back to the bottle's par."""
+    since = (datetime.now(timezone.utc) - timedelta(days=USAGE_WINDOW_DAYS)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+            (location_id, user_id)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=403, detail={
+                "error": "forbidden", "message": "Access denied to this location"})
+        cursor.execute(
+            "SELECT created_at, order_data FROM orders WHERE location_id = %s AND created_at >= %s "
+            "ORDER BY created_at",
+            (location_id, since)
+        )
+        rows = cursor.fetchall()
+    orders = []
+    for r in rows:
+        try:
+            data = json.loads(r["order_data"]) if isinstance(r["order_data"], str) else (r["order_data"] or {})
+            orders.append((parse_iso(r["created_at"]), data))
+        except (ValueError, TypeError):
+            continue
+    return order_usage(orders)
+
 
 @v1_router.get("/locations/{location_id}/duplicates", response_model=dict)
 def get_duplicates(location_id: str, user_id: str = Depends(get_current_user)):
@@ -1439,7 +1484,7 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         now = now_iso()
         # Fetch existing row so we can preserve unchanged fields
         cursor.execute(
-            "SELECT par_quantity, full_quantity, current_stock, price, par_set_at FROM par_levels WHERE location_id = %s AND product_id = %s",
+            "SELECT par_quantity, full_quantity, current_stock, price, par_set_at, order_unit, case_size FROM par_levels WHERE location_id = %s AND product_id = %s",
             (location_id, product_id)
         )
         existing = cursor.fetchone()
@@ -1459,19 +1504,40 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         # Stamped only when this request actually carried a par, so the column
         # stays a record of deliberate choices rather than of row activity.
         new_par_set_at = now if data.par is not None else (existing["par_set_at"] if existing else None)
+        # Order unit: NULL = nobody chose, the app decides from how fast the
+        # bar goes through the bottle; "bottle"/"case" = the bar overrode it.
+        # Preserved like price when the request doesn't mention it; "auto"
+        # hands it back. case_size 0 clears it; "case" with no pack size on
+        # record is refused rather than guessed (a 1.75L is 6, a 375ml 24).
+        if data.order_unit is None:
+            new_unit = existing["order_unit"] if existing else None
+        else:
+            new_unit = None if data.order_unit == "auto" else data.order_unit
+        if data.case_size is not None:
+            new_case_size = data.case_size or None
+        else:
+            new_case_size = (existing["case_size"] if existing else None) or None
+        if new_unit == "case" and not new_case_size:
+            raise HTTPException(status_code=422, detail={
+                "error": "case_size_required",
+                "message": "Set how many bottles come in a case before ordering this bottle by the case.",
+            })
 
         par_id = generate_id()
         cursor.execute("""
-            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, price, par_set_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, price, par_set_at, order_unit, case_size, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(location_id, product_id) DO UPDATE SET
                 par_quantity = excluded.par_quantity,
                 full_quantity = excluded.full_quantity,
                 current_stock = excluded.current_stock,
                 price = excluded.price,
                 par_set_at = excluded.par_set_at,
+                order_unit = excluded.order_unit,
+                case_size = excluded.case_size,
                 updated_at = excluded.updated_at
-        """, (par_id, location_id, product_id, new_par, new_full, new_stock, new_price, new_par_set_at, now))
+        """, (par_id, location_id, product_id, new_par, new_full, new_stock, new_price, new_par_set_at,
+              new_unit, new_case_size, now))
         conn.commit()
 
         return {
@@ -1481,6 +1547,8 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
             "current_stock": new_stock,
             "par": new_par,
             "price": new_price if new_price > 0 else None,
+            "order_unit": new_unit,
+            "case_size": new_case_size,
             "updated_at": now,
         }
 
@@ -2502,6 +2570,8 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
                 "full_quantity": float(row["full_quantity"] or 0),
                 "current_stock": float(row["current_stock"] or 0),
                 "price": float(row["price"]) if row["price"] else None,
+                "order_unit": row.get("order_unit") or None,
+                "case_size": row.get("case_size") or None,
                 "updated_at": row["updated_at"],
                 "product": {
                     "id": row["product_id"],
@@ -2568,19 +2638,21 @@ def list_distributors(user_id: str = Depends(get_current_user)):
 @v1_router.post("/distributors", response_model=dict, status_code=201)
 def create_distributor(distributor_data: DistributorCreate, user_id: str = Depends(get_current_user)):
     """Create new distributor"""
+    days = _delivery_days_or_422(distributor_data.delivery_days)
     with get_db() as conn:
         cursor = conn.cursor()
         distributor_id = generate_id()
         now = now_iso()
         cursor.execute("""
-            INSERT INTO distributors (id, user_id, name, email, phone, rep_name, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO distributors (id, user_id, name, email, phone, rep_name, delivery_days, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (distributor_id, user_id, distributor_data.name, distributor_data.email,
-              distributor_data.phone, distributor_data.rep_name, now, now))
+              distributor_data.phone, distributor_data.rep_name, days, now, now))
         conn.commit()
         return {"distributor": {"id": distributor_id, "user_id": user_id, "name": distributor_data.name,
                                 "email": distributor_data.email, "phone": distributor_data.phone,
-                                "rep_name": distributor_data.rep_name, "created_at": now, "updated_at": now}}
+                                "rep_name": distributor_data.rep_name, "delivery_days": days,
+                                "created_at": now, "updated_at": now}}
 
 @v1_router.put("/distributors/{distributor_id}", response_model=dict)
 def update_distributor(distributor_id: str, distributor_data: DistributorUpdate, user_id: str = Depends(get_current_user)):
@@ -2606,12 +2678,78 @@ def update_distributor(distributor_id: str, distributor_data: DistributorUpdate,
         if distributor_data.rep_name is not None:
             updates.append("rep_name = %s")
             params.append(distributor_data.rep_name)
+        if distributor_data.delivery_days is not None:
+            updates.append("delivery_days = %s")
+            params.append(_delivery_days_or_422(distributor_data.delivery_days))
         updates.append("updated_at = %s")
         params.append(now)
         params.append(distributor_id)
         cursor.execute(f"UPDATE distributors SET {', '.join(updates)} WHERE id = %s", params)
         conn.commit()
         return {"success": True, "message": "Distributor updated"}
+
+def _delivery_days_or_422(raw) -> Optional[str]:
+    try:
+        return clean_delivery_days(raw)
+    except ValueError:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_delivery_days",
+            "message": "Delivery days must be weekdays, like \"mon,thu\"."})
+
+
+# ── This bar's account number with each distributor ─────────────────────────
+# Per location: a distributor gives every licensed bar its own number, while
+# distributors belong to the account. Asked for once (Settings, or right on the
+# order screen) and kept until someone edits it; every order email carries it.
+
+def _own_location_or_403(cursor, location_id: str, user_id: str):
+    cursor.execute("SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+                   (location_id, user_id))
+    if not cursor.fetchone():
+        raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied to this location"})
+
+
+@v1_router.get("/locations/{location_id}/distributor-accounts", response_model=dict)
+def get_distributor_accounts(location_id: str, user_id: str = Depends(get_current_user)):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        _own_location_or_403(cursor, location_id, user_id)
+        cursor.execute("""
+            SELECT a.distributor_id, a.account_number FROM location_distributor_accounts a
+            JOIN distributors d ON d.id = a.distributor_id
+            WHERE a.location_id = %s AND d.user_id = %s AND d.deleted_at IS NULL
+        """, (location_id, user_id))
+        return {"accounts": [dict(r) for r in cursor.fetchall()]}
+
+
+@v1_router.put("/locations/{location_id}/distributor-accounts/{distributor_id}", response_model=dict)
+def set_distributor_account(location_id: str, distributor_id: str, data: DistributorAccountUpdate,
+                            user_id: str = Depends(get_current_user)):
+    number = clean_account_number(data.account_number)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        _own_location_or_403(cursor, location_id, user_id)
+        cursor.execute("SELECT id FROM distributors WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+                       (distributor_id, user_id))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Distributor not found"})
+        _save_account_number(cursor, location_id, distributor_id, number)
+        conn.commit()
+    return {"distributor_id": distributor_id, "account_number": number}
+
+
+def _save_account_number(cursor, location_id: str, distributor_id: str, number: Optional[str]):
+    if number:
+        cursor.execute("""
+            INSERT INTO location_distributor_accounts (location_id, distributor_id, account_number, updated_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (location_id, distributor_id) DO UPDATE SET
+                account_number = excluded.account_number, updated_at = excluded.updated_at
+        """, (location_id, distributor_id, number, now_iso()))
+    else:
+        cursor.execute("DELETE FROM location_distributor_accounts WHERE location_id = %s AND distributor_id = %s",
+                       (location_id, distributor_id))
+
 
 @v1_router.delete("/distributors/{distributor_id}")
 def delete_distributor(distributor_id: str, user_id: str = Depends(get_current_user)):
@@ -2813,14 +2951,35 @@ Thank you,
 
 class OrderEmailItem(BaseModel):
     name: str
+    # Always BOTTLES, a case line included ("2 cases of 12" is quantity 24):
+    # cost totals, the history and an old build's reorder all read it that way.
     quantity: float
     size: str = ""
-    price: float | None = None
+    price: float | None = None   # per bottle
+    # How the bar orders this bottle from this distributor. Older builds send
+    # neither and every line is a bottle line, exactly as before.
+    unit: Literal["bottle", "case"] | None = None
+    case_size: int | None = Field(default=None, ge=2, le=120)
+    # Which product this line is, so the bar's order history can tell the app
+    # how fast it goes through each bottle. Older builds send only the name.
+    product_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _case_needs_a_size(self):
+        if self.unit == "case" and not self.case_size:
+            raise ValueError("a line ordered by the case needs case_size (bottles per case)")
+        return self
 
 
 class DistributorOrder(BaseModel):
     distributor_id: str
     items: list[OrderEmailItem] = Field(min_length=1)
+    # The day the bar wants this delivered (the app fills in the distributor's
+    # next delivery day). Left off the email when absent — older builds.
+    deliver_by: date | None = None
+    # Typed on the order screen: saved as this bar's number with the
+    # distributor (and used now). Absent = the saved one, if any.
+    account_number: str | None = Field(default=None, max_length=40)
 
 
 class SendOrderEmailsRequest(BaseModel):
@@ -2835,10 +2994,31 @@ class SendOrderEmailsRequest(BaseModel):
     client_ref: str | None = Field(default=None, max_length=64)
 
 
-def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None, bcc: str | None = None) -> tuple[bool, str | None]:
+ORDER_FROM_DEFAULT = "86'd Orders <onboarding@resend.dev>"
+
+
+def _order_sender(business_name: str | None) -> str:
+    """The From line a distributor sees: the BAR's name on 86'd's own address
+    ("Marlins Seafood and Grille via 86'd <orders@my86d.com>"), so the inbox
+    shows who is ordering. The address is ORDER_EMAIL_FROM's (a domain
+    verified in Resend); its display name is replaced per bar. formataddr
+    quotes and encodes the name, so a bar name can't add a second address."""
+    _, address = parseaddr(os.getenv("ORDER_EMAIL_FROM") or ORDER_FROM_DEFAULT)
+    if not address:
+        _, address = parseaddr(ORDER_FROM_DEFAULT)
+    name = " ".join((business_name or "").split())[:80]
+    return formataddr((f"{name} via 86'd" if name else "86'd Orders", address))
+
+
+def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None,
+                     bcc: str | None = None, html: str | None = None, from_name: str | None = None,
+                     to_name: str | None = None) -> tuple[bool, str | None]:
     """Send one email through the Resend API. Returns (ok, error_message)."""
-    sender = os.getenv("ORDER_EMAIL_FROM", "86'd Orders <onboarding@resend.dev>")
-    payload = {"from": sender, "to": [to_email], "subject": subject, "text": body_text}
+    sender = _order_sender(from_name) if from_name is not None else (os.getenv("ORDER_EMAIL_FROM") or ORDER_FROM_DEFAULT)
+    to = formataddr((" ".join(to_name.split())[:80], to_email)) if to_name else to_email
+    payload = {"from": sender, "to": [to], "subject": subject, "text": body_text}
+    if html:
+        payload["html"] = html
     if reply_to:
         payload["reply_to"] = reply_to
     if bcc and bcc.lower() != to_email.lower():
@@ -2892,6 +3072,24 @@ SEND_STALE_MINUTES = 10
 # app ever failed to start a new ref) is a NEW order, and swallowing it as
 # "already sent" would be a missed delivery — worse than the duplicate.
 SEND_DEDUPE_HOURS = 12
+
+
+def _order_line(i: OrderEmailItem) -> dict:
+    """One order line as it's emailed, hashed and kept in the history.
+
+    The case keys (and product_id) are added ONLY when the line carries them.
+    _items_hash fingerprints the whole dict, so adding them to every line
+    (even as None) would change the hash of every order an old build sends:
+    a retry straddling the deploy would no longer match its first send and
+    the distributor would be emailed twice.
+    """
+    line = {"name": i.name, "quantity": i.quantity, "size": i.size or None, "price": i.price}
+    if i.product_id:
+        line["product_id"] = i.product_id
+    if i.unit == "case":
+        line["unit"] = "case"
+        line["case_size"] = i.case_size
+    return line
 
 
 def _items_hash(items: list[dict]) -> str:
@@ -2975,7 +3173,6 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
             "message": "Email sending is not configured on the server (RESEND_API_KEY missing)"
         })
 
-    today = datetime.now(timezone.utc).strftime("%B %d, %Y")
     ref = (request.client_ref or "").strip() or None
 
     # 1. Everything the emails need, in one short visit.
@@ -2989,7 +3186,8 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Location not found"})
 
         cursor.execute(
-            "SELECT name, email, business_name, manager_name FROM users WHERE id = %s AND deleted_at IS NULL",
+            "SELECT name, email, business_name, manager_name, title, order_reply_to "
+            "FROM users WHERE id = %s AND deleted_at IS NULL",
             (user_id,)
         )
         user_row = cursor.fetchone()
@@ -2998,15 +3196,27 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
             ([o.distributor_id for o in request.orders], user_id)
         )
         dists = {r["id"]: r for r in cursor.fetchall()}
+        # An account number typed on the order screen is saved for good here,
+        # then every email reads the saved one.
+        typed = {o.distributor_id: clean_account_number(o.account_number)
+                 for o in request.orders if o.account_number and o.distributor_id in dists}
+        for dist_id, number in typed.items():
+            if number:
+                _save_account_number(cursor, request.location_id, dist_id, number)
+        if typed:
+            conn.commit()
+        cursor.execute(
+            "SELECT distributor_id, account_number FROM location_distributor_accounts WHERE location_id = %s",
+            (request.location_id,)
+        )
+        accounts = {r["distributor_id"]: r["account_number"] for r in cursor.fetchall()}
 
     business_name = (user_row["business_name"] if user_row else None) or request.location_name
     manager_name = (user_row["manager_name"] if user_row else None) or (user_row["name"] if user_row else None) or business_name
-    reply_to = user_row["email"] if user_row else None
-    location_suffix = (
-        f" ({request.location_name})"
-        if request.location_name and request.location_name != business_name
-        else ""
-    )
+    sender_title = user_row.get("title") if user_row else None
+    # Replies go to the bar: its chosen reply-to, else the login email. The BCC
+    # proof copy goes to the same place.
+    reply_to = ((user_row.get("order_reply_to") or user_row["email"]) if user_row else None)
 
     results = []
     order_distributors = []  # what THIS request did, with each distributor's line items, for order history
@@ -3014,10 +3224,7 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
 
     # 2. The sends. No database connection is held while Resend answers.
     for order in request.orders:
-        item_dicts = [
-            {"name": i.name, "quantity": i.quantity, "size": i.size or None, "price": i.price}
-            for i in order.items
-        ]
+        item_dicts = [_order_line(i) for i in order.items]
         dist = dists.get(order.distributor_id)
         if not dist:
             results.append({
@@ -3066,15 +3273,20 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
         # where no distributor had an address doesn't burn a number.
         if order_number is None:
             order_number = _draw_order_number(user_id)
-        subject, body_text = order_email(
-            order_number, dist["name"], business_name, location_suffix,
-            item_dicts, manager_name, today,
+        account_number = accounts.get(dist["id"])
+        mail = order_email(
+            order_number=order_number, business_name=business_name,
+            location_name=request.location_name, items=item_dicts,
+            sender_name=manager_name, sender_title=sender_title,
+            account_number=account_number, deliver_by=order.deliver_by,
         )
 
         # BCC the bar's own email: proof in the manager's inbox that the
         # order went out, and a paper trail if a distributor claims they
         # never received it. "Sent" only means Resend accepted it.
-        ok, error = _send_via_resend(api_key, dist["email"], subject, body_text, reply_to=reply_to, bcc=reply_to)
+        ok, error = _send_via_resend(api_key, dist["email"], mail["subject"], mail["text"],
+                                     reply_to=reply_to, bcc=reply_to, html=mail["html"],
+                                     from_name=business_name, to_name=dist["name"])
         if ref:
             _finish_send(user_id, ref, dist["id"], ihash, ok, order_number, dist["email"], error)
         results.append({
@@ -3084,7 +3296,9 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
         })
         order_distributors.append({
             "distributor_id": dist["id"], "distributor_name": dist["name"],
-            "email": dist["email"], "status": "sent" if ok else "failed", "items": item_dicts
+            "email": dist["email"], "status": "sent" if ok else "failed", "items": item_dicts,
+            "account_number": account_number,
+            "deliver_by": order.deliver_by.isoformat() if order.deliver_by else None,
         })
         if not ok:
             print(f"[send_order_emails] failed for {dist['name']} <{dist['email']}>: {error}", flush=True)
@@ -3998,8 +4212,9 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, phone, subscription_status,
-                   subscription_tier, trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
+            SELECT id, email, name, business_name, manager_name, phone, title, order_reply_to,
+                   subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
+                   privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
         row = cursor.fetchone()
@@ -4009,6 +4224,23 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
         result["subscription_status"] = result.get("subscription_status") or "trial"
         result["subscription_tier"] = result.get("subscription_tier") or "starter"
         return result
+
+_REPLY_TO_RE = re.compile(r"^[^@\s<>,;\"]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}$")
+
+
+def _clean_reply_to(raw: Optional[str]) -> Optional[str]:
+    """Where distributors' replies to orders go: blank clears it (replies go
+    to the login email again); anything else must be one plain address — it
+    becomes an email header, so nothing that could carry a second one."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if not _REPLY_TO_RE.match(s):
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_email",
+            "message": "That doesn't look like an email address. Check it, or leave it blank."})
+    return s
+
 
 def _clean_profile_phone(raw: Optional[str]) -> Optional[str]:
     """A customer's own number, from the bar-name screen: blank clears it,
@@ -4033,6 +4265,10 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
         raise HTTPException(status_code=400, detail={"error": "no_fields", "message": "No fields to update"})
     if "phone" in updates:
         updates["phone"] = _clean_profile_phone(updates["phone"])
+    if "title" in updates:
+        updates["title"] = " ".join((updates["title"] or "").split()) or None
+    if "order_reply_to" in updates:
+        updates["order_reply_to"] = _clean_reply_to(updates["order_reply_to"])
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -4046,8 +4282,9 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
         conn.commit()
 
         cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, phone, subscription_status,
-                   subscription_tier, trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
+            SELECT id, email, name, business_name, manager_name, phone, title, order_reply_to,
+                   subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
+                   privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
         row = cursor.fetchone()

@@ -644,51 +644,256 @@ def format_order_number(n: Optional[int]) -> Optional[str]:
     return f"#{int(n)}" if n else None
 
 
-def order_email(
-    order_number: Optional[int],
-    distributor_name: str,
-    business_name: str,
-    location_suffix: str,
-    items: list[dict],
-    manager_name: str,
-    today: str,
-) -> tuple[str, str]:
-    """Subject and plain-text body of one distributor's order email.
+def _qty(n: float) -> str:
+    return str(int(n)) if n == int(n) else f"{n:g}"
 
-    The order number goes in the subject, where a rep's inbox search and an
-    invoice clerk both look, and once more at the bottom with the ask to put it
-    on the invoice: that is what lets a bar match a delivery or a bill back to
-    the order it sent. `items` are {"name", "size", "quantity"}.
+
+def _plural(n: float, word: str) -> str:
+    return word if n == 1 else word + "s"
+
+
+def _btl(n: float) -> str:
+    return f"{_qty(n)} btl"
+
+
+def case_size_of(item: dict) -> Optional[int]:
+    """The pack size of a line ordered by the case, else None (a bottle line)."""
+    if item.get("unit") != "case":
+        return None
+    size = item.get("case_size")
+    return int(size) if size and int(size) >= 2 else None
+
+
+def line_quantity(item: dict) -> str:
+    """How one order line's amount reads: "2 cases (24 btl)", "1 case + 3 btl
+    (15 btl)", "1 btl". `quantity` is always bottles; a case line spells out
+    both, because "2 cases" alone is where a rep guesses the case size wrong."""
+    qty = item["quantity"]
+    pack = case_size_of(item)
+    if not pack:
+        return _btl(qty)
+    cases, rest = divmod(qty, pack)
+    cases = int(cases)
+    if not cases:
+        return _btl(qty)
+    head = f"{cases} {_plural(cases, 'case')}" + (f" + {_btl(rest)}" if rest else "")
+    return f"{head} ({_btl(qty)})"
+
+
+def order_total(items: list[dict]) -> str:
+    """"2 cases + 1 btl (25 btl)", or "3 btl" when nothing is by the case."""
+    total = sum(i["quantity"] for i in items)
+    cases = 0
+    loose = 0.0
+    for i in items:
+        pack = case_size_of(i)
+        if pack:
+            c, r = divmod(i["quantity"], pack)
+            cases += int(c)
+            loose += r
+        else:
+            loose += i["quantity"]
+    if not cases:
+        return _btl(total)
+    head = f"{cases} {_plural(cases, 'case')}" + (f" + {_btl(loose)}" if loose else "")
+    return f"{head} ({_btl(total)})"
+
+
+def delivery_label(day) -> Optional[str]:
+    """A requested delivery date as the email shows it: "Fri, Oct 10"."""
+    if not day:
+        return None
+    return f"{day.strftime('%a, %b')} {day.day}"
+
+
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def clean_delivery_days(raw) -> Optional[str]:
+    """"Mon, thu" / "monday,Thursday" -> "mon,thu" (week order, no repeats).
+    Blank -> None. Anything that isn't a weekday raises ValueError."""
+    if raw is None or not str(raw).strip():
+        return None
+    days = set()
+    for part in re.split(r"[\s,;/]+", str(raw).strip().lower()):
+        if not part:
+            continue
+        day = part[:3]
+        if day not in WEEKDAYS or not "monday tuesday wednesday thursday friday saturday sunday".split()[WEEKDAYS.index(day)].startswith(part):
+            raise ValueError(f"not a weekday: {part!r}")
+        days.add(day)
+    return ",".join(d for d in WEEKDAYS if d in days) or None
+
+
+def clean_account_number(raw) -> Optional[str]:
+    """A bar's account number with a distributor, as typed: trimmed, a leading
+    "#" or "Acct" dropped, one line, at most 40 characters. Blank -> None."""
+    if raw is None:
+        return None
+    s = " ".join(str(raw).split())
+    s = re.sub(r"^(?:acct\.?|account)\s*(?:no\.?|number)?\s*[:#]?\s*", "", s, flags=re.IGNORECASE)
+    s = s.lstrip("#").strip()
+    return s[:40] or None
+
+
+DEFAULT_SENDER_TITLE = "Bar Manager"
+
+
+def order_email(
+    *,
+    order_number: Optional[int],
+    business_name: str,
+    location_name: Optional[str],
+    items: list[dict],
+    sender_name: Optional[str],
+    sender_title: Optional[str] = None,
+    account_number: Optional[str] = None,
+    deliver_by=None,
+) -> dict:
+    """One distributor's order email: {"subject", "text", "html"}.
+
+    Laid out like the order card on the 86'd landing page: the order number in
+    the subject, the bar's account number with this distributor and the date
+    it wants delivery right under it, one line per item with its unit, and a
+    closing that says who sent it and asks for the number on the invoice —
+    what lets a bar match a delivery or a bill back to the order. Plain text
+    and an HTML card carrying the same words; a mail app that won't show the
+    HTML shows the text. `items` are {"name", "size", "quantity"} plus
+    {"unit": "case", "case_size"} on a case line; `quantity` is bottles.
+    The account number and delivery date are left out when there aren't any,
+    and every value a bar typed is escaped before it goes into the HTML.
     """
     ref = format_order_number(order_number)
-    lines = []
-    total_qty = 0.0
-    for item in items:
-        qty = item["quantity"]
-        total_qty += qty
-        qty_str = str(int(qty)) if qty == int(qty) else f"{qty:g}"
-        size_str = f" {item['size']}" if item.get("size") else ""
-        lines.append(f"- {item['name']}{size_str} x {qty_str}")
-    total_str = str(int(total_qty)) if total_qty == int(total_qty) else f"{total_qty:g}"
+    where = business_name + (f" ({location_name})"
+                             if location_name and location_name != business_name else "")
+    subject = f"Order {ref} from {business_name}" if ref else f"Order from {business_name}"
 
-    if ref:
-        subject = f"Order {ref} from {business_name} — {today}"
-        opening = f"This is order {ref} from {business_name}{location_suffix}."
-        reference = f"\nPlease put order {ref} on the invoice so we can match it up.\n"
+    info = []
+    if clean_account_number(account_number):
+        info.append(f"Acct #{clean_account_number(account_number)}")
+    deliver = delivery_label(deliver_by)
+    if deliver:
+        info.append(f"Deliver by {deliver}")
+
+    rows = [(f"{i['name']}{' ' + i['size'] if i.get('size') else ''}", line_quantity(i)) for i in items]
+    total = order_total(items)
+
+    person = (sender_name or "").strip()
+    title = (sender_title or "").strip() or DEFAULT_SENDER_TITLE
+    if person and person != business_name:
+        sent_by = f"Order sent by {person}, {title} at {where}."
     else:
-        subject = f"Order from {business_name} — {today}"
-        opening = f"This is an order from {business_name}{location_suffix}."
-        reference = ""
-    body = f"""Hi {distributor_name},
+        sent_by = f"Order sent by {where}."
+    invoice = (f"Please put order {ref} on the invoice." if ref
+               else "Please reference this order on the invoice.")
+    closing = f"{sent_by} {invoice}"
 
-{opening} Please prepare the following for pickup/delivery:
+    text_lines = [subject]
+    text_lines += info
+    text_lines.append("")
+    text_lines += [f"- {name} — {qty}" for name, qty in rows]
+    text_lines += ["", f"Total: {total}", "", closing, "", "Sent with 86'd bar inventory"]
+    text = "\n".join(text_lines)
 
-{chr(10).join(lines)}
+    html = _order_email_html(subject, info, rows, total, closing)
+    return {"subject": subject, "text": text, "html": html}
 
-Total: {total_str} bottles
-{reference}
-Thank you,
-{manager_name}
-{business_name}
-(sent via 86'd bar inventory)"""
-    return subject, body
+
+def _order_email_html(subject: str, info: list[str], rows: list[tuple[str, str]],
+                      total: str, closing: str) -> str:
+    """The light order card. Tables and inline styles only: that's what every
+    mail app renders the same way. Every value is escaped."""
+    from html import escape as e
+    chips = "".join(
+        f'<span style="display:inline-block;margin:0 8px 8px 0;padding:4px 10px;border-radius:999px;'
+        f'background:#f2ece4;color:#17181b;font-size:13px;font-weight:600;">{e(c)}</span>'
+        for c in info)
+    body_rows = "".join(
+        f'<tr><td style="padding:10px 0;border-top:1px solid #ece7e0;color:#17181b;font-size:15px;">{e(n)}</td>'
+        f'<td style="padding:10px 0;border-top:1px solid #ece7e0;color:#17181b;font-size:15px;'
+        f'font-weight:700;text-align:right;white-space:nowrap;">{e(q)}</td></tr>'
+        for n, q in rows)
+    return (
+        '<!doctype html><html><body style="margin:0;padding:24px 12px;background:#f6f4f1;'
+        'font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;'
+        'margin:0 auto;background:#ffffff;border:1px solid #e6e1da;border-radius:12px;">'
+        '<tr><td style="padding:24px;">'
+        f'<div style="font-size:18px;font-weight:700;color:#17181b;margin-bottom:12px;">{e(subject)}</div>'
+        + (f'<div style="margin-bottom:8px;">{chips}</div>' if chips else '')
+        + '<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
+        + body_rows
+        + '<tr><td style="padding:12px 0 0;border-top:2px solid #17181b;color:#17181b;font-size:15px;'
+          'font-weight:700;">Total</td><td style="padding:12px 0 0;border-top:2px solid #17181b;'
+          f'color:#17181b;font-size:15px;font-weight:700;text-align:right;white-space:nowrap;">{e(total)}</td></tr>'
+        + '</table>'
+        f'<p style="margin:20px 0 0;color:#3a3b40;font-size:14px;line-height:1.5;">{e(closing)}</p>'
+        '</td></tr></table>'
+        '<p style="max-width:560px;margin:12px auto 0;color:#8a8580;font-size:12px;text-align:center;">'
+        "Sent with 86&#x27;d bar inventory</p>"
+        '</body></html>'
+    )
+
+
+# ── How fast a bar goes through each bottle, from its own sent orders ────────
+#
+# The app rounds a shortfall up to a full case only when the extra bottles
+# would be used soon, so it needs a usage rate per bottle. A bar that orders
+# back up to par is, in each order, replacing what it used since the last one:
+# so the bottles in every order AFTER the first, divided by the time from the
+# first order to the last, is its rate. (The first order's own quantity covers
+# a stretch before the window and is left out.) Fewer than two orders, or less
+# than USAGE_MIN_SPAN_DAYS between them, is no rate at all — the app then falls
+# back to the bottle's par, never a guess dressed up as data.
+
+USAGE_WINDOW_DAYS = 56
+USAGE_MIN_SPAN_DAYS = 6
+
+
+def parse_iso(value) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _usage_name_key(name) -> str:
+    return " ".join(str(name or "").lower().split())
+
+
+def order_usage(orders: list) -> dict:
+    """orders: [(sent_at datetime, order_data dict)], any order.
+
+    Returns {"span_days": float, "products": {product_id: bottles},
+    "names": {lowercased line name: bottles}}, counting only orders after the
+    first. `names` covers lines from builds that sent no product_id. A line's
+    quantity is bottles, case lines included. span_days 0 = no usable rate.
+    """
+    dated = sorted((o for o in orders if o[0] is not None), key=lambda o: o[0])
+    empty = {"span_days": 0, "products": {}, "names": {}}
+    if len(dated) < 2:
+        return empty
+    span = (dated[-1][0] - dated[0][0]).total_seconds() / 86400
+    if span < USAGE_MIN_SPAN_DAYS:
+        return empty
+    products: dict = {}
+    names: dict = {}
+    for _, data in dated[1:]:
+        for dist in (data or {}).get("distributors") or []:
+            if dist.get("status") not in (None, "sent"):
+                continue          # a line that never reached the distributor wasn't ordered
+            for item in dist.get("items") or []:
+                try:
+                    qty = float(item.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if qty <= 0:
+                    continue
+                pid = item.get("product_id")
+                if pid:
+                    products[pid] = products.get(pid, 0) + qty
+                key = _usage_name_key(item.get("name"))
+                if key:
+                    names[key] = names.get(key, 0) + qty
+    return {"span_days": round(span, 2), "products": products, "names": names}
