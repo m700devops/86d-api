@@ -374,7 +374,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
   test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py -q` (1234 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py -q` (1245 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -772,14 +772,26 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   Manager at <bar>[ (<location>)]. Please put order #1042 on the invoice.` and `Sent with 86'd bar
   inventory`. The name is `users.manager_name` (else `name`); the title is `users.title`, blank =
   "Bar Manager"; no person on file = "Order sent by <bar>." Plain text AND a light HTML card with
-  the same words (tables + inline styles, every typed value escaped). **From** is the bar on 86'd's
-  address — `_order_sender()`: `"<bar> via 86'd" <address of ORDER_EMAIL_FROM>` (formataddr, so a
-  name can't add a header or address); **To** is `Metro Beverage <their email>`; **Reply-To** and
+  the same words (tables + inline styles, every typed value escaped). **From** is exactly `ORDER_EMAIL_FROM`
+  (`86'd Orders <orders@my86d.com>`), the same for every bar — a per-bar "<bar> via 86'd" name
+  was tried and dropped at the owner's request (2026-10-08): the bar's name is in the subject and
+  body. **To** is `Metro Beverage <their email>`; **Reply-To** and
   the BCC proof copy go to `users.order_reply_to` if set (PATCH /users/me, one plain address or
   422 `invalid_email`; for Apple hidden-email accounts whose relay may refuse a distributor's
-  reply), else the login email. The bar's name only shows as the sender once `ORDER_EMAIL_FROM`
-  is on a domain verified in Resend (`86'd Orders <orders@my86d.com>`); on the sandbox sender it
+  reply), else the login email. On the sandbox sender (ORDER_EMAIL_FROM unset) it
   still sends. Covered by test_order_card.py, run on a real Postgres 16 from the old schema
+- **A bounced distributor address is shown, not silent** (`POST /webhooks/resend`,
+  email_events.py). "Sent" only ever meant Resend ACCEPTED the email, so a dead rep address
+  failed every week unnoticed. Resend's webhook (Svix-signed: `svix-id`/`svix-timestamp`/
+  `svix-signature`, HMAC-SHA256 over "id.ts.body" with the base64 key after `whsec_`, 5-min
+  tolerance; `RESEND_WEBHOOK_SECRET`, unset = 503, bad signature = 401) marks every distributor
+  row with that address: a PERMANENT bounce → `email_problem='bounced'` (+ reason, time), a spam
+  complaint → 'complained'; a transient bounce changes nothing; a later delivery clears it, and
+  so does saving a DIFFERENT address (re-saving the same one keeps it). Returned on
+  `GET /distributors`; the app warns on the order screen and in Settings. Log `EMAIL_EVENT`.
+  **Setup**: Resend → Webhooks → endpoint `https://eight6d-api.onrender.com/webhooks/resend`,
+  events email.bounced, email.complained, email.delivered; its signing secret into
+  `RESEND_WEBHOOK_SECRET` on Render. Covered by test_email_events.py; run on a real Postgres 16
 - **Account numbers: per BAR per distributor** (`location_distributor_accounts`, PK (location,
   distributor)) — a distributor gives every licensed bar its own number, and distributors belong
   to the account. `GET /locations/{id}/distributor-accounts`, `PUT
@@ -1994,6 +2006,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
   **There is no launch price** (the owner's call, 2026-10-07): the $29.99-for-the-first-10 offer
   and STRIPE_LAUNCH_PRICE_ID, LAUNCH_PRICE_SLOTS and LAUNCH_PRICE_LABEL are gone and not read,
   so a leftover STRIPE_LAUNCH_PRICE_ID on Render does nothing. Covered by test_price.py
+- RESEND_WEBHOOK_SECRET — Resend's webhook signing secret (`whsec_…`); without it
+  `/webhooks/resend` 503s and bounced distributor addresses aren't flagged
 - STRIPE_WEBHOOK_SECRET — without it, payments don't activate subscriptions (customers pay and stay locked out)
 - CRM_API_KEY — shared key for `/v1/crm/*`; unset means every CRM endpoint 503s (the UI at
   `/crm` still loads, it just can't do anything). Not used by the mobile app at all

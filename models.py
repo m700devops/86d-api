@@ -487,6 +487,10 @@ class DistributorBase(BaseModel):
     rep_name: Optional[str] = None
     # The days this distributor delivers, "mon,thu" (helpers.clean_delivery_days).
     delivery_days: Optional[str] = None
+    # Set by Resend's webhook: "bounced" or "complained", with why and when.
+    email_problem: Optional[str] = None
+    email_problem_reason: Optional[str] = None
+    email_problem_at: Optional[str] = None
 
 class DistributorCreate(DistributorBase):
     pass
