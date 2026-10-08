@@ -5,7 +5,8 @@ from fastapi.responses import JSONResponse, FileResponse
 from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
+from email.utils import formataddr, parseaddr
 import asyncio
 import functools
 import weakref
@@ -28,7 +29,7 @@ from helpers import (
     normalize_match_text, NORM_SQL, product_match_key, seed_display_name,
     size_ml, sizes_compatible, label_supports, answers_agree, barcode_variants, clean_barcode,
     duplicate_groups, FIRST_ORDER_NUMBER, format_order_number, order_email,
-    order_usage, parse_iso, USAGE_WINDOW_DAYS,
+    order_usage, parse_iso, USAGE_WINDOW_DAYS, clean_delivery_days, clean_account_number,
 )
 from models import *
 from seed_data import SEED_PRODUCTS
@@ -2637,19 +2638,21 @@ def list_distributors(user_id: str = Depends(get_current_user)):
 @v1_router.post("/distributors", response_model=dict, status_code=201)
 def create_distributor(distributor_data: DistributorCreate, user_id: str = Depends(get_current_user)):
     """Create new distributor"""
+    days = _delivery_days_or_422(distributor_data.delivery_days)
     with get_db() as conn:
         cursor = conn.cursor()
         distributor_id = generate_id()
         now = now_iso()
         cursor.execute("""
-            INSERT INTO distributors (id, user_id, name, email, phone, rep_name, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO distributors (id, user_id, name, email, phone, rep_name, delivery_days, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (distributor_id, user_id, distributor_data.name, distributor_data.email,
-              distributor_data.phone, distributor_data.rep_name, now, now))
+              distributor_data.phone, distributor_data.rep_name, days, now, now))
         conn.commit()
         return {"distributor": {"id": distributor_id, "user_id": user_id, "name": distributor_data.name,
                                 "email": distributor_data.email, "phone": distributor_data.phone,
-                                "rep_name": distributor_data.rep_name, "created_at": now, "updated_at": now}}
+                                "rep_name": distributor_data.rep_name, "delivery_days": days,
+                                "created_at": now, "updated_at": now}}
 
 @v1_router.put("/distributors/{distributor_id}", response_model=dict)
 def update_distributor(distributor_id: str, distributor_data: DistributorUpdate, user_id: str = Depends(get_current_user)):
@@ -2675,12 +2678,78 @@ def update_distributor(distributor_id: str, distributor_data: DistributorUpdate,
         if distributor_data.rep_name is not None:
             updates.append("rep_name = %s")
             params.append(distributor_data.rep_name)
+        if distributor_data.delivery_days is not None:
+            updates.append("delivery_days = %s")
+            params.append(_delivery_days_or_422(distributor_data.delivery_days))
         updates.append("updated_at = %s")
         params.append(now)
         params.append(distributor_id)
         cursor.execute(f"UPDATE distributors SET {', '.join(updates)} WHERE id = %s", params)
         conn.commit()
         return {"success": True, "message": "Distributor updated"}
+
+def _delivery_days_or_422(raw) -> Optional[str]:
+    try:
+        return clean_delivery_days(raw)
+    except ValueError:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_delivery_days",
+            "message": "Delivery days must be weekdays, like \"mon,thu\"."})
+
+
+# ── This bar's account number with each distributor ─────────────────────────
+# Per location: a distributor gives every licensed bar its own number, while
+# distributors belong to the account. Asked for once (Settings, or right on the
+# order screen) and kept until someone edits it; every order email carries it.
+
+def _own_location_or_403(cursor, location_id: str, user_id: str):
+    cursor.execute("SELECT id FROM locations WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+                   (location_id, user_id))
+    if not cursor.fetchone():
+        raise HTTPException(status_code=403, detail={"error": "forbidden", "message": "Access denied to this location"})
+
+
+@v1_router.get("/locations/{location_id}/distributor-accounts", response_model=dict)
+def get_distributor_accounts(location_id: str, user_id: str = Depends(get_current_user)):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        _own_location_or_403(cursor, location_id, user_id)
+        cursor.execute("""
+            SELECT a.distributor_id, a.account_number FROM location_distributor_accounts a
+            JOIN distributors d ON d.id = a.distributor_id
+            WHERE a.location_id = %s AND d.user_id = %s AND d.deleted_at IS NULL
+        """, (location_id, user_id))
+        return {"accounts": [dict(r) for r in cursor.fetchall()]}
+
+
+@v1_router.put("/locations/{location_id}/distributor-accounts/{distributor_id}", response_model=dict)
+def set_distributor_account(location_id: str, distributor_id: str, data: DistributorAccountUpdate,
+                            user_id: str = Depends(get_current_user)):
+    number = clean_account_number(data.account_number)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        _own_location_or_403(cursor, location_id, user_id)
+        cursor.execute("SELECT id FROM distributors WHERE id = %s AND user_id = %s AND deleted_at IS NULL",
+                       (distributor_id, user_id))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Distributor not found"})
+        _save_account_number(cursor, location_id, distributor_id, number)
+        conn.commit()
+    return {"distributor_id": distributor_id, "account_number": number}
+
+
+def _save_account_number(cursor, location_id: str, distributor_id: str, number: Optional[str]):
+    if number:
+        cursor.execute("""
+            INSERT INTO location_distributor_accounts (location_id, distributor_id, account_number, updated_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (location_id, distributor_id) DO UPDATE SET
+                account_number = excluded.account_number, updated_at = excluded.updated_at
+        """, (location_id, distributor_id, number, now_iso()))
+    else:
+        cursor.execute("DELETE FROM location_distributor_accounts WHERE location_id = %s AND distributor_id = %s",
+                       (location_id, distributor_id))
+
 
 @v1_router.delete("/distributors/{distributor_id}")
 def delete_distributor(distributor_id: str, user_id: str = Depends(get_current_user)):
@@ -2905,6 +2974,12 @@ class OrderEmailItem(BaseModel):
 class DistributorOrder(BaseModel):
     distributor_id: str
     items: list[OrderEmailItem] = Field(min_length=1)
+    # The day the bar wants this delivered (the app fills in the distributor's
+    # next delivery day). Left off the email when absent — older builds.
+    deliver_by: date | None = None
+    # Typed on the order screen: saved as this bar's number with the
+    # distributor (and used now). Absent = the saved one, if any.
+    account_number: str | None = Field(default=None, max_length=40)
 
 
 class SendOrderEmailsRequest(BaseModel):
@@ -2919,10 +2994,31 @@ class SendOrderEmailsRequest(BaseModel):
     client_ref: str | None = Field(default=None, max_length=64)
 
 
-def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None, bcc: str | None = None) -> tuple[bool, str | None]:
+ORDER_FROM_DEFAULT = "86'd Orders <onboarding@resend.dev>"
+
+
+def _order_sender(business_name: str | None) -> str:
+    """The From line a distributor sees: the BAR's name on 86'd's own address
+    ("Marlins Seafood and Grille via 86'd <orders@my86d.com>"), so the inbox
+    shows who is ordering. The address is ORDER_EMAIL_FROM's (a domain
+    verified in Resend); its display name is replaced per bar. formataddr
+    quotes and encodes the name, so a bar name can't add a second address."""
+    _, address = parseaddr(os.getenv("ORDER_EMAIL_FROM") or ORDER_FROM_DEFAULT)
+    if not address:
+        _, address = parseaddr(ORDER_FROM_DEFAULT)
+    name = " ".join((business_name or "").split())[:80]
+    return formataddr((f"{name} via 86'd" if name else "86'd Orders", address))
+
+
+def _send_via_resend(api_key: str, to_email: str, subject: str, body_text: str, reply_to: str | None = None,
+                     bcc: str | None = None, html: str | None = None, from_name: str | None = None,
+                     to_name: str | None = None) -> tuple[bool, str | None]:
     """Send one email through the Resend API. Returns (ok, error_message)."""
-    sender = os.getenv("ORDER_EMAIL_FROM", "86'd Orders <onboarding@resend.dev>")
-    payload = {"from": sender, "to": [to_email], "subject": subject, "text": body_text}
+    sender = _order_sender(from_name) if from_name is not None else (os.getenv("ORDER_EMAIL_FROM") or ORDER_FROM_DEFAULT)
+    to = formataddr((" ".join(to_name.split())[:80], to_email)) if to_name else to_email
+    payload = {"from": sender, "to": [to], "subject": subject, "text": body_text}
+    if html:
+        payload["html"] = html
     if reply_to:
         payload["reply_to"] = reply_to
     if bcc and bcc.lower() != to_email.lower():
@@ -3077,7 +3173,6 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
             "message": "Email sending is not configured on the server (RESEND_API_KEY missing)"
         })
 
-    today = datetime.now(timezone.utc).strftime("%B %d, %Y")
     ref = (request.client_ref or "").strip() or None
 
     # 1. Everything the emails need, in one short visit.
@@ -3091,7 +3186,8 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Location not found"})
 
         cursor.execute(
-            "SELECT name, email, business_name, manager_name FROM users WHERE id = %s AND deleted_at IS NULL",
+            "SELECT name, email, business_name, manager_name, title, order_reply_to "
+            "FROM users WHERE id = %s AND deleted_at IS NULL",
             (user_id,)
         )
         user_row = cursor.fetchone()
@@ -3100,15 +3196,27 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
             ([o.distributor_id for o in request.orders], user_id)
         )
         dists = {r["id"]: r for r in cursor.fetchall()}
+        # An account number typed on the order screen is saved for good here,
+        # then every email reads the saved one.
+        typed = {o.distributor_id: clean_account_number(o.account_number)
+                 for o in request.orders if o.account_number and o.distributor_id in dists}
+        for dist_id, number in typed.items():
+            if number:
+                _save_account_number(cursor, request.location_id, dist_id, number)
+        if typed:
+            conn.commit()
+        cursor.execute(
+            "SELECT distributor_id, account_number FROM location_distributor_accounts WHERE location_id = %s",
+            (request.location_id,)
+        )
+        accounts = {r["distributor_id"]: r["account_number"] for r in cursor.fetchall()}
 
     business_name = (user_row["business_name"] if user_row else None) or request.location_name
     manager_name = (user_row["manager_name"] if user_row else None) or (user_row["name"] if user_row else None) or business_name
-    reply_to = user_row["email"] if user_row else None
-    location_suffix = (
-        f" ({request.location_name})"
-        if request.location_name and request.location_name != business_name
-        else ""
-    )
+    sender_title = user_row.get("title") if user_row else None
+    # Replies go to the bar: its chosen reply-to, else the login email. The BCC
+    # proof copy goes to the same place.
+    reply_to = ((user_row.get("order_reply_to") or user_row["email"]) if user_row else None)
 
     results = []
     order_distributors = []  # what THIS request did, with each distributor's line items, for order history
@@ -3165,15 +3273,20 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
         # where no distributor had an address doesn't burn a number.
         if order_number is None:
             order_number = _draw_order_number(user_id)
-        subject, body_text = order_email(
-            order_number, dist["name"], business_name, location_suffix,
-            item_dicts, manager_name, today,
+        account_number = accounts.get(dist["id"])
+        mail = order_email(
+            order_number=order_number, business_name=business_name,
+            location_name=request.location_name, items=item_dicts,
+            sender_name=manager_name, sender_title=sender_title,
+            account_number=account_number, deliver_by=order.deliver_by,
         )
 
         # BCC the bar's own email: proof in the manager's inbox that the
         # order went out, and a paper trail if a distributor claims they
         # never received it. "Sent" only means Resend accepted it.
-        ok, error = _send_via_resend(api_key, dist["email"], subject, body_text, reply_to=reply_to, bcc=reply_to)
+        ok, error = _send_via_resend(api_key, dist["email"], mail["subject"], mail["text"],
+                                     reply_to=reply_to, bcc=reply_to, html=mail["html"],
+                                     from_name=business_name, to_name=dist["name"])
         if ref:
             _finish_send(user_id, ref, dist["id"], ihash, ok, order_number, dist["email"], error)
         results.append({
@@ -3183,7 +3296,9 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
         })
         order_distributors.append({
             "distributor_id": dist["id"], "distributor_name": dist["name"],
-            "email": dist["email"], "status": "sent" if ok else "failed", "items": item_dicts
+            "email": dist["email"], "status": "sent" if ok else "failed", "items": item_dicts,
+            "account_number": account_number,
+            "deliver_by": order.deliver_by.isoformat() if order.deliver_by else None,
         })
         if not ok:
             print(f"[send_order_emails] failed for {dist['name']} <{dist['email']}>: {error}", flush=True)
@@ -4097,8 +4212,9 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, phone, subscription_status,
-                   subscription_tier, trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
+            SELECT id, email, name, business_name, manager_name, phone, title, order_reply_to,
+                   subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
+                   privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
         row = cursor.fetchone()
@@ -4108,6 +4224,23 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
         result["subscription_status"] = result.get("subscription_status") or "trial"
         result["subscription_tier"] = result.get("subscription_tier") or "starter"
         return result
+
+_REPLY_TO_RE = re.compile(r"^[^@\s<>,;\"]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}$")
+
+
+def _clean_reply_to(raw: Optional[str]) -> Optional[str]:
+    """Where distributors' replies to orders go: blank clears it (replies go
+    to the login email again); anything else must be one plain address — it
+    becomes an email header, so nothing that could carry a second one."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if not _REPLY_TO_RE.match(s):
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_email",
+            "message": "That doesn't look like an email address. Check it, or leave it blank."})
+    return s
+
 
 def _clean_profile_phone(raw: Optional[str]) -> Optional[str]:
     """A customer's own number, from the bar-name screen: blank clears it,
@@ -4132,6 +4265,10 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
         raise HTTPException(status_code=400, detail={"error": "no_fields", "message": "No fields to update"})
     if "phone" in updates:
         updates["phone"] = _clean_profile_phone(updates["phone"])
+    if "title" in updates:
+        updates["title"] = " ".join((updates["title"] or "").split()) or None
+    if "order_reply_to" in updates:
+        updates["order_reply_to"] = _clean_reply_to(updates["order_reply_to"])
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -4145,8 +4282,9 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
         conn.commit()
 
         cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, phone, subscription_status,
-                   subscription_tier, trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
+            SELECT id, email, name, business_name, manager_name, phone, title, order_reply_to,
+                   subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
+                   privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
         row = cursor.fetchone()

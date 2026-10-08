@@ -17,6 +17,8 @@ class UserResponse(UserBase):
     business_name: Optional[str] = None
     phone: Optional[str] = None
     manager_name: Optional[str] = None
+    title: Optional[str] = None
+    order_reply_to: Optional[str] = None
     subscription_status: str = "trial"
     subscription_tier: str = "starter"
     trial_ends_at: Optional[datetime] = None
@@ -37,6 +39,13 @@ class UpdateProfileRequest(BaseModel):
     # Optional contact number from the bar-name screen ("for setup help").
     # Checked and stored as 615-742-9095 by the route; "" clears it.
     phone: Optional[str] = Field(default=None, max_length=40)
+    # Who's sending orders, as the distributor email says it: "Order sent by
+    # Dana Reyes, Bar Manager at …". Blank = the email says "Bar Manager".
+    title: Optional[str] = Field(default=None, max_length=80)
+    # Where distributors' replies go, when it shouldn't be the login email —
+    # e.g. an Apple "Hide My Email" relay, which may refuse a distributor's
+    # reply. "" clears it.
+    order_reply_to: Optional[str] = Field(default=None, max_length=254)
 
 class AcceptTermsRequest(BaseModel):
     terms_version: str
@@ -361,6 +370,8 @@ class OrderDistributor(BaseModel):
     email: Optional[str] = None
     status: str  # sent | failed | no_email
     items: List[OrderLineItem] = []
+    account_number: Optional[str] = None   # what the email carried
+    deliver_by: Optional[str] = None       # ISO date the email asked for
 
 class OrderResponse(BaseModel):
     id: str
@@ -474,6 +485,8 @@ class DistributorBase(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     rep_name: Optional[str] = None
+    # The days this distributor delivers, "mon,thu" (helpers.clean_delivery_days).
+    delivery_days: Optional[str] = None
 
 class DistributorCreate(DistributorBase):
     pass
@@ -483,6 +496,11 @@ class DistributorUpdate(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     rep_name: Optional[str] = None
+    delivery_days: Optional[str] = None   # "" clears
+
+class DistributorAccountUpdate(BaseModel):
+    """This bar's account number with one distributor; "" clears it."""
+    account_number: str = Field(max_length=40)
 
 class DistributorResponse(DistributorBase):
     id: str

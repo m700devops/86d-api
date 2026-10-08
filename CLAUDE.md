@@ -374,7 +374,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
   test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py test_offer.py test_case_orders.py -q` (1221 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py -q` (1234 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -763,6 +763,33 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   distributor ever saw a number on them, so backfilling one would be a reference nobody else
   can match. `OrderResponse` declares the field: a field the response_model doesn't list is
   silently dropped before it reaches the app
+- **The order email IS the landing page's order card** (2026-10-08, `helpers.order_email()` →
+  `{subject, text, html}`, keyword-only). Subject `Order #1042 from <bar>` (no date — every mail
+  app shows it); under it `Acct #4471` (this bar's account number with that distributor) and
+  `Deliver by Fri, Oct 10` (the date the app sends, `DistributorOrder.deliver_by`), each left out
+  when absent; one line per item WITH a unit — `- Tito's 1L — 2 cases (24 btl)`, `- Green
+  Chartreuse — 1 btl`; `Total: 2 cases + 1 btl (25 btl)`; then `Order sent by Dana Reyes, Bar
+  Manager at <bar>[ (<location>)]. Please put order #1042 on the invoice.` and `Sent with 86'd bar
+  inventory`. The name is `users.manager_name` (else `name`); the title is `users.title`, blank =
+  "Bar Manager"; no person on file = "Order sent by <bar>." Plain text AND a light HTML card with
+  the same words (tables + inline styles, every typed value escaped). **From** is the bar on 86'd's
+  address — `_order_sender()`: `"<bar> via 86'd" <address of ORDER_EMAIL_FROM>` (formataddr, so a
+  name can't add a header or address); **To** is `Metro Beverage <their email>`; **Reply-To** and
+  the BCC proof copy go to `users.order_reply_to` if set (PATCH /users/me, one plain address or
+  422 `invalid_email`; for Apple hidden-email accounts whose relay may refuse a distributor's
+  reply), else the login email. The bar's name only shows as the sender once `ORDER_EMAIL_FROM`
+  is on a domain verified in Resend (`86'd Orders <orders@my86d.com>`); on the sandbox sender it
+  still sends. Covered by test_order_card.py, run on a real Postgres 16 from the old schema
+- **Account numbers: per BAR per distributor** (`location_distributor_accounts`, PK (location,
+  distributor)) — a distributor gives every licensed bar its own number, and distributors belong
+  to the account. `GET /locations/{id}/distributor-accounts`, `PUT
+  /locations/{id}/distributor-accounts/{distributor_id}` (`helpers.clean_account_number`: "Acct #
+  4471" → "4471"; "" deletes). A number typed on the order screen arrives as
+  `DistributorOrder.account_number` and is SAVED for good before the send; every email reads the
+  saved one. Kept in the order history (`OrderDistributor.account_number`, `deliver_by`).
+  **Delivery days per distributor**: `distributors.delivery_days` ("mon,thu",
+  `helpers.clean_delivery_days`, 422 `invalid_delivery_days`) on create/update/list; the app fills
+  in the next one
 - **Ordering by the case** (2026-10-08). Bars order fast movers by the case and the top shelf by
   the bottle; **the app decides which, per bottle per order, and the bar is never asked**
   (86d-mobile utils/caseOrder.ts): a shortfall rounds up to a full case only when the extra

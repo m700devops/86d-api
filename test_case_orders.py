@@ -33,28 +33,28 @@ from pydantic import ValidationError  # noqa: E402
 
 
 def _email(items):
-    return helpers.order_email(1042, "Breakthru", "Olde Town Tavern", "", items,
-                               "Dan", "October 8, 2026")[1]
+    return helpers.order_email(order_number=1042, business_name="Olde Town Tavern", location_name=None,
+                               items=items, sender_name="Dan")["text"]
 
 
 # ── the email ────────────────────────────────────────────────────────────────
 
-def test_a_case_line_says_cases_pack_and_bottles():
+def test_a_case_line_says_cases_and_bottles():
     body = _email([{"name": "Tito's", "size": "1L", "quantity": 24, "unit": "case", "case_size": 12}])
-    assert "- Tito's 1L x 2 cases (12/cs, 24 bottles)" in body
-    assert "Total: 2 cases (24 bottles)\n" in body
+    assert "- Tito's 1L — 2 cases (24 btl)" in body
+    assert "Total: 2 cases (24 btl)\n" in body
 
 
 def test_one_case_is_singular_and_a_part_case_shows_the_loose_bottles():
     body = _email([{"name": "Jameson", "quantity": 12, "unit": "case", "case_size": 12},
                    {"name": "Hennessy", "quantity": 15, "unit": "case", "case_size": 12}])
-    assert "- Jameson x 1 case (12/cs, 12 bottles)" in body
-    assert "- Hennessy x 1 case + 3 bottles (12/cs, 15 bottles)" in body
+    assert "- Jameson — 1 case (12 btl)" in body
+    assert "- Hennessy — 1 case + 3 btl (15 btl)" in body
 
 
 def test_under_a_case_never_says_zero_cases():
     body = _email([{"name": "Malibu", "quantity": 5, "unit": "case", "case_size": 6}])
-    assert "- Malibu x 5 bottles (6/cs)\n" in body
+    assert "- Malibu — 5 btl\n" in body
     assert "0 case" not in body
 
 
@@ -62,15 +62,14 @@ def test_a_mixed_order_totals_cases_and_loose_bottles():
     body = _email([{"name": "Tito's", "quantity": 24, "unit": "case", "case_size": 12},
                    {"name": "Macallan 12", "quantity": 2},
                    {"name": "Smirnoff", "size": "1.75L", "quantity": 6, "unit": "case", "case_size": 6}])
-    assert "- Macallan 12 x 2\n" in body                      # a bottle line, as before
-    assert "Total: 3 cases + 2 bottles (32 bottles)\n" in body
+    assert "- Macallan 12 — 2 btl\n" in body
+    assert "Total: 3 cases + 2 btl (32 btl)\n" in body
 
 
-def test_a_bottle_only_order_is_the_old_email_byte_for_byte():
+def test_every_line_carries_a_unit_and_a_stray_case_size_changes_nothing():
     items = [{"name": "Tito's", "size": "1L", "quantity": 2}, {"name": "Jameson", "quantity": 1.5}]
     body = _email(items)
-    assert "- Tito's 1L x 2\n- Jameson x 1.5\n\nTotal: 3.5 bottles\n" in body
-    # A "bottle" unit or a stray case_size on a bottle line changes nothing.
+    assert "- Tito's 1L — 2 btl\n- Jameson — 1.5 btl\n\nTotal: 3.5 btl\n" in body
     assert _email([dict(items[0], unit="bottle", case_size=12), items[1]]) == body
     assert _email([dict(items[0], unit="case", case_size=None), items[1]]) == body
 

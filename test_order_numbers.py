@@ -16,31 +16,32 @@ from models import OrderResponse
 
 
 def _email(n):
-    return helpers.order_email(
-        n, "Southern Glazer's", "Olde Town Tavern", " (Main St)",
-        [{"name": "Tito's", "size": "1L", "quantity": 2}, {"name": "Jameson", "quantity": 1.5}],
-        "Laura", "September 24, 2026")
+    m = helpers.order_email(
+        order_number=n, business_name="Olde Town Tavern", location_name="Main St",
+        items=[{"name": "Tito's", "size": "1L", "quantity": 2}, {"name": "Jameson", "quantity": 1.5}],
+        sender_name="Laura")
+    return m["subject"], m["text"]
 
 
 def test_the_number_leads_the_subject():
     subject, _ = _email(1042)
-    assert subject == "Order #1042 from Olde Town Tavern — September 24, 2026"
+    assert subject == "Order #1042 from Olde Town Tavern"
 
 
 def test_the_body_names_it_and_asks_for_it_on_the_invoice():
     _, body = _email(1042)
-    assert "This is order #1042 from Olde Town Tavern (Main St)." in body
-    assert "Please put order #1042 on the invoice" in body
-    assert "- Tito's 1L x 2" in body and "- Jameson x 1.5" in body
-    assert "Total: 3.5 bottles" in body
+    assert body.startswith("Order #1042 from Olde Town Tavern\n")
+    assert "Please put order #1042 on the invoice." in body
+    assert "- Tito's 1L — 2 btl" in body and "- Jameson — 1.5 btl" in body
+    assert "Total: 3.5 btl" in body
 
 
-def test_without_a_number_the_email_is_exactly_the_old_one():
+def test_without_a_number_it_still_reads_right():
     subject, body = _email(None)
-    assert subject == "Order from Olde Town Tavern — September 24, 2026"
-    assert "#" not in body and "invoice" not in body
-    assert "This is an order from Olde Town Tavern (Main St)." in body
-    assert "Total: 3.5 bottles\n\nThank you," in body
+    assert subject == "Order from Olde Town Tavern"
+    assert "#" not in body
+    assert "Please reference this order on the invoice." in body
+    assert "Order sent by Laura, Bar Manager at Olde Town Tavern (Main St)." in body
 
 
 def test_numbers_start_at_1001_and_format_with_a_hash():

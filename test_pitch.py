@@ -38,8 +38,9 @@ def test_the_sheet_claims_the_order_number_the_email_really_carries():
     sheet = pitch.master_sheet()
     assert "order number (#1001, #1002" in sheet
     assert "order number" in pitch.EXAMPLE_EMAIL.lower()
-    subject, body = helpers.order_email(1001, "SG", "Rioja", "", [{"name": "x", "quantity": 1}],
-                                        "Ed", "today")
+    m = helpers.order_email(order_number=1001, business_name="Rioja", location_name=None,
+                            items=[{"name": "x", "quantity": 1}], sender_name="Ed")
+    subject, body = m["subject"], m["text"]
     assert "#1001" in subject and "put order #1001 on the invoice" in body
 
 
