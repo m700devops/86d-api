@@ -49,7 +49,8 @@ import psycopg2
 import psycopg2.errors
 import hashlib
 import secrets
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from typing import Literal
 
 # Startup time for uptime calculation
 START_TIME = time.time()
@@ -955,7 +956,7 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
             # after an order was already sent must not silently double what's
             # on hand.
             cursor.execute(
-                "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels "
+                "SELECT par_quantity, full_quantity, current_stock, price, order_unit, case_size FROM par_levels "
                 "WHERE location_id = %s AND product_id = %s",
                 (location_id, source_id)
             )
@@ -963,7 +964,7 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
 
             if src_row:
                 cursor.execute(
-                    "SELECT par_quantity, full_quantity, current_stock, price FROM par_levels "
+                    "SELECT par_quantity, full_quantity, current_stock, price, order_unit, case_size FROM par_levels "
                     "WHERE location_id = %s AND product_id = %s",
                     (location_id, target_id)
                 )
@@ -971,16 +972,23 @@ def merge_product(product_id: str, data: ProductMergeRequest, user_id: str = Dep
 
                 if tgt_row:
                     merged_price = float(tgt_row["price"] or 0) or float(src_row["price"] or 0)
+                    # The order unit goes with whichever side the bar set to
+                    # "case" (keeper first), and its pack size with it.
+                    unit_row = next((r for r in (tgt_row, src_row)
+                                     if r["order_unit"] == "case" and r["case_size"]), None)
+                    merged_unit = "case" if unit_row else (tgt_row["order_unit"] or src_row["order_unit"])
+                    merged_case = (unit_row["case_size"] if unit_row
+                                   else (tgt_row["case_size"] or src_row["case_size"]))
                     cursor.execute("""
                         UPDATE par_levels
                         SET par_quantity = %s, full_quantity = %s, current_stock = %s,
-                            price = %s, updated_at = %s
+                            price = %s, order_unit = %s, case_size = %s, updated_at = %s
                         WHERE location_id = %s AND product_id = %s
                     """, (
                         max(float(tgt_row["par_quantity"] or 0), float(src_row["par_quantity"] or 0)),
                         max(float(tgt_row["full_quantity"] or 0), float(src_row["full_quantity"] or 0)),
                         max(float(tgt_row["current_stock"] or 0), float(src_row["current_stock"] or 0)),
-                        merged_price, now, location_id, target_id
+                        merged_price, merged_unit, merged_case, now, location_id, target_id
                     ))
                     cursor.execute(
                         "DELETE FROM par_levels WHERE location_id = %s AND product_id = %s",
@@ -1221,6 +1229,8 @@ def get_par_levels(location_id: str, user_id: str = Depends(get_current_user)):
                 "full_quantity": float(row["full_quantity"] or 0),
                 "current_stock": float(row["current_stock"] or 0),
                 "price": float(row["price"]) if row["price"] else None,
+                "order_unit": row.get("order_unit") or "bottle",
+                "case_size": row.get("case_size") or None,
                 "updated_at": row["updated_at"],
                 "product": {
                     "id": row["product_id"],
@@ -1439,7 +1449,7 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         now = now_iso()
         # Fetch existing row so we can preserve unchanged fields
         cursor.execute(
-            "SELECT par_quantity, full_quantity, current_stock, price, par_set_at FROM par_levels WHERE location_id = %s AND product_id = %s",
+            "SELECT par_quantity, full_quantity, current_stock, price, par_set_at, order_unit, case_size FROM par_levels WHERE location_id = %s AND product_id = %s",
             (location_id, product_id)
         )
         existing = cursor.fetchone()
@@ -1459,19 +1469,35 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
         # Stamped only when this request actually carried a par, so the column
         # stays a record of deliberate choices rather than of row activity.
         new_par_set_at = now if data.par is not None else (existing["par_set_at"] if existing else None)
+        # Order unit: preserved like price when the request doesn't mention it.
+        # case_size 0 clears it; "case" with no pack size on record is refused
+        # rather than guessed (a 1.75L is 6 to a case, a 375ml 24).
+        new_unit = data.order_unit or ((existing["order_unit"] if existing else None) or "bottle")
+        if data.case_size is not None:
+            new_case_size = data.case_size or None
+        else:
+            new_case_size = (existing["case_size"] if existing else None) or None
+        if new_unit == "case" and not new_case_size:
+            raise HTTPException(status_code=422, detail={
+                "error": "case_size_required",
+                "message": "Set how many bottles come in a case before ordering this bottle by the case.",
+            })
 
         par_id = generate_id()
         cursor.execute("""
-            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, price, par_set_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO par_levels (id, location_id, product_id, par_quantity, full_quantity, current_stock, price, par_set_at, order_unit, case_size, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(location_id, product_id) DO UPDATE SET
                 par_quantity = excluded.par_quantity,
                 full_quantity = excluded.full_quantity,
                 current_stock = excluded.current_stock,
                 price = excluded.price,
                 par_set_at = excluded.par_set_at,
+                order_unit = excluded.order_unit,
+                case_size = excluded.case_size,
                 updated_at = excluded.updated_at
-        """, (par_id, location_id, product_id, new_par, new_full, new_stock, new_price, new_par_set_at, now))
+        """, (par_id, location_id, product_id, new_par, new_full, new_stock, new_price, new_par_set_at,
+              new_unit, new_case_size, now))
         conn.commit()
 
         return {
@@ -1481,6 +1507,8 @@ def update_product_stock(location_id: str, product_id: str, data: ProductStockUp
             "current_stock": new_stock,
             "par": new_par,
             "price": new_price if new_price > 0 else None,
+            "order_unit": new_unit,
+            "case_size": new_case_size,
             "updated_at": now,
         }
 
@@ -2502,6 +2530,8 @@ def get_location_sync_data(location_id: str, since: Optional[str] = None, user_i
                 "full_quantity": float(row["full_quantity"] or 0),
                 "current_stock": float(row["current_stock"] or 0),
                 "price": float(row["price"]) if row["price"] else None,
+                "order_unit": row.get("order_unit") or "bottle",
+                "case_size": row.get("case_size") or None,
                 "updated_at": row["updated_at"],
                 "product": {
                     "id": row["product_id"],
@@ -2813,9 +2843,21 @@ Thank you,
 
 class OrderEmailItem(BaseModel):
     name: str
+    # Always BOTTLES, a case line included ("2 cases of 12" is quantity 24):
+    # cost totals, the history and an old build's reorder all read it that way.
     quantity: float
     size: str = ""
-    price: float | None = None
+    price: float | None = None   # per bottle
+    # How the bar orders this bottle from this distributor. Older builds send
+    # neither and every line is a bottle line, exactly as before.
+    unit: Literal["bottle", "case"] | None = None
+    case_size: int | None = Field(default=None, ge=2, le=120)
+
+    @model_validator(mode="after")
+    def _case_needs_a_size(self):
+        if self.unit == "case" and not self.case_size:
+            raise ValueError("a line ordered by the case needs case_size (bottles per case)")
+        return self
 
 
 class DistributorOrder(BaseModel):
@@ -2892,6 +2934,21 @@ SEND_STALE_MINUTES = 10
 # app ever failed to start a new ref) is a NEW order, and swallowing it as
 # "already sent" would be a missed delivery — worse than the duplicate.
 SEND_DEDUPE_HOURS = 12
+
+
+def _order_line(i: OrderEmailItem) -> dict:
+    """One order line as it's emailed, hashed and kept in the history.
+
+    The case keys are added ONLY to a case line. _items_hash fingerprints the
+    whole dict, so adding them to every line (even as None) would change the
+    hash of every bottle-only order: a retry straddling the deploy would no
+    longer match its first send and the distributor would be emailed twice.
+    """
+    line = {"name": i.name, "quantity": i.quantity, "size": i.size or None, "price": i.price}
+    if i.unit == "case":
+        line["unit"] = "case"
+        line["case_size"] = i.case_size
+    return line
 
 
 def _items_hash(items: list[dict]) -> str:
@@ -3014,10 +3071,7 @@ def send_order_emails(request: SendOrderEmailsRequest, user_id: str = Depends(ge
 
     # 2. The sends. No database connection is held while Resend answers.
     for order in request.orders:
-        item_dicts = [
-            {"name": i.name, "quantity": i.quantity, "size": i.size or None, "price": i.price}
-            for i in order.items
-        ]
+        item_dicts = [_order_line(i) for i in order.items]
         dist = dists.get(order.distributor_id)
         if not dist:
             results.append({

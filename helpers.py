@@ -644,6 +644,32 @@ def format_order_number(n: Optional[int]) -> Optional[str]:
     return f"#{int(n)}" if n else None
 
 
+def _qty(n: float) -> str:
+    return str(int(n)) if n == int(n) else f"{n:g}"
+
+
+def _plural(n: float, word: str) -> str:
+    return word if n == 1 else word + "s"
+
+
+def _case_phrase(cases: int, bottles: float) -> str:
+    """"2 cases", "1 case + 3 bottles", "5 bottles" — never "0 cases"."""
+    parts = []
+    if cases:
+        parts.append(f"{cases} {_plural(cases, 'case')}")
+    if bottles or not cases:
+        parts.append(f"{_qty(bottles)} {_plural(bottles, 'bottle')}")
+    return " + ".join(parts)
+
+
+def case_size_of(item: dict) -> Optional[int]:
+    """The pack size of a line ordered by the case, else None (a bottle line)."""
+    if item.get("unit") != "case":
+        return None
+    size = item.get("case_size")
+    return int(size) if size and int(size) >= 2 else None
+
+
 def order_email(
     order_number: Optional[int],
     distributor_name: str,
@@ -658,18 +684,40 @@ def order_email(
     The order number goes in the subject, where a rep's inbox search and an
     invoice clerk both look, and once more at the bottom with the ask to put it
     on the invoice: that is what lets a bar match a delivery or a bill back to
-    the order it sent. `items` are {"name", "size", "quantity"}.
+    the order it sent. `items` are {"name", "size", "quantity"}, plus
+    {"unit": "case", "case_size": N} on a line the bar orders by the case.
+
+    `quantity` is ALWAYS bottles, case lines included: a case is a label on
+    top, so cost totals, old app builds and reorders keep meaning bottles.
+    A case line spells out both ("x 2 cases (12/cs, 24 bottles)") because a
+    bare "x 24" or "x 2" on a case item is exactly how a rep guesses wrong.
+    An order with no case line renders byte-for-byte as it always has.
     """
     ref = format_order_number(order_number)
     lines = []
     total_qty = 0.0
+    total_cases = 0
+    loose = 0.0          # bottles not in a full case, across every line
+    any_case = False
     for item in items:
         qty = item["quantity"]
         total_qty += qty
-        qty_str = str(int(qty)) if qty == int(qty) else f"{qty:g}"
         size_str = f" {item['size']}" if item.get("size") else ""
-        lines.append(f"- {item['name']}{size_str} x {qty_str}")
-    total_str = str(int(total_qty)) if total_qty == int(total_qty) else f"{total_qty:g}"
+        pack = case_size_of(item)
+        if pack:
+            any_case = True
+            cases, rest = divmod(qty, pack)
+            cases = int(cases)
+            total_cases += cases
+            loose += rest
+            bottles = f", {_qty(qty)} {_plural(qty, 'bottle')}" if cases else ""
+            lines.append(f"- {item['name']}{size_str} x {_case_phrase(cases, rest)} ({pack}/cs{bottles})")
+        else:
+            loose += qty
+            lines.append(f"- {item['name']}{size_str} x {_qty(qty)}")
+    total_str = _qty(total_qty)
+    if any_case:
+        total_str = f"{_case_phrase(total_cases, loose)} ({total_str} {_plural(total_qty, 'bottle')})"
 
     if ref:
         subject = f"Order {ref} from {business_name} — {today}"
@@ -685,7 +733,7 @@ def order_email(
 
 {chr(10).join(lines)}
 
-Total: {total_str} bottles
+Total: {total_str}{"" if any_case else " bottles"}
 {reference}
 Thank you,
 {manager_name}

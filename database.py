@@ -613,6 +613,18 @@ def init_db():
                 print(f"[db] migrated par_levels: added {col} {col_type}", flush=True)
         conn.commit()
 
+        # Migrate par_levels: how this bar orders this bottle. NULL = by the
+        # bottle (every row before this), so nothing existing changes.
+        for col, col_type in [("order_unit", "TEXT"), ("case_size", "INTEGER")]:
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'par_levels' AND column_name = %s
+            """, (col,))
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE par_levels ADD COLUMN {col} {col_type}")
+                print(f"[db] migrated par_levels: added {col} {col_type}", flush=True)
+        conn.commit()
+
         # Migrate par_levels: par_set_at records when a human actually set a par, as
         # opposed to a row that exists only because something else was written to it.
         # Adding the column is also the one-shot gate for the backfill below, which
