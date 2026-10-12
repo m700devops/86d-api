@@ -80,7 +80,13 @@ def _expand_days(spec: str) -> list[int]:
 # as a single Monday-to-Thursday rule carrying four time spans. The venue then
 # has no hours at all for Friday, Saturday or Sunday, which for a bar is
 # "closed on its three best nights": dropped from the call list all weekend.
-_RULE_COMMA = re.compile(r",\s*(?=(?:Mo|Tu|We|Th|Fr|Sa|Su|PH)\b)", re.I)
+# Only a comma that FOLLOWS a time (or "off") starts a new rule. A comma
+# between two days is a day list: "Fr,Sa 11:00-02:00" split into "Fr" and
+# "Sa 11:00-02:00" and the bar lost its Friday (Eastburn, Portland) — 385 of
+# 2,604 hours strings on the map in Portland, Austin and Chicago list days
+# that way (2026-10-12).
+_RULE_COMMA = re.compile(r"(?:(?<=\d)|(?<=off)|(?<=closed)),\s*"
+                         r"(?=(?:Mo|Tu|We|Th|Fr|Sa|Su|PH)\b)", re.I)
 
 
 def _split_rules(text: str) -> list[str]:
@@ -154,6 +160,33 @@ def parse_opening_hours(value: Optional[str]) -> Optional[dict]:
     if not understood:
         return None
     return schedule
+
+
+# Hours whose end the parser can't see: "17:00+" and "open end" (open until
+# whenever), sunset and dusk. A venue like that may well be open late.
+_OPEN_ENDED = re.compile(r"\+|open ?end|\blate\b|sunset|sunrise|dusk|dawn", re.I)
+_OFF_RULE = re.compile(r"\boff\b|\bclosed\b", re.I)
+
+
+def latest_close(value: Optional[str]) -> Optional[int]:
+    """The latest a venue is open on any day of the week, in minutes past
+    midnight (past 24:00 when it shuts after midnight), or None.
+
+    None unless EVERY rule in the string was read. parse_opening_hours skips
+    what it can't understand, which is fine for a call window but not for
+    deciding a place shuts by mid-afternoon: "Mo-Fr 07:00-14:00; Fr 5pm-10pm"
+    would lose its only evening. Open-ended hours are None too: Colleen's
+    Kitchen in Austin is tagged "…Mo-Su 16:00-17:00+" and serves dinner.
+    """
+    if not value or _OPEN_ENDED.search(value):
+        return None
+    for rule in _split_rules(value.strip()):
+        rule = rule.strip()
+        if rule and not _TIME_RE.search(rule) and not _OFF_RULE.search(rule):
+            return None
+    schedule = parse_opening_hours(value)
+    ends = [end for spans in (schedule or {}).values() for _start, end in spans]
+    return max(ends) if ends else None
 
 
 def opens_at(schedule: Optional[dict], weekday: int) -> Optional[int]:

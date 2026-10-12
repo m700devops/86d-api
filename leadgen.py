@@ -42,7 +42,7 @@ from typing import Optional
 from database import get_db
 from helpers import generate_id, now_iso
 import activity
-from callwindow import ZONE_OFFSETS, call_window
+from callwindow import ZONE_OFFSETS, call_window, latest_close
 import venue as venue_facts
 from contacts import (email_kind, email_fits_venue, find_manager, strip_non_content,
                       visible_text)
@@ -354,7 +354,10 @@ def init_leadgen_tables():
                               ("enrich_attempts", "INTEGER"), ("retry_after", "TEXT"),
                               # The owner's rules (liquor, strip, chain): 'ok'
                               # or 'blocked', and the evidence / reason.
-                              ("fit_status", "TEXT"), ("fit_note", "TEXT")]:
+                              ("fit_status", "TEXT"), ("fit_note", "TEXT"),
+                              # When hours_check_step read the hours on its
+                              # site (rows crawled before the daytime rule).
+                              ("hours_checked_at", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'crm_lead_candidates' AND column_name = %s
@@ -504,6 +507,13 @@ def init_leadgen_tables():
         except Exception as exc:
             conn.rollback()
             print(f"[leadgen] LEADGEN_OWNER_RULES_FAILED {exc}", flush=True)
+
+        try:
+            _start_hours_check(cursor)
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            print(f"[leadgen] LEADGEN_HOURS_MARK_FAILED {exc}", flush=True)
 
         try:
             reopened = _requalify_once(cursor)
@@ -1590,6 +1600,124 @@ def liquor_verdict(text: str, tags: Optional[dict] = None, name: str = "",
             "reason": "no sign on their own site that they pour liquor"}
 
 
+# ── Daytime only: a breakfast or lunch place, not a bar ─────────────────────
+#
+# The Daily Feast PDX (2026-10-12): a downtown breakfast diner open 7am-2pm.
+# Its drinks page lists a Paloma and a Greyhound — two spirits, so it "poured
+# liquor" — and the owner spent half an hour on an email to it. A place that
+# shuts by mid-afternoon pours brunch drinks; it has no back bar worth
+# counting. The map had its hours all along ("Mo-Fr 07:00-14:00; Sa,Su
+# 07:00-15:00") and nothing read when it closes.
+#
+# Measured on the map (2026-10-12), venues whose hours shut them by 5pm on
+# every day they open: Portland 70 restaurants (bagel shops, pancake houses,
+# diners, delis, Sweedeedee, The Daily Feast) and NO bar, pub or nightclub;
+# Chicago 68 and Austin 33 more, and the only "bar" Radio Coffee and Beer
+# (Austin), shut by noon. On their own sites, 71 open into the evening: none read
+# as daytime.
+# Cuisine alone is NOT a signal: Bloodbuzz (Portland) and TRUCE (Chicago) are
+# cocktail bars the map tags coffee_shop, open until 10pm and 1am.
+DAYTIME_CLOSE = 17 * 60          # shuts by 5pm on every day it opens
+
+# On their own site: a time range, read on lower-cased visible text. Every
+# repeat is bounded (see test_hostile_pages.py).
+_T_RANGE = (r"(\d{1,2})(?:[:.]([0-5]\d))? {0,2}(?:([ap])\.? ?m\b\.?|([ap])\b)?")
+_RANGE_RE = re.compile(
+    r"(?<![\d:.$])" + _T_RANGE + r"\s{0,3}(?:-|–|—|to\b|until\b|till\b|til\b)\s{0,3}"
+    r"(?:" + _T_RANGE + r"|(midnight|close|closing|late|last call)\b)(?![\d])")
+# "Hours" as a label — not happy hour, kitchen or brunch hours.
+_HOURS_LABEL = re.compile(
+    r"(?<!happy )(?<!happy-)(?<!kitchen )(?<!brunch )(?<!lunch )(?<!breakfast )"
+    r"(?<!delivery )(?<!pickup )(?<!office )(?<!patio )(?<!market )"
+    r"\b(?:hours|open daily|open every day|open 7 days)\b")
+# A range that is about one part of the day, not when the doors shut. It can
+# still prove an evening (a 3-7pm happy hour means open till 7), never a
+# daytime-only place.
+_PART_OF_DAY = re.compile(
+    r"brunch|lunch|breakfast|happy|kitchen|deliver|pick ?up|catering|patio|office"
+    r"|market|class|appointment|tour|special|served|serving|bottomless|mimosa")
+# Words only a place open at night uses.
+_EVENING_WORDS = re.compile(r"\b(?:dinner|supper|late[- ]night|nightly|last call)\b")
+SITE_HOURS_LABELS = 12           # labels read per page — hours sit in a footer
+
+
+def _range_end(m) -> Optional[int]:
+    """When a matched range ends, in minutes past midnight (past 24:00 if it
+    runs past midnight); None when it can't be told ("10-2")."""
+    (h1, m1_raw, a1, b1, h2, m2_raw, a2, b2, word) = m.groups()
+    if word:
+        return 24 * 60                       # "11am - close": open into the night
+    h1, h2, m1, m2 = int(h1), int(h2), int(m1_raw or 0), int(m2_raw or 0)
+    mk1, mk2 = a1 or b1, a2 or b2
+    if mk2:
+        if not 1 <= h2 <= 12 or not 1 <= h1 <= 12:
+            return None
+        end = (h2 % 12 + (12 if mk2 == "p" else 0)) * 60 + m2
+        # With no am/pm on the start, morning: only the end matters, and a
+        # range that runs past midnight ("9-2am") ends before it either way.
+        start = (h1 % 12 + (12 if mk1 == "p" else 0)) * 60 + m1
+    elif m1_raw and m2_raw and (h1 > 12 or h2 > 12) and h1 <= 24 and h2 <= 24:
+        start, end = h1 * 60 + m1, h2 * 60 + m2            # a 24-hour clock ("8-14": a count)
+    else:
+        return None
+    return end + 24 * 60 if end <= start else end
+
+
+def site_latest_close(text: str) -> Optional[int]:
+    """The latest their own site says they're open, when every sign on the
+    page agrees they shut by DAYTIME_CLOSE; None if any says otherwise or the
+    page states no hours. Read from VISIBLE text.
+
+    Only ranges after an "Hours" label count toward daytime, and not one
+    about brunch, lunch, a happy hour or the kitchen ("Hours: Brunch Sat-Sun
+    10am-2pm" on a bar's site says nothing about when it shuts). Anything on
+    the page that runs into the evening — a 4-7pm happy hour, "until close",
+    "dinner" — means it isn't a daytime place."""
+    low = (text or "").lower()[:200000]
+    if _EVENING_WORDS.search(low):
+        return None
+    for m in _RANGE_RE.finditer(low):
+        end = _range_end(m)
+        if end is not None and end > DAYTIME_CLOSE:
+            return None
+    latest = None
+    for n, label in enumerate(_HOURS_LABEL.finditer(low)):
+        if n >= SITE_HOURS_LABELS:
+            break
+        window = low[label.end():label.end() + 250]
+        for m in _RANGE_RE.finditer(window):
+            if _PART_OF_DAY.search(window[max(0, m.start() - 40):m.start()]):
+                continue
+            end = _range_end(m)
+            if end is not None:
+                latest = max(latest or 0, end)
+    return latest
+
+
+def _clock(minutes: int) -> str:
+    h, m = (minutes // 60) % 24, minutes % 60
+    return f"{h % 12 or 12}{f':{m:02d}' if m else ''}{'am' if h < 12 else 'pm'}"
+
+
+def daytime_only(opening_hours: Optional[str] = None, site_text: str = "") -> Optional[str]:
+    """Why this is a breakfast or lunch place, not a bar — or None.
+
+    The map's hours decide without a crawl. When the map has none, or has
+    them open later, the hours posted on their own site can still show a
+    daytime place: the map is a volunteer's survey, the site is the venue
+    talking. The reason starts "daytime only" (the harvest re-opens it when
+    the map's hours change)."""
+    end = latest_close(opening_hours)
+    if end is not None and end <= DAYTIME_CLOSE:
+        return (f"daytime only — the map lists it shut by {_clock(end)} every day "
+                f"({opening_hours[:80]}): breakfast/lunch, no bar to count")
+    end = site_latest_close(site_text) if site_text else None
+    if end is not None and end <= DAYTIME_CLOSE:
+        return (f"daytime only — their site lists it shut by {_clock(end)} every day: "
+                f"breakfast/lunch, no bar to count")
+    return None
+
+
 # ── 1. Chains and corporate venues ──────────────────────────────────────────
 #
 # CHAIN_NAMES and franchise language (looks_like_chain) catch the brands we
@@ -2094,9 +2222,13 @@ out center tags;
                     website = EXCLUDED.website,
                     phone = COALESCE(EXCLUDED.phone, c.phone),
                     status = CASE WHEN c.status = 'rejected'
-                                   AND (c.website IS DISTINCT FROM EXCLUDED.website
-                                        OR c.phone IS DISTINCT FROM COALESCE(EXCLUDED.phone, c.phone))
-                                   AND lower(COALESCE(c.reject_reason, '')) ~ %s
+                                   AND (((c.website IS DISTINCT FROM EXCLUDED.website
+                                          OR c.phone IS DISTINCT FROM COALESCE(EXCLUDED.phone, c.phone))
+                                         AND lower(COALESCE(c.reject_reason, '')) ~ %s)
+                                        -- new hours on the map: a breakfast place
+                                        -- that started opening at night
+                                        OR (c.opening_hours IS DISTINCT FROM EXCLUDED.opening_hours
+                                            AND c.reject_reason LIKE 'daytime only%%'))
                                   THEN 'new' ELSE c.status END
                  WHERE c.status IN ('new', 'rejected', 'retry')
                 RETURNING (xmax = 0) AS inserted
@@ -2448,16 +2580,45 @@ def _verify_phones_safe(**kw) -> Optional[dict]:
 
 # ── The owner's rules, applied to what's already banked or listed ─────────
 
+def _retire_unfit(cursor, row: dict, why: str) -> str:
+    """Take a never-called generated lead off the call list and its candidate
+    out of the bank, or reject a banked candidate. A lead with an email
+    queued stays but is hidden; one someone worked meanwhile is left alone.
+    Returns 'removed', 'rejected' or 'hidden'."""
+    if row["status"] == "promoted":
+        cursor.execute("""
+            DELETE FROM crm_leads WHERE id = %s AND status = 'new'
+               AND last_touch_at IS NULL AND queued_email_at IS NULL
+        """, (row["lead_id"],))
+        if not cursor.rowcount:
+            cursor.execute("UPDATE crm_leads SET fit_status = 'blocked', fit_note = %s "
+                           "WHERE id = %s AND status = 'new' AND last_touch_at IS NULL",
+                           (why, row["lead_id"]))
+            return "hidden"
+        outcome = "removed"
+    else:
+        outcome = "rejected"
+    # Status as read: a banked candidate promoted meanwhile is left alone.
+    cursor.execute("""
+        UPDATE crm_lead_candidates
+           SET status = 'rejected', reject_reason = %s, fit_status = 'blocked',
+               fit_note = %s, promoted_lead_id = NULL, promoted_at = NULL
+         WHERE status = %s AND id = %s
+    """, (why, why, row["status"], row["id"]))
+    return outcome
+
+
 def _reconcile_owner_rules(cursor) -> tuple[int, int]:
-    """Every boot: never-called leads and banked candidates on a tourist strip
-    or run by a chain come off the list / out of the bank. Map data and the
-    harvest only — no crawling, so it's cheap and safe at boot. Called and
-    emailed leads are never touched; a lead with an email queued stays but is
-    hidden from the call list. Returns (leads removed, candidates rejected)."""
+    """Every boot: never-called leads and banked candidates on a tourist strip,
+    run by a chain, or shut by mid-afternoon on the map (daytime_only) come
+    off the list / out of the bank. Map data and the harvest only — no
+    crawling, so it's cheap and safe at boot. Called and emailed leads are
+    never touched; a lead with an email queued stays but is hidden from the
+    call list. Returns (leads removed, candidates rejected)."""
     corporate = corporate_index(cursor)
     cursor.execute("""
         SELECT c.id, c.city, c.lat, c.lon, c.website, c.raw_tags, c.status,
-               l.id AS lead_id, l.queued_email_at
+               c.opening_hours, l.id AS lead_id, l.queued_email_at
           FROM crm_lead_candidates c
           LEFT JOIN crm_leads l ON l.id = c.promoted_lead_id
          WHERE c.status = 'qualified'
@@ -2469,27 +2630,13 @@ def _reconcile_owner_rules(cursor) -> tuple[int, int]:
         tags = _cand_tags(row)
         strip = tourist_strip(tags, row["city"], row["lat"], row["lon"])
         why = f"tourist strip ({strip})" if strip else corporate_reason(
-            tags, row["website"], corporate)
+            tags, row["website"], corporate) or daytime_only(
+            row.get("opening_hours") or tags.get("opening_hours"))
         if not why:
             continue
-        if row["status"] == "promoted":
-            cursor.execute("""
-                DELETE FROM crm_leads WHERE id = %s AND status = 'new'
-                   AND last_touch_at IS NULL AND queued_email_at IS NULL
-            """, (row["lead_id"],))
-            if not cursor.rowcount:
-                cursor.execute("UPDATE crm_leads SET fit_status = 'blocked', fit_note = %s "
-                               "WHERE id = %s", (why, row["lead_id"]))
-                continue
-            removed += 1
-        else:
-            rejected += 1
-        cursor.execute("""
-            UPDATE crm_lead_candidates
-               SET status = 'rejected', reject_reason = %s, fit_status = 'blocked',
-                   fit_note = %s, promoted_lead_id = NULL, promoted_at = NULL
-             WHERE id = %s
-        """, (why, why, row["id"]))
+        outcome = _retire_unfit(cursor, row, why)
+        removed += outcome == "removed"
+        rejected += outcome == "rejected"
     return removed, rejected
 
 
@@ -2503,7 +2650,8 @@ def check_fit(row: dict, corporate: Optional[dict] = None) -> dict:
     strip = tourist_strip(tags, row.get("city"), row.get("lat"), row.get("lon"))
     if strip:
         return {"status": "blocked", "note": f"tourist strip ({strip})"}
-    why = corporate_reason(tags, row.get("website"), corporate)
+    why = corporate_reason(tags, row.get("website"), corporate) or daytime_only(
+        row.get("opening_hours") or tags.get("opening_hours"))
     if why:
         return {"status": "blocked", "note": why}
     home, website, status = _fetch_site(row.get("website") or "")
@@ -2513,7 +2661,8 @@ def check_fit(row: dict, corporate: Optional[dict] = None) -> dict:
         return {"status": "blocked", "note": f"their website doesn't mention "
                                              f"{row.get('name')} — it may not be theirs"}
     text = _page_text(home)
-    chain = looks_like_chain(row.get("name") or "", website, text)
+    chain = looks_like_chain(row.get("name") or "", website, text) or daytime_only(
+        site_text=text)
     if chain:
         return {"status": "blocked", "note": chain}
     name, amenity = row.get("name") or "", (row.get("amenity") or "").lower()
@@ -2581,7 +2730,8 @@ def verify_fit(lead_limit: int = VERIFY_BATCH, bank_limit: int = VERIFY_BATCH,
             bank: list = []
             if bank_limit:
                 cursor.execute("""
-                    SELECT id, name, city, lat, lon, website, raw_tags, amenity
+                    SELECT id, name, city, lat, lon, website, raw_tags, amenity,
+                           opening_hours
                       FROM crm_lead_candidates
                      WHERE status = 'qualified' AND fit_status IS NULL
                      ORDER BY score DESC LIMIT %s
@@ -2681,6 +2831,96 @@ def fit_check_step() -> int:
         print(f"[leadgen] LEADGEN_FIT_CHECK_FAILED {exc}", flush=True)
         return 0
     return out.get("leads_checked", 0) + out.get("bank_checked", 0)
+
+
+# ── The daytime rule, for venues crawled before it ─────────────────────────
+#
+# The boot reconcile applies the MAP's hours to everything listed and banked.
+# Venues the map has no hours for were crawled before anything read the hours
+# on their own site, so each one's homepage is read once more — in the
+# background, a small batch at a time, after the scanner has gone quiet, like
+# every other crawl. Anything crawled after the rule went live (the marker's
+# applied_at) was read with it already.
+
+_HOURS_MARKER = "daytime_rule_2026_10"
+
+
+def _start_hours_check(cursor) -> None:
+    """Boot: note when the daytime rule went live, once."""
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS crm_leadgen_oneshots (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL,
+            detail TEXT
+        )
+    """)
+    cursor.execute("INSERT INTO crm_leadgen_oneshots (name, applied_at) VALUES (%s, %s) "
+                   "ON CONFLICT (name) DO NOTHING", (_HOURS_MARKER, now_iso()))
+
+
+def hours_check_step(limit: int = VERIFY_BATCH, budget_s: int = VERIFY_BUDGET_S) -> int:
+    """One batch: never-called call-list leads first, then the bank's best.
+    A site that shows a daytime-only place takes it off the list / out of the
+    bank (_retire_unfit); every row read is stamped so it's read once. A row
+    the deadline didn't reach waits for the next batch. Returns rows read."""
+    if not _fit_lock.acquire(blocking=False):
+        return 0
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT applied_at FROM crm_leadgen_oneshots WHERE name = %s",
+                           (_HOURS_MARKER,))
+            mark = cursor.fetchone()
+            if not mark:
+                return 0
+            cursor.execute("""
+                SELECT c.id, c.name, c.website, c.status, l.id AS lead_id
+                  FROM crm_lead_candidates c
+                  LEFT JOIN crm_leads l ON l.id = c.promoted_lead_id
+                 WHERE c.hours_checked_at IS NULL AND c.website IS NOT NULL
+                   AND (c.enriched_at IS NULL OR c.enriched_at < %s)
+                   AND (c.status = 'qualified'
+                        OR (c.status = 'promoted' AND l.source = 'leadgen'
+                            AND l.status = 'new' AND l.last_touch_at IS NULL))
+                 ORDER BY (c.status = 'promoted') DESC, c.score DESC NULLS LAST
+                 LIMIT %s
+            """, (mark["applied_at"], limit))
+            rows = [dict(r) for r in cursor.fetchall()]
+        if not rows:
+            return 0
+
+        from concurrent.futures import ThreadPoolExecutor
+        deadline = time.monotonic() + budget_s
+
+        def check(row):
+            if not activity.wait_for_quiet(until=deadline) or time.monotonic() > deadline:
+                return row, None
+            try:
+                home, _site, _status = _fetch_site(row["website"])
+            except Exception:
+                home = ""
+            # A site that doesn't load keeps the venue as it is: read once.
+            return row, (daytime_only(site_text=_page_text(home)) if home else "") or ""
+
+        with ThreadPoolExecutor(max_workers=VERIFY_WORKERS) as pool:
+            results = [r for r in pool.map(check, rows) if r[1] is not None]
+
+        tally: Counter = Counter()
+        stamp = now_iso()
+        with get_db() as conn:
+            cursor = conn.cursor()
+            for row, why in results:
+                if why:
+                    tally[_retire_unfit(cursor, row, why)] += 1
+                cursor.execute("UPDATE crm_lead_candidates SET hours_checked_at = %s "
+                               "WHERE id = %s", (stamp, row["id"]))
+            conn.commit()
+        print(f"[leadgen] LEADGEN_HOURS_CHECKED read={len(results)} "
+              f"removed_leads={tally['removed']} rejected_candidates={tally['rejected']} "
+              f"hidden={tally['hidden']}", flush=True)
+        return len(results)
+    finally:
+        _fit_lock.release()
 
 
 # ── Bars added by hand (or found by the AI): timed and checked ─────────────
@@ -3077,6 +3317,9 @@ def enrich_candidate(cand: dict) -> dict:
     corporate = corporate_reason(osm_tags, website, None)
     if corporate:
         return _rejected(corporate)
+    daytime = daytime_only(cand.get("opening_hours") or osm_tags.get("opening_hours"))
+    if daytime:
+        return _rejected(daytime)
     tagged = (osm_tags.get("email") or osm_tags.get("contact:email") or "").strip()
     if tagged and not EMAIL_BLOCKLIST.search(tagged) and "@" in tagged:
         email, email_source = tagged.lower(), "OpenStreetMap tag"
@@ -3172,6 +3415,10 @@ def enrich_candidate(cand: dict) -> dict:
     chain_reason = looks_like_chain(cand["name"], website, seen_text)
     if chain_reason:
         return _rejected(chain_reason)
+    # Hours the map didn't have, or had wrong, from their own pages.
+    daytime = daytime_only(site_text=seen_text)
+    if daytime:
+        return _rejected(daytime)
 
     # Must pour LIQUOR, shown on its own site — bars included: a wine bar or a
     # taproom is tagged a bar too. The drinks are usually on a menu page, so
@@ -3313,7 +3560,8 @@ def _promote_one(cursor, cand: dict, now: str, corporate: Optional[dict] = None)
     tags = _cand_tags(cand)
     blocked = tourist_strip(tags, cand.get("city"), cand.get("lat"), cand.get("lon"))
     blocked = f"tourist strip ({blocked})" if blocked else corporate_reason(
-        tags, cand.get("website"), corporate)
+        tags, cand.get("website"), corporate) or daytime_only(
+        cand.get("opening_hours") or tags.get("opening_hours"))
     if blocked:
         cursor.execute("UPDATE crm_lead_candidates SET status='rejected', reject_reason=%s, "
                        "fit_status='blocked', fit_note=%s WHERE id=%s",
