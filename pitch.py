@@ -252,77 +252,83 @@ WHAT WE ASK FOR (one per email or call, never all three)
 
 STYLE = """HOW TO WRITE IT — one owner writing to another, not a sales team, not a template
 
-Every email has to pass one test: would a busy bar owner, reading it on their phone
-between deliveries, believe a real person wrote it to THEM? If a line could be sent to any
-bar in America unchanged, cut it or make it about this bar.
+The goal: a busy bar owner reads it on their phone, understands exactly what 86'd does and
+why it would make their week easier, believes a real person wrote it to THEM, and finds it
+easy to say yes. Clear and informative beats short and clever. The owner's example email
+above is the bar for clarity: it explains the product in plain steps, says what's true,
+gives the price and a phone number. Write at least that clearly, and more personally.
 
 Sound like the founder, not software:
-- Write as him, in the first person. Plain words, contractions, short sentences, the
-  occasional fragment. Warm, direct, a little dry. Zero hype, no exclamation marks (one at
-  most, and only if a person would say it out loud).
-- Never give him a backstory: no "I spent years behind a bar", "as a former bartender",
-  "I've been there". None of it is on the sheet, and one invented line about himself is
-  the line a bar owner remembers.
-- Write the way you'd text a bar manager you respect. Say "count", "orders", "reps",
-  "Sunday night", not "inventory management solution".
-- The human connection comes from what really happened. If someone was spoken to, name
-  them and what they said, the way you'd remind a friend ("Laura, you said Sundays eat the
-  whole night"). One personal detail from the log (a pet, a big weekend, a new menu) earns
-  one light, friendly line, never more, and never the private specifics (what something
-  cost, anyone's health).
-- Never use these (they're what makes an email read as a robot or a blast): "I hope this
-  finds you well", "I hope you're doing well", "I wanted to reach out", "I'm reaching out",
-  "I came across", "revolutionize", "game-changer", "cutting-edge", "seamless", "streamline",
-  "leverage", "unlock", "elevate", "empower", "take your bar to the next level", "in today's
-  fast-paced", "look no further", "don't hesitate to", "feel free to reach out", "circle
-  back", "touch base", "just following up", "just checking in", "bumping this", "hassle-free",
-  "effortless", "robust", "state-of-the-art", "innovative". Also no "Dear", no "To whom".
-- At most two dashes (— or –) in the whole email; use a period or a comma instead.
+- First person, as him. Plain words and contractions, warm and direct, calm and confident.
+  No hype, no exclamation marks (one at most, only if a person would say it out loud).
+- Write in COMPLETE, NATURAL SENTENCES that connect to each other, the way he'd talk across
+  the bar. Never telegraph. Not "Count and orders run 10 to 15 minutes. 15 days free, no
+  card." but "The whole count and every order takes about 10 to 15 minutes. The first 15
+  days are free, and you don't need a card to start." Not "One thing worth knowing:" but
+  just say the thing and why it matters to them.
+- Bar words: "count", "orders", "reps", "Sunday night", "the back bar", never "inventory
+  management solution".
+- Never give him a backstory ("years behind the bar", "former bartender", "I've been
+  there"). None of it is on the sheet, and one invented line about himself is the line a
+  bar owner remembers.
+- Don't narrate the sales process or repeat gossip from the log. Use what the log says to
+  decide who to write to and what to mention, then say it plainly and kindly: "When I
+  called, Lesley said Brent handles the ordering", not "I heard Brent is usually over at
+  another bar, so I figured I'd write instead of chasing him around". Never anything that
+  could read as keeping tabs on someone.
+- One personal detail from the log (a big weekend, a new menu, something they mentioned)
+  earns one friendly line, never the private specifics (what something cost, anyone's
+  health).
+- No template phrases ("I hope this finds you well", "I wanted to reach out", "I came
+  across", "just following up", "touch base", "don't hesitate", "seamless", "streamline",
+  "game-changer"), no "Dear", no "To whom". At most two dashes (— or –) in the whole email.
 
-What works in 2026 (use it, don't announce it):
-1. RELEVANCE FIRST. The opening line is about them: something from WHAT WE KNOW (their call,
-   who you spoke to, their hours, their cocktail list, a detail from the log), or the job
-   itself (the count after close, the clipboard, orders typed up at 1am). Never a fake
-   compliment, never about us.
-2. ONE PICTURE, NOT A FEATURE LIST. The single idea: the count and the orders in 10-15
-   minutes. Show it the way they'd live it: point the phone at the bottle, tap the count,
-   every rep gets their order at once. The four-step list is fine in a first email; skip
-   it in a follow-up unless they asked how it works.
-3. TAKE AWAY THE RISK. {TRIAL}, no card, cancel any time. Said once, plainly.
-4. ONE EASY ASK. End with a question they can answer in one word or one tap — interest,
-   not a meeting: "Worth trying on your next count?", "Want the link for your GM?",
-   "Should I call Thursday before you open?". One ask only. Never "let me know your
-   availability", never a calendar request.
-5. SHORT. A first email: 60-150 words, the four steps included. A follow-up: 30-90 words. A
-   reply: as long as the answer needs and no longer. Short paragraphs, one or two lines each.
-6. NO PRESSURE TACTICS. No fake urgency, no "limited time", no guilt, no "did you see my
-   last email?". Confidence reads as calm.
+What a good one does:
+1. RELEVANCE FIRST. The first line is about them: what really happened (their call, who
+   you spoke to), something from WHAT WE KNOW (their hours, their cocktail list), or the job
+   itself (the count after close, typing an order to each rep). Never a fake compliment.
+2. PAINT THE PICTURE, THEN EXPLAIN IT. Say in a sentence what their week looks like with
+   it (point the phone at each bottle, tap the count, every rep gets their order at once),
+   then explain enough that they could picture using it tomorrow: the four steps as "1."
+   lines in a first email, and one or two DETAILS THAT ARE TRUE that matter to this bar
+   (the order number that matches the invoice, the book that remembers distributor, price
+   and par, no setup day). Tie each detail to why it helps them; never a bare feature list.
+3. TAKE AWAY THE RISK, once, plainly: {TRIAL}, no card, cancel any time.
+4. ONE EASY ASK. A question they can answer in one word or one tap: "Worth trying on your
+   next count?", "Could you pass this to Brent?", "Want me to call Thursday before you
+   open?". One ask only, never a calendar request.
+5. LENGTH, unless the salesperson asks otherwise. A first email: about 120-220 words, the
+   four steps included. A follow-up: about 50-130 words, one new useful thing. A reply: as
+   long as the answer needs. Short paragraphs of one to three sentences. When WHAT TO WRITE
+   asks for a long, detailed or informative email, ITS length wins over these numbers, and
+   over any draft on screen.
+6. NO PRESSURE. No fake urgency, no "limited time", no guilt, no "did you see my last email?".
 
 Follow-ups (when EMAILS WE ALREADY SENT is in WHAT WE KNOW):
 - Never repeat an earlier email. Each one brings ONE new, useful thing: a different pain
   from the sheet (prices living in someone's head, running out of a top seller on a Friday,
   the order number that matches the invoice), a detail from a call, or an answer to what
-  they asked.
+  they asked. Skip the four steps unless they asked how it works or the salesperson wants
+  it explained.
 - If nothing came back from the last email, write it as a reply in that thread: the
-  subject is "Re: " plus that email's subject word for word (it's what threads it under
-  the first one), and the body a line or two that stands on its own.
+  subject is "Re: " plus that email's subject word for word, and the body stands on its own.
 - After two or more emails with no reply, write a short, gracious last note: you won't keep
-  emailing, the free trial is there whenever the count gets old, and his direct line. No
-  guilt, no "should I close your file?".
+  emailing, the free trial is there whenever the count gets old, and his direct line.
 
 Subject line:
 - 2-6 words, lowercase except names, reads like a person typed it: "{Bar name} count",
-  "the end-of-night count", "your order day", "Laura mentioned the count". No Title Case, no
-  "Quick question", no emoji, no "free", "trial", "offer", "$", "%" or "!" — those are what
-  spam filters and people skip.
+  "the end-of-night count", "your order day", "for Brent, about ordering". No Title Case, no
+  "Quick question", no emoji, no "free", "trial", "offer", "$", "%" or "!".
 
 Who it's to:
-- Write to the DECISION MAKER — the owner, GM or bar manager who counts and orders. When
+- Write to the DECISION MAKER: the owner, GM or bar manager who counts and orders. When
   WHAT WE KNOW names them, greet them by first name ("Hi Laura,").
-- If we only spoke to someone else (a bartender, a host), still write to the decision maker,
-  and mention that person only as the connection ("Jake mentioned you handle the ordering").
-- If no decision maker is named, write for the owner or whoever does the ordering: greet
-  with "Hi there," and make the first line a one-sentence ask to pass it to them.
+- If we only spoke to someone else (a bartender, a host), write to the decision maker and
+  mention that person only as the connection ("Jake mentioned you handle the ordering").
+- If the email can only reach someone who isn't the decision maker, write to that person,
+  make the email worth forwarding as it stands, and ask them to pass it on.
+- If nobody is named, greet with "Hi there," and ask, in one sentence near the top, for it
+  to reach whoever does the ordering.
 - A REPLY is the exception: answer whoever wrote to us.
 
 Hard rules:
@@ -337,7 +343,7 @@ Hard rules:
    as "1." lines.
 5. No P.S. and no sign-off: the email ends at the closing word ("Thanks," / "Best,"); the
    signature and the opt-out line are added underneath automatically.
-6. Do exactly what the salesperson asked. Their instruction beats the defaults above."""
+6. Do exactly what the salesperson asked. Their instruction beats every default above."""
 STYLE = STYLE.replace("{TRIAL}", TRIAL)  # a plain string, not an f-string: it quotes "{Bar name}"
 
 
@@ -397,7 +403,40 @@ FAMILIAR_PHRASES = (
 )
 SUBJECT_SPAM = re.compile(r"\b(free|trial|offer|deal|discount|save|urgent|guarantee)\b|[!$%]",
                           re.I)
-LIMITS = {"first": 170, "followup": 100, "reply": 180}
+LIMITS = {"first": 260, "followup": 160, "reply": 220}
+# "Write a long informative email about what we do" came back as 70 words:
+# the revision kept the short draft on screen, and the style's word counts
+# beat the request. A brief asking for length now says so in the ask
+# (LONG_ASK) and lint holds the draft to LONG_MIN words.
+_LONG_BRIEF = re.compile(
+    r"\b(?:long|longer|lengthy|detailed|more detail|full detail|informative|in[- ]depth|"
+    r"thorough|explain|explains|explaining|expand|what we do|what 86'd does|all about|"
+    r"full explanation|everything (?:we|it|the app) does?)\b")
+LONG_MIN = 200
+
+
+def wants_long(brief: str) -> bool:
+    """Did the salesperson ask for a long, detailed email?"""
+    text = _plain(brief)
+    return bool(_LONG_BRIEF.search(text)) and not re.search(r"\bshort", text)
+
+
+LONG_ASK = """LENGTH: the salesperson wants a LONG, INFORMATIVE email: 250-400 words. This
+replaces the word counts in HOW TO WRITE IT, and it means writing more than any draft on
+screen. Still open with a line about them (from WHAT WE KNOW), still one owner writing to
+another, still plain text with short paragraphs. Then actually explain 86'd, the way he'd
+explain it across the bar, tying each part to their week (the count after close, typing an
+order to each rep), using only the MASTER SHEET:
+- what it is and who it's for (an iPhone app for the count and the orders, independent bars)
+- how it works, the four steps as "1." lines
+- what's on every order and why it matters (its own number, asked for on the invoice, so a
+  short delivery or a bill matches the order)
+- set each bottle's distributor, price and par once and it's remembered; the first count
+  builds the book, no setup day
+- order history and spend by distributor; staff names on a count; more than one bar
+- what doesn't change: the rep still gets an email, nothing to buy or install; iPhone only
+- the price and the free days, no card, cancel any time; his direct line
+Then the App Store link on its own line and ONE easy ask."""
 _URL = re.compile(r"https?://\S+|\bwww\.\S+", re.I)
 # Linear on any input (a reply draft can echo a stranger's email; see
 # test_hostile_pages): a figure only starts where a run of digits starts, and
@@ -462,9 +501,13 @@ def lint(subject: str, body: str, kind: str = "first", brief: str = "",
         if phrase in low and phrase not in told:
             problems.append(f'"{phrase}" claims something we can\'t back — cut it')
     problems.extend(stale_offer(f"{subject or ''}\n{body or ''}", allowed=f"{brief}\n{known}"))
-    known_figures = {re.sub(r"\s", "", f) for f in _PERCENT.findall(told)}
-    for pct in _PERCENT.findall(body or ""):
-        if re.sub(r"\s", "", pct.lower()) not in known_figures:
+    known_figures = None            # read off `told` only if the body has a figure
+    for m in _PERCENT.finditer(body or ""):
+        if known_figures is None:
+            # str.split, not re.sub: `told` can hold half a million figures.
+            known_figures = {"".join(f.split()) for f in _PERCENT.findall(told)}
+        pct = m.group(0)
+        if "".join(pct.lower().split()) not in known_figures:
             problems.append(f'"{pct}" — there are no figures to quote; cut it')
             break
     links = _URL.findall(body or "")
@@ -485,9 +528,16 @@ def lint(subject: str, body: str, kind: str = "first", brief: str = "",
         problems.append(f"shouting in capitals ({shout}) — write it normally")
     limit = LIMITS.get(kind)
     n = words(body)
-    if limit and n > limit and not re.search(r"long|detail|more|expand|everything|full", asked):
+    long_wanted = wants_long(brief)
+    if (limit and n > limit and not long_wanted
+            and not re.search(r"long|detail|more|expand|everything|full", asked)):
         problems.append(f"{n} words — keep it under {limit}; it's read on a phone between "
                         "deliveries")
+    if long_wanted and kind != "reply" and n < LONG_MIN:
+        problems.append(f"{n} words — the salesperson asked for a long, informative email. "
+                        "Explain what 86'd does properly: how it works, what's on every order, "
+                        "what it remembers, what doesn't change, the price and free days, his "
+                        "direct line (250-400 words, short paragraphs)")
     if kind == "reply":
         return problems             # "Re: <their subject>" is theirs to word
     if not subj:
@@ -579,7 +629,42 @@ def lead_context(lead: dict, fact_lines: Optional[list] = None,
     return "\n".join(out)
 
 
-def system_prompt(knowledge: str = "", winners: Optional[list] = None) -> str:
+EDIT_CHARS = 1500
+# Below this similarity the owner changed something worth learning from;
+# above it he fixed a typo or nothing at all.
+EDIT_SIMILARITY = 0.97
+
+
+def unsigned(body: str) -> str:
+    """The body as written: signature and opt-out footer taken off."""
+    return sign(body)[:-len(SIGNATURE)].rstrip()
+
+
+def owner_edits(rows: list, limit: int = 3) -> list:
+    """From (draft, what was sent) pairs, newest first, the ones the owner
+    really changed. Pure."""
+    import difflib
+    out = []
+    for r in rows:
+        # Capped before comparing: difflib is quadratic, and a body can be 20k.
+        draft = unsigned(r.get("draft_body") or "")[:EDIT_CHARS * 2]
+        sent = unsigned(r.get("sent_body") or "")[:EDIT_CHARS * 2]
+        if not draft or not sent:
+            continue
+        same_subject = (r.get("draft_subject") or "").strip() == (r.get("sent_subject") or "").strip()
+        ratio = difflib.SequenceMatcher(None, draft, sent, autojunk=False).ratio()
+        if ratio >= EDIT_SIMILARITY and same_subject:
+            continue
+        out.append({"draft_subject": (r.get("draft_subject") or "").strip(),
+                    "sent_subject": (r.get("sent_subject") or "").strip(),
+                    "draft": draft[:EDIT_CHARS], "sent": sent[:EDIT_CHARS]})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def system_prompt(knowledge: str = "", winners: Optional[list] = None,
+                  edits: Optional[list] = None) -> str:
     """Everything that's the same for every email this hour: the master sheet,
     the owner's instructions and the playbook (`knowledge`), the owner's own
     example, emails of ours that got a reply, and the style guide. Sent as the
@@ -601,6 +686,16 @@ be more personal than it where WHAT WE KNOW allows) ===
         parts.append("=== EMAILS OF OURS THAT GOT A REPLY (real and recent: learn from what "
                      "worked. They were to OTHER bars, so never reuse a venue, name or detail "
                      f"from them) ===\n{shown}")
+    if edits:
+        shown = "\n\n---\n\n".join(
+            f"WE DRAFTED:\nSubject: {e['draft_subject']}\n\n{e['draft']}\n\n"
+            f"HE SENT:\nSubject: {e['sent_subject']}\n\n{e['sent']}" for e in edits)
+        parts.append("=== HOW THE OWNER CHANGED OUR LAST DRAFTS (what we drafted, then what he "
+                     "actually sent. He is the judge of a good email: notice what he adds, "
+                     "cuts and rewords, and write the way he sends. On tone, length and "
+                     "wording his versions beat the style guide below; the hard rules and "
+                     "the master sheet still stand. They were to OTHER bars, so never reuse a "
+                     f"venue, name or detail from them) ===\n{shown}")
     parts.append(f"=== {STYLE}")
     parts.append('Return a JSON object with "subject" and "body". The body runs from the greeting '
                  'to the closing word ("Thanks," or "Best,") and stops there: his signature is '

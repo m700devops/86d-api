@@ -251,6 +251,9 @@
   .aibox button{flex:none;background:var(--accent);border-color:var(--accent);
                 color:#fff;font-weight:700;align-self:stretch;white-space:nowrap}
   .aibox button:disabled{opacity:.6}
+  /* One tap for the emails written most often: fills the box and drafts. */
+  .presets{display:flex;flex-wrap:wrap;gap:6px;margin:-4px 0 10px}
+  .presets button{font-size:12px;padding:4px 10px;border-radius:999px}
 
   /* Scheduling. Deliberately below the message, not above it: you decide when
      it lands once you know what it says. */
@@ -1152,6 +1155,25 @@ $('startBtn').onclick=async()=>{
    what's wrong with it and Claude changes that bit rather than starting over.
    Either way the draft lands in the same two fields you can edit by hand, and
    nothing sends until you press Send. */
+/* A preset writes a FRESH email (not a tweak of the one on screen): it fills
+   the box, marks it fresh, and presses Draft it, so every tab's own handler
+   runs it. */
+const EMAIL_PRESETS=[
+  {label:'Full explainer', brief:'A long, informative email that explains properly what 86\u2019d does, how it works and what it costs.'},
+  {label:'Short intro', brief:'A short, friendly first note: who I am, what 86\u2019d does in a sentence or two, and one easy question.'},
+  {label:'Ask who orders', brief:'A short note asking who handles the count and the ordering, and the best way to reach them. Make it worth forwarding.'},
+  {label:'Last try', brief:'A short, gracious last note: I won\u2019t keep emailing, the free trial is there whenever the count gets old, and my direct line.'},
+];
+document.addEventListener('click', e=>{
+  const b=e.target.closest('[data-preset]'); if(!b) return;
+  const td=b.closest('td'); const brief=td&&td.querySelector('[data-brief]');
+  const go=td&&td.querySelector('[data-draft]');
+  if(!brief||!go||go.disabled) return;
+  brief.value=EMAIL_PRESETS[+b.dataset.preset].brief;
+  brief.dataset.fresh='1';
+  go.click();
+});
+
 function composeDrawer(addr, contact, cols=8){
   return `<td colspan="${cols}">
     <p class="hint">Sending as <strong>${esc(MAIL.from||'')}</strong>. Nothing goes until you press Send.</p>
@@ -1159,7 +1181,9 @@ function composeDrawer(addr, contact, cols=8){
     ${MAIL.ai?`<div class="aibox">
       <textarea data-brief rows="2" placeholder="What should this say? e.g. Ed the manager wants more information about the app — include a link to it and my website, and what the company does"></textarea>
       <button data-draft>Draft it</button>
-    </div>`:''}
+    </div>
+    <div class="presets">${EMAIL_PRESETS.map((p,i)=>
+      `<button data-preset="${i}" title="${esc(p.brief)}">${esc(p.label)}</button>`).join('')}</div>`:''}
     <div class="mailrow"><label>Subject</label><input data-subject value="${esc(MAIL_SUBJECT)}"></div>
     <textarea data-body rows="9">${MAIL.ai?'':esc(mailBody(contact))}</textarea>
     <div class="whenbox">
@@ -1269,7 +1293,8 @@ async function runDraft(dr, id){
     const payload={brief:ask};
     // Once there's a draft on screen, send it along so a tweak edits THIS
     // email instead of writing a new one and losing the good parts.
-    if(dr.dataset.drafted){ payload.subject=subject.value; payload.body=body.value; }
+    if(dr.dataset.drafted && !brief.dataset.fresh){ payload.subject=subject.value; payload.body=body.value; }
+    delete brief.dataset.fresh;
     const r=await api(`/leads/${id}/draft-email`,
       {method:'POST',body:JSON.stringify(payload)});
     subject.value=r.subject; body.value=r.body;
