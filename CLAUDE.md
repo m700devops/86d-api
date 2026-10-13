@@ -1781,6 +1781,13 @@ capture. Don't reintroduce them or describe them as current.)
   echo a stranger's email): it's in test_hostile_pages.py, where the first versions of the
   bullet and percentage patterns ran 20s+ on one input. Checked against the owner's own
   example email, the compose box's default and six realistic good drafts: none flagged
+- **"Long" means long** (`pitch.wants_long()`, `LONG_ASK`, `LONG_MIN` 200). "Write a long
+  informative email about what we do" came back as 70 words: typed under the auto-draft it was
+  sent as a revision ("change it, keeping everything else as it is") and STYLE's 30-90-word
+  follow-up rule beat it. A brief asking for long/detailed/informative/explain (and not "short")
+  now turns a revision into a REWRITE, adds `LONG_ASK` (250-400 words, the whole sheet explained
+  in his voice: how it works, the order number, what it remembers, what doesn't change, price,
+  his line) to any ask, and lint sends back a draft under 200 words once. Covered by test_pitch.py
 - **Follow-ups build on what was SENT, and thread.** `_sent_emails_to()` puts our last 3
   emails to the bar in WHAT WE KNOW (subject, body, and whether a reply came in after it —
   matched the way `_touch_stories` matches one), so a follow-up never repeats the first email,

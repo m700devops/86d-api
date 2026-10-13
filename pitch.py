@@ -287,14 +287,16 @@ What works in 2026 (use it, don't announce it):
 2. ONE PICTURE, NOT A FEATURE LIST. The single idea: the count and the orders in 10-15
    minutes. Show it the way they'd live it: point the phone at the bottle, tap the count,
    every rep gets their order at once. The four-step list is fine in a first email; skip
-   it in a follow-up unless they asked how it works.
+   it in a follow-up unless they asked how it works or the salesperson wants it explained.
 3. TAKE AWAY THE RISK. {TRIAL}, no card, cancel any time. Said once, plainly.
 4. ONE EASY ASK. End with a question they can answer in one word or one tap — interest,
    not a meeting: "Worth trying on your next count?", "Want the link for your GM?",
    "Should I call Thursday before you open?". One ask only. Never "let me know your
    availability", never a calendar request.
-5. SHORT. A first email: 60-150 words, the four steps included. A follow-up: 30-90 words. A
-   reply: as long as the answer needs and no longer. Short paragraphs, one or two lines each.
+5. SHORT, unless the salesperson asks for long. A first email: 60-150 words, the four steps
+   included. A follow-up: 30-90 words. A reply: as long as the answer needs and no longer.
+   Short paragraphs, one or two lines each. When WHAT TO WRITE asks for a long, detailed or
+   informative email, ITS length wins over these numbers, and over any draft on screen.
 6. NO PRESSURE TACTICS. No fake urgency, no "limited time", no guilt, no "did you see my
    last email?". Confidence reads as calm.
 
@@ -398,6 +400,39 @@ FAMILIAR_PHRASES = (
 SUBJECT_SPAM = re.compile(r"\b(free|trial|offer|deal|discount|save|urgent|guarantee)\b|[!$%]",
                           re.I)
 LIMITS = {"first": 170, "followup": 100, "reply": 180}
+# "Write a long informative email about what we do" came back as 70 words:
+# the revision kept the short draft on screen, and the style's word counts
+# beat the request. A brief asking for length now says so in the ask
+# (LONG_ASK) and lint holds the draft to LONG_MIN words.
+_LONG_BRIEF = re.compile(
+    r"\b(?:long|longer|lengthy|detailed|more detail|full detail|informative|in[- ]depth|"
+    r"thorough|explain|explains|explaining|expand|what we do|what 86'd does|all about|"
+    r"full explanation|everything (?:we|it|the app) does?)\b")
+LONG_MIN = 200
+
+
+def wants_long(brief: str) -> bool:
+    """Did the salesperson ask for a long, detailed email?"""
+    text = _plain(brief)
+    return bool(_LONG_BRIEF.search(text)) and not re.search(r"\bshort", text)
+
+
+LONG_ASK = """LENGTH: the salesperson wants a LONG, INFORMATIVE email: 250-400 words. This
+replaces the word counts in HOW TO WRITE IT, and it means writing more than any draft on
+screen. Still open with a line about them (from WHAT WE KNOW), still one owner writing to
+another, still plain text with short paragraphs. Then actually explain 86'd, the way he'd
+explain it across the bar, tying each part to their week (the count after close, typing an
+order to each rep), using only the MASTER SHEET:
+- what it is and who it's for (an iPhone app for the count and the orders, independent bars)
+- how it works, the four steps as "1." lines
+- what's on every order and why it matters (its own number, asked for on the invoice, so a
+  short delivery or a bill matches the order)
+- set each bottle's distributor, price and par once and it's remembered; the first count
+  builds the book, no setup day
+- order history and spend by distributor; staff names on a count; more than one bar
+- what doesn't change: the rep still gets an email, nothing to buy or install; iPhone only
+- the price and the free days, no card, cancel any time; his direct line
+Then the App Store link on its own line and ONE easy ask."""
 _URL = re.compile(r"https?://\S+|\bwww\.\S+", re.I)
 # Linear on any input (a reply draft can echo a stranger's email; see
 # test_hostile_pages): a figure only starts where a run of digits starts, and
@@ -485,9 +520,16 @@ def lint(subject: str, body: str, kind: str = "first", brief: str = "",
         problems.append(f"shouting in capitals ({shout}) — write it normally")
     limit = LIMITS.get(kind)
     n = words(body)
-    if limit and n > limit and not re.search(r"long|detail|more|expand|everything|full", asked):
+    long_wanted = wants_long(brief)
+    if (limit and n > limit and not long_wanted
+            and not re.search(r"long|detail|more|expand|everything|full", asked)):
         problems.append(f"{n} words — keep it under {limit}; it's read on a phone between "
                         "deliveries")
+    if long_wanted and kind != "reply" and n < LONG_MIN:
+        problems.append(f"{n} words — the salesperson asked for a long, informative email. "
+                        "Explain what 86'd does properly: how it works, what's on every order, "
+                        "what it remembers, what doesn't change, the price and free days, his "
+                        "direct line (250-400 words, short paragraphs)")
     if kind == "reply":
         return problems             # "Re: <their subject>" is theirs to word
     if not subj:

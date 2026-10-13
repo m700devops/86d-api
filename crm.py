@@ -3863,7 +3863,8 @@ def _followup_ask(lead: dict, brief: str = "") -> str:
         "something was said, leave it out. Ignore bookkeeping lines (where the "
         "email or website was found, attempt numbers, lead-generator notes) — "
         "never mention them. If nobody was reached, keep it to a short note "
-        "saying you tried calling and why you're reaching out.")
+        "saying you tried calling and why you're reaching out, unless the "
+        "salesperson asks below for something longer.")
     if brief:
         lines.append(f"Also: {brief}")
     return "\n\n".join(lines)
@@ -3917,7 +3918,17 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
         raise HTTPException(status_code=422, detail={
             "error": "brief_required", "message": "Say what the email should cover."})
 
-    if revising:
+    import pitch
+    long_wanted = pitch.wants_long(brief)
+    if revising and long_wanted:
+        # "Write a long email about what we do" typed under a short draft is
+        # a rewrite, not a tweak: "keep everything else as it is" kept the
+        # 70 words and the request lost.
+        ask = (f"Here is the current draft.\n\nSubject: {data.subject or ''}\n\n"
+               f"{data.body or ''}\n\n---\n\nREWRITE it as a new, longer email. Keep "
+               "who it's to and what really happened, but the salesperson's instruction "
+               f"wins over the draft: {brief}")
+    elif revising:
         ask = (f"Here is the current draft.\n\nSubject: {data.subject or ''}\n\n"
                f"{data.body or ''}\n\n---\n\nChange it as follows, keeping "
                f"everything else as it is: {brief}")
@@ -3936,7 +3947,8 @@ def draft_lead_email(lead_id: str, data: DraftRequest,
                "ask." + (f"\n\nAlso: {brief}" if brief else ""))
     else:
         ask = f"Write the email. What it needs to say: {brief}"
-    import pitch
+    if long_wanted and not data.reply_to:
+        ask += "\n\n" + pitch.LONG_ASK
     if data.reply_to:
         kind = "reply"
     elif revising:
