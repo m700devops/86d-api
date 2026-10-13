@@ -399,3 +399,53 @@ def test_lint_holds_a_long_request_to_length():
     long_body = "Hi Alex,\n\n" + "The count takes too long on Sundays. " * 45 + "\n\nBest,"
     probs = pitch.lint("your count", long_body, "followup", asked)
     assert not any("words" in p for p in probs)
+
+
+# ── the drafter learns from what the owner actually sends ──────────────────
+
+def _signed(text):
+    return pitch.sign(text + "\n\nBest,") + "\n\n" + pitch.OPT_OUT_LINE
+
+
+def test_owner_edits_keeps_only_drafts_he_changed():
+    rows = [
+        {"draft_subject": "your count", "sent_subject": "your count",
+         "draft_body": _signed("Hi Ed,\n\nCount and orders run 10 to 15 minutes."),
+         "sent_body": _signed("Hi Ed,\n\nThe whole count and every order takes about 15 "
+                              "minutes, and every rep gets their order at once.")},
+        {"draft_subject": "same", "sent_subject": "same",
+         "draft_body": _signed("Hi Jo,\n\nUntouched draft."),
+         "sent_body": _signed("Hi Jo,\n\nUntouched draft.")},
+        {"draft_subject": "old subject", "sent_subject": "better subject",
+         "draft_body": _signed("Hi Al,\n\nSame body."), "sent_body": _signed("Hi Al,\n\nSame body.")},
+    ]
+    out = pitch.owner_edits(rows)
+    assert [e["sent_subject"] for e in out] == ["your count", "better subject"]
+    assert "every rep gets their order" in out[0]["sent"]
+    # Signature and footer are not part of the lesson.
+    assert pitch.SIGNATURE.split("\n")[0] not in out[0]["sent"]
+    assert pitch.OPT_OUT_LINE not in out[0]["draft"]
+    assert len(pitch.owner_edits(rows * 5, limit=3)) == 3
+
+
+def test_his_edits_go_in_the_prompt_above_the_style_guide():
+    edits = [{"draft_subject": "a", "sent_subject": "b", "draft": "DRAFTED TEXT",
+              "sent": "SENT TEXT"}]
+    p = pitch.system_prompt("", None, edits)
+    assert "HOW THE OWNER CHANGED OUR LAST DRAFTS" in p
+    assert p.index("SENT TEXT") < p.index("HOW TO WRITE IT")
+    assert "HOW THE OWNER CHANGED" not in pitch.system_prompt("", None, [])
+
+
+def test_every_draft_is_kept_for_comparison(drafted, monkeypatch):
+    saved = []
+    monkeypatch.setattr(crm, "_save_draft", lambda *a: saved.append(a))
+    monkeypatch.setattr(crm, "_owner_edits", lambda *a, **k: [])
+    crm.draft_lead_email("L1", crm.DraftRequest(brief="first email"))
+    assert saved and saved[0][0] == "L1" and saved[0][2] == "Rioja's Sunday count"
+
+
+def test_the_style_asks_for_whole_sentences_not_telegrams():
+    assert "COMPLETE, NATURAL SENTENCES" in pitch.STYLE
+    assert "occasional fragment" not in pitch.STYLE
+    assert "Don't narrate the sales process" in pitch.STYLE

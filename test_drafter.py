@@ -147,9 +147,9 @@ def test_a_name_in_capitals_that_came_from_the_map_is_theirs():
 
 
 def test_length_is_judged_by_kind_and_the_salespersons_word_wins():
-    long_body = "Hi Laura,\n\n" + " ".join(["The count takes too long on Sundays."] * 30) + "\n\nBest,"
-    assert any("words" in p for p in pitch.lint("your sunday count", long_body, "first"))
-    assert any("under 100" in p for p in pitch.lint("your sunday count", long_body, "followup"))
+    long_body = "Hi Laura,\n\n" + " ".join(["The count takes too long on Sundays."] * 40) + "\n\nBest,"
+    assert any("under 260" in p for p in pitch.lint("your sunday count", long_body, "first"))
+    assert any("under 160" in p for p in pitch.lint("your sunday count", long_body, "followup"))
     assert not any("words" in p for p in pitch.lint("your sunday count", long_body, "revision"))
     assert not any("words" in p for p in pitch.lint("your sunday count", long_body, "first",
                                                     brief="make it longer, all the detail"))

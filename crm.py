@@ -212,6 +212,21 @@ def init_crm_tables():
                 sent_at TEXT NOT NULL
             )
         """)
+        # Every draft the AI wrote, so what was SENT can be compared with what
+        # was drafted: the owner's edits are how the drafter learns his voice
+        # (_owner_edits). Small rows, a few a day.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crm_email_drafts (
+                id TEXT PRIMARY KEY,
+                lead_id TEXT NOT NULL,
+                kind TEXT,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_drafts_lead "
+                       "ON crm_email_drafts(lead_id, created_at)")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS crm_sent_messages (
                 message_id TEXT PRIMARY KEY,
@@ -2207,9 +2222,52 @@ def _draft_context(row: dict, include_log: bool = True, sent: Optional[list] = N
     return pitch.lead_context(lead, lines, points, log, sent, talked)
 
 
+EDITS_SHOWN = 3
+
+
+def _owner_edits(limit: int = EDITS_SHOWN) -> list:
+    """Our latest drafts next to what the owner actually SENT, where he
+    changed them. He is the judge of a good email; the gap between the two is
+    the clearest lesson the drafter can get, and it updates with every send."""
+    import pitch
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT e.subject AS sent_subject, e.body AS sent_body,
+                       d.subject AS draft_subject, d.body AS draft_body
+                  FROM crm_sent_emails e
+                  JOIN LATERAL (
+                        SELECT subject, body FROM crm_email_drafts d
+                         WHERE d.lead_id = e.lead_id AND d.created_at <= e.sent_at
+                           AND d.created_at::timestamptz
+                               > e.sent_at::timestamptz - INTERVAL '7 days'
+                         ORDER BY d.created_at DESC LIMIT 1) d ON TRUE
+                 ORDER BY e.sent_at DESC LIMIT 20
+            """)
+            rows = cursor.fetchall()
+    except Exception as exc:
+        print(f"[crm] owner edits unavailable: {exc}", flush=True)
+        return []
+    return pitch.owner_edits([dict(r) for r in rows], limit)
+
+
+def _save_draft(lead_id: str, kind: str, subject: str, body: str) -> None:
+    """Keep what the AI wrote, for _owner_edits. Never fails a draft."""
+    try:
+        with get_db() as conn:
+            conn.cursor().execute("""
+                INSERT INTO crm_email_drafts (id, lead_id, kind, subject, body, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (generate_id(), lead_id, kind, subject, body, now_iso()))
+            conn.commit()
+    except Exception as exc:
+        print(f"[crm] DRAFT_SAVE_FAILED {exc}", flush=True)
+
+
 def _draft_system() -> str:
     import pitch
-    return pitch.system_prompt(_knowledge(), _winning_emails())
+    return pitch.system_prompt(_knowledge(), _winning_emails(), _owner_edits())
 
 
 def _write_draft(row: dict, ask: str, include_log: bool = True,
@@ -2279,6 +2337,7 @@ def _write_draft(row: dict, ask: str, include_log: bool = True,
     signed = pitch.sign(body)
     if outreach and pitch.outreach_footer():
         signed += "\n\n" + pitch.outreach_footer()
+    _save_draft(row["id"], kind, subject, signed)
     return {"subject": subject, "body": signed, "checks": problems}
 
 

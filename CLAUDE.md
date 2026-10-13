@@ -1781,6 +1781,20 @@ capture. Don't reintroduce them or describe them as current.)
   echo a stranger's email): it's in test_hostile_pages.py, where the first versions of the
   bullet and percentage patterns ran 20s+ on one input. Checked against the owner's own
   example email, the compose box's default and six realistic good drafts: none flagged
+- **The drafter learns from what the owner SENDS** (2026-10-13, `crm_email_drafts`,
+  `crm._owner_edits()`, `pitch.owner_edits()`). Every draft `_write_draft` returns is stored;
+  the latest draft before each sent email (same lead, up to 7 days earlier) is compared with
+  what actually went (signature and footer off, `pitch.unsigned()`), and the last
+  `EDITS_SHOWN` (3) he really changed (`EDIT_SIMILARITY` < 0.97, or a new subject) go in the
+  system prompt as "WE DRAFTED / HE SENT", above STYLE, winning on tone and length (the hard
+  rules and the sheet still stand). Query run on a real Postgres 16. **STYLE was rewritten the
+  same day**: clear and informative over short and clever, the owner's example as the bar,
+  COMPLETE sentences (it used to ask for "the occasional fragment", which came back as "15 days
+  free, no card."), no narrating the sales process or gossip from the log, an email that can
+  only reach a non-decision-maker written to be forwarded; first emails ~120-220 words, follow-ups
+  ~50-130 (`LIMITS` 260/160/220). **Presets** in every compose box (`EMAIL_PRESETS` in crm.html:
+  Full explainer, Short intro, Ask who orders, Last try) write a FRESH draft in one tap
+  (`data-fresh`: the draft on screen isn't sent as a revision)
 - **"Long" means long** (`pitch.wants_long()`, `LONG_ASK`, `LONG_MIN` 200). "Write a long
   informative email about what we do" came back as 70 words: typed under the auto-draft it was
   sent as a revision ("change it, keeping everything else as it is") and STYLE's 30-90-word
