@@ -1686,6 +1686,14 @@ capture. Don't reintroduce them or describe them as current.)
   the notes line — subject and address only, with `complete: false` so the page says the
   text wasn't kept rather than showing a blank. One delegated click handler in crm.html
   serves the CRM, Yet to Contact and Follow-ups panels. Covered by test_sent_email.py
+- **Notes & history is laid out in paragraphs** (`notesHtml()` in crm.html, used by
+  `leadDetailsCell()`). The log is stored one entry per LINE and a logged call is one long line
+  (`summary · Spoke to · Best time · Next — Your notes: …`), because every reader of the log
+  (touch stories, tries, the drafter, the prep sheet) works a line at a time, so the storage
+  stays as it is and the page splits it: a heading (`2026-10-13 · call · attempt 1`), the
+  summary, a line per labelled fact (`NOTE_FACTS`), then the operator's own words with each
+  pasted "•" bullet on its own line. An entry that doesn't fit that shape shows as one paragraph.
+  Display only, so old notes get it too. The edit box still shows the raw text
 - **Follow-ups rows are clickable too**, opening the same full record as the CRM tab —
   `leadDetailsCell()` in crm.html, shared by CRM, Yet to Contact and Follow-ups so they can't
   drift: every field, an "Every attempt" list (each call/email in the operator's own clock,

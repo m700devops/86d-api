@@ -43,6 +43,12 @@
   .awaygone>span{flex:1;min-width:0}
   .phok{font-size:11px;color:var(--text3);margin-top:3px;white-space:nowrap}
   .attempts{border-collapse:collapse;font-size:13px;margin:0 0 4px}
+  /* Notes & history: one block per logged entry, then a paragraph per fact. */
+  .notes{font-size:13px;line-height:1.5}
+  .notes .note{margin:0 0 14px}
+  .notes .note p{margin:0 0 6px}
+  .notes .notehead{font-weight:700;margin:0 0 4px}
+  .notes .bullet{padding-left:12px}
   .attempts td{padding:3px 14px 3px 0;border:0;background:none !important;vertical-align:top}
   .attempts td:first-child{color:var(--text3)}
   .attempts tr.mailtouch{cursor:pointer}
@@ -1993,6 +1999,38 @@ function leadEditCell(l, cols){
 const clock12=t=>{ const [h,m]=String(t||'').split(':').map(Number);
   if(isNaN(h)) return t||''; const ap=h<12?'am':'pm', h12=h%12||12;
   return m?`${h12}:${String(m).padStart(2,'0')}${ap}`:`${h12}${ap}`; };
+/* Notes are stored one entry per line, and a logged call is ONE long line
+   (summary · Spoke to · Best time · Next — Your notes: …) because every reader
+   of the log works a line at a time. So the page lays each entry out as
+   paragraphs instead: a heading, the summary, a line per labelled fact, then
+   the operator's own words (a pasted listing's bullets on their own lines). */
+const NOTE_FACTS='Spoke to|Objection|How they do it now|Best time|Next';
+function notesHtml(notes){
+  const entries=(notes||'').split('\n').filter(x=>x.trim());
+  if(!entries.length) return '<span class="muted">Nothing logged yet.</span>';
+  const labelled=(t,re)=>{ const m=re.exec(t);
+    return m ? `<strong>${esc(m[1])}:</strong> ${esc(m[2])}` : esc(t); };
+  const factRe=new RegExp('^('+NOTE_FACTS+'):\\s*([\\s\\S]*)$');
+  const bulletRe=/^([^:]{2,40}):\s+([\s\S]*)$/;
+  return entries.map(e=>{
+    let head='', rest=e.trim(), said='', saidLabel='';
+    const hm=/^(\[[^\]]+\]\s+[a-z]+(?:\s·\sattempt\s\d+)?)(?::|\s·)\s*([\s\S]*)$/i.exec(rest);
+    if(hm){ head=hm[1].replace(/^\[([^\]]+)\]\s*/,'$1 · '); rest=hm[2]; }
+    const sm=/\s—\s(Your notes|From the recording):\s*([\s\S]*)$/.exec(rest);
+    if(sm){ rest=rest.slice(0,sm.index); saidLabel=sm[1]; said=sm[2]; }
+    const parts=rest.split(new RegExp('\\s·\\s(?=(?:'+NOTE_FACTS+'):\\s)')).filter(p=>p.trim());
+    let out='<div class="note">';
+    if(head) out+=`<div class="notehead">${esc(head)}</div>`;
+    parts.forEach((p,i)=>{ out+=`<p>${i>0?labelled(p.trim(),factRe):esc(p.trim())}</p>`; });
+    if(said){
+      const lines=said.split(/\s+•\s+/).filter(x=>x.trim());
+      out+=`<p><strong>${esc(saidLabel)}:</strong> ${esc(lines[0]||'')}</p>`;
+      out+=lines.slice(1).map(x=>`<p class="bullet">• ${labelled(x.trim(),bulletRe)}</p>`).join('');
+    }
+    return out+'</div>';
+  }).join('');
+}
+
 function leadDetailsCell(l, cols){
   const f=(k,v)=>v?`<div class="mailrow"><label>${k}</label><div>${esc(String(v))}</div></div>`:'';
   const t=l.tries||{total:l.attempts||0};
@@ -2016,7 +2054,7 @@ function leadDetailsCell(l, cols){
         <td>${mail?'Sent · <span class="linkish">view email</span>':esc(x.kind==='email'?'Sent':outcomeLabel(x.outcome))}</td></tr>`;}).join('')}</table>`
       :'<p class="muted" style="margin:0;font-size:13px">None logged yet.</p>'}
     <p class="hint" style="margin:10px 0 4px">Notes &amp; history</p>
-    <div style="white-space:pre-wrap;font-size:13px;line-height:1.5">${esc(l.notes||'Nothing logged yet.')}</div>
+    <div class="notes">${notesHtml(l.notes)}</div>
     <div class="row" style="margin-top:10px"><button data-edit>Edit</button>
       <button data-prep="${esc(l.id)}">Prep me for the call</button>
       <button data-calls="${esc(l.id)}">Calls &amp; scores</button>
