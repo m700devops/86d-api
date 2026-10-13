@@ -40,6 +40,25 @@ def test_a_comma_can_separate_rules_as_well_as_time_spans():
     assert is_open_today(schedule, 5) is True
 
 
+def test_a_comma_between_two_days_is_a_day_list_not_a_new_rule():
+    # Eastburn (a Portland pub) and The Daily Feast, from the map: the comma
+    # in "Fr,Sa" used to start a new rule, leaving "Fr" with no hours — read
+    # as shut on its Friday.
+    schedule = parse_opening_hours("Su-Th 11:00-24:00; Fr,Sa 11:00-02:00")
+    assert schedule[4] == [(11 * 60, 26 * 60)] and schedule[5] == [(11 * 60, 26 * 60)]
+    assert is_open_today(schedule, 4) is True
+    schedule = parse_opening_hours("Mo-Fr 07:00-14:00; Sa,Su 07:00-15:00")
+    assert schedule[5] == schedule[6] == [(7 * 60, 15 * 60)]
+    schedule = parse_opening_hours("Mo, Th-Fr 11:00-15:00, 17:00-21:00; Tu 16:00-21:00")
+    assert schedule[0] == schedule[3] == [(11 * 60, 15 * 60), (17 * 60, 21 * 60)]
+    assert schedule.get(2) is None
+    # And a comma after a time or "off" still starts one.
+    schedule = parse_opening_hours("Mo-Fr 03:00-02:00, Sa,Su 12:00-02:00")
+    assert schedule[5] == [(12 * 60, 26 * 60)] and schedule[0] == [(3 * 60, 26 * 60)]
+    schedule = parse_opening_hours("Mo off, Tu-Su 16:00-24:00")
+    assert schedule[0] == [] and schedule[1] == [(16 * 60, 24 * 60)]
+
+
 def test_a_comma_between_two_shifts_still_joins_them():
     # The other meaning of a comma, which must keep working: one rule, two
     # spans, a lunch service and a dinner service on the same days.

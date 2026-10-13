@@ -42,6 +42,8 @@ SHAPES = {
     "spirits and food": "bourbon pecan whiskey glaze vodka sauce martinique " * (N // 50),
     "selection of": "selection of the best " * (N // 22), "beer and": "beer and " * (N // 9),
     "capitals": "WORD " * (N // 5), "percents": "9% " * (N // 3),
+    "hours": "hours 7:00 am - " * (N // 16), "hours labels": "hours " * (N // 6),
+    "times": "11 a.m. to 1" * (N // 12),
     "bullets": "\n  \t" * (N // 4), "re re": "re: " * (N // 4),
 }
 
@@ -59,6 +61,8 @@ READERS = {
     "restaurant gate": lambda h: leadgen._restaurant_pours(h, {}),
     "liquor verdict": lambda h: leadgen.liquor_verdict(contacts.visible_text(h), {}, "", "bar"),
     "liquor verdict, raw text": lambda h: leadgen.liquor_verdict(h, {}, "", "restaurant"),
+    "posted hours": lambda h: leadgen.daytime_only(site_text=leadgen._page_text(h)),
+    "posted hours, raw text": leadgen.site_latest_close,
     "site names venue": lambda h: leadgen.site_names_venue(h, "NE Moose Bar & Grill"),
     "site mentions venue": lambda h: leadgen.site_mentions_venue(h, "https://x.com", "Olde Town"),
     "page text": leadgen._page_text,

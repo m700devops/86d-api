@@ -374,7 +374,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
   test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py -q` (1245 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py test_daytime.py -q` (1263 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -1032,6 +1032,27 @@ capture. Don't reintroduce them or describe them as current.)
     operator (Hilton), or one website domain across 2+ harvest cities. A bare `operator` is NOT
     corporate (Portland data: owners' own names), nor is a domain a few bars in ONE town share
     — a local owner with two or three rooms is who 86'd is for. `SHARED_HOSTS` never count.
+  - **Daytime only = not a bar** (`daytime_only()`, 2026-10-12). The Daily Feast PDX, a
+    breakfast diner open 7am-2pm, passed the liquor rule on a Paloma and a Greyhound on its
+    drinks page, and the owner lost half an hour emailing it. A venue that shuts by
+    `DAYTIME_CLOSE` (5pm) on EVERY day it opens is excluded: from the map's `opening_hours`
+    (`callwindow.latest_close()`: None unless every rule was read, and None for an open end —
+    "17:00+", "open end", "late", sunset — Colleen's Kitchen's "16:00-17:00+" serves dinner),
+    else from the hours on its own site (`site_latest_close()`: only ranges after an "Hours"
+    label, not brunch/lunch/happy-hour/kitchen ones; ANY range on the page ending after 5pm,
+    "until close", or "dinner" means it isn't daytime; an ambiguous "10-2" or "8-14" counts
+    for nothing). Measured 2026-10-12 on the map: Portland 70 restaurants, Chicago 68, Austin
+    33 shut by 5pm — bagel shops, pancake houses, diners, Sweedeedee, The Daily Feast — and
+    no bar, pub or nightclub in Portland or Chicago (Austin: one coffee shop tagged bar, shut
+    by noon). On their own sites, 71 venues open into the evening: none read as daytime. **Cuisine
+    is NOT a signal**: Bloodbuzz (Portland) and TRUCE (Chicago) are cocktail bars tagged
+    `coffee_shop`, open till 10pm and 1am. The reason starts "daytime only"; a re-harvest
+    re-opens it when the map's hours change. Covered by test_daytime.py (every rule
+    mutation-checked; boot, the hours pass and the re-open run on a real Postgres 16)
+  - **`callwindow._RULE_COMMA` splits a rule only at a comma AFTER a time or "off".** A
+    comma between days is a day list: "Fr,Sa 11:00-02:00" was split into "Fr" (no hours) and
+    "Sa …", so Eastburn read as shut on Fridays — 385 of 2,604 hours strings in three metros
+    list days that way
   - **Where it's applied:** `enrich_candidate` rejects a strip/brand venue before any request
     and a non-liquor venue after reading its pages, stamping `fit_status='ok'` + `fit_note`
     (the evidence, shown in the lead's notes) on a pass. `_promote_one` re-checks strip and
@@ -1042,7 +1063,13 @@ capture. Don't reintroduce them or describe them as current.)
     phone-check loop, one small batch after the phone batch, in-window leads first — crawls
     them: pass → 'ok'; fail → deleted from the list, candidate rejected with the reason; site
     down → back to the bank as 'retry' to be re-crawled. Never touches a called lead; one with
-    an email queued is kept but hidden. Logs `LEADGEN_OWNER_RULES`, `LEADGEN_FIT_CHECKED`
+    an email queued is kept but hidden. Logs `LEADGEN_OWNER_RULES`, `LEADGEN_FIT_CHECKED`.
+    Daytime-only: map hours in all four places (enrich before any request, `check_fit`,
+    `_promote_one`, the boot reconcile); site hours in enrich and `check_fit`. Rows crawled
+    before the rule (`crm_leadgen_oneshots` `daytime_rule_2026_10`'s `applied_at`) get their
+    homepage read ONCE by `hours_check_step()` — main.py's phone-check loop, after the fit
+    batch, never-called leads first, waits for a quiet scanner, stamps
+    `crm_lead_candidates.hours_checked_at`. Log `LEADGEN_HOURS_CHECKED`
 - **`recheck_restaurant_leads()` is the one-time correction for rows the OLD gate let
   through.** Tightening `LIQUOR_HINTS` only changes what NEW candidates do from here on —
   restaurants already banked (`status='qualified'`) or already promoted-but-never-called sit

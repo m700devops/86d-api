@@ -3653,6 +3653,9 @@ async def _phone_check_loop():
             # for leads listed before them — one after the other, never side
             # by side, so the crawl stays at two sites at a time.
             checked += await asyncio.to_thread(leadgen.fit_check_step)
+            # Once over what was crawled before the daytime rule: the hours
+            # on each venue's own site (leadgen.hours_check_step).
+            checked += await asyncio.to_thread(leadgen.hours_check_step)
             # Bars added by hand or found by the AI: timezone, hours, and the
             # number checked against their own site (leadgen.check_hand_added).
             checked += await asyncio.to_thread(leadgen.hand_check_step)
