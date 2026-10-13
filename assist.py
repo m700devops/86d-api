@@ -113,6 +113,9 @@ BAR_SCHEMA = {
         # A standing instruction or fact to keep for good ("remember I don't
         # call on Mondays"): added to the owner's instructions every AI reads.
         "remember": {"type": "string"},
+        # Tappable answers to `question`: each is sent back as the
+        # salesperson's own next message when pressed (see rule 14).
+        "choices": {"type": "array", "items": {"type": "string"}},
         # Venues to FIND (sister restaurants, other locations, the same
         # owner's bars): the system searches the web and adds what it can
         # check — see research.py.
@@ -132,7 +135,7 @@ BAR_SCHEMA = {
             "additionalProperties": False,
         }},
     },
-    "required": SCHEMA["required"] + ["new_leads", "research", "remember"],
+    "required": SCHEMA["required"] + ["new_leads", "research", "remember", "choices"],
 }
 
 BAR_RULES = """
@@ -145,7 +148,31 @@ BAR_RULES += """
 BAR_RULES += """
 13. When the salesperson asks you to remember something for the future — "remember…", "from now on…", "always…", "never…", "keep in mind…" — put it in "remember", in their words. It is saved to the owner's standing instructions that every AI here reads (the drafter, the prep sheet, you). Otherwise "remember" is empty. EARLIER IN THIS CONVERSATION is kept for a week across devices, so "that bar I mentioned yesterday" can be resolved from it."""
 
+BAR_RULES += """
+14. Whenever "question" can be answered by picking from a few options (which of two spellings, which of two bars, yes or no, this one or that one), put the answers in "choices": two to four short, complete replies, each worded as the salesperson would type it and understandable on its own, with any email, phone or name written out in full ("Use murphysfunctions@gmail.com", "Use murphysfuntions@gmail.com", "Neither, I'll type it"). Pressing one sends exactly that text as their next message, so a choice must never contain anything they haven't seen in the message or in LEADS. Leave "choices" empty when you are not asking, or the question needs a typed answer (a new phone number, a date they haven't given)."""
+
 BAR_SYSTEM = SYSTEM + BAR_RULES
+
+
+MAX_CHOICES = 4
+CHOICE_LIMIT = 160
+
+
+def clean_choices(raw, question) -> list:
+    """The tappable answers to a question, or none. Only with a question to
+    answer; at most MAX_CHOICES short plain strings, no duplicates. Pure."""
+    if not question or not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        text = re.sub(r"\s+", " ", item).strip()[:CHOICE_LIMIT]
+        if text and text.lower() not in {c.lower() for c in out}:
+            out.append(text)
+        if len(out) >= MAX_CHOICES:
+            break
+    return out if len(out) >= 2 else []
 
 
 def new_lead_texts(out: dict, text: str, known_aliases) -> list:
