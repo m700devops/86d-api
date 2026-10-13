@@ -1535,6 +1535,15 @@ capture. Don't reintroduce them or describe them as current.)
   "Saved: <bars>." from what was actually written, never the model's claim. The inbox reader
   keeps plain `SCHEMA`/`SYSTEM`: strangers' email must never create leads. Covered by
   test_assist.py
+- **A question from the AI bar comes with buttons** (`assist.BAR_SCHEMA`'s `choices`, rule 14,
+  `assist.clean_choices()`; `assistResult()` and the `data-assist-choice` click handler in
+  crm.html). When the bar asks something answerable by picking ("is the email X or Y?", "which
+  Barrel House?"), the model also returns two to four short, self-contained answers; each shows
+  as a button under the question, in both AI boxes (CRM tab and Follow-ups), and pressing one
+  sends its exact text as the next message (the question is already in the history, so "Use X"
+  resolves). The button label IS the text sent, so nothing hidden goes through; choices need a
+  question, are capped at 4 x 160 chars, de-duplicated, and one lone choice is dropped. The inbox
+  reader keeps plain `SCHEMA` and never offers buttons. Covered by test_assist.py
 - **The AI bar can FIND venues it's asked for** (research.py, `crm._run_research`). "Find the
   sister restaurants and add them" used to get "tell me their names" back — it only saw the book.
   `assist.BAR_SCHEMA`'s `research` (about, loc, find, carry; rule 12: never ask for the names) →

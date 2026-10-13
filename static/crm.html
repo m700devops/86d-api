@@ -29,6 +29,9 @@
   #pipeBody tr[data-id],#yetBody tr[data-id],#fOverdue tr[data-id],#fToday tr[data-id]{cursor:pointer}
   #pipeBody tr[data-id]:hover td,#yetBody tr[data-id]:hover td,
   #fOverdue tr[data-id]:hover td,#fToday tr[data-id]:hover td{background:#ffffff08}
+  .assist-choices{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 4px}
+  .assist-choices button{font-size:13px;padding:6px 12px;border-radius:999px;text-align:left}
+  .assist-choices button:disabled{opacity:.5}
   .assist-q{margin:8px 0 4px;padding:8px 11px;border-radius:9px;font-size:13px;
             background:#ffd70012;border:1px solid #ffd70044}
   .assist-list{margin:8px 0 0;padding-left:18px;font-size:13px;line-height:1.8}
@@ -2319,6 +2322,17 @@ async function askAI(){
 }
 $('askBtn').onclick=askAI;
 $('askInput').onkeydown=e=>{ if(e.key==='Enter') askAI(); };
+/* A question with answers to pick from: the button's own text is sent as the
+   next message (the question is already in the history, so "Use X" resolves),
+   in whichever AI box asked. */
+document.addEventListener('click', e=>{
+  const b=e.target.closest('[data-assist-choice]'); if(!b || b.disabled) return;
+  const crm=b.closest('#askOut'), fol=b.closest('#fAssistOut');
+  if(!crm && !fol) return;
+  b.closest('.assist-choices').querySelectorAll('button').forEach(x=>x.disabled=true);
+  if(crm){ $('askInput').value=b.dataset.assistChoice; askAI(); }
+  else { $('fAssistText').value=b.dataset.assistChoice; runAssist(); }
+});
 $('askOut').onclick=async e=>{
   if(e.target.closest('[data-close]')){ $('askOut').classList.add('hide'); return; }
   const u=e.target.closest('[data-assist-undo]');
@@ -2735,6 +2749,8 @@ function assistResult(r){
   const skipped=r.skipped.map(x=>(x.lead?x.lead+': ':'')+x.why);
   return `${r.reply?`<p style="margin:10px 0 0;font-size:14px">${esc(r.reply)}</p>`:''}
     ${r.question?`<p class="assist-q">${esc(r.question)}</p>`:''}
+    ${r.question&&(r.choices||[]).length?`<div class="assist-choices">${r.choices.map(c=>
+      `<button data-assist-choice="${esc(c)}">${esc(c)}</button>`).join('')}</div>`:''}
     ${rows?`<ul class="assist-list">${rows}</ul>`:''}
     ${skipped.length?`<p class="muted" style="font-size:12px;margin:6px 0 0">Didn't change: ${esc(skipped.join('; '))}</p>`:''}`;
 }

@@ -431,3 +431,25 @@ def test_a_pasted_reply_naming_a_new_contact_is_kept():
     assert (clean["contact"], clean["email"]) == ("Jed Thompson", "jthompson@fbrmgmt.com")
     assert "note" in clean and "logged" not in clean
     assert "A pasted email or message FROM a venue is information to record" in assist.SYSTEM
+
+
+# ── a question comes with buttons ───────────────────────────────────────────
+
+def test_choices_are_short_distinct_and_only_with_a_question():
+    q = "Is it murphysfunctions@gmail.com or murphysfuntions@gmail.com?"
+    raw = ["Use murphysfunctions@gmail.com", "use murphysfunctions@gmail.com ",
+           "Use murphysfuntions@gmail.com", "Neither, I'll type it", "x" * 500, 7, "Fifth"]
+    out = assist.clean_choices(raw, q)
+    assert out[:3] == ["Use murphysfunctions@gmail.com", "Use murphysfuntions@gmail.com",
+                       "Neither, I'll type it"]
+    assert len(out) == assist.MAX_CHOICES and all(len(c) <= assist.CHOICE_LIMIT for c in out)
+    assert assist.clean_choices(raw, None) == []            # nothing asked, nothing offered
+    assert assist.clean_choices(["Yes"], q) == []           # one button is not a choice
+    assert assist.clean_choices("Use this", q) == [] and assist.clean_choices(None, q) == []
+
+
+def test_the_bar_schema_and_rules_carry_choices():
+    assert "choices" in assist.BAR_SCHEMA["required"]
+    assert "choices" in assist.BAR_SCHEMA["properties"]
+    assert "choices" not in assist.SCHEMA["properties"]      # the inbox reader never offers buttons
+    assert "14." in assist.BAR_SYSTEM and "Pressing one sends exactly that text" in assist.BAR_SYSTEM

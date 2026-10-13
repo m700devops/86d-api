@@ -6625,7 +6625,9 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
     reply = reply.strip()
     _log_bar_exchange(text, " ".join(filter(None, [reply, question])),
                       [a["name"] for a in applied])
-    return {"reply": reply, "question": question, "applied": applied, "skipped": skipped}
+    return {"reply": reply, "question": question,
+            "choices": _assist.clean_choices(out.get("choices"), question),
+            "applied": applied, "skipped": skipped}
 
 
 BAR_MEMORY_TURNS = 8          # exchanges read back into every message
