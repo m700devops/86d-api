@@ -564,7 +564,7 @@
     <img src="/crm/icon.png" alt="86'd">
     <div>
       <h1><button id="copyApp" class="titlebtn" title="Copy the App Store link">86'd — Sales</button></h1>
-      <div class="sub">Who to call, and what to say</div>
+      <div class="sub"><button id="copyPhone" class="titlebtn" title="Copy my phone number">910-335-2760</button></div>
     </div>
   </header>
 
@@ -1611,6 +1611,10 @@ const APP_URL_DEFAULT='https://apps.apple.com/us/app/86d-bar-inventory/id6798359
 $('copyApp').onclick=async()=>{
   await copyText((MAIL&&MAIL.app_url)||APP_URL_DEFAULT);
   toast('App Store link copied — paste it anywhere');
+};
+$('copyPhone').onclick=async()=>{
+  await copyText('910-335-2760');
+  toast('Copied 910-335-2760');
 };
 async function copyDigits(el){
   const num=el.dataset.copy;
