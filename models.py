@@ -19,6 +19,8 @@ class UserResponse(UserBase):
     manager_name: Optional[str] = None
     title: Optional[str] = None
     order_reply_to: Optional[str] = None
+    count_day: Optional[str] = None
+    count_time: Optional[str] = None
     subscription_status: str = "trial"
     subscription_tier: str = "starter"
     trial_ends_at: Optional[datetime] = None
@@ -46,6 +48,11 @@ class UpdateProfileRequest(BaseModel):
     # e.g. an Apple "Hide My Email" relay, which may refuse a distributor's
     # reply. "" clears it.
     order_reply_to: Optional[str] = Field(default=None, max_length=254)
+    # When this bar usually counts, asked once right after sign-up: the app
+    # schedules its count-day reminder from it, and the CRM shows it so a call
+    # to a new customer can be timed to their count. null clears.
+    count_day: Optional[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun", "varies"]] = None
+    count_time: Optional[Literal["before_open", "afternoon", "after_close"]] = None
 
 class AcceptTermsRequest(BaseModel):
     terms_version: str

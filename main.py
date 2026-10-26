@@ -37,10 +37,12 @@ from apple_auth import (
     AppleAuthError, fetch_apple_keys, is_private_relay, verify_identity_token,
     DEFAULT_BUNDLE_ID as APPLE_DEFAULT_BUNDLE_ID,
 )
-from crm import crm_router, init_crm_tables
+from crm import crm_router, init_crm_tables, TEST_EMAIL_PATTERN
 from phones import normalize_us_phone, format_us_phone_dashed
 from pitch import TRIAL_DAYS  # the free trial's length, shared with the sales pitch
 import billing
+import mailer
+import welcome
 import activity
 from leadgen import init_leadgen_tables
 import openai
@@ -112,6 +114,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_warm_providers())
     # Periodic trial-ending reminder emails (best-effort, runs for the life of the process)
     asyncio.create_task(_trial_reminder_loop())
+    # The welcome email from the owner's mailbox, ~15 minutes after sign-up.
+    asyncio.create_task(_welcome_loop())
     # Daily lead sourcing. Best-effort like the reminder loop — a failure here
     # must never touch the product API.
     asyncio.create_task(_leadgen_daily_loop())
@@ -3483,6 +3487,67 @@ async def _trial_reminder_loop():
         await asyncio.sleep(TRIAL_REMINDER_CHECK_INTERVAL_SECONDS)
 
 
+# ============== WELCOME EMAIL ==============
+
+WELCOME_CHECK_INTERVAL_SECONDS = 5 * 60
+
+
+def _send_welcome_emails():
+    """The one welcome email from the owner's mailbox (welcome.py says what
+    and why). Sent through mailer.py — the CRM's Spacemail mailbox — so a
+    reply ("we count Sunday nights") lands in the owner's inbox. Without a
+    mailbox configured it does nothing and stamps nothing; an account that
+    waits past welcome.WELCOME_MAX_AGE_HOURS is stamped and skipped instead
+    of being welcomed late. Existing accounts were stamped when the column
+    was added (database.init_db), so a deploy never welcomes old customers."""
+    if not mailer.is_configured():
+        return
+    now = datetime.now(timezone.utc)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, email, name, manager_name, business_name, created_at
+              FROM users
+             WHERE welcome_sent_at IS NULL AND deleted_at IS NULL
+             ORDER BY created_at
+             LIMIT 25
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+
+    # Same shape as the trial reminder: each stamp its own short transaction,
+    # no connection held while the mail server answers.
+    for row in rows:
+        try:
+            verdict = welcome.decide(row["created_at"], row["email"], now)
+            # App Store review and our own QA accounts (the CRM's own test
+            # pattern): stamped and skipped, never mailed.
+            if re.search(TEST_EMAIL_PATTERN, row["email"] or "", re.IGNORECASE):
+                verdict = "skip"
+            if verdict == "wait":
+                continue
+            if verdict == "send":
+                mail = welcome.compose(row.get("name"), row.get("manager_name"), row.get("business_name"))
+                mailer.send(row["email"], mail["subject"], mail["body"])
+                print(f"[welcome] WELCOME_SENT user={row['id']}", flush=True)
+            with get_db() as conn:
+                conn.cursor().execute(
+                    "UPDATE users SET welcome_sent_at = %s WHERE id = %s AND welcome_sent_at IS NULL",
+                    (now_iso(), row["id"]))
+                conn.commit()
+        except Exception as e:
+            print(f"[welcome] WELCOME_FAILED user={row['id']}: {e}", flush=True)
+
+
+async def _welcome_loop():
+    """Best-effort, for the life of the process, like the trial reminder."""
+    while True:
+        try:
+            await asyncio.to_thread(_send_welcome_emails)
+        except Exception as e:
+            print(f"[welcome] loop error: {e}", flush=True)
+        await asyncio.sleep(WELCOME_CHECK_INTERVAL_SECONDS)
+
+
 # ============== LEAD GENERATOR SCHEDULER ==============
 
 # The daily lead run crawls bar websites in this process, next to the scanner,
@@ -4255,7 +4320,7 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, email, name, business_name, manager_name, phone, title, order_reply_to,
-                   subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
+                   count_day, count_time, subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
                    privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
@@ -4325,7 +4390,7 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
 
         cursor.execute("""
             SELECT id, email, name, business_name, manager_name, phone, title, order_reply_to,
-                   subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
+                   count_day, count_time, subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
                    privacy_accepted_at, created_at
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
@@ -6010,16 +6075,36 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
 
 # ============== APP FUNNEL EVENTS ==============
 
-# The five steps between opening the app and having an account. Everything
-# after this point is already measurable from `users`, `inventory_sessions`
-# and /v1/crm/funnel; none of it is, which is why "does the sign-up screen
-# lose people" has never had an answer.
+# The five steps between opening the app and having an account, then the
+# steps from a new account to a first count. The second half exists because
+# five people signed up in October 2026 and none of them counted, and nothing
+# said where they stopped: the server only sees a scan once a photo is sent,
+# and nothing at all of the start screen, the camera prompt or the count-day
+# question. The first_* events are sent once per install by the app.
 APP_EVENTS = {
     "app_opened",
     "login_viewed",
     "register_viewed",
     "register_submitted",
     "register_succeeded",
+    # sign-up → first count
+    "bar_name_saved",
+    "count_day_set",
+    "count_day_skipped",
+    "start_screen_viewed",
+    "start_tapped",
+    "camera_allowed",
+    "camera_denied",
+    "first_scan_sent",
+    "first_scan_identified",
+    "first_bottle_saved",
+    "first_try_done",
+    "practice_cleared",
+    "reminder_on",
+    "reminder_declined",
+    "reminder_opened",
+    "review_opened",
+    "order_sent",
 }
 
 

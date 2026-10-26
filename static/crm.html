@@ -847,6 +847,15 @@
         </div>
         <div id="fAssistOut"></div>
       </div>
+      <!-- New customers who signed up and haven't had a single bottle read.
+           At a handful of signups a week, a call asking "when do you count?"
+           is the fastest fix there is (crm.stuck_users). -->
+      <div class="card hide" id="fNew">
+        <strong>New customers who haven't scanned yet <span class="muted" id="fNewN"></span></strong>
+        <div class="muted" style="font-size:13px;margin-top:4px">Signed up, never had a bottle
+          read. Call and ask when they count — offer to stay on the line for their first few bottles.</div>
+        <div id="fNewList" style="margin-top:10px"></div>
+      </div>
       <div class="card hide" id="fAway">
         <strong>While you were away</strong>
         <span class="muted" id="fAwayNote" style="font-size:13px"></span>
@@ -2681,8 +2690,37 @@ async function showEarlier(){
           <span class="muted">AI:</span> ${esc(t.ai||'')}</div>`).join('');
   }catch{}
 }
+async function loadStuck(){
+  let d;
+  try{ d=await api('/users/stuck'); }catch{ return; }
+  const users=d.users||[];
+  $('fNew').classList.toggle('hide', !users.length);
+  if(!users.length) return;
+  $('fNewN').textContent=`(${users.length})`;
+  $('fNewList').innerHTML=`<table class="sheet"><tbody>${users.map(u=>{
+    const who=u.business_name||u.name||u.email;
+    const person=[u.manager_name||u.name, u.email].filter(Boolean).join(' · ');
+    const days=Math.max(0,Math.floor((new Date()-new Date(u.created_at))/86400000));
+    const left=u.trial_ends_at?Math.ceil((new Date(u.trial_ends_at)-new Date())/86400000):null;
+    return `<tr>
+      <td class="nm">${esc(who)}<div class="sub">${esc(person)}</div></td>
+      <td>${u.phone
+        ? `<div class="phcell"><span class="digits" data-copy="${esc(u.phone)}">${esc(u.phone)}</span>`
+          +`<button class="copybtn" data-act="copy" data-copy="${esc(u.phone)}">COPY</button></div>`
+        : '<span class="muted">no phone — email them</span>'}</td>
+      <td>${esc(u.counts_on?`Counts ${u.counts_on}`:'Count day not set')}
+        <div class="sub">signed up ${days===0?'today':days===1?'yesterday':days+' days ago'}${left!==null?` · ${left}d of trial left`:''}</div></td>
+      <td>${u.lead?`<span class="win-good">called first</span><div class="sub">${esc(u.lead.name)}</div>`:'<span class="muted">organic</span>'}</td>
+    </tr>`;}).join('')}</tbody></table>`;
+}
+$('fNewList').onclick=async e=>{
+  const c=e.target.closest('[data-copy]'); if(!c) return;
+  await copyText(c.dataset.copy); toast('Number copied');
+};
+
 async function loadFollowups(){
   loadAway();
+  loadStuck();
   showEarlier();
   const d=await api('/queue');
   // "(50)" when 400 are overdue would be a comforting lie, so when the list is
@@ -3047,14 +3085,24 @@ function timeAgo(iso){
   return days<30 ? `${days}d ago` : iso.slice(0,10);
 }
 
+/* What the customer has DONE, from the server's stage (crm.activation_stage):
+   scans and the count in progress, not just sent orders — "never started a
+   count" used to be shown for anyone who hadn't pressed Send yet. */
+function activityText(u){
+  const active=timeAgo(u.last_active_at);
+  const last=active?` · last ${active}`:'';
+  const n=(k,one,many)=>`${k} ${k===1?one:many}`;
+  if(u.stage==='ordered') return `${n(u.orders_sent,'order','orders')} sent${last}`;
+  if(u.stage==='counting') return `Counting — ${n(u.bottles_in_draft,'bottle','bottles')} saved${last}`;
+  if(u.stage==='tried') return `Tried it — ${n(u.scans,'scan','scans')}, nothing saved${last}`;
+  return "Hasn't scanned a bottle yet";
+}
+
 function userRow(u,n){
   const st=subBadge(u);
   const who=u.business_name||u.name||u.email;
   const sub=[who!==u.email?u.email:null, u.manager_name, u.phone].filter(Boolean).join(' · ');
-  const active=timeAgo(u.last_active_at);
-  const activity=u.sessions_completed
-    ? `${u.sessions_completed} count${u.sessions_completed===1?'':'s'}${active?` · last ${active}`:''}`
-    : (active ? `started, never finished · last ${active}` : 'never started a count');
+  const activity=activityText(u);
   const from=u.lead
     ? `<span class="win-good">called first</span><div class="sub">${esc(u.lead.name)}</div>`
     : '<span class="muted">organic</span>';
@@ -3063,7 +3111,8 @@ function userRow(u,n){
     <td class="nm">${esc(who)}${sub?`<div class="sub">${esc(sub)}</div>`:''}</td>
     <td><span class="st ${st.cls}">${esc(st.text)}</span></td>
     <td>${esc((u.created_at||'').slice(0,10))}</td>
-    <td><span class="${u.sessions_completed?'win-good':'muted'}">${esc(activity)}</span>
+    <td><span class="${u.stage==='ordered'||u.stage==='counting'?'win-good':'muted'}">${esc(activity)}</span>
+        <div class="sub">${esc(u.counts_on?`Counts ${u.counts_on}`:'Count day not set')}</div>
         ${u.location_count>1?`<div class="sub">${u.location_count} locations</div>`:''}</td>
     <td>${from}</td>
     <td><button class="del" data-act="del" title="Delete">✕</button></td>
