@@ -102,6 +102,9 @@ def test_activation_reads_scans_and_drafts_not_just_sent_orders():
     sql = crm.ACTIVATION_SQL
     assert "FROM scan_events" in sql and "FROM inventory_drafts" in sql
     assert "orders_sent" in sql
+    # a sent order is one /orders/email actually emailed, not any completed session
+    assert "export_format = 'email'" in sql and "export_destination IS NOT NULL" in sql
+    assert "status = 'completed') AS orders_sent" not in sql
 
 
 # ---------- the CRM's "haven't scanned yet" list ----------

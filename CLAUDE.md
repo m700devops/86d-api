@@ -1231,7 +1231,8 @@ capture. Don't reintroduce them or describe them as current.)
 
 ## CRM SALES TOOLING
 - `GET /v1/crm/funnel` — signups, trials by days-remaining, trial→paid, **activation**
-  (`started_a_count` = a scan, a draft or a session; `sent_an_order` = a completed session —
+  (`started_a_count` = a scan, a draft or a session; `sent_an_order` = an order /orders/email
+  actually emailed —
   see FIRST COUNT for why it isn't "has a session"), pipeline and per-channel win rates
 - `GET /v1/crm/queue` — overdue follow-ups, due today, never called, each with a call-window
   hint, per venue (see THE CALL LIST)
@@ -2190,7 +2191,9 @@ all covered by test_first_count.py, the SQL run on a real Postgres 16 upgraded f
   `/funnel` and the Customers page read "never started a count" for anyone who had scanned forty
   bottles and not pressed Send. `crm.ACTIVATION_SQL` reads the real traces: `scan_events`
   (scans, first/last scan), `inventory_drafts` (`bottles_in_draft`, summed `json_array_length`)
-  and completed sessions (`orders_sent`). `activation_stage()` (pure): ordered > counting (bottles
+  and orders `/orders/email` actually emailed (`orders_sent`: `export_format='email'` with a
+  non-NULL `export_destination` — NOT completed sessions, which the older
+  `/inventory/{id}/complete` route also writes without emailing anyone). `activation_stage()` (pure): ordered > counting (bottles
   saved) > tried (scanned, nothing saved) > not_started. Customers shows it in words
 - **When they count** (`users.count_day`, `count_time`, PATCH /users/me): the app asks right after
   the bar name. A when-and-where plan is the best-evidenced follow-through technique there is

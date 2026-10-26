@@ -1599,6 +1599,8 @@ def funnel(_: bool = Depends(require_crm_key)):
              WHERE u.deleted_at IS NULL
         """)
         completed_count = cursor.fetchone()["n"]
+        cursor.execute(f"SELECT COUNT(*) AS n FROM users u WHERE u.deleted_at IS NULL AND EXISTS ({SENT_ORDER_SQL})")
+        sent_order_count = cursor.fetchone()["n"]
         # "Started" = the AI read at least one of their bottles, or a count is
         # in progress. It used to be "has an inventory_sessions row", which the
         # app only writes when an order is SENT — so everyone who scanned and
@@ -1644,7 +1646,7 @@ def funnel(_: bool = Depends(require_crm_key)):
                 "signed_up": total_users,
                 "started_a_count": started_count,
                 "completed_a_count": completed_count,
-                "sent_an_order": completed_count,
+                "sent_an_order": sent_order_count,
                 "never_started_pct": rate(total_users - started_count, total_users),
                 "started_but_never_finished": max(0, started_count - completed_count),
             },
@@ -1749,7 +1751,14 @@ TEST_EMAIL_PATTERN = r"(^test[-+.]|app.*review|@86d\.com$|@example\.com$|-verify
 # "sessions_completed = 0" used to read as "never started a count" for someone
 # who had scanned forty bottles and not pressed Send yet. The real traces are
 # scan_events (every photo the AI read) and inventory_drafts (the count in
-# progress, synced from the phone).
+# progress, synced from the phone). orders_sent counts what /orders/email
+# actually emailed (export_destination = the addresses that accepted it,
+# NULL when every send failed), not completed sessions: the older
+# /inventory/{id}/complete route completes a session without emailing anyone.
+SENT_ORDER_SQL = """
+    SELECT 1 FROM orders o JOIN inventory_sessions s ON s.id = o.session_id
+     WHERE s.user_id = u.id AND o.export_format = 'email' AND o.export_destination IS NOT NULL
+"""
 ACTIVATION_SQL = """
     (SELECT COUNT(*) FROM scan_events WHERE user_id = u.id) AS scans,
     (SELECT MIN(created_at) FROM scan_events WHERE user_id = u.id) AS first_scan_at,
@@ -1757,8 +1766,9 @@ ACTIVATION_SQL = """
     COALESCE((SELECT SUM(json_array_length(bottles_data::json)) FROM inventory_drafts
                WHERE user_id = u.id), 0) AS bottles_in_draft,
     (SELECT MAX(updated_at) FROM inventory_drafts WHERE user_id = u.id) AS draft_updated_at,
-    (SELECT COUNT(*) FROM inventory_sessions
-      WHERE user_id = u.id AND status = 'completed') AS orders_sent
+    (SELECT COUNT(*) FROM orders o JOIN inventory_sessions s ON s.id = o.session_id
+      WHERE s.user_id = u.id AND o.export_format = 'email'
+        AND o.export_destination IS NOT NULL) AS orders_sent
 """
 
 # Hours after sign-up before a customer who hasn't scanned shows up on the
