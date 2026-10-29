@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Header, Request, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, field
@@ -40,7 +40,10 @@ from apple_auth import (
 from crm import crm_router, init_crm_tables, TEST_EMAIL_PATTERN
 from phones import normalize_us_phone, format_us_phone_dashed
 from pitch import TRIAL_DAYS  # the free trial's length, shared with the sales pitch
+import pitch
+import media
 import billing
+import html
 import mailer
 import welcome
 import activity
@@ -167,8 +170,18 @@ app.add_middleware(
     expose_headers=["X-Request-Id", "X-RateLimit-Remaining", "X-RateLimit-Limit", "X-RateLimit-Reset", "Retry-After"]
 )
 
-# Gzip compression
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Gzip compression — except video. An MP4 is already compressed (gzip saved
+# 1.5% of /watch/first-count.mp4), and gzipping a 206 range answer makes its
+# Content-Range describe bytes the browser never gets: Safari then won't play.
+class _GZipExceptVideo(GZipMiddleware):
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path", "").endswith(".mp4"):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
+app.add_middleware(_GZipExceptVideo, minimum_size=1000)
 
 # ============== MIDDLEWARE ==============
 
@@ -6099,6 +6112,9 @@ APP_EVENTS = {
     "reminder_opened",
     "review_opened",
     "order_sent",
+    # the walkthrough video on the first-run start screen
+    "how_video_opened",
+    "how_video_finished",
 }
 
 
@@ -6195,6 +6211,68 @@ async def crm_asset(asset: str):
             "error": "not_found", "message": "Asset missing on this server"})
     return FileResponse(path, media_type=allowed[asset],
                         headers={"Cache-Control": "public, max-age=86400"})
+
+# ============== WALKTHROUGH VIDEO (/watch) ==============
+# The owner's 35-second walkthrough of a real count — snap, count, order sent —
+# for the welcome email (welcome.py links it when COMPANY_VIDEO_URL is set) and
+# anywhere else a link helps. The same cut is bundled in the app (86d-mobile
+# assets/video). Served here so there's always a working link, on any host.
+WATCH_VIDEO = os.path.join(os.path.dirname(CRM_PAGE), "first-count.mp4")
+
+
+@app.get("/watch", include_in_schema=False)
+async def watch_page():
+    """A page with the video and one line on what to do next."""
+    from fastapi.responses import HTMLResponse
+    app_url = html.escape(pitch.APP_URL or "")
+    get_it = (f'<p class="sub">Don\'t have it yet? <a href="{app_url}">Get 86\'d on the App Store</a></p>'
+              if app_url else "")
+    return HTMLResponse(f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How a count works — 86'd</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{ margin: 0; background: #0F0F0F; color: #fff;
+         font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }}
+  main {{ max-width: 420px; margin: 0 auto; padding: 24px 16px 40px; text-align: center; }}
+  h1 {{ font-size: 22px; margin: 4px 0 16px; }}
+  video {{ width: 100%; max-height: 78vh; border-radius: 16px; background: #000; }}
+  p {{ margin: 16px 0 0; }}
+  .sub {{ color: #A3A3A3; font-size: 14px; }}
+  a {{ color: #F0566A; }}
+</style></head>
+<body><main>
+  <h1>How a count works</h1>
+  <video src="/watch/first-count.mp4" controls playsinline preload="metadata"></video>
+  <p>Open 86'd and tap <strong>Try 3 Bottles</strong>. It takes about a minute.</p>
+  {get_it}
+</main></body></html>""", headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.api_route("/watch/first-count.mp4", methods=["GET", "HEAD"], include_in_schema=False)
+async def watch_video(request: Request):
+    """The video, with byte ranges (media.parse_range) — Safari won't play
+    without them. 2MB, read whole and sliced: no streaming machinery needed."""
+    if not os.path.exists(WATCH_VIDEO):
+        raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Video missing on this server"})
+    with open(WATCH_VIDEO, "rb") as f:
+        data = f.read()
+    size = len(data)
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=86400"}
+    rng = media.parse_range(request.headers.get("range"), size)
+    if rng == "unsatisfiable":
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+    if rng is None:
+        body, status = data, 200
+    else:
+        start, end = rng
+        body, status = data[start:end + 1], 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    headers["Content-Length"] = str(len(body))
+    if request.method == "HEAD":
+        body = b""
+    return Response(content=body, status_code=status, media_type="video/mp4", headers=headers)
 
 # ============== ERROR HANDLERS ==============
 

@@ -18,7 +18,15 @@ relationship email, not outreach: no opt-out footer, no selling.
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import os
+
 import pitch
+
+# Where the 35-second walkthrough lives (the API serves one at /watch). Set on
+# Render to switch the line on; unset, the email is exactly as before. Read at
+# call time so a dashboard edit needs no deploy beyond the restart it causes.
+def video_url() -> str:
+    return (os.getenv("COMPANY_VIDEO_URL") or "").strip()
 
 # Not the instant the account is made: a "personal" email two seconds after
 # tapping Create reads as exactly what it is. A little later reads as a person.
@@ -77,13 +85,15 @@ def compose(name: Optional[str] = None, manager_name: Optional[str] = None,
     who = first_name(manager_name, name)
     greeting = f"Hi {who}," if who else "Hi there,"
     bar = (business_name or "").strip()
+    url = video_url()
+    watch = f"\nHere's a real one, start to finished order, in 35 seconds: {url}\n" if url else ""
     for_bar = f" for {bar}" if bar else ""
     body = f"""{greeting}
 
 Thanks for setting up 86'd{for_bar}. I'm {pitch.OWNER_NAME}, I built it, and this is my own inbox.
 
 The quickest way to see if it's for you: next time you're behind the bar, open the app and count three bottles. Point the camera at the label, tap, and type how many you have. It takes about a minute, and a full count works exactly the same way.
-
+{watch}
 When do you usually do your count? Reply and tell me, and I'll make sure you're set up before then. If you'd like me on the phone for your first few bottles, call or text me at {pitch.OWNER_PHONE}.
 
 {pitch.SIGNATURE}"""

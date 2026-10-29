@@ -356,6 +356,8 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
 - seed_data.py — default product catalog
 - welcome.py — the one welcome email a new customer gets, from the owner's mailbox. Pure
   (`decide()`, `compose()`); sent by main.py's `_welcome_loop`. See FIRST COUNT
+- media.py — `parse_range()`, byte ranges for the /watch video (pure). See FIRST COUNT
+- static/first-count.mp4 — the owner's 35-second walkthrough (2MB), served at /watch
 - scanstats.py — the scanner's report card, pure: `summarize(rows, days)` over scan_events +
   scan_outcomes, per AI model — replies, couldn't-read, flagged disagreements settled right or
   wrong, rows removed by staff, reply time. Feeds `GET /v1/crm/scanner` (crm.py) and the CRM
@@ -376,7 +378,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
   test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py test_daytime.py test_first_count.py test_login_profile.py -q` (1310 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py test_daytime.py test_first_count.py test_login_profile.py test_watch.py -q` (1334 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -845,6 +847,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
     Postgres 16
 - POST /billing/create-checkout-session — Stripe hosted checkout (no IAP, checkout happens in system browser)
 - GET /health, GET / (API info), GET /docs
+- GET /watch, GET|HEAD /watch/first-count.mp4 — the walkthrough video, with byte ranges (FIRST COUNT)
 
 (There is no `/scans/pen-capture` or `/scans/batch` route — those were removed along with pen-based level
 capture. Don't reintroduce them or describe them as current.)
@@ -2135,6 +2138,8 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - APPLE_ISSUER_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY (+ optional APPLE_APP_ID) — optional; the
   Apple Analytics tab's App Store Connect team key. Unset is fine: the tab's Connect form
   saves the key instead (encrypted). `\n` in APPLE_PRIVATE_KEY is accepted
+- COMPANY_VIDEO_URL — optional: the walkthrough's link in the welcome email (see FIRST COUNT);
+  unset = no link. The API serves one at /watch
 - CRM_STUCK_AFTER_HOURS — optional (48): how long after sign-up a customer with no scan shows
   on Follow-ups' "haven't scanned yet" list
 - SENTRY_DSN — optional, error visibility only
@@ -2223,6 +2228,19 @@ all covered by test_first_count.py, the SQL run on a real Postgres 16 upgraded f
   event` shows exactly where a new customer stops. The first_* ones are sent once per install
 - The app side (86d-mobile): the count-day step, a "try 3 bottles" first run with a win card,
   and a weekly local reminder on their count day
+- **The walkthrough video** (2026-10-29): the owner's recording of a real count, cut to 35s —
+  0:00–0:30 of the original with its voiceover, then an "Order sent" frame while "your
+  distributors get the order by email" plays. The original's App Store end card is gone, and so
+  is the "All Stocked!" screen it caught after sending (an app bug, fixed in 86d-mobile #43).
+  `GET /watch` is a page with it; `GET|HEAD /watch/first-count.mp4` serves `static/first-count.mp4`
+  WITH BYTE RANGES (`media.parse_range`: 206 + Content-Range, 416 past the end, 200 for none or
+  several) — the pinned Starlette's FileResponse has none, and iPhone Safari won't play a video
+  without them (it opens with `Range: bytes=0-1`). **`.mp4` paths skip the gzip middleware**
+  (`_GZipExceptVideo`): gzip saved 1.5% of an MP4 and turned a 206 into bytes its Content-Range
+  doesn't describe. The welcome email gains "Here's a real one, start to finished order, in 35
+  seconds: <url>" only when `COMPANY_VIDEO_URL` is set (e.g. https://eight6d-api.onrender.com/watch,
+  or a my86d.com page); unset, the email is unchanged. App events `how_video_opened` /
+  `how_video_finished`. Covered by test_watch.py; played in Chromium through uvicorn over 206s
 
 ## FAILURE POINTS FIXED (audit, 2026-09-25) — don't reintroduce these
 Each is covered by test_failure_points.py unless noted.
