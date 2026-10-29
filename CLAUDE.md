@@ -376,7 +376,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
   test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py test_daytime.py test_first_count.py -q` (1305 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py test_daytime.py test_first_count.py test_login_profile.py -q` (1310 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -661,7 +661,12 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   though the mobile client no longer does pen-based level capture
 
 ## Key API Routes (all under /v1)
-- POST /auth/register, /auth/login, /auth/refresh
+- POST /auth/register, /auth/login, /auth/refresh. **Login and Apple sign-in return the WHOLE
+  profile** (`PROFILE_COLUMNS` / `_profile()`, the same columns as GET/PATCH /users/me): the app
+  stores whatever user a sign-in hands it, and login used to send a short version with no
+  business_name / manager_name, so the order screen asked "what's your bar called?" again after
+  every sign-in, for a bar that had long told us. A column added to the profile goes in
+  `PROFILE_COLUMNS` and reaches all four. Covered by test_login_profile.py
 - PATCH /users/me — business_name, manager_name and **phone** (optional, from the app's bar-name
   screen, "for setup help"): blank clears it, anything else must pass `phones.normalize_us_phone`
   (422 `invalid_phone`) and is stored dashed (615-742-9095, what CloudTalk accepts). Shown and

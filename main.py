@@ -293,6 +293,26 @@ def health_check():
 
 # ============== AUTHENTICATION ==============
 
+# Everything the app keeps about the signed-in account. Login, Apple sign-in and
+# /users/me all return exactly this, because the app STORES whatever user it's
+# handed: login used to send a short version with no business_name, so after
+# every sign-in the order screen asked "what's your bar called?" again — for a
+# bar that had told us long ago — until a /users/me refresh happened to land.
+PROFILE_COLUMNS = """id, email, name, business_name, manager_name, phone, title, order_reply_to,
+                     count_day, count_time, subscription_status, subscription_tier,
+                     trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at"""
+_PROFILE_KEYS = [c.strip() for c in PROFILE_COLUMNS.split(",")]
+
+
+def _profile(row, **overrides) -> dict:
+    """The account as the app gets it, from a row selected with PROFILE_COLUMNS."""
+    out = {k: row.get(k) for k in _PROFILE_KEYS}
+    out.update(overrides)
+    out["subscription_status"] = out.get("subscription_status") or "trial"
+    out["subscription_tier"] = out.get("subscription_tier") or "starter"
+    return out
+
+
 @v1_router.post("/auth/register", response_model=TokenResponse, status_code=201)
 def register(user_data: UserCreate):
     """Create new user account"""
@@ -425,8 +445,7 @@ def login(credentials: UserLogin):
 
         # Find user
         cursor.execute(
-            """SELECT id, email, password_hash, name, subscription_status, subscription_tier,
-                      trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
+            f"""SELECT {PROFILE_COLUMNS}, password_hash
                FROM users WHERE email = %s AND deleted_at IS NULL""",
             (email,)
         )
@@ -460,17 +479,7 @@ def login(credentials: UserLogin):
         refresh_token = create_refresh_token(row["id"])
         
         return {
-            "user": {
-                "id": row["id"],
-                "email": row["email"],
-                "name": row["name"],
-                "subscription_status": row["subscription_status"] or "trial",
-                "subscription_tier": row["subscription_tier"] or "starter",
-                "trial_ends_at": row["trial_ends_at"],
-                "terms_accepted_at": row["terms_accepted_at"],
-                "privacy_accepted_at": row["privacy_accepted_at"],
-                "created_at": row["created_at"]
-            },
+            "user": _profile(row),
             "access_token": access_token,
             "refresh_token": refresh_token,
             "expires_in": 3600
@@ -512,8 +521,7 @@ def apple_sign_in(request: AppleSignInRequest):
 
         # business_name comes back on purpose: the client shows its
         # "what's your bar called?" step only when this is still empty.
-        user_columns = """id, email, name, business_name, subscription_status, subscription_tier,
-                          trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at"""
+        user_columns = PROFILE_COLUMNS
 
         # 1. Returning Apple user.
         cursor.execute(
@@ -622,18 +630,8 @@ def apple_sign_in(request: AppleSignInRequest):
             conn.commit()
 
         return {
-            "user": {
-                "id": row["id"],
-                "email": row["email"],
-                "name": row["name"] or request.name,
-                "business_name": row["business_name"] or request.business_name,
-                "subscription_status": row["subscription_status"] or "trial",
-                "subscription_tier": row["subscription_tier"] or "starter",
-                "trial_ends_at": row["trial_ends_at"],
-                "terms_accepted_at": row["terms_accepted_at"],
-                "privacy_accepted_at": row["privacy_accepted_at"],
-                "created_at": row["created_at"],
-            },
+            "user": _profile(row, name=row["name"] or request.name,
+                             business_name=row["business_name"] or request.business_name),
             "access_token": create_access_token(row["id"]),
             "refresh_token": create_refresh_token(row["id"]),
             "expires_in": 3600,
@@ -4318,10 +4316,8 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
     """Get full user profile including subscription status"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, phone, title, order_reply_to,
-                   count_day, count_time, subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
-                   privacy_accepted_at, created_at
+        cursor.execute(f"""
+            SELECT {PROFILE_COLUMNS}
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
         row = cursor.fetchone()
@@ -4388,10 +4384,8 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
         conn.commit()
 
-        cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, phone, title, order_reply_to,
-                   count_day, count_time, subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
-                   privacy_accepted_at, created_at
+        cursor.execute(f"""
+            SELECT {PROFILE_COLUMNS}
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
         row = cursor.fetchone()
