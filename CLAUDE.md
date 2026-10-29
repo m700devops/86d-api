@@ -354,6 +354,10 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   `CRAWL_QUIET_SECONDS` (180). See "The crawl stays out of the scanner's way" under LEAD
   GENERATOR. Covered by test_crawl_quiet.py
 - seed_data.py — default product catalog
+- welcome.py — the one welcome email a new customer gets, from the owner's mailbox. Pure
+  (`decide()`, `compose()`); sent by main.py's `_welcome_loop`. See FIRST COUNT
+- media.py — `parse_range()`, byte ranges for the /watch video (pure). See FIRST COUNT
+- static/first-count.mp4 — the owner's 35-second walkthrough (2MB), served at /watch
 - scanstats.py — the scanner's report card, pure: `summarize(rows, days)` over scan_events +
   scan_outcomes, per AI model — replies, couldn't-read, flagged disagreements settled right or
   wrong, rows removed by staff, reply time. Feeds `GET /v1/crm/scanner` (crm.py) and the CRM
@@ -374,7 +378,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
   test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py test_daytime.py -q` (1263 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py test_daytime.py test_first_count.py test_login_profile.py test_watch.py -q` (1334 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -659,11 +663,18 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   though the mobile client no longer does pen-based level capture
 
 ## Key API Routes (all under /v1)
-- POST /auth/register, /auth/login, /auth/refresh
+- POST /auth/register, /auth/login, /auth/refresh. **Login and Apple sign-in return the WHOLE
+  profile** (`PROFILE_COLUMNS` / `_profile()`, the same columns as GET/PATCH /users/me): the app
+  stores whatever user a sign-in hands it, and login used to send a short version with no
+  business_name / manager_name, so the order screen asked "what's your bar called?" again after
+  every sign-in, for a bar that had long told us. A column added to the profile goes in
+  `PROFILE_COLUMNS` and reaches all four. Covered by test_login_profile.py
 - PATCH /users/me — business_name, manager_name and **phone** (optional, from the app's bar-name
   screen, "for setup help"): blank clears it, anything else must pass `phones.normalize_us_phone`
   (422 `invalid_phone`) and is stored dashed (615-742-9095, what CloudTalk accepts). Shown and
-  searchable (digits only) on the CRM's Customers page. Covered by test_profile_phone.py
+  searchable (digits only) on the CRM's Customers page. Covered by test_profile_phone.py.
+  Also **count_day** (mon…sun | varies) and **count_time** (before_open | afternoon |
+  after_close), asked right after sign-up — see FIRST COUNT. A Literal: anything else is a 422
 - POST /auth/apple — Sign in with Apple. Matched on Apple's `sub`, NEVER the email: the
   address can be a Hide My Email relay alias, the user can switch it off later, and it is
   not a stable identifier. An existing password account on the same address is LINKED
@@ -673,8 +684,9 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   "no password" and "any password works". Deletion skips the password re-confirmation for
   those accounts; requiring a password that cannot exist would make them undeletable, which
   guideline 5.1.1(ix) does not allow
-- POST /events — five allowlisted client funnel events (app_opened, login_viewed,
-  register_viewed, register_submitted, register_succeeded). Unauthenticated because the
+- POST /events — allowlisted client funnel events (`APP_EVENTS`): the five before an account
+  (app_opened, login_viewed, register_viewed, register_submitted, register_succeeded) and the
+  steps from a new account to a first count (see FIRST COUNT). Unauthenticated because the
   events worth having happen before an account exists; kept safe by a fixed event list, a
   capped batch and no free-form properties column. Always answers 202 — a lost metric must
   never surface as an error in the app
@@ -835,6 +847,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
     Postgres 16
 - POST /billing/create-checkout-session — Stripe hosted checkout (no IAP, checkout happens in system browser)
 - GET /health, GET / (API info), GET /docs
+- GET /watch, GET|HEAD /watch/first-count.mp4 — the walkthrough video, with byte ranges (FIRST COUNT)
 
 (There is no `/scans/pen-capture` or `/scans/batch` route — those were removed along with pen-based level
 capture. Don't reintroduce them or describe them as current.)
@@ -1226,7 +1239,9 @@ capture. Don't reintroduce them or describe them as current.)
 
 ## CRM SALES TOOLING
 - `GET /v1/crm/funnel` — signups, trials by days-remaining, trial→paid, **activation**
-  (signed up but never finished a first count), pipeline and per-channel win rates
+  (`started_a_count` = a scan, a draft or a session; `sent_an_order` = an order /orders/email
+  actually emailed —
+  see FIRST COUNT for why it isn't "has a session"), pipeline and per-channel win rates
 - `GET /v1/crm/queue` — overdue follow-ups, due today, never called, each with a call-window
   hint, per venue (see THE CALL LIST)
 - **Timezone is decided by STATE, not longitude** (`us_tz_offset(lon, state, lat)`). The
@@ -1253,8 +1268,9 @@ capture. Don't reintroduce them or describe them as current.)
   `crm_leads` — most rows never touched the pipeline at all, since an organic download signs
   up with no call or email behind it. No touch/log/email actions — the calling workflow lives
   on the pipeline tab — but it does carry a delete button (see below), because this list
-  needs its own housekeeping. Each row carries `location_count`, `sessions_completed` and
-  `last_active_at` (from `locations`/`inventory_sessions`) and, where attribution has matched
+  needs its own housekeeping. Each row carries `location_count`, `sessions_completed`,
+  `last_active_at` (latest scan, draft sync or session), the activation columns and `stage`
+  (FIRST COUNT), `counts_on` ("Sunday after close") and, where attribution has matched
   one, the originating `lead` — the same `matched_user_id` join `rematch_attribution` writes,
   done as a Python lookup here rather than a SQL join so an unmatched user (most of them)
   needs no special-casing. `status` is one of `trial` / `active` / `canceled` (the only values
@@ -2122,6 +2138,10 @@ Source of truth: the `_config_checks` startup list in main.py (~line 52) — it 
 - APPLE_ISSUER_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY (+ optional APPLE_APP_ID) — optional; the
   Apple Analytics tab's App Store Connect team key. Unset is fine: the tab's Connect form
   saves the key instead (encrypted). `\n` in APPLE_PRIVATE_KEY is accepted
+- COMPANY_VIDEO_URL — optional: the walkthrough's link in the welcome email (see FIRST COUNT);
+  unset = no link. The API serves one at /watch
+- CRM_STUCK_AFTER_HOURS — optional (48): how long after sign-up a customer with no scan shows
+  on Follow-ups' "haven't scanned yet" list
 - SENTRY_DSN — optional, error visibility only
 - CONFIDENCE_THRESHOLD, LEVEL_DEADBAND, UNREADABLE_CONFIDENCE (0.5), AI_KEEPALIVE_SECONDS (120),
   LABEL_CHECK (enforce | log | off), SECOND_OPINION (on | off), SECOND_OPINION_WAIT_SEC (2.0),
@@ -2169,6 +2189,58 @@ on a real Postgres 16 with four concurrent deliveries of one event (one write, t
   without its AI quiz/Gauntlet (the page's built-ins stand in until the next refresh). The
   OWNER'S notes on the AI Brain page are never filtered: an old price there is the owner's to
   fix. **Changing PRICE or TRIAL_DAYS again needs nothing more.** Covered by test_offer.py
+
+## FIRST COUNT (sign-up → first count, 2026-10-26)
+Five bars signed up in October 2026 and none counted. A sign-up happens on a sales call, away
+from the bar, days before the next count (about half of bars count weekly, a quarter monthly),
+and nothing tied the two together: the first thing the company said after "Start trial" was the
+trial-ending email on day ten. The 15-day trial from sign-up stays (owner's call). What changed,
+all covered by test_first_count.py, the SQL run on a real Postgres 16 upgraded from main's schema:
+- **The activation number was wrong.** The app never writes `inventory_sessions` while someone
+  counts — a completed session is written only when an order email is SENT (`/orders/email`) — so
+  `/funnel` and the Customers page read "never started a count" for anyone who had scanned forty
+  bottles and not pressed Send. `crm.ACTIVATION_SQL` reads the real traces: `scan_events`
+  (scans, first/last scan), `inventory_drafts` (`bottles_in_draft`, summed `json_array_length`)
+  and orders `/orders/email` actually emailed (`orders_sent`: `export_format='email'` with a
+  non-NULL `export_destination` — NOT completed sessions, which the older
+  `/inventory/{id}/complete` route also writes without emailing anyone). `activation_stage()` (pure): ordered > counting (bottles
+  saved) > tried (scanned, nothing saved) > not_started. Customers shows it in words
+- **When they count** (`users.count_day`, `count_time`, PATCH /users/me): the app asks right after
+  the bar name. A when-and-where plan is the best-evidenced follow-through technique there is
+  (implementation intentions, Gollwitzer & Sheeran); the app schedules its own reminder from it,
+  and the CRM shows it so a call can be timed to their count
+- **`GET /v1/crm/users/stuck`** — still in trial, signed up ≥ `CRM_STUCK_AFTER_HOURS` (48) ago,
+  no scan ever; test accounts out. Follow-ups shows it first: "New customers who haven't scanned
+  yet", with their phone (copy), count day, days left and the lead they came from
+- **Welcome email** (welcome.py, `_welcome_loop` every 5 min): plain text from the owner's
+  Spacemail mailbox (so "we count Sundays" lands in his inbox), ~`WELCOME_DELAY_MINUTES` (15)
+  after sign-up: count three bottles next time you're behind the bar; when do you count?; his
+  number. Once per account (`users.welcome_sent_at`; adding the column stamped every existing
+  account, so the deploy welcomed nobody old). Skipped and stamped: older than
+  `WELCOME_MAX_AGE_HOURS` (72), an Apple relay address (it would bounce), a test account
+  (`TEST_EMAIL_PATTERN`). No mailbox = nothing sent, nothing stamped. A failed send isn't
+  stamped (retried next pass). Log `WELCOME_SENT` / `WELCOME_FAILED`
+- **App events after sign-up** (`APP_EVENTS`): bar_name_saved, count_day_set / _skipped,
+  start_screen_viewed, start_tapped, camera_allowed / _denied, first_scan_sent,
+  first_scan_identified, first_bottle_saved, first_try_done, practice_cleared, reminder_on /
+  _declined / _opened, review_opened, order_sent. They carry `user_id` (the app sends its token),
+  so `SELECT event, count(DISTINCT user_id) FROM app_events WHERE created_at > '<date>' GROUP BY
+  event` shows exactly where a new customer stops. The first_* ones are sent once per install
+- The app side (86d-mobile): the count-day step, a "try 3 bottles" first run with a win card,
+  and a weekly local reminder on their count day
+- **The walkthrough video** (2026-10-29): the owner's recording of a real count, cut to 35s —
+  0:00–0:30 of the original with its voiceover, then an "Order sent" frame while "your
+  distributors get the order by email" plays. The original's App Store end card is gone, and so
+  is the "All Stocked!" screen it caught after sending (an app bug, fixed in 86d-mobile #43).
+  `GET /watch` is a page with it; `GET|HEAD /watch/first-count.mp4` serves `static/first-count.mp4`
+  WITH BYTE RANGES (`media.parse_range`: 206 + Content-Range, 416 past the end, 200 for none or
+  several) — the pinned Starlette's FileResponse has none, and iPhone Safari won't play a video
+  without them (it opens with `Range: bytes=0-1`). **`.mp4` paths skip the gzip middleware**
+  (`_GZipExceptVideo`): gzip saved 1.5% of an MP4 and turned a 206 into bytes its Content-Range
+  doesn't describe. The welcome email gains "Here's a real one, start to finished order, in 35
+  seconds: <url>" only when `COMPANY_VIDEO_URL` is set (e.g. https://eight6d-api.onrender.com/watch,
+  or a my86d.com page); unset, the email is unchanged. App events `how_video_opened` /
+  `how_video_finished`. Covered by test_watch.py; played in Chromium through uvicorn over 206s
 
 ## FAILURE POINTS FIXED (audit, 2026-09-25) — don't reintroduce these
 Each is covered by test_failure_points.py unless noted.

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Header, Request, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, field
@@ -37,10 +37,15 @@ from apple_auth import (
     AppleAuthError, fetch_apple_keys, is_private_relay, verify_identity_token,
     DEFAULT_BUNDLE_ID as APPLE_DEFAULT_BUNDLE_ID,
 )
-from crm import crm_router, init_crm_tables
+from crm import crm_router, init_crm_tables, TEST_EMAIL_PATTERN
 from phones import normalize_us_phone, format_us_phone_dashed
 from pitch import TRIAL_DAYS  # the free trial's length, shared with the sales pitch
+import pitch
+import media
 import billing
+import html
+import mailer
+import welcome
 import activity
 from leadgen import init_leadgen_tables
 import openai
@@ -112,6 +117,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_warm_providers())
     # Periodic trial-ending reminder emails (best-effort, runs for the life of the process)
     asyncio.create_task(_trial_reminder_loop())
+    # The welcome email from the owner's mailbox, ~15 minutes after sign-up.
+    asyncio.create_task(_welcome_loop())
     # Daily lead sourcing. Best-effort like the reminder loop — a failure here
     # must never touch the product API.
     asyncio.create_task(_leadgen_daily_loop())
@@ -163,8 +170,18 @@ app.add_middleware(
     expose_headers=["X-Request-Id", "X-RateLimit-Remaining", "X-RateLimit-Limit", "X-RateLimit-Reset", "Retry-After"]
 )
 
-# Gzip compression
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Gzip compression — except video. An MP4 is already compressed (gzip saved
+# 1.5% of /watch/first-count.mp4), and gzipping a 206 range answer makes its
+# Content-Range describe bytes the browser never gets: Safari then won't play.
+class _GZipExceptVideo(GZipMiddleware):
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path", "").endswith(".mp4"):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
+app.add_middleware(_GZipExceptVideo, minimum_size=1000)
 
 # ============== MIDDLEWARE ==============
 
@@ -288,6 +305,26 @@ def health_check():
         )
 
 # ============== AUTHENTICATION ==============
+
+# Everything the app keeps about the signed-in account. Login, Apple sign-in and
+# /users/me all return exactly this, because the app STORES whatever user it's
+# handed: login used to send a short version with no business_name, so after
+# every sign-in the order screen asked "what's your bar called?" again — for a
+# bar that had told us long ago — until a /users/me refresh happened to land.
+PROFILE_COLUMNS = """id, email, name, business_name, manager_name, phone, title, order_reply_to,
+                     count_day, count_time, subscription_status, subscription_tier,
+                     trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at"""
+_PROFILE_KEYS = [c.strip() for c in PROFILE_COLUMNS.split(",")]
+
+
+def _profile(row, **overrides) -> dict:
+    """The account as the app gets it, from a row selected with PROFILE_COLUMNS."""
+    out = {k: row.get(k) for k in _PROFILE_KEYS}
+    out.update(overrides)
+    out["subscription_status"] = out.get("subscription_status") or "trial"
+    out["subscription_tier"] = out.get("subscription_tier") or "starter"
+    return out
+
 
 @v1_router.post("/auth/register", response_model=TokenResponse, status_code=201)
 def register(user_data: UserCreate):
@@ -421,8 +458,7 @@ def login(credentials: UserLogin):
 
         # Find user
         cursor.execute(
-            """SELECT id, email, password_hash, name, subscription_status, subscription_tier,
-                      trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at
+            f"""SELECT {PROFILE_COLUMNS}, password_hash
                FROM users WHERE email = %s AND deleted_at IS NULL""",
             (email,)
         )
@@ -456,17 +492,7 @@ def login(credentials: UserLogin):
         refresh_token = create_refresh_token(row["id"])
         
         return {
-            "user": {
-                "id": row["id"],
-                "email": row["email"],
-                "name": row["name"],
-                "subscription_status": row["subscription_status"] or "trial",
-                "subscription_tier": row["subscription_tier"] or "starter",
-                "trial_ends_at": row["trial_ends_at"],
-                "terms_accepted_at": row["terms_accepted_at"],
-                "privacy_accepted_at": row["privacy_accepted_at"],
-                "created_at": row["created_at"]
-            },
+            "user": _profile(row),
             "access_token": access_token,
             "refresh_token": refresh_token,
             "expires_in": 3600
@@ -508,8 +534,7 @@ def apple_sign_in(request: AppleSignInRequest):
 
         # business_name comes back on purpose: the client shows its
         # "what's your bar called?" step only when this is still empty.
-        user_columns = """id, email, name, business_name, subscription_status, subscription_tier,
-                          trial_ends_at, terms_accepted_at, privacy_accepted_at, created_at"""
+        user_columns = PROFILE_COLUMNS
 
         # 1. Returning Apple user.
         cursor.execute(
@@ -618,18 +643,8 @@ def apple_sign_in(request: AppleSignInRequest):
             conn.commit()
 
         return {
-            "user": {
-                "id": row["id"],
-                "email": row["email"],
-                "name": row["name"] or request.name,
-                "business_name": row["business_name"] or request.business_name,
-                "subscription_status": row["subscription_status"] or "trial",
-                "subscription_tier": row["subscription_tier"] or "starter",
-                "trial_ends_at": row["trial_ends_at"],
-                "terms_accepted_at": row["terms_accepted_at"],
-                "privacy_accepted_at": row["privacy_accepted_at"],
-                "created_at": row["created_at"],
-            },
+            "user": _profile(row, name=row["name"] or request.name,
+                             business_name=row["business_name"] or request.business_name),
             "access_token": create_access_token(row["id"]),
             "refresh_token": create_refresh_token(row["id"]),
             "expires_in": 3600,
@@ -3483,6 +3498,67 @@ async def _trial_reminder_loop():
         await asyncio.sleep(TRIAL_REMINDER_CHECK_INTERVAL_SECONDS)
 
 
+# ============== WELCOME EMAIL ==============
+
+WELCOME_CHECK_INTERVAL_SECONDS = 5 * 60
+
+
+def _send_welcome_emails():
+    """The one welcome email from the owner's mailbox (welcome.py says what
+    and why). Sent through mailer.py — the CRM's Spacemail mailbox — so a
+    reply ("we count Sunday nights") lands in the owner's inbox. Without a
+    mailbox configured it does nothing and stamps nothing; an account that
+    waits past welcome.WELCOME_MAX_AGE_HOURS is stamped and skipped instead
+    of being welcomed late. Existing accounts were stamped when the column
+    was added (database.init_db), so a deploy never welcomes old customers."""
+    if not mailer.is_configured():
+        return
+    now = datetime.now(timezone.utc)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, email, name, manager_name, business_name, created_at
+              FROM users
+             WHERE welcome_sent_at IS NULL AND deleted_at IS NULL
+             ORDER BY created_at
+             LIMIT 25
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+
+    # Same shape as the trial reminder: each stamp its own short transaction,
+    # no connection held while the mail server answers.
+    for row in rows:
+        try:
+            verdict = welcome.decide(row["created_at"], row["email"], now)
+            # App Store review and our own QA accounts (the CRM's own test
+            # pattern): stamped and skipped, never mailed.
+            if re.search(TEST_EMAIL_PATTERN, row["email"] or "", re.IGNORECASE):
+                verdict = "skip"
+            if verdict == "wait":
+                continue
+            if verdict == "send":
+                mail = welcome.compose(row.get("name"), row.get("manager_name"), row.get("business_name"))
+                mailer.send(row["email"], mail["subject"], mail["body"])
+                print(f"[welcome] WELCOME_SENT user={row['id']}", flush=True)
+            with get_db() as conn:
+                conn.cursor().execute(
+                    "UPDATE users SET welcome_sent_at = %s WHERE id = %s AND welcome_sent_at IS NULL",
+                    (now_iso(), row["id"]))
+                conn.commit()
+        except Exception as e:
+            print(f"[welcome] WELCOME_FAILED user={row['id']}: {e}", flush=True)
+
+
+async def _welcome_loop():
+    """Best-effort, for the life of the process, like the trial reminder."""
+    while True:
+        try:
+            await asyncio.to_thread(_send_welcome_emails)
+        except Exception as e:
+            print(f"[welcome] loop error: {e}", flush=True)
+        await asyncio.sleep(WELCOME_CHECK_INTERVAL_SECONDS)
+
+
 # ============== LEAD GENERATOR SCHEDULER ==============
 
 # The daily lead run crawls bar websites in this process, next to the scanner,
@@ -4253,10 +4329,8 @@ def get_user_profile(user_id: str = Depends(get_current_user)):
     """Get full user profile including subscription status"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, phone, title, order_reply_to,
-                   subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
-                   privacy_accepted_at, created_at
+        cursor.execute(f"""
+            SELECT {PROFILE_COLUMNS}
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
         row = cursor.fetchone()
@@ -4323,10 +4397,8 @@ def update_user_profile(request: UpdateProfileRequest, user_id: str = Depends(ge
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": "User not found"})
         conn.commit()
 
-        cursor.execute("""
-            SELECT id, email, name, business_name, manager_name, phone, title, order_reply_to,
-                   subscription_status, subscription_tier, trial_ends_at, terms_accepted_at,
-                   privacy_accepted_at, created_at
+        cursor.execute(f"""
+            SELECT {PROFILE_COLUMNS}
             FROM users WHERE id = %s AND deleted_at IS NULL
         """, (user_id,))
         row = cursor.fetchone()
@@ -6010,16 +6082,39 @@ async def analyze_bottle(request: ScanAnalyzeRequest, user_id: str = Depends(get
 
 # ============== APP FUNNEL EVENTS ==============
 
-# The five steps between opening the app and having an account. Everything
-# after this point is already measurable from `users`, `inventory_sessions`
-# and /v1/crm/funnel; none of it is, which is why "does the sign-up screen
-# lose people" has never had an answer.
+# The five steps between opening the app and having an account, then the
+# steps from a new account to a first count. The second half exists because
+# five people signed up in October 2026 and none of them counted, and nothing
+# said where they stopped: the server only sees a scan once a photo is sent,
+# and nothing at all of the start screen, the camera prompt or the count-day
+# question. The first_* events are sent once per install by the app.
 APP_EVENTS = {
     "app_opened",
     "login_viewed",
     "register_viewed",
     "register_submitted",
     "register_succeeded",
+    # sign-up → first count
+    "bar_name_saved",
+    "count_day_set",
+    "count_day_skipped",
+    "start_screen_viewed",
+    "start_tapped",
+    "camera_allowed",
+    "camera_denied",
+    "first_scan_sent",
+    "first_scan_identified",
+    "first_bottle_saved",
+    "first_try_done",
+    "practice_cleared",
+    "reminder_on",
+    "reminder_declined",
+    "reminder_opened",
+    "review_opened",
+    "order_sent",
+    # the walkthrough video on the first-run start screen
+    "how_video_opened",
+    "how_video_finished",
 }
 
 
@@ -6116,6 +6211,68 @@ async def crm_asset(asset: str):
             "error": "not_found", "message": "Asset missing on this server"})
     return FileResponse(path, media_type=allowed[asset],
                         headers={"Cache-Control": "public, max-age=86400"})
+
+# ============== WALKTHROUGH VIDEO (/watch) ==============
+# The owner's 35-second walkthrough of a real count — snap, count, order sent —
+# for the welcome email (welcome.py links it when COMPANY_VIDEO_URL is set) and
+# anywhere else a link helps. The same cut is bundled in the app (86d-mobile
+# assets/video). Served here so there's always a working link, on any host.
+WATCH_VIDEO = os.path.join(os.path.dirname(CRM_PAGE), "first-count.mp4")
+
+
+@app.get("/watch", include_in_schema=False)
+async def watch_page():
+    """A page with the video and one line on what to do next."""
+    from fastapi.responses import HTMLResponse
+    app_url = html.escape(pitch.APP_URL or "")
+    get_it = (f'<p class="sub">Don\'t have it yet? <a href="{app_url}">Get 86\'d on the App Store</a></p>'
+              if app_url else "")
+    return HTMLResponse(f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How a count works — 86'd</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{ margin: 0; background: #0F0F0F; color: #fff;
+         font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }}
+  main {{ max-width: 420px; margin: 0 auto; padding: 24px 16px 40px; text-align: center; }}
+  h1 {{ font-size: 22px; margin: 4px 0 16px; }}
+  video {{ width: 100%; max-height: 78vh; border-radius: 16px; background: #000; }}
+  p {{ margin: 16px 0 0; }}
+  .sub {{ color: #A3A3A3; font-size: 14px; }}
+  a {{ color: #F0566A; }}
+</style></head>
+<body><main>
+  <h1>How a count works</h1>
+  <video src="/watch/first-count.mp4" controls playsinline preload="metadata"></video>
+  <p>Open 86'd and tap <strong>Try 3 Bottles</strong>. It takes about a minute.</p>
+  {get_it}
+</main></body></html>""", headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.api_route("/watch/first-count.mp4", methods=["GET", "HEAD"], include_in_schema=False)
+async def watch_video(request: Request):
+    """The video, with byte ranges (media.parse_range) — Safari won't play
+    without them. 2MB, read whole and sliced: no streaming machinery needed."""
+    if not os.path.exists(WATCH_VIDEO):
+        raise HTTPException(status_code=404, detail={"error": "not_found", "message": "Video missing on this server"})
+    with open(WATCH_VIDEO, "rb") as f:
+        data = f.read()
+    size = len(data)
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=86400"}
+    rng = media.parse_range(request.headers.get("range"), size)
+    if rng == "unsatisfiable":
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+    if rng is None:
+        body, status = data, 200
+    else:
+        start, end = rng
+        body, status = data[start:end + 1], 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    headers["Content-Length"] = str(len(body))
+    if request.method == "HEAD":
+        body = b""
+    return Response(content=body, status_code=status, media_type="video/mp4", headers=headers)
 
 # ============== ERROR HANDLERS ==============
 

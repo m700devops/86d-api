@@ -1599,10 +1599,18 @@ def funnel(_: bool = Depends(require_crm_key)):
              WHERE u.deleted_at IS NULL
         """)
         completed_count = cursor.fetchone()["n"]
+        cursor.execute(f"SELECT COUNT(*) AS n FROM users u WHERE u.deleted_at IS NULL AND EXISTS ({SENT_ORDER_SQL})")
+        sent_order_count = cursor.fetchone()["n"]
+        # "Started" = the AI read at least one of their bottles, or a count is
+        # in progress. It used to be "has an inventory_sessions row", which the
+        # app only writes when an order is SENT — so everyone who scanned and
+        # hadn't sent an order yet read as never started (see ACTIVATION_SQL).
         cursor.execute("""
-            SELECT COUNT(DISTINCT u.id) AS n
-              FROM users u JOIN inventory_sessions s ON s.user_id = u.id
+            SELECT COUNT(*) AS n FROM users u
              WHERE u.deleted_at IS NULL
+               AND (EXISTS (SELECT 1 FROM scan_events s WHERE s.user_id = u.id)
+                    OR EXISTS (SELECT 1 FROM inventory_drafts d WHERE d.user_id = u.id)
+                    OR EXISTS (SELECT 1 FROM inventory_sessions i WHERE i.user_id = u.id))
         """)
         started_count = cursor.fetchone()["n"]
 
@@ -1638,6 +1646,7 @@ def funnel(_: bool = Depends(require_crm_key)):
                 "signed_up": total_users,
                 "started_a_count": started_count,
                 "completed_a_count": completed_count,
+                "sent_an_order": sent_order_count,
                 "never_started_pct": rate(total_users - started_count, total_users),
                 "started_but_never_finished": max(0, started_count - completed_count),
             },
@@ -1736,6 +1745,67 @@ USER_STATUSES = ("trial", "active", "canceled")
 TEST_EMAIL_PATTERN = r"(^test[-+.]|app.*review|@86d\.com$|@example\.com$|-verify@)"
 
 
+# What a customer has actually DONE in the app, per account. The app never
+# writes inventory_sessions while someone counts — a completed session is
+# written only when an order email is sent (main.py's /orders/email) — so
+# "sessions_completed = 0" used to read as "never started a count" for someone
+# who had scanned forty bottles and not pressed Send yet. The real traces are
+# scan_events (every photo the AI read) and inventory_drafts (the count in
+# progress, synced from the phone). orders_sent counts what /orders/email
+# actually emailed (export_destination = the addresses that accepted it,
+# NULL when every send failed), not completed sessions: the older
+# /inventory/{id}/complete route completes a session without emailing anyone.
+SENT_ORDER_SQL = """
+    SELECT 1 FROM orders o JOIN inventory_sessions s ON s.id = o.session_id
+     WHERE s.user_id = u.id AND o.export_format = 'email' AND o.export_destination IS NOT NULL
+"""
+ACTIVATION_SQL = """
+    (SELECT COUNT(*) FROM scan_events WHERE user_id = u.id) AS scans,
+    (SELECT MIN(created_at) FROM scan_events WHERE user_id = u.id) AS first_scan_at,
+    (SELECT MAX(created_at) FROM scan_events WHERE user_id = u.id) AS last_scan_at,
+    COALESCE((SELECT SUM(json_array_length(bottles_data::json)) FROM inventory_drafts
+               WHERE user_id = u.id), 0) AS bottles_in_draft,
+    (SELECT MAX(updated_at) FROM inventory_drafts WHERE user_id = u.id) AS draft_updated_at,
+    (SELECT COUNT(*) FROM orders o JOIN inventory_sessions s ON s.id = o.session_id
+      WHERE s.user_id = u.id AND o.export_format = 'email'
+        AND o.export_destination IS NOT NULL) AS orders_sent
+"""
+
+# Hours after sign-up before a customer who hasn't scanned shows up on the
+# operator's "call them" list — long enough that they've had a night to try it,
+# short enough that the first week of the trial isn't gone.
+STUCK_AFTER_HOURS = int(os.getenv("CRM_STUCK_AFTER_HOURS", "48"))
+
+COUNT_DAY_LABEL = {"mon": "Monday", "tue": "Tuesday", "wed": "Wednesday", "thu": "Thursday",
+                   "fri": "Friday", "sat": "Saturday", "sun": "Sunday", "varies": "No set day"}
+COUNT_TIME_LABEL = {"before_open": "before opening", "afternoon": "in the afternoon",
+                    "after_close": "after close"}
+
+
+def activation_stage(row: dict) -> str:
+    """Where a customer has got to: 'ordered' (sent an order — a whole count
+    done), 'counting' (bottles saved in a count), 'tried' (the AI read at least
+    one bottle, nothing saved), or 'not_started'. Pure, over ACTIVATION_SQL's
+    columns."""
+    if (row.get("orders_sent") or 0) > 0:
+        return "ordered"
+    if (row.get("bottles_in_draft") or 0) > 0:
+        return "counting"
+    if (row.get("scans") or 0) > 0:
+        return "tried"
+    return "not_started"
+
+
+def count_day_text(day: Optional[str], time_of_day: Optional[str]) -> Optional[str]:
+    """'Sunday after close' — when the customer said they count, for the CRM."""
+    if not day:
+        return None
+    text = COUNT_DAY_LABEL.get(day, day)
+    if day != "varies" and time_of_day in COUNT_TIME_LABEL:
+        text += " " + COUNT_TIME_LABEL[time_of_day]
+    return text
+
+
 @crm_router.get("/users", response_model=dict)
 def list_users(status: Optional[str] = None, q: Optional[str] = None,
                limit: int = 100, offset: int = 0,
@@ -1784,7 +1854,9 @@ def list_users(status: Optional[str] = None, q: Optional[str] = None,
                    (SELECT COUNT(*) FROM inventory_sessions
                      WHERE user_id = u.id AND status = 'completed') AS sessions_completed,
                    (SELECT MAX(started_at) FROM inventory_sessions
-                     WHERE user_id = u.id) AS last_active_at
+                     WHERE user_id = u.id) AS last_active_at,
+                   u.count_day, u.count_time,
+                   {ACTIVATION_SQL}
               FROM users u
              WHERE {sql_where}
              ORDER BY u.created_at DESC
@@ -1821,6 +1893,12 @@ def list_users(status: Optional[str] = None, q: Optional[str] = None,
 
     for u in users:
         u["subscription_status"] = u["subscription_status"] or "trial"
+        u["stage"] = activation_stage(u)
+        u["counts_on"] = count_day_text(u.get("count_day"), u.get("count_time"))
+        # Last time they did anything: a scan, a draft sync or a sent order.
+        u["last_active_at"] = max(
+            [t for t in (u.get("last_active_at"), u.get("last_scan_at"), u.get("draft_updated_at")) if t],
+            default=None)
         lead = leads_by_user.get(u["id"])
         u["lead"] = {"id": lead["id"], "name": lead["name"], "loc": lead["loc"],
                      "status": lead["status"]} if lead else None
@@ -1828,6 +1906,45 @@ def list_users(status: Optional[str] = None, q: Optional[str] = None,
     return {"users": users, "count": len(users), "matching": matching,
             "offset": offset, "limit": limit,
             "counts": {**{k: by_status.get(k, 0) for k in USER_STATUSES}, "all": everything}}
+
+
+@crm_router.get("/users/stuck", response_model=dict)
+def stuck_users(_: bool = Depends(require_crm_key)):
+    """New customers worth a call: still in their trial, signed up at least
+    STUCK_AFTER_HOURS ago, and the AI has never read one of their bottles.
+    Follow-ups shows them at the top — at a handful of signups a week the
+    fastest fix for "signed up and never counted" is the owner on the phone
+    asking when they count. Newest first; test and review accounts left out.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=STUCK_AFTER_HOURS)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT u.id, u.email, u.name, u.business_name, u.manager_name, u.phone,
+                   u.created_at, u.trial_ends_at, u.count_day, u.count_time,
+                   {ACTIVATION_SQL}
+              FROM users u
+             WHERE u.deleted_at IS NULL AND u.email !~* %s
+               AND COALESCE(u.subscription_status, 'trial') = 'trial'
+               AND u.created_at <= %s AND u.trial_ends_at > %s
+               AND NOT EXISTS (SELECT 1 FROM scan_events s WHERE s.user_id = u.id)
+             ORDER BY u.created_at DESC
+             LIMIT 50
+        """, (TEST_EMAIL_PATTERN, cutoff, now_iso()))
+        users = [dict(r) for r in cursor.fetchall()]
+        ids = [u["id"] for u in users]
+        leads_by_user = {}
+        if ids:
+            cursor.execute(
+                "SELECT matched_user_id, id, name, loc FROM crm_leads "
+                "WHERE matched_user_id = ANY(%s)", (ids,))
+            leads_by_user = {r["matched_user_id"]: dict(r) for r in cursor.fetchall()}
+    for u in users:
+        u["stage"] = activation_stage(u)
+        u["counts_on"] = count_day_text(u.get("count_day"), u.get("count_time"))
+        lead = leads_by_user.get(u["id"])
+        u["lead"] = {"id": lead["id"], "name": lead["name"], "loc": lead["loc"]} if lead else None
+    return {"users": users, "after_hours": STUCK_AFTER_HOURS}
 
 
 @crm_router.delete("/users/{user_id}", response_model=dict)

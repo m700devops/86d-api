@@ -531,7 +531,7 @@ def init_db():
         # hide behind a relay alias at any time.
         # password_reset_attempts: wrong reset codes against the current one —
         # the code is thrown away after RESET_MAX_ATTEMPTS (main.reset_password).
-        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT"), ("password_reset_attempts", "INTEGER DEFAULT 0"), ("phone", "TEXT"), ("stripe_subscription_id", "TEXT"), ("title", "TEXT"), ("order_reply_to", "TEXT")]:
+        for col, col_type in [("business_name", "TEXT"), ("manager_name", "TEXT"), ("stripe_customer_id", "TEXT"), ("trial_reminder_sent_at", "TEXT"), ("password_changed_at", "TEXT"), ("auth_provider", "TEXT DEFAULT 'password'"), ("apple_subject", "TEXT"), ("password_reset_attempts", "INTEGER DEFAULT 0"), ("phone", "TEXT"), ("stripe_subscription_id", "TEXT"), ("title", "TEXT"), ("order_reply_to", "TEXT"), ("count_day", "TEXT"), ("count_time", "TEXT")]:
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'users' AND column_name = %s
@@ -539,6 +539,20 @@ def init_db():
             if not cursor.fetchone():
                 cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
                 print(f"[db] migrated users: added {col} {col_type}", flush=True)
+        conn.commit()
+
+        # welcome_sent_at: the one welcome email from the owner's mailbox
+        # (main._send_welcome_emails). Adding the column is the one-shot gate:
+        # every account that already exists is stamped now, so a deploy never
+        # sends "welcome" to someone who signed up weeks ago.
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'users' AND column_name = 'welcome_sent_at'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE users ADD COLUMN welcome_sent_at TEXT")
+            cursor.execute("UPDATE users SET welcome_sent_at = %s", (now_iso(),))
+            print(f"[db] migrated users: added welcome_sent_at (stamped {cursor.rowcount} existing)", flush=True)
         conn.commit()
 
         # Distributor delivery days ("mon,thu"): set once per distributor, so the
