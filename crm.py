@@ -727,7 +727,11 @@ def phone_digits(phone: Optional[str]) -> str:
 ZONE_LABELS = {-5: "Eastern", -6: "Central", -7: "Mountain", -8: "Pacific"}
 
 
-TRY_KINDS = ("call", "email", "fb")
+TRY_KINDS = ("call", "email", "fb", "form")
+# The day's quota each kind of touch spends. A contact-form message has none:
+# it spends only the lifetime touch ticker.
+COUNTER_COLS = {"call": "daily_calls_remaining", "email": "daily_emails_remaining",
+                "fb": "daily_fb_remaining"}
 
 
 def _tries(kind_counts) -> dict:
@@ -739,7 +743,7 @@ def _tries(kind_counts) -> dict:
     use up a bar's six tries at being rung. The screen's "tries" is this —
     a bar called once and emailed twice has been tried three times.
     """
-    out = {"total": 0, "call": 0, "email": 0, "fb": 0}
+    out = {"total": 0, "call": 0, "email": 0, "fb": 0, "form": 0}
     for kind, n in kind_counts:
         out["total"] += n
         if kind in TRY_KINDS:
@@ -909,10 +913,21 @@ def _cadence(attempt: int, outcome: Optional[str]) -> tuple[Optional[int], Optio
 # Never contacted: the same test the call list uses to decide who's still
 # unworked. Everything else has had at least one logged call or email.
 _UNTOUCHED = "(status = 'new' AND last_touch_at IS NULL)"
+# Contact form: a message sent through the venue's own website form, where
+# nobody has actually been spoken to. A lead whose ONLY logged touches are
+# contact-form messages sits in its own CRM view, apart from the bars the
+# operator has really called or emailed; the first real call, email or
+# Facebook message moves it into Open on its own (nothing to clear by hand).
+_FORM_TOUCH = ("EXISTS (SELECT 1 FROM crm_touches t WHERE t.lead_id = crm_leads.id "
+               "AND t.outcome IS DISTINCT FROM 'undone' AND t.kind = 'form')")
+_REAL_TOUCH = ("EXISTS (SELECT 1 FROM crm_touches t WHERE t.lead_id = crm_leads.id "
+               "AND t.outcome IS DISTINCT FROM 'undone' AND t.kind <> 'form')")
+_FORM_ONLY = f"({_FORM_TOUCH} AND NOT {_REAL_TOUCH})"
 LEAD_VIEWS = {
     "untouched": _UNTOUCHED,
     "worked": f"NOT {_UNTOUCHED}",
-    "open": f"(status <> 'dead' AND NOT {_UNTOUCHED})",
+    "open": f"(status <> 'dead' AND NOT {_UNTOUCHED} AND NOT {_FORM_ONLY})",
+    "form": f"(status <> 'dead' AND {_FORM_ONLY})",
 }
 
 
@@ -2119,7 +2134,7 @@ def call_queue(limit: int = 50, _: bool = Depends(require_crm_key)):
 
 
 class TouchLogged(BaseModel):
-    kind: Literal["call", "email", "fb"]
+    kind: Literal["call", "email", "fb", "form"]
     outcome: Optional[Literal["answered", "voicemail", "no_answer", "gatekeeper",
                               "not_interested", "callback"]] = None
     followup_in_days: Optional[int] = Field(default=None, ge=0, le=365)
@@ -2155,7 +2170,11 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
             sets.append("attempts = %s"); params.append(attempt)
         elif data.kind == "email" and not lead["email_date"]:
             sets.append("email_date = %s"); params.append(today)
-        if data.outcome:
+        if data.kind == "form":
+            # Their website's contact form: nobody answered anything, so it
+            # never carries a call outcome.
+            sets.append("last_outcome = %s"); params.append("form_sent")
+        elif data.outcome:
             sets.append("last_outcome = %s"); params.append(data.outcome)
 
         # An explicit follow-up always wins; otherwise the ladder decides.
@@ -2166,7 +2185,9 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
             sets.append("followup_date = %s"); params.append(follow)
 
         new_status = data.status or forced_status
-        if new_status is None and data.outcome:
+        if new_status is None and data.kind == "form":
+            new_status = "contacted"
+        if new_status is None and data.outcome and data.kind != "form":
             # A call that reached a human has, at minimum, contacted them.
             new_status = {"not_interested": "dead", "callback": "warm",
                           "answered": "contacted", "voicemail": "contacted",
@@ -2192,7 +2213,7 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
 
         undo_id = _snapshot(cursor, lead, f"log {data.kind}")
         _attach_touch(cursor, undo_id, _record_touch(
-            cursor, lead, data.kind, data.outcome, attempt, lead.get("tz_offset_hours")))
+            cursor, lead, data.kind, None if data.kind == "form" else data.outcome, attempt, lead.get("tz_offset_hours")))
         params.append(lead_id)
         cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
         updated = cursor.fetchone()
@@ -2204,12 +2225,12 @@ def log_touch(lead_id: str, data: TouchLogged, _: bool = Depends(require_crm_key
         # remaining count, and the next counters read resets to quota and erases
         # it — the day's activity numbers then under-report the work done.
         _load_counters_locked(cursor)
-        counter_col = {"call": "daily_calls_remaining",
-                       "email": "daily_emails_remaining",
-                       "fb": "daily_fb_remaining"}[data.kind]
+        counter_col = COUNTER_COLS.get(data.kind)
+        per_kind = (f"{counter_col} = GREATEST(0, {counter_col} - 1),"
+                    if counter_col else "")
         cursor.execute(f"""
             UPDATE crm_counters
-               SET {counter_col} = GREATEST(0, {counter_col} - 1),
+               SET {per_kind}
                    touch_ticker_remaining = GREATEST(0, touch_ticker_remaining - 1),
                    touch_ticker_last_action = %s,
                    updated_at = %s
@@ -4771,21 +4792,23 @@ def undo_touch(undo_id: str, _: bool = Depends(require_crm_key)):
 
         if undo["counters_spent"]:
             kind = (undo["action"] or "").split()[-1]
-            counter_col = {"call": "daily_calls_remaining",
-                           "email": "daily_emails_remaining",
-                           "fb": "daily_fb_remaining"}.get(kind)
-            if counter_col:
+            counter_col = COUNTER_COLS.get(kind)
+            if counter_col or kind == "form":
                 # And before a refund: crediting yesterday's number back is the
                 # same erasure, and leaves a call that didn't happen in the day's
                 # totals — which is exactly what the undo exists to take out.
+                # A contact form has no daily quota of its own: only the
+                # lifetime ticker it spent comes back.
                 _load_counters_locked(cursor)
+                per_kind = f"{counter_col} = {counter_col} + %s," if counter_col else ""
                 cursor.execute(f"""
                     UPDATE crm_counters
-                       SET {counter_col} = {counter_col} + %s,
+                       SET {per_kind}
                            touch_ticker_remaining = touch_ticker_remaining + %s,
                            updated_at = %s
                      WHERE id = 1
-                """, (undo["counters_spent"], undo["counters_spent"], now_iso()))
+                """, ((undo["counters_spent"],) if counter_col else ())
+                     + (undo["counters_spent"], now_iso()))
 
         cursor.execute("UPDATE crm_lead_undo SET restored_at = %s WHERE id = %s",
                        (now_iso(), undo_id))
@@ -5595,7 +5618,7 @@ def call_now(limit: Optional[int] = None, _: bool = Depends(require_crm_key)):
 
 class Debrief(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
-    kind: Literal["call", "email", "fb"] = "call"
+    kind: Literal["call", "email", "fb", "form"] = "call"
 
 
 # What a logged call is turned into — one definition for /debrief and
@@ -5817,6 +5840,13 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
             outcome_guess = "answered"
         else:
             outcome_guess = None
+    if kind == "form":
+        # A message through their website form: nobody picked up, nobody
+        # said anything. Never "answered", never a call outcome; the stage
+        # moves to contacted unless the notes say something stronger.
+        outcome_guess = None
+        if status not in ("warm", "won", "dead"):
+            status = "contacted" if lead.get("status") in (None, "new") else None
     cadence_days, forced_status = _cadence(attempt, outcome_guess) if kind == "call" else (None, None)
     if forced_status and not status:
         status = forced_status
@@ -5826,7 +5856,8 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
 
     if status:
         sets.append("status = %s"); params.append(status); applied["status"] = status
-    sets.append("last_outcome = %s"); params.append(outcome_guess or "logged")
+    sets.append("last_outcome = %s")
+    params.append(outcome_guess or ("form_sent" if kind == "form" else "logged"))
     # Length caps on model output: these columns are written straight from
     # whatever the model returned, and a model is perfectly capable of
     # handing back a paragraph where a name was asked for.
@@ -5938,11 +5969,11 @@ def _apply_call_notes(cursor, lead, extracted: dict, raw_text: str, kind: str,
     cursor.execute(f"UPDATE crm_leads SET {', '.join(sets)} WHERE id = %s RETURNING *", params)
     updated = cursor.fetchone()
 
-    counter_col = {"call": "daily_calls_remaining", "email": "daily_emails_remaining",
-                   "fb": "daily_fb_remaining"}[kind]
+    counter_col = COUNTER_COLS.get(kind)
+    per_kind = f"{counter_col} = GREATEST(0, {counter_col} - 1)," if counter_col else ""
     cursor.execute(f"""
         UPDATE crm_counters
-           SET {counter_col} = GREATEST(0, {counter_col} - 1),
+           SET {per_kind}
                touch_ticker_remaining = GREATEST(0, touch_ticker_remaining - 1),
                touch_ticker_last_action = %s, updated_at = %s
          WHERE id = 1 RETURNING *
@@ -6664,7 +6695,11 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
     added: list = []
     for part in new_texts:
         try:
-            made = _quick_add(part)
+            # "Sent them a message through their contact form" is not a
+            # call: logged as a contact-form touch, so the bar lands in the
+            # CRM tab's Contact Form view instead of Open.
+            made = (_quick_add(part, kind="form") if _assist.mentions_contact_form(part)
+                    else _quick_add(part))
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {}
             skipped.append({"lead": None, "why": "couldn't add the new bar — "
@@ -6676,9 +6711,13 @@ def assist_update(data: AssistRequest, _: bool = Depends(require_crm_key)):
             continue
         lead = made["lead"]
         existing = (made.get("applied") or {}).get("matched_existing")
-        changed = [("already in your book — logged the call on it" if existing
+        form = lead.get("last_outcome") == "form_sent"
+        what = "contact-form message" if form else "call"
+        changed = [(f"already in your book — logged the {what} on it" if existing
                     else "added as a new lead")]
-        if lead.get("last_outcome"):
+        if form:
+            changed.append("logged contact-form message")
+        elif lead.get("last_outcome"):
             changed.append(f"logged call ({lead['last_outcome'].replace('_', ' ')})")
         if lead.get("contact"):
             changed.append(f"ask for {lead['contact']}")
@@ -7802,7 +7841,7 @@ def quick_add_lead(data: QuickAdd, _: bool = Depends(require_crm_key)):
     return _quick_add(data.text, data.name)
 
 
-def _quick_add(text: str, name_override: Optional[str] = None) -> dict:
+def _quick_add(text: str, name_override: Optional[str] = None, kind: str = "call") -> dict:
     """Describe a call to a bar that isn't in the CRM yet — paste whatever you
     have — and get back a new lead with the call logged and every detail kept.
 
@@ -7886,7 +7925,7 @@ def _quick_add(text: str, name_override: Optional[str] = None) -> dict:
             lead = cursor.fetchone()
 
         updated, applied, undo_id, counters = _apply_call_notes(
-            cursor, lead, extracted, text, "call", today, now)
+            cursor, lead, extracted, text, kind, today, now)
         if matched:
             # After the call's own note, and still under its undo: the
             # snapshot was taken before either.

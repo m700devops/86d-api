@@ -19,7 +19,7 @@ from typing import Optional
 STATUSES = ("new", "contacted", "warm", "won", "dead")
 OUTCOMES = ("answered", "voicemail", "no_answer", "gatekeeper", "callback",
             "not_interested")
-KINDS = ("call", "email", "fb")
+KINDS = ("call", "email", "fb", "form")
 MAX_CHANGES = 50
 FIELD_LIMITS = {"name": 200, "loc": 200, "contact": 200, "phone": 50, "email": 320}
 NOTE_LIMIT = 1000
@@ -82,7 +82,7 @@ For each lead the message is about, return one entry in "changes". Use null for 
 - status: new = never contacted; contacted = reached out, no real interest yet; warm = interested, a callback agreed or a demo booked; won = signed up; dead = said no, already has a system or an app, or asked not to be called again.
 - followup_date: the next day to get back to them, YYYY-MM-DD. clear_followup: true removes the follow-up date entirely; otherwise false.
 - note: anything else worth keeping, as one line: what they said, a personal detail, a time they gave ("call after 3pm"), a promise made.
-- logged: ONLY when the message says a call, email or Facebook message HAPPENED ("called", "left a voicemail", "no answer", "emailed him"). kind; outcome for a call: answered = a person picked up and spoke, voicemail, no_answer = rang out with no message left, gatekeeper = staff answered and the decision maker wasn't in, callback = they asked to be called back or agreed a next step, not_interested = said no or already has a system; a one-sentence summary; their_words = the exact part of the message about this lead, copied word for word. Logging counts as a try and books the next call on its own when nobody was reached, so never log a contact the message doesn't say happened.
+- logged: ONLY when the message says a call, email, Facebook message or contact-form message HAPPENED ("called", "left a voicemail", "no answer", "emailed him", "sent a message through their contact form"). kind: call, email, fb (Facebook), or form = a message sent through the venue's own website contact form, where nobody was spoken to — never log a contact form as a call or an email, and never give it an outcome; outcome for a call: answered = a person picked up and spoke, voicemail, no_answer = rang out with no message left, gatekeeper = staff answered and the decision maker wasn't in, callback = they asked to be called back or agreed a next step, not_interested = said no or already has a system; a one-sentence summary; their_words = the exact part of the message about this lead, copied word for word. Logging counts as a try and books the next call on its own when nobody was reached, so never log a contact the message doesn't say happened.
 
 Rules:
 1. Never invent. Every name, phone number and email you write must appear in the message, or, for a contact, in that lead's own row. If they didn't give it, leave it null.
@@ -139,7 +139,8 @@ BAR_SCHEMA = {
 }
 
 BAR_RULES = """
-11. A bar or restaurant the message is about that is NOT in LEADS never goes in "changes" — there is no lead to change, and a change with a name instead of an alias is thrown away. Put it in "new_leads" instead, one entry per new bar, with "text" = every part of the message about that bar copied word for word (name, phone, address, who you spoke to, what was said, when to call back). The system creates the lead, logs the call and sets the follow-up from that text itself. In reply, say you are adding it; never say it was added, logged or scheduled — the system reports that."""
+11. A bar or restaurant the message is about that is NOT in LEADS never goes in "changes" — there is no lead to change, and a change with a name instead of an alias is thrown away. Put it in "new_leads" instead, one entry per new bar, with "text" = every part of the message about that bar copied word for word (name, phone, address, who you spoke to, what was said, when to call back). The system creates the lead, logs the call and sets the follow-up from that text itself. In reply, say you are adding it; never say it was added, logged or scheduled — the system reports that.
+15. Contact forms: the salesperson also reaches bars by filling in the contact form on the venue's own website. Nobody is spoken to, so it is NOT a call. For a bar in LEADS, log it with kind "form" (outcome null). For a new bar, put it in "new_leads" as usual and keep the words "contact form" in its text — that is how the system files it under Contact Form instead of a call. Bars reached only by contact form are kept apart in the CRM tab's Contact Form list until a real call or email happens."""
 
 BAR_RULES += """
 12. When the message asks you to FIND venues it doesn't name — sister restaurants, the same owner's other bars, other locations — put one entry in "research": "about" = the venue they belong with (as the message names it), "loc" = its "City, ST", "find" = what to look for in plain words, "carry" = the part of the message to copy onto each venue found, word for word (e.g. "they use our competitor, Margins Edge, they are satisfied"; empty if nothing is to be copied). The SYSTEM searches the web and checks each venue against its own website before adding it. Never ask the salesperson for the names — finding them is the job — and never name venues yourself. In reply say you're looking them up; the system reports what it found and added.
@@ -205,6 +206,18 @@ def new_lead_texts(out: dict, text: str, known_aliases) -> list:
     return unique
 
 
+_CONTACT_FORM = re.compile(
+    r"\b(?:contact|web|website|online|inquiry|enquiry)[ -]?forms?\b"
+    r"|\bforms? on (?:their|the|its) (?:web)?site\b", re.I)
+
+
+def mentions_contact_form(text: str) -> bool:
+    """Does this excerpt say the bar was reached through its website's contact
+    form? A narrow phrase match (bounded, linear): the AI bar's new bars are
+    added through quick-add, which logs a CALL unless this says otherwise."""
+    return bool(_CONTACT_FORM.search((text or "")[:6000]))
+
+
 def dates_table(today: date, days: int = 14) -> str:
     """Today and the next two weeks, spelled out.
 
@@ -240,7 +253,8 @@ def _tries_text(t: Optional[dict]) -> str:
     if not t or not t.get("total"):
         return "0"
     parts = [f"{t[k]} {w}" for k, w in (("call", "call"), ("email", "email"),
-                                         ("fb", "message")) if t.get(k)]
+                                         ("fb", "message"), ("form", "contact form"))
+             if t.get(k)]
     return f"{t['total']} ({', '.join(parts)})" if parts else str(t["total"])
 
 
@@ -425,7 +439,7 @@ def clean_change(change: dict, lead: dict, text: str, today: date) -> tuple[dict
 
     logged = change.get("logged")
     if isinstance(logged, dict) and logged.get("kind") in KINDS:
-        outcome = logged.get("outcome")
+        outcome = logged.get("outcome") if logged["kind"] != "form" else None
         out["logged"] = {
             "kind": logged["kind"],
             "outcome": outcome if outcome in OUTCOMES else None,
@@ -442,7 +456,8 @@ def describe(clean: dict) -> list:
               "email": "email", "status": "stage"}
     if "logged" in clean:
         lg = clean["logged"]
-        what = {"call": "call", "email": "email", "fb": "Facebook message"}[lg["kind"]]
+        what = {"call": "call", "email": "email", "fb": "Facebook message",
+            "form": "contact-form message"}[lg["kind"]]
         said.append(f"logged {what}" + (f" ({lg['outcome'].replace('_', ' ')})"
                                         if lg.get("outcome") else ""))
     for field, label in labels.items():

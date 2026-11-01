@@ -378,7 +378,7 @@ FastAPI backend for 86'd Mobile — handles auth, inventory, bottle scanning, an
   test_scanstats.py test_crawl_quiet.py test_barcode.py test_duplicates.py test_db_pool.py
   test_research.py test_competitors.py test_hand_check.py test_bounces.py test_memory.py
   test_cloudtalk.py test_callcoach.py test_price.py test_profile_phone.py test_billing.py
-  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py test_daytime.py test_first_count.py test_login_profile.py test_watch.py -q` (1334 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
+  test_product_distributors.py test_offer.py test_case_orders.py test_order_card.py test_email_events.py test_daytime.py test_first_count.py test_login_profile.py test_watch.py test_contact_form.py -q` (1340 tests, in one process with a dummy `DATABASE_URL` — test_timezones.py needs it; run them
   in a venv with the pinned requirements — system Python lacks cryptography's backend, which
   test_apple_auth.py and main.py need)
 - test_scan_path.py — the bottle-scan path (AI Vision Rules below). Runs the real OpenAI SDK and the
@@ -1385,6 +1385,21 @@ capture. Don't reintroduce them or describe them as current.)
   the same `loadPipeline()` and the same row-click handler (`TAB` picks the list), so Log /
   Email / Edit / Delete behave identically in both
 - **Two buttons only: Open and Dead** (`status=open` on `/leads` — see above).
+- **A third button: Contact Form** (2026-11-01, the owner's call). Bars reached ONLY through the
+  contact form on their own website — nobody was spoken to — are kept apart from Open. A
+  contact-form message is its own touch kind, `form` (`TRY_KINDS`, `TouchLogged`, `Debrief`): the
+  Log drawers' "Contact form" button posts `/touch {kind: form}`; it moves a new lead to
+  `contacted`, sets `last_outcome='form_sent'`, never carries a call outcome, never touches the
+  call ladder (`attempts`), and spends only the lifetime touch ticker (`COUNTER_COLS` has no daily
+  quota for it). `/leads?status=form` (`LEAD_VIEWS["form"]`, `_FORM_ONLY`) = not dead, at least one
+  form touch and NO other (non-undone) touch; `open` leaves those out, so the first real call,
+  email or Facebook message moves the bar into Open by itself. **The AI files them**: `form` is in
+  `assist.KINDS` and the SYSTEM prompt (a bar in the book is logged with kind "form", outcome
+  null), BAR_RULES rule 15 tells it to keep "contact form" in a new bar's text, and
+  `assist.mentions_contact_form()` (narrow phrase match) makes `_quick_add(kind="form")` log the
+  new bar as a form, not a call. Shown with its own icon in WHERE THINGS STAND ("Sent their contact
+  form") and REACHED OUT. Covered by test_contact_form.py; the views, `/touch` and undo were run on
+  a real Postgres 16
 - **The STAGE header is clickable** on the CRM tab: each click floats the next stage to the
   top (Warm → Contacted → Won → back to most-recently-worked). Sorted server-side via
   `/leads?first=<stage>` (`ORDER BY (status = %s) DESC, …`, only accepted when it's a real

@@ -1768,6 +1768,7 @@ $('zones').onclick=async e=>{
         <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
         <button data-outcome="not_interested" data-note="Not interested, asked not to be called again.">Not interested</button>
         <button data-outcome="not_interested" data-note="Already has a system/app for inventory.">Has a system</button>
+        <button data-outcome="" data-kind="form" data-note="Sent a message through their website contact form." title="You filled in the contact form on their website — nobody was spoken to. The bar moves to the Contact Form list.">Contact form</button>
         <button data-wrong>Wrong number</button>
         <button data-cancel>Cancel</button>
       </div>
@@ -1831,7 +1832,7 @@ async function drawerAction(dr,e){
     const typed=ta.value.trim();
     try{
       const r=await api(`/leads/${id}/touch`,{method:'POST',body:JSON.stringify({
-        kind:'call', outcome:quick.dataset.outcome,
+        kind:quick.dataset.kind||'call', outcome:quick.dataset.outcome||null,
         note:typed||quick.dataset.note})});
       toast(`${quick.textContent} logged — ${r.lead.name}`, r.undo_id);
       await loadCalls();
@@ -1875,6 +1876,10 @@ async function drawerAction(dr,e){
    each one held; "is this one still worth a call or not" is the only
    question the tab actually answers. Typing a search looks in both.
 
+   A third button, Contact Form, holds bars reached ONLY through the contact
+   form on their own website (kind 'form' touches): nobody has been spoken
+   to, so they stay apart from Open until a real call or email is logged.
+
    Only bars you've WORKED are here — a call or email logged. The ones nobody
    has contacted yet live in the burger's Yet to Contact tab, which renders
    through this same function and the same row buttons (TAB decides which). */
@@ -1906,7 +1911,8 @@ async function loadPipeline(){
     $('yetCount').textContent=`${d.counts.untouched??d.matching} not contacted yet`;
   }else{
   const open=d.counts.open??0;
-  $('pipeStats').innerHTML=[['open','Open',open],['dead','Not Interested',d.counts.dead??0]]
+  $('pipeStats').innerHTML=[['open','Open',open],['dead','Not Interested',d.counts.dead??0],
+                           ['form','Contact Form',d.counts.form??0]]
     .map(([key,label,n])=>`<button data-view="${key}"
        class="${!searching&&PIPE.view===key?'on':''}">${label} <b>${n}</b></button>`).join('');
   }
@@ -1916,6 +1922,7 @@ async function loadPipeline(){
       searching ? 'Nothing matches “'+esc(S.q)+'”.'
         : yet ? 'Everyone has been contacted.'
         : PIPE.view==='dead' ? 'Nobody has said no yet.'
+        : PIPE.view==='form' ? 'No contact-form messages logged yet — open Log on a bar and press Contact form, or tell the AI “sent a contact form to …”.'
         : 'Nothing logged yet — log a call from the Call list and it shows up here.'}</div>`;
     return;
   }
@@ -1958,6 +1965,7 @@ const OUTCOME_LABEL = {
   gatekeeper: 'Manager out',
   not_interested: 'Not interested', callback: 'Asked for a callback',
   logged: 'Logged', emailed: 'Emailed', wrong_number: 'Wrong number',
+  form_sent: 'Contact form sent',
 };
 const outcomeLabel = o => o ? (OUTCOME_LABEL[o] || o) : '';
 
@@ -1975,13 +1983,14 @@ function phoneCheck(l){
    counted from the touch log. Not `attempts`: that counts calls only, because
    it paces the call-retry ladder, and an email must not use up a bar's six
    tries at being rung. */
-const TRY_WORDS = {call:['call','calls'], email:['email','emails'], fb:['message','messages']};
+const TRY_WORDS = {call:['call','calls'], email:['email','emails'], fb:['message','messages'],
+                   form:['contact form','contact forms']};
 function triesText(t){
   if(!t) return '';
   return Object.keys(TRY_WORDS).filter(k=>t[k])
     .map(k=>`${t[k]} ${TRY_WORDS[k][t[k]===1?0:1]}`).join(' · ');
 }
-const TOUCH_KIND = {call:'Call', email:'Email', fb:'Facebook message'};
+const TOUCH_KIND = {call:'Call', email:'Email', fb:'Facebook message', form:'Contact form'};
 // In this device's clock, which is the operator's.
 function touchWhen(at){
   const d=new Date(at);
@@ -2134,6 +2143,7 @@ const ICON={
   call:'<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>',
   email:'<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
   fb:'<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+  form:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 8h10"/><path d="M7 12h10"/><path d="M7 16h6"/>',
   reply:'<polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>',
   next:'<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   done:'<path d="M20 6 9 17l-5-5"/>',
@@ -2193,8 +2203,9 @@ function standing(l, today){
 
   // 1. the latest thing that happened
   if(replied) add('reply', rep.opt_out?'Asked us to stop emailing':'They replied', 'head', dayOf(rep.at));
-  else if(t) add(t.kind==='email'?'email':t.kind==='fb'?'fb':'call',
-                 t.kind==='email'?'Emailed':t.kind==='fb'?'Messaged on Facebook':callSaid(t.outcome,l),
+  else if(t) add(t.kind==='email'?'email':t.kind==='fb'?'fb':t.kind==='form'?'form':'call',
+                 t.kind==='email'?'Emailed':t.kind==='fb'?'Messaged on Facebook'
+                 :t.kind==='form'?'Sent their contact form':callSaid(t.outcome,l),
                  'head', dayOf(t.at));
   else if(l.last_touch_at||l.last_outcome)      // worked before the touch log, or set by hand
     add(l.last_outcome==='emailed'?'email':'call',
@@ -2207,7 +2218,7 @@ function standing(l, today){
   if(call && out.lines[0].ic!=='call') add('call', callSaid(call.outcome,l), 'prior', dayOf(call.at));
 
   // 3. what's next
-  const callOutcome=call?call.outcome:(l.last_outcome!=='emailed'?l.last_outcome:null);
+  const callOutcome=call?call.outcome:(!['emailed','form_sent'].includes(l.last_outcome)?l.last_outcome:null);
   const reached=['answered','callback','gatekeeper'].includes(callOutcome);
   const who=askFor(l), due=l.followup_date;
   today=today||ymdLocal(new Date());
@@ -2236,12 +2247,13 @@ function standHtml(st){
 /* REACHED OUT: every call, email and Facebook message, one each — a call
    then two follow-up emails is 3. Undone ones don't count. */
 function reachHtml(l){
-  const t=l.tries||{total:0,call:0,email:0,fb:0};
+  const t=l.tries||{total:0,call:0,email:0,fb:0,form:0};
   // Worked, but not one call or email logged here (the stage was set by hand,
   // or it predates the log): a 0 beside "Emailed" would contradict itself.
   if(!t.total&&(l.last_touch_at||l.last_outcome))
     return '<div class="n muted" title="No call or email logged here — the stage was set by hand">—</div>';
-  const mix=[['call',t.call,'call'],['email',t.email,'email'],['fb',t.fb,'Facebook message']]
+  const mix=[['call',t.call,'call'],['email',t.email,'email'],['fb',t.fb,'Facebook message'],
+             ['form',t.form,'contact form']]
     .filter(([,n])=>n).map(([k,n,w])=>`<span title="${n} ${w}${n===1?'':'s'}">${icon(k)}${n}</span>`).join('');
   return `<div class="n">${t.total||0}</div>${mix?`<div class="mix">${mix}</div>`:''}`;
 }
@@ -2428,6 +2440,7 @@ $('pipeBody').onclick=async e=>{
         <button data-outcome="gatekeeper" data-note="Spoke to staff, manager not in.">Manager out</button>
         <button data-outcome="not_interested" data-note="Not interested.">Not interested</button>
         <button data-outcome="not_interested" data-note="Already has a system/app for inventory.">Has a system</button>
+        <button data-outcome="" data-kind="form" data-note="Sent a message through their website contact form." title="You filled in the contact form on their website — nobody was spoken to. The bar moves to the Contact Form list.">Contact form</button>
         <button data-wrong>Wrong number</button>
         <button data-cancel>Cancel</button>
       </div>
@@ -2497,7 +2510,7 @@ async function pipeDrawer(dr,e){
     const ta=dr.querySelector('textarea');
     if(quick){
       try{ const r=await api(`/leads/${id}/touch`,{method:'POST',body:JSON.stringify({
-             kind:'call', outcome:quick.dataset.outcome,
+             kind:quick.dataset.kind||'call', outcome:quick.dataset.outcome||null,
              note:ta.value.trim()||quick.dataset.note})});
            toast(`${quick.textContent} logged`, r.undo_id); await loadPipeline(); }
       catch(err){ fail(err.message); }
