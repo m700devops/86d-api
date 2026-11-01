@@ -61,11 +61,11 @@ def _db(monkeypatch, cursor):
 
 def test_tries_counts_every_kind():
     t = crm._tries([("call", 1), ("email", 2)])
-    assert t == {"total": 3, "call": 1, "email": 2, "fb": 0}
+    assert t == {"total": 3, "call": 1, "email": 2, "fb": 0, "form": 0}
 
 
 def test_tries_with_nothing_logged():
-    assert crm._tries([]) == {"total": 0, "call": 0, "email": 0, "fb": 0}
+    assert crm._tries([]) == {"total": 0, "call": 0, "email": 0, "fb": 0, "form": 0}
 
 
 def test_follow_ups_try_column_counts_calls_and_emails(monkeypatch):
@@ -113,7 +113,7 @@ def test_lead_details_list_every_attempt_oldest_first(monkeypatch):
     assert [t["kind"] for t in lead["touches"]] == ["call", "email", "email"]
     # The id is what lets the page open an email attempt's text.
     assert [t["id"] for t in lead["touches"]] == ["T1", "T2", "T3"]
-    assert lead["tries"] == {"total": 3, "call": 1, "email": 2, "fb": 0}
+    assert lead["tries"] == {"total": 3, "call": 1, "email": 2, "fb": 0, "form": 0}
     history = next(q for q in cur.seen if q.startswith("SELECT id, kind, outcome, at"))
     assert "'undone'" in history and "ORDER BY at ASC" in history
 
@@ -134,7 +134,7 @@ CALL_THEN_TWO_EMAILS = [
 
 def test_a_call_then_two_emails_is_three_and_keeps_the_call():
     s = crm.touch_story(CALL_THEN_TWO_EMAILS)
-    assert s["tries"] == {"total": 3, "call": 1, "email": 2, "fb": 0}
+    assert s["tries"] == {"total": 3, "call": 1, "email": 2, "fb": 0, "form": 0}
     assert s["last_touch"] == {"kind": "email", "outcome": "emailed",
                                "at": "2026-09-24T15:40:00+00:00"}
     assert s["last_call"] == {"outcome": "voicemail", "at": "2026-09-22T01:14:00+00:00"}
