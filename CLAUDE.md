@@ -2256,6 +2256,15 @@ all covered by test_first_count.py, the SQL run on a real Postgres 16 upgraded f
   seconds: <url>" only when `COMPANY_VIDEO_URL` is set (e.g. https://eight6d-api.onrender.com/watch,
   or a my86d.com page); unset, the email is unchanged. App events `how_video_opened` /
   `how_video_finished`. Covered by test_watch.py; played in Chromium through uvicorn over 206s
+- **/watch counts its views by `?src=`** (2026-11-05): each load writes one `app_events` row
+  (`event='watch_viewed'`, `platform='web'`, `src` — a new nullable column) after the response
+  (BackgroundTasks; `WATCH_VIEW_FAILED` if it can't). `watch_src()`: none → "direct", a tag of
+  `[a-z0-9_-]{1,32}` kept lowercased, anything else "other". No cookie, no IP, no UA stored;
+  `anon_id` is a fresh random id per view. Link-preview fetchers (`_PREVIEW_AGENTS`: bots,
+  Slack, WhatsApp, facebookexternalhit…) aren't counted. The page is now `no-store` — cached,
+  repeat views never reached the server. Under the red App Store button, a plain "Learn more at
+  my86d.com" link. Views by source: `SELECT COALESCE(src,'direct') src, count(*) FROM app_events
+  WHERE event='watch_viewed' AND created_at > '<date>' GROUP BY 1 ORDER BY 2 DESC`
 
 ## FAILURE POINTS FIXED (audit, 2026-09-25) — don't reintroduce these
 Each is covered by test_failure_points.py unless noted.

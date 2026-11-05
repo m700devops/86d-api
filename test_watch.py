@@ -125,3 +125,79 @@ def test_with_a_url_the_email_links_it(monkeypatch):
 
 def test_video_events_are_allowlisted():
     assert {"how_video_opened", "how_video_finished"} <= main.APP_EVENTS
+
+
+# ---------- /watch: the website link and ?src= view tracking ----------
+
+@pytest.fixture
+def views(monkeypatch):
+    seen = []
+    monkeypatch.setattr(main, "_record_watch_view", seen.append)
+    return seen
+
+
+def test_watch_page_links_the_website_below_the_app_store(client, views, monkeypatch):
+    monkeypatch.setattr(main.pitch, "APP_URL", "https://apps.apple.com/us/app/x/id1")
+    r = client.get("/watch")
+    assert '<a href="https://my86d.com">Learn more at my86d.com</a>' in r.text
+    assert 'class="cta" href="https://apps.apple.com/us/app/x/id1"' in r.text
+    assert r.text.index("App Store") < r.text.index("Learn more at my86d.com")
+    assert "#C8283A" in r.text
+
+
+@pytest.mark.parametrize("query,expect", [
+    ("", "direct"), ("?src=", "direct"), ("?src=form", "form"), ("?src=IG", "ig"),
+    ("?src=email", "email"), ("?src=<script>", "other"), ("?src=" + "a" * 40, "other"),
+])
+def test_watch_logs_one_view_with_its_src(client, views, query, expect):
+    r = client.get("/watch" + query)
+    assert r.status_code == 200
+    assert '<video src="/watch/first-count.mp4"' in r.text
+    assert views == [expect]
+
+
+def test_src_form_renders_the_normal_page(client, views):
+    plain = client.get("/watch").text
+    assert client.get("/watch?src=form").text == plain
+
+
+def test_watch_page_is_not_cached_so_every_view_reaches_the_server(client, views):
+    assert client.get("/watch").headers["cache-control"] == "no-store"
+
+
+def test_link_previews_are_not_counted(client, views):
+    client.get("/watch?src=ig", headers={"User-Agent": "facebookexternalhit/1.1"})
+    client.get("/watch", headers={"User-Agent": "Slackbot-LinkExpanding 1.0"})
+    assert views == []
+
+
+def test_a_failed_write_never_breaks_the_page(client):
+    # the stub get_db returns None: the real recorder must swallow the error
+    assert client.get("/watch?src=form").status_code == 200
+
+
+def test_the_write_stores_no_viewer_data(monkeypatch):
+    calls = []
+
+    class Cur:
+        def execute(self, sql, params):
+            calls.append((sql, params))
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+        def commit(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(main, "get_db", lambda: Conn())
+    main._record_watch_view("form")
+    sql, params = calls[0]
+    assert "'watch_viewed'" in sql and "'web'" in sql and "NULL" in sql
+    assert params[-1] == "form" and len(params) == 4

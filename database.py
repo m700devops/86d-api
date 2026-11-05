@@ -834,6 +834,16 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_app_events_anon
             ON app_events(anon_id)
         """)
+        # src: where a /watch page view came from (?src=form, ig, email…;
+        # "direct" with none). Only the web page's watch_viewed rows carry it —
+        # a short, allowlisted-shape tag (main.watch_src), never free text.
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'app_events' AND column_name = 'src'
+        """)
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE app_events ADD COLUMN src TEXT")
+            print("[db] migrated app_events: added src TEXT", flush=True)
 
         # One row per /scans/analyze call: which provider answered, how fast,
         # what it said, what it matched. final_product_id is filled in later by
