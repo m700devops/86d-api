@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Header, Request, Query, APIRouter
+from fastapi import FastAPI, Depends, HTTPException, Header, Request, Query, APIRouter, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, FileResponse, Response
@@ -58,7 +58,7 @@ import hashlib
 import email_events
 import secrets
 from pydantic import BaseModel, Field, model_validator
-from typing import Literal
+from typing import Literal, Optional
 
 # Startup time for uptime calculation
 START_TIME = time.time()
@@ -6220,12 +6220,52 @@ async def crm_asset(asset: str):
 WATCH_VIDEO = os.path.join(os.path.dirname(CRM_PAGE), "first-count.mp4")
 
 
+# ?src= on /watch says where the link was shared (form, ig, email…). Kept to a
+# short tag of lowercase letters, digits, - and _ so the column can never hold
+# free text; anything else is counted as "other", none at all as "direct".
+_WATCH_SRC_RE = re.compile(r"[a-z0-9_-]{1,32}")
+
+# Link-preview fetchers (iMessage, Slack, WhatsApp…) load a shared URL once per
+# chat it's pasted into. They aren't viewers; the User-Agent is only read here,
+# never stored.
+_PREVIEW_AGENTS = ("bot", "crawler", "spider", "facebookexternalhit", "whatsapp",
+                   "telegram", "preview", "embedly", "slack", "discord", "skype")
+
+
+def watch_src(raw: Optional[str]) -> str:
+    if raw is None or not raw.strip():
+        return "direct"
+    raw = raw.strip().lower()
+    return raw if _WATCH_SRC_RE.fullmatch(raw) else "other"
+
+
+def _record_watch_view(src: str) -> None:
+    """One app_events row per /watch view: event watch_viewed, platform web,
+    the src tag. No cookie and nothing about the viewer — anon_id is a fresh
+    random id per view (the column is NOT NULL), so views can't be joined.
+    Runs after the response, in the threadpool; never fails the page."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO app_events (id, anon_id, user_id, event, platform, app_version, created_at, src)
+                VALUES (%s, %s, NULL, 'watch_viewed', 'web', NULL, %s, %s)
+            """, (str(uuid.uuid4()), str(uuid.uuid4()), now_iso(), src))
+            conn.commit()
+    except Exception as e:
+        print(f"[watch] WATCH_VIEW_FAILED src={src}: {e}", flush=True)
+
+
 @app.get("/watch", include_in_schema=False)
-async def watch_page():
+async def watch_page(request: Request, background_tasks: BackgroundTasks,
+                     src: Optional[str] = None):
     """A page with the video and one line on what to do next."""
     from fastapi.responses import HTMLResponse
+    agent = (request.headers.get("user-agent") or "").lower()
+    if not any(p in agent for p in _PREVIEW_AGENTS):
+        background_tasks.add_task(_record_watch_view, watch_src(src))
     app_url = html.escape(pitch.APP_URL or "")
-    get_it = (f'<p class="sub">Don\'t have it yet? <a href="{app_url}">Get 86\'d on the App Store</a></p>'
+    get_it = (f'<p class="sub">Don\'t have it yet?</p>\n  <p><a class="cta" href="{app_url}">Get 86\'d on the App Store</a></p>'
               if app_url else "")
     return HTMLResponse(f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -6241,13 +6281,17 @@ async def watch_page():
   p {{ margin: 16px 0 0; }}
   .sub {{ color: #A3A3A3; font-size: 14px; }}
   a {{ color: #F0566A; }}
+  a.cta {{ display: inline-block; background: #C8283A; color: #fff; text-decoration: none;
+          font-weight: 600; padding: 12px 22px; border-radius: 12px; }}
+  .more {{ font-size: 15px; }}
 </style></head>
 <body><main>
   <h1>How a count works</h1>
   <video src="/watch/first-count.mp4" controls playsinline preload="metadata"></video>
   <p>Open 86'd and tap <strong>Try 3 Bottles</strong>. It takes about a minute.</p>
   {get_it}
-</main></body></html>""", headers={"Cache-Control": "public, max-age=3600"})
+  <p class="more"><a href="https://my86d.com">Learn more at my86d.com</a></p>
+</main></body></html>""", headers={"Cache-Control": "no-store"})
 
 
 @app.api_route("/watch/first-count.mp4", methods=["GET", "HEAD"], include_in_schema=False)
